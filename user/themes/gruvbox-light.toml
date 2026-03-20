@@ -1,5 +1,7 @@
 id = "gruvbox-light"
 name = "Gruvbox Light"
+opacity = 1.0
+blend_mode = "opacity"
 
 [tokens]
 "ui.background" = "#fbf1c7"

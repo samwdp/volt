@@ -1494,12 +1494,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     video.text_input().start(&window);
 
-    let font = ttf
-        .load_font(&font_path, config.font_size as f32)
+    let mut current_font_size = config.font_size;
+    let mut font = ttf
+        .load_font(&font_path, current_font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let line_height = font.height().max(1) as usize;
-    let ascent = font.ascent();
-    let cell_width = font
+    let mut line_height = font.height().max(1) as usize;
+    let mut ascent = font.ascent();
+    let mut cell_width = font
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
@@ -1512,7 +1513,49 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut state = ShellState::new()?;
     let mut frames_rendered = 0;
 
+    // Apply initial theme render settings (opacity + font size) from the active
+    // theme, if one is registered.
+    let mut last_active_theme_id: Option<String> = state
+        .runtime
+        .services()
+        .get::<ThemeRegistry>()
+        .and_then(|r| r.active_theme())
+        .map(|t| t.id().to_owned());
+    apply_theme_render_settings(
+        &state.runtime,
+        &mut canvas,
+        &ttf,
+        &font_path,
+        &mut current_font_size,
+        &mut font,
+        &mut line_height,
+        &mut ascent,
+        &mut cell_width,
+    )?;
+
     loop {
+        // Detect active-theme changes and re-apply render settings.
+        let current_active_theme_id = state
+            .runtime
+            .services()
+            .get::<ThemeRegistry>()
+            .and_then(|r| r.active_theme())
+            .map(|t| t.id().to_owned());
+        if current_active_theme_id != last_active_theme_id {
+            apply_theme_render_settings(
+                &state.runtime,
+                &mut canvas,
+                &ttf,
+                &font_path,
+                &mut current_font_size,
+                &mut font,
+                &mut line_height,
+                &mut ascent,
+                &mut cell_width,
+            )?;
+            last_active_theme_id = current_active_theme_id;
+        }
+
         let (render_width, render_height) = canvas
             .output_size()
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -1557,6 +1600,64 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         popup_visible: state.popup_visible()?,
         font_path: font_path.display().to_string(),
     })
+}
+
+/// Reads the active theme's render settings and applies them to the window and
+/// font loader.
+///
+/// - **Opacity** (`theme.opacity()`) is applied to the window via
+///   `SDL_SetWindowOpacity`.  Both `BlendMode::Opacity` and `BlendMode::Blur`
+///   use this call; true compositor blur requires platform-specific support
+///   beyond SDL3's portable API.
+/// - **Font size** (`theme.font_size()`) triggers a font reload when it differs
+///   from the currently loaded size.  The font path is fixed to the system
+///   monospace font discovered at startup; a per-theme `font` family field is
+///   stored on the theme but applying it requires locating the font file on the
+///   host system, which is left to a future font-discovery layer.
+///
+/// Errors from `set_opacity` are silently ignored because the call fails on
+/// platforms that do not support window transparency.
+#[allow(clippy::too_many_arguments)]
+fn apply_theme_render_settings(
+    runtime: &EditorRuntime,
+    canvas: &mut Canvas<Window>,
+    ttf: &sdl3::ttf::Sdl3TtfContext,
+    font_path: &Path,
+    current_font_size: &mut u32,
+    font: &mut Font<'static>,
+    line_height: &mut usize,
+    ascent: &mut i32,
+    cell_width: &mut i32,
+) -> Result<(), ShellError> {
+    let Some(registry) = runtime.services().get::<ThemeRegistry>() else {
+        return Ok(());
+    };
+    let Some(theme) = registry.active_theme() else {
+        return Ok(());
+    };
+
+    // Apply window opacity (ignoring errors on unsupported platforms).
+    let _ = canvas.window_mut().set_opacity(theme.opacity());
+
+    // Reload font if the theme specifies a different size.
+    if let Some(theme_font_size) = theme.font_size()
+        && theme_font_size != *current_font_size
+    {
+        let new_font = ttf
+            .load_font(font_path, theme_font_size as f32)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        *current_font_size = theme_font_size;
+        *font = new_font;
+        *line_height = font.height().max(1) as usize;
+        *ascent = font.ascent();
+        *cell_width = font
+            .size_of_char('M')
+            .map_err(|error| ShellError::Sdl(error.to_string()))?
+            .0
+            .max(1) as i32;
+    }
+
+    Ok(())
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {

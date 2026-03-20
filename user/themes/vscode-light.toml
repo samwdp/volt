@@ -1,5 +1,7 @@
 id = "vscode-light"
 name = "VS Code Light"
+opacity = 1.0
+blend_mode = "opacity"
 
 [tokens]
 "ui.background" = "#ffffff"

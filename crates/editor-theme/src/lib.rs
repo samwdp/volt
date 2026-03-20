@@ -36,27 +36,78 @@ impl Color {
     }
 }
 
+/// How the window background transparency is composited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    /// True window opacity applied via the OS compositor (0.0 = fully
+    /// transparent, 1.0 = fully opaque).  This is the default.
+    #[default]
+    Opacity,
+    /// Blurred transparency.  The compositor applies a blur behind the window
+    /// in addition to the `opacity` value.  Falls back to plain opacity on
+    /// platforms that do not support compositor blur.
+    Blur,
+}
+
 /// Theme definition registered in Rust code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     id: String,
     name: String,
     tokens: BTreeMap<String, Color>,
+    /// Window opacity in the range `[0.0, 1.0]`.  Only the window background
+    /// is affected; rendered text is always fully opaque.
+    opacity: f32,
+    /// Compositing blend mode used together with `opacity`.
+    blend_mode: BlendMode,
+    /// Optional font family name override (e.g. `"JetBrains Mono"`).
+    /// `None` means use the system monospace font discovery fallback.
+    font: Option<String>,
+    /// Optional font size in pixels.  `None` means inherit from `ShellConfig`.
+    font_size: Option<u32>,
 }
 
 impl Theme {
-    /// Creates a new empty theme.
+    /// Creates a new empty theme with default render settings.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             tokens: BTreeMap::new(),
+            opacity: 1.0,
+            blend_mode: BlendMode::Opacity,
+            font: None,
+            font_size: None,
         }
     }
 
     /// Adds or replaces a theme token color.
     pub fn with_token(mut self, token: impl Into<String>, color: Color) -> Self {
         self.tokens.insert(token.into(), color);
+        self
+    }
+
+    /// Sets the window opacity (clamped to `[0.0, 1.0]`).
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Sets the compositing blend mode.
+    pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+
+    /// Sets the font family name.
+    pub fn with_font(mut self, font: impl Into<String>) -> Self {
+        self.font = Some(font.into());
+        self
+    }
+
+    /// Sets the font size in pixels.
+    pub fn with_font_size(mut self, font_size: u32) -> Self {
+        self.font_size = Some(font_size);
         self
     }
 
@@ -78,6 +129,26 @@ impl Theme {
     /// Resolves a token color.
     pub fn color(&self, token: &str) -> Option<Color> {
         self.tokens.get(token).copied()
+    }
+
+    /// Returns the window opacity in `[0.0, 1.0]`.
+    pub fn opacity(&self) -> f32 {
+        self.opacity
+    }
+
+    /// Returns the compositing blend mode.
+    pub fn blend_mode(&self) -> BlendMode {
+        self.blend_mode
+    }
+
+    /// Returns the optional font family name.
+    pub fn font(&self) -> Option<&str> {
+        self.font.as_deref()
+    }
+
+    /// Returns the optional font size in pixels.
+    pub fn font_size(&self) -> Option<u32> {
+        self.font_size
     }
 }
 
@@ -106,7 +177,7 @@ impl fmt::Display for ThemeError {
 impl Error for ThemeError {}
 
 /// Registry of available themes and the current active selection.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ThemeRegistry {
     themes: BTreeMap<String, Theme>,
     active_theme: Option<String>,

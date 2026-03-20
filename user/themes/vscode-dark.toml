@@ -1,5 +1,7 @@
 id = "vscode-dark"
 name = "VS Code Dark"
+opacity = 1.0
+blend_mode = "opacity"
 
 [tokens]
 "ui.background" = "#1e1e1e"

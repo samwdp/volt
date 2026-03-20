@@ -118,11 +118,13 @@ mod tests {
         let themes = themes();
         assert_eq!(themes.len(), 6);
 
+        // Themes are sorted alphabetically by ID.
+        // g < v, and "volt" ('o') < "vscode" ('s') in ASCII.
         let expected_ids = [
-            "volt-dark",
-            "volt-light",
             "gruvbox-dark",
             "gruvbox-light",
+            "volt-dark",
+            "volt-light",
             "vscode-dark",
             "vscode-light",
         ];

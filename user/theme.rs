@@ -1,15 +1,19 @@
 use std::path::{Path, PathBuf};
 
-use editor_theme::{Color, Theme};
+use editor_theme::{BlendMode, Color, Theme};
 
-/// Returns the themes directory, resolved relative to the current working
-/// directory using the same convention as the grammar install root in
-/// `editor-syntax`: `<cwd>/user/themes`.
+/// Returns the themes directory.
+///
+/// Tries `<cwd>/user/themes` first (runtime layout), then falls back to
+/// `<cwd>/themes` (package-test layout where CWD is already `user/`).
 fn themes_dir() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("user")
-        .join("themes")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let with_user = cwd.join("user").join("themes");
+    if with_user.is_dir() {
+        with_user
+    } else {
+        cwd.join("themes")
+    }
 }
 
 /// Loads all `.toml` theme files found in `dir`.
@@ -45,6 +49,10 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
 /// ```toml
 /// id = "theme-id"
 /// name = "Theme Name"
+/// opacity = 0.9
+/// blend_mode = "blur"   # "opacity" (default) or "blur"
+/// font = "JetBrains Mono"
+/// font_size = 18
 ///
 /// [tokens]
 /// "token.name" = "#rrggbb"
@@ -54,6 +62,10 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
 fn parse_theme(source: &str) -> Option<Theme> {
     let mut id: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut opacity: Option<f32> = None;
+    let mut blend_mode: Option<BlendMode> = None;
+    let mut font: Option<String> = None;
+    let mut font_size: Option<u32> = None;
     let mut theme = None;
 
     for line in source.lines() {
@@ -73,6 +85,15 @@ fn parse_theme(source: &str) -> Option<Theme> {
         match key {
             "id" => id = Some(value.to_owned()),
             "name" => name = Some(value.to_owned()),
+            "opacity" => opacity = value.parse::<f32>().ok(),
+            "blend_mode" => {
+                blend_mode = match value {
+                    "blur" => Some(BlendMode::Blur),
+                    _ => Some(BlendMode::Opacity),
+                };
+            }
+            "font" => font = Some(value.to_owned()),
+            "font_size" => font_size = value.parse::<u32>().ok(),
             token => {
                 if theme.is_none() {
                     if let (Some(id), Some(name)) = (id.as_deref(), name.as_deref()) {
@@ -88,11 +109,25 @@ fn parse_theme(source: &str) -> Option<Theme> {
         }
     }
 
-    theme.or_else(|| {
+    let mut built = theme.or_else(|| {
         id.as_deref()
             .zip(name.as_deref())
             .map(|(i, n)| Theme::new(i, n))
-    })
+    })?;
+
+    if let Some(v) = opacity {
+        built = built.with_opacity(v);
+    }
+    if let Some(bm) = blend_mode {
+        built = built.with_blend_mode(bm);
+    }
+    if let Some(f) = font {
+        built = built.with_font(f);
+    }
+    if let Some(fs) = font_size {
+        built = built.with_font_size(fs);
+    }
+    Some(built)
 }
 
 /// Parses a `#rrggbb` hex color string into a [`Color`].
@@ -120,7 +155,7 @@ mod tests {
     use std::fs;
 
     use super::{load_themes_from_dir, parse_hex_color, parse_theme};
-    use editor_theme::Color;
+    use editor_theme::{BlendMode, Color};
 
     #[test]
     fn parse_hex_color_valid() {
@@ -157,6 +192,28 @@ mod tests {
         assert_eq!(theme.name(), "Test Theme");
         assert_eq!(theme.color("syntax.keyword"), Some(Color::rgb(0xc6, 0x78, 0xdd)));
         assert_eq!(theme.color("ui.background"), Some(Color::rgb(0x18, 0x1b, 0x22)));
+        assert_eq!(theme.opacity(), 1.0);
+        assert_eq!(theme.blend_mode(), BlendMode::Opacity);
+        assert_eq!(theme.font(), None);
+        assert_eq!(theme.font_size(), None);
+    }
+
+    #[test]
+    fn parse_theme_parses_render_settings() {
+        let src = concat!(
+            "id = \"t\"\n",
+            "name = \"T\"\n",
+            "opacity = 0.85\n",
+            "blend_mode = \"blur\"\n",
+            "font = \"JetBrains Mono\"\n",
+            "font_size = 16\n",
+            "[tokens]\n",
+        );
+        let theme = parse_theme(src).expect("should parse");
+        assert!((theme.opacity() - 0.85).abs() < 0.001);
+        assert_eq!(theme.blend_mode(), BlendMode::Blur);
+        assert_eq!(theme.font(), Some("JetBrains Mono"));
+        assert_eq!(theme.font_size(), Some(16));
     }
 
     #[test]

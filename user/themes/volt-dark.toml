@@ -1,5 +1,7 @@
 id = "volt-dark"
 name = "Volt Dark"
+opacity = 1.0
+blend_mode = "opacity"
 
 [tokens]
 "ui.background" = "#181b22"

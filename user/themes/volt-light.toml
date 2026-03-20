@@ -1,5 +1,7 @@
 id = "volt-light"
 name = "Volt Light"
+opacity = 1.0
+blend_mode = "opacity"
 
 [tokens]
 "ui.background" = "#fafafa"
