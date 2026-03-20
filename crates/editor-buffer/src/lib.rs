@@ -408,6 +408,59 @@ impl TextBuffer {
         ))
     }
 
+    /// Returns the current word text object range at a point.
+    pub fn word_range_at(&self, point: TextPoint, around: bool, count: usize) -> Option<TextRange> {
+        if self.char_count() == 0 || count == 0 {
+            return None;
+        }
+
+        let mut char_index = self.point_to_char(point);
+        if char_index >= self.char_count() {
+            char_index = self.char_count().saturating_sub(1);
+        }
+
+        if !is_word_char(self.rope.char(char_index)) {
+            while char_index < self.char_count() && !is_word_char(self.rope.char(char_index)) {
+                char_index += 1;
+            }
+            if char_index >= self.char_count() {
+                return None;
+            }
+        }
+
+        let mut start_char = self.word_start_char(char_index);
+        let mut end_char = self.word_end_char(char_index);
+        for _ in 1..count {
+            let mut next_word = end_char;
+            while next_word < self.char_count() && !is_word_char(self.rope.char(next_word)) {
+                next_word += 1;
+            }
+            if next_word >= self.char_count() {
+                break;
+            }
+            end_char = self.word_end_char(next_word);
+        }
+
+        if around {
+            let mut trailing = end_char;
+            while trailing < self.char_count() && self.rope.char(trailing).is_whitespace() {
+                trailing += 1;
+            }
+            if trailing > end_char {
+                end_char = trailing;
+            } else {
+                while start_char > 0 && self.rope.char(start_char - 1).is_whitespace() {
+                    start_char -= 1;
+                }
+            }
+        }
+
+        Some(TextRange::new(
+            self.char_to_point(start_char),
+            self.char_to_point(end_char),
+        ))
+    }
+
     /// Replaces a range with new text and records the edit for undo/redo.
     pub fn replace(&mut self, range: TextRange, text: &str) {
         let range = range.normalized();
@@ -770,6 +823,20 @@ impl TextBuffer {
         TextPoint { line, column }
     }
 
+    fn word_start_char(&self, mut char_index: usize) -> usize {
+        while char_index > 0 && is_word_char(self.rope.char(char_index - 1)) {
+            char_index -= 1;
+        }
+        char_index
+    }
+
+    fn word_end_char(&self, mut char_index: usize) -> usize {
+        while char_index < self.char_count() && is_word_char(self.rope.char(char_index)) {
+            char_index += 1;
+        }
+        char_index
+    }
+
     fn apply_char_edit(&mut self, start_char: usize, end_char: usize, text: &str) {
         if start_char < end_char {
             self.rope.remove(start_char..end_char);
@@ -1008,5 +1075,25 @@ mod tests {
             buffer.find_backward_in_line(TextPoint::new(0, 9), 'b'),
             Some(TextPoint::new(0, 6))
         );
+    }
+
+    #[test]
+    fn word_ranges_cover_inner_and_around_text_objects() {
+        let buffer = TextBuffer::from_text("alpha beta  gamma");
+
+        let inner = buffer
+            .word_range_at(TextPoint::new(0, 7), false, 1)
+            .expect("inner word range");
+        assert_eq!(buffer.slice(inner), "beta");
+
+        let around = buffer
+            .word_range_at(TextPoint::new(0, 7), true, 1)
+            .expect("around word range");
+        assert_eq!(buffer.slice(around), "beta  ");
+
+        let counted = buffer
+            .word_range_at(TextPoint::new(0, 7), false, 2)
+            .expect("counted word range");
+        assert_eq!(buffer.slice(counted), "beta  gamma");
     }
 }
