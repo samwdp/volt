@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use editor_buffer::{TextBuffer, TextPoint, TextRange};
+use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode,
     WorkspaceId, builtins,
@@ -18,7 +18,8 @@ use editor_git::list_repository_files;
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
-    RenderError, centered_rect, find_system_monospace_font, horizontal_pane_rects,
+    DrawCommand, PixelRect, RenderBackend, RenderColor, RenderError, centered_rect,
+    find_system_monospace_font, horizontal_pane_rects,
 };
 use editor_syntax::{SyntaxError, SyntaxRegistry, SyntaxSnapshot};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
@@ -27,7 +28,7 @@ use sdl3::{
     keyboard::{Keycode, Mod},
     pixels::Color,
     rect::Rect,
-    render::Canvas,
+    render::{Canvas, RenderTarget},
     ttf::Font,
     video::Window,
 };
@@ -40,11 +41,28 @@ const HOOK_MOVE_RIGHT: &str = "editor.cursor.move-right";
 const HOOK_MOVE_WORD_FORWARD: &str = "editor.cursor.move-word-forward";
 const HOOK_MOVE_WORD_BACKWARD: &str = "editor.cursor.move-word-backward";
 const HOOK_MOVE_WORD_END: &str = "editor.cursor.move-word-end";
+const HOOK_MOVE_BIG_WORD_FORWARD: &str = "editor.cursor.move-big-word-forward";
+const HOOK_MOVE_BIG_WORD_BACKWARD: &str = "editor.cursor.move-big-word-backward";
+const HOOK_MOVE_BIG_WORD_END: &str = "editor.cursor.move-big-word-end";
+const HOOK_MOVE_SENTENCE_FORWARD: &str = "editor.cursor.move-sentence-forward";
+const HOOK_MOVE_SENTENCE_BACKWARD: &str = "editor.cursor.move-sentence-backward";
+const HOOK_MOVE_PARAGRAPH_FORWARD: &str = "editor.cursor.move-paragraph-forward";
+const HOOK_MOVE_PARAGRAPH_BACKWARD: &str = "editor.cursor.move-paragraph-backward";
+const HOOK_MATCH_PAIR: &str = "editor.cursor.match-pair";
 const HOOK_MOVE_LINE_START: &str = "editor.cursor.move-line-start";
 const HOOK_MOVE_LINE_FIRST_NON_BLANK: &str = "editor.cursor.move-line-first-non-blank";
 const HOOK_MOVE_LINE_END: &str = "editor.cursor.move-line-end";
+const HOOK_MOVE_SCREEN_TOP: &str = "editor.cursor.move-screen-top";
+const HOOK_MOVE_SCREEN_MIDDLE: &str = "editor.cursor.move-screen-middle";
+const HOOK_MOVE_SCREEN_BOTTOM: &str = "editor.cursor.move-screen-bottom";
 const HOOK_GOTO_FIRST_LINE: &str = "editor.cursor.goto-first-line";
 const HOOK_GOTO_LAST_LINE: &str = "editor.cursor.goto-last-line";
+const HOOK_SCROLL_HALF_PAGE_DOWN: &str = "editor.vim.scroll-half-page-down";
+const HOOK_SCROLL_HALF_PAGE_UP: &str = "editor.vim.scroll-half-page-up";
+const HOOK_SCROLL_PAGE_DOWN: &str = "editor.vim.scroll-page-down";
+const HOOK_SCROLL_PAGE_UP: &str = "editor.vim.scroll-page-up";
+const HOOK_SCROLL_LINE_DOWN: &str = "editor.vim.scroll-line-down";
+const HOOK_SCROLL_LINE_UP: &str = "editor.vim.scroll-line-up";
 const HOOK_MODE_INSERT: &str = "editor.mode.insert";
 const HOOK_MODE_NORMAL: &str = "editor.mode.normal";
 const HOOK_VIM_EDIT: &str = "editor.vim.edit";
@@ -68,6 +86,8 @@ pub struct ShellConfig {
     pub font_size: u32,
     /// Whether the window should start hidden.
     pub hidden: bool,
+    /// Renderer backend requested by the shell configuration.
+    pub render_backend: RenderBackend,
     /// Optional frame limit used for smoke tests.
     pub frame_limit: Option<u32>,
 }
@@ -80,6 +100,7 @@ impl Default for ShellConfig {
             height: 760,
             font_size: 18,
             hidden: false,
+            render_backend: RenderBackend::SdlCanvas,
             frame_limit: None,
         }
     }
@@ -94,6 +115,10 @@ pub struct ShellSummary {
     pub pane_count: usize,
     /// Whether the picker popup was visible when the loop exited.
     pub popup_visible: bool,
+    /// Renderer backend used for the shell session.
+    pub render_backend: RenderBackend,
+    /// Concrete SDL renderer chosen for the shell session.
+    pub renderer_name: String,
     /// Font path selected by the text renderer.
     pub font_path: String,
 }
@@ -107,6 +132,20 @@ pub enum ShellError {
     Render(RenderError),
     /// Runtime or shell orchestration failed.
     Runtime(String),
+}
+
+enum DrawTarget<'a> {
+    Scene(&'a mut Vec<DrawCommand>),
+}
+
+impl DrawTarget<'_> {
+    fn clear(&mut self, color: Color) {
+        match self {
+            Self::Scene(scene) => scene.push(DrawCommand::Clear {
+                color: to_render_color(color),
+            }),
+        }
+    }
 }
 
 impl fmt::Display for ShellError {
@@ -160,6 +199,12 @@ enum VimFindKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimSearchDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellMotion {
     Left,
     Down,
@@ -168,11 +213,44 @@ enum ShellMotion {
     WordForward,
     WordBackward,
     WordEnd,
+    BigWordForward,
+    BigWordBackward,
+    BigWordEnd,
+    SentenceForward,
+    SentenceBackward,
+    ParagraphForward,
+    ParagraphBackward,
+    WordEndBackward,
+    BigWordEndBackward,
+    MatchPair,
     LineStart,
     LineFirstNonBlank,
     LineEnd,
+    ScreenTop,
+    ScreenMiddle,
+    ScreenBottom,
     FirstLine,
     LastLine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollCommand {
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
+    LineDown,
+    LineUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimTextObjectKind {
+    Word,
+    BigWord,
+    Sentence,
+    Paragraph,
+    Delimited { open: char, close: char },
+    Tag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +273,10 @@ enum VimPending {
         around: bool,
         count: usize,
     },
+    VisualTextObject {
+        around: bool,
+        count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,9 +286,45 @@ struct LastFind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct YankRegister {
-    text: String,
-    linewise: bool,
+struct LastSearch {
+    direction: VimSearchDirection,
+    query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum YankRegister {
+    Character(String),
+    Line(String),
+    Block(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum VisualSelectionKind {
+    #[default]
+    Character,
+    Line,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockSelection {
+    start_line: usize,
+    end_line: usize,
+    start_col: usize,
+    end_col: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisualSelection {
+    Range(TextRange),
+    Block(BlockSelection),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct YankFlash {
+    buffer_id: BufferId,
+    selection: VisualSelection,
+    until: Instant,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -214,7 +332,9 @@ struct VimState {
     count: Option<usize>,
     pending: Option<VimPending>,
     visual_anchor: Option<TextPoint>,
+    visual_kind: VisualSelectionKind,
     last_find: Option<LastFind>,
+    last_search: Option<LastSearch>,
     yank: Option<YankRegister>,
 }
 
@@ -256,6 +376,7 @@ struct ShellBuffer {
     kind: BufferKind,
     text: TextBuffer,
     scroll_row: usize,
+    viewport_lines: usize,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
@@ -276,6 +397,7 @@ impl ShellBuffer {
             kind: buffer.kind().clone(),
             text,
             scroll_row: 0,
+            viewport_lines: 1,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -290,6 +412,7 @@ impl ShellBuffer {
             kind: buffer.kind().clone(),
             text,
             scroll_row: 0,
+            viewport_lines: 1,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -311,6 +434,7 @@ impl ShellBuffer {
             kind,
             text,
             scroll_row: 0,
+            viewport_lines: 1,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -420,12 +544,52 @@ impl ShellBuffer {
         self.text.move_word_forward()
     }
 
+    fn move_big_word_forward(&mut self) -> bool {
+        self.text.move_big_word_forward()
+    }
+
     fn move_word_backward(&mut self) -> bool {
         self.text.move_word_backward()
     }
 
+    fn move_big_word_backward(&mut self) -> bool {
+        self.text.move_big_word_backward()
+    }
+
     fn move_word_end(&mut self) -> bool {
         self.text.move_word_end_forward()
+    }
+
+    fn move_big_word_end(&mut self) -> bool {
+        self.text.move_big_word_end_forward()
+    }
+
+    fn move_word_end_backward(&mut self) -> bool {
+        self.text.move_word_end_backward()
+    }
+
+    fn move_big_word_end_backward(&mut self) -> bool {
+        self.text.move_big_word_end_backward()
+    }
+
+    fn move_matching_delimiter(&mut self) -> bool {
+        self.text.move_matching_delimiter()
+    }
+
+    fn move_sentence_forward(&mut self) -> bool {
+        self.text.move_sentence_forward()
+    }
+
+    fn move_sentence_backward(&mut self) -> bool {
+        self.text.move_sentence_backward()
+    }
+
+    fn move_paragraph_forward(&mut self) -> bool {
+        self.text.move_paragraph_forward()
+    }
+
+    fn move_paragraph_backward(&mut self) -> bool {
+        self.text.move_paragraph_backward()
     }
 
     fn set_cursor(&mut self, point: TextPoint) {
@@ -490,10 +654,6 @@ impl ShellBuffer {
             .unwrap_or(TextPoint::new(line, 0));
         self.text.set_cursor(point);
         self.cursor_point() != before
-    }
-
-    fn delete_char(&mut self) {
-        let _ = self.text.delete_forward();
     }
 
     fn append_after_cursor(&mut self) {
@@ -579,8 +739,32 @@ impl ShellBuffer {
         ))
     }
 
-    fn word_object_range(&self, around: bool, count: usize) -> Option<TextRange> {
-        self.text.word_range_at(self.cursor_point(), around, count)
+    fn text_object_range(
+        &self,
+        kind: VimTextObjectKind,
+        around: bool,
+        count: usize,
+    ) -> Option<TextRange> {
+        match kind {
+            VimTextObjectKind::Word => self.text.word_range_at(self.cursor_point(), around, count),
+            VimTextObjectKind::BigWord => {
+                self.text
+                    .word_range_at_kind(self.cursor_point(), WordKind::BigWord, around, count)
+            }
+            VimTextObjectKind::Sentence => {
+                self.text
+                    .sentence_range_at(self.cursor_point(), around, count)
+            }
+            VimTextObjectKind::Paragraph => {
+                self.text
+                    .paragraph_range_at(self.cursor_point(), around, count)
+            }
+            VimTextObjectKind::Delimited { open, close } => {
+                self.text
+                    .delimited_range_at(self.cursor_point(), open, close, around)
+            }
+            VimTextObjectKind::Tag => self.text.tag_range_at(self.cursor_point(), around),
+        }
     }
 
     fn move_find(&mut self, kind: VimFindKind, target: char, count: usize) -> bool {
@@ -623,6 +807,32 @@ impl ShellBuffer {
         self.scroll_row = next as usize;
     }
 
+    fn set_viewport_lines(&mut self, visible_lines: usize) {
+        self.viewport_lines = visible_lines.max(1);
+    }
+
+    fn viewport_lines(&self) -> usize {
+        self.viewport_lines.max(1)
+    }
+
+    fn line_at_viewport_offset(&self, offset: usize) -> usize {
+        let max_line = self.line_count().saturating_sub(1);
+        self.scroll_row.saturating_add(offset).min(max_line)
+    }
+
+    fn move_to_viewport_offset(&mut self, offset: usize) -> bool {
+        if self.line_count() == 0 {
+            return false;
+        }
+        let target_line = self.line_at_viewport_offset(offset);
+        self.goto_line(target_line)
+    }
+
+    fn move_to_viewport_middle(&mut self) -> bool {
+        let middle = self.viewport_lines().saturating_sub(1) / 2;
+        self.move_to_viewport_offset(middle)
+    }
+
     fn ensure_visible(&mut self, visible_lines: usize) {
         let cursor_row = self.cursor_row();
         if cursor_row < self.scroll_row {
@@ -648,6 +858,7 @@ enum PickerAction {
     ExecuteCommand(String),
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
+    VimSearch(VimSearchDirection),
     InstallTreeSitterLanguage(String),
     CreateWorkspace { name: String, root: PathBuf },
     SwitchWorkspace(WorkspaceId),
@@ -664,6 +875,7 @@ struct PickerEntry {
 struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
+    submit_action: Option<PickerAction>,
 }
 
 impl PickerOverlay {
@@ -681,6 +893,15 @@ impl PickerOverlay {
         Self {
             session: PickerSession::new(title, items).with_result_limit(48),
             actions,
+            submit_action: None,
+        }
+    }
+
+    fn prompt(title: impl Into<String>, action: PickerAction) -> Self {
+        Self {
+            session: PickerSession::new(title.into(), Vec::new()).with_result_limit(48),
+            actions: BTreeMap::new(),
+            submit_action: Some(action),
         }
     }
 
@@ -689,6 +910,9 @@ impl PickerOverlay {
     }
 
     fn selected_action(&self) -> Option<PickerAction> {
+        if let Some(action) = &self.submit_action {
+            return Some(action.clone());
+        }
         let selected = self.session.selected()?;
         self.actions.get(selected.item().id()).cloned()
     }
@@ -751,6 +975,7 @@ struct ShellUiState {
     vim: VimState,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
+    yank_flash: Option<YankFlash>,
 }
 
 impl ShellUiState {
@@ -781,6 +1006,7 @@ impl ShellUiState {
             vim: VimState::default(),
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
+            yank_flash: None,
         }
     }
 
@@ -801,18 +1027,21 @@ impl ShellUiState {
     fn enter_normal_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.vim.visual_anchor = None;
+        self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
     }
 
     fn enter_insert_mode(&mut self) {
         self.input_mode = InputMode::Insert;
         self.vim.visual_anchor = None;
+        self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
     }
 
-    fn enter_visual_mode(&mut self, anchor: TextPoint) {
+    fn enter_visual_mode(&mut self, anchor: TextPoint, kind: VisualSelectionKind) {
         self.input_mode = InputMode::Visual;
         self.vim.visual_anchor = Some(anchor);
+        self.vim.visual_kind = kind;
         self.vim.clear_transient();
     }
 
@@ -953,6 +1182,21 @@ impl ShellUiState {
 
     fn close_picker(&mut self) {
         self.picker = None;
+    }
+
+    fn set_yank_flash(&mut self, buffer_id: BufferId, selection: VisualSelection) {
+        const YANK_FLASH_DURATION: Duration = Duration::from_millis(140);
+        self.yank_flash = Some(YankFlash {
+            buffer_id,
+            selection,
+            until: Instant::now() + YANK_FLASH_DURATION,
+        });
+    }
+
+    fn yank_flash(&self, buffer_id: BufferId, now: Instant) -> Option<VisualSelection> {
+        self.yank_flash.and_then(|flash| {
+            (flash.buffer_id == buffer_id && now <= flash.until).then_some(flash.selection)
+        })
     }
 
     fn buffer(&self, buffer_id: BufferId) -> Option<&ShellBuffer> {
@@ -1106,6 +1350,7 @@ impl ShellState {
     }
 
     fn handle_event(&mut self, event: Event, visible_lines: usize) -> Result<bool, ShellError> {
+        self.active_buffer_mut()?.set_viewport_lines(visible_lines);
         match event {
             Event::Quit { .. } => return Ok(true),
             Event::KeyDown {
@@ -1177,7 +1422,7 @@ impl ShellState {
     #[allow(clippy::too_many_arguments)]
     fn render(
         &self,
-        canvas: &mut Canvas<Window>,
+        target: &mut DrawTarget<'_>,
         font: &Font<'_>,
         width: u32,
         height: u32,
@@ -1196,7 +1441,7 @@ impl ShellState {
             .name()
             .to_owned();
         render_shell_state(
-            canvas,
+            target,
             font,
             ui,
             runtime_popup.as_ref(),
@@ -1208,6 +1453,7 @@ impl ShellState {
             cell_width,
             line_height,
             ascent,
+            Instant::now(),
         )
     }
 
@@ -1311,8 +1557,8 @@ impl ShellState {
                 operator,
                 line_target,
             } => {
-                if chord == "g" {
-                    resolve_g_prefix(&mut self.runtime, operator, line_target)
+                if matches!(chord, "g" | "e" | "E") {
+                    resolve_g_prefix(&mut self.runtime, operator, line_target, chord)
                         .map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
@@ -1324,8 +1570,17 @@ impl ShellState {
                 around,
                 count,
             } => {
-                if chord == "w" {
-                    apply_text_object_operator(&mut self.runtime, operator, around, count)
+                if let Some(kind) = vim_text_object_kind(chord) {
+                    apply_text_object_operator(&mut self.runtime, operator, kind, around, count)
+                        .map_err(ShellError::Runtime)?;
+                } else {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                }
+                Ok(true)
+            }
+            VimPending::VisualTextObject { around, count } => {
+                if let Some(kind) = vim_text_object_kind(chord) {
+                    apply_visual_text_object(&mut self.runtime, kind, around, count)
                         .map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
@@ -1504,6 +1759,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .max(1) as i32;
 
     let mut canvas = window.into_canvas();
+    let renderer_name = canvas.renderer_name.clone();
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -1522,6 +1778,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     frames_rendered,
                     pane_count: state.pane_count()?,
                     popup_visible: state.popup_visible()?,
+                    render_backend: RenderBackend::SdlCanvas,
+                    renderer_name: renderer_name.clone(),
                     font_path: font_path.display().to_string(),
                 });
             }
@@ -1529,8 +1787,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
         state.refresh_pending_syntax()?;
 
+        let mut scene = Vec::new();
         state.render(
-            &mut canvas,
+            &mut DrawTarget::Scene(&mut scene),
             &font,
             render_width,
             render_height,
@@ -1538,6 +1797,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             line_height as i32,
             ascent,
         )?;
+        present_scene_to_canvas(&mut canvas, &font, &scene)?;
         frames_rendered += 1;
 
         if let Some(frame_limit) = config.frame_limit
@@ -1553,6 +1813,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         frames_rendered,
         pane_count: state.pane_count()?,
         popup_visible: state.popup_visible()?,
+        render_backend: RenderBackend::SdlCanvas,
+        renderer_name,
         font_path: font_path.display().to_string(),
     })
 }
@@ -1579,6 +1841,46 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_MOVE_BIG_WORD_FORWARD,
+        "Moves the active cursor to the next Vim WORD.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_BIG_WORD_BACKWARD,
+        "Moves the active cursor to the previous Vim WORD.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_BIG_WORD_END,
+        "Moves the active cursor to the end of the current or next Vim WORD.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_SENTENCE_FORWARD,
+        "Moves the active cursor to the start of the next sentence.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_SENTENCE_BACKWARD,
+        "Moves the active cursor to the start of the current or previous sentence.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_PARAGRAPH_FORWARD,
+        "Moves the active cursor to the start of the next paragraph.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_PARAGRAPH_BACKWARD,
+        "Moves the active cursor to the start of the current or previous paragraph.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MATCH_PAIR,
+        "Moves the active cursor to the matching paired delimiter.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_MOVE_LINE_START,
         "Moves to the start of the current line.",
     )?;
@@ -1591,6 +1893,21 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_MOVE_LINE_END,
         "Moves to the end of the current line.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_SCREEN_TOP,
+        "Moves to the first visible screen line.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_SCREEN_MIDDLE,
+        "Moves to the middle visible screen line.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_MOVE_SCREEN_BOTTOM,
+        "Moves to the last visible screen line.",
     )?;
     register_hook(
         runtime,
@@ -1630,6 +1947,36 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Executes the selected picker action.",
     )?;
     register_hook(runtime, HOOK_PICKER_CANCEL, "Closes the active picker.")?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_HALF_PAGE_DOWN,
+        "Scrolls down by half a page in Vim normal mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_HALF_PAGE_UP,
+        "Scrolls up by half a page in Vim normal mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_PAGE_DOWN,
+        "Scrolls down by a full page in Vim normal mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_PAGE_UP,
+        "Scrolls up by a full page in Vim normal mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_LINE_DOWN,
+        "Scrolls the viewport down by one line in Vim normal mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SCROLL_LINE_UP,
+        "Scrolls the viewport up by one line in Vim normal mode.",
+    )?;
     register_hook(
         runtime,
         HOOK_POPUP_TOGGLE,
@@ -1688,6 +2035,82 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_MOVE_BIG_WORD_FORWARD,
+            "shell.move-big-word-forward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::BigWordForward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_BIG_WORD_BACKWARD,
+            "shell.move-big-word-backward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::BigWordBackward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_BIG_WORD_END,
+            "shell.move-big-word-end",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::BigWordEnd)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_SENTENCE_FORWARD,
+            "shell.move-sentence-forward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::SentenceForward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_SENTENCE_BACKWARD,
+            "shell.move-sentence-backward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::SentenceBackward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_PARAGRAPH_FORWARD,
+            "shell.move-paragraph-forward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::ParagraphForward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MOVE_PARAGRAPH_BACKWARD,
+            "shell.move-paragraph-backward",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::ParagraphBackward)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_MATCH_PAIR, "shell.match-pair", |_, runtime| {
+            apply_motion_command(runtime, ShellMotion::MatchPair)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_MOVE_LINE_START,
             "shell.move-line-start",
             |_, runtime| {
@@ -1713,6 +2136,24 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_MOVE_SCREEN_TOP, "shell.move-screen-top", |_, runtime| {
+            apply_motion_command(runtime, ShellMotion::ScreenTop)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_MOVE_SCREEN_MIDDLE, "shell.move-screen-middle", |_, runtime| {
+            apply_motion_command(runtime, ShellMotion::ScreenMiddle)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_MOVE_SCREEN_BOTTOM, "shell.move-screen-bottom", |_, runtime| {
+            apply_motion_command(runtime, ShellMotion::ScreenBottom)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(
             HOOK_GOTO_FIRST_LINE,
             "shell.goto-first-line",
@@ -1725,6 +2166,46 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_GOTO_LAST_LINE, "shell.goto-last-line", |_, runtime| {
             apply_motion_command(runtime, ShellMotion::LastLine)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_SCROLL_HALF_PAGE_DOWN,
+            "shell.scroll-half-page-down",
+            |_, runtime| {
+                apply_scroll_command(runtime, ScrollCommand::HalfPageDown)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SCROLL_HALF_PAGE_UP, "shell.scroll-half-page-up", |_, runtime| {
+            apply_scroll_command(runtime, ScrollCommand::HalfPageUp)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SCROLL_PAGE_DOWN, "shell.scroll-page-down", |_, runtime| {
+            apply_scroll_command(runtime, ScrollCommand::PageDown)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SCROLL_PAGE_UP, "shell.scroll-page-up", |_, runtime| {
+            apply_scroll_command(runtime, ScrollCommand::PageUp)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SCROLL_LINE_DOWN, "shell.scroll-line-down", |_, runtime| {
+            apply_scroll_command(runtime, ScrollCommand::LineDown)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SCROLL_LINE_UP, "shell.scroll-line-up", |_, runtime| {
+            apply_scroll_command(runtime, ScrollCommand::LineUp)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -1748,9 +2229,27 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             let detail = event.detail.as_deref().unwrap_or_default();
             match detail {
                 "delete-char" => {
-                    let buffer = active_shell_buffer_mut(runtime)?;
-                    buffer.delete_char();
-                    buffer.mark_syntax_dirty();
+                    delete_chars(runtime, false)?;
+                }
+                "delete-char-before" => {
+                    delete_chars(runtime, true)?;
+                }
+                "delete-line-end" => {
+                    apply_motion_alias(runtime, VimOperator::Delete, ShellMotion::LineEnd)?;
+                }
+                "change-line-end" => {
+                    apply_motion_alias(runtime, VimOperator::Change, ShellMotion::LineEnd)?;
+                }
+                "yank-line" => {
+                    let lines = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+                    apply_linewise_operator(runtime, VimOperator::Yank, lines)?;
+                }
+                "substitute-char" => {
+                    substitute_chars(runtime)?;
+                }
+                "substitute-line" => {
+                    let lines = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+                    apply_linewise_operator(runtime, VimOperator::Change, lines)?;
                 }
                 "append" => {
                     active_shell_buffer_mut(runtime)?.append_after_cursor();
@@ -1787,7 +2286,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     buffer.mark_syntax_dirty();
                 }
                 "enter-visual" => {
-                    start_visual_mode(runtime)?;
+                    toggle_visual_mode(runtime)?;
+                }
+                "enter-visual-line" => {
+                    toggle_visual_line_mode(runtime)?;
+                }
+                "enter-visual-block" => {
+                    toggle_visual_block_mode(runtime)?;
                 }
                 "start-delete-operator" => {
                     start_vim_operator(runtime, VimOperator::Delete)?;
@@ -1819,65 +2324,47 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "repeat-find-previous" => {
                     repeat_last_find(runtime, true)?;
                 }
+                "start-search-forward" => {
+                    open_vim_search_prompt(runtime, VimSearchDirection::Forward)?;
+                }
+                "start-search-backward" => {
+                    open_vim_search_prompt(runtime, VimSearchDirection::Backward)?;
+                }
+                "search-word-forward" => {
+                    search_word_under_cursor(runtime, VimSearchDirection::Forward)?;
+                }
+                "search-word-backward" => {
+                    search_word_under_cursor(runtime, VimSearchDirection::Backward)?;
+                }
+                "repeat-search-next" => {
+                    repeat_vim_search(runtime, false)?;
+                }
+                "repeat-search-previous" => {
+                    repeat_vim_search(runtime, true)?;
+                }
                 "put-after" => {
                     put_yank(runtime, true)?;
                 }
                 "put-before" => {
                     put_yank(runtime, false)?;
                 }
+                "visual-swap-anchor" => {
+                    swap_visual_anchor(runtime)?;
+                }
+                "start-visual-inner-text-object" => {
+                    start_visual_text_object(runtime, false)?;
+                }
+                "start-visual-around-text-object" => {
+                    start_visual_text_object(runtime, true)?;
+                }
                 "visual-delete" => {
-                    let (range, cursor) = {
-                        let ui = shell_ui(runtime)?;
-                        let anchor = ui
-                            .vim()
-                            .visual_anchor
-                            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
-                        let buffer = shell_ui(runtime)?
-                            .buffer(active_shell_buffer_id(runtime)?)
-                            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
-                        (
-                            visual_selection_range(buffer, anchor)
-                                .ok_or_else(|| "visual selection is empty".to_owned())?,
-                            buffer.cursor_point(),
-                        )
-                    };
-                    apply_operator_to_range(runtime, VimOperator::Delete, range, false, cursor)?;
+                    apply_visual_operator(runtime, VimOperator::Delete)?;
                 }
                 "visual-change" => {
-                    let (range, cursor) = {
-                        let ui = shell_ui(runtime)?;
-                        let anchor = ui
-                            .vim()
-                            .visual_anchor
-                            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
-                        let buffer = shell_ui(runtime)?
-                            .buffer(active_shell_buffer_id(runtime)?)
-                            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
-                        (
-                            visual_selection_range(buffer, anchor)
-                                .ok_or_else(|| "visual selection is empty".to_owned())?,
-                            buffer.cursor_point(),
-                        )
-                    };
-                    apply_operator_to_range(runtime, VimOperator::Change, range, false, cursor)?;
+                    apply_visual_operator(runtime, VimOperator::Change)?;
                 }
                 "visual-yank" => {
-                    let (range, cursor) = {
-                        let ui = shell_ui(runtime)?;
-                        let anchor = ui
-                            .vim()
-                            .visual_anchor
-                            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
-                        let buffer = shell_ui(runtime)?
-                            .buffer(active_shell_buffer_id(runtime)?)
-                            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
-                        (
-                            visual_selection_range(buffer, anchor)
-                                .ok_or_else(|| "visual selection is empty".to_owned())?,
-                            buffer.cursor_point(),
-                        )
-                    };
-                    apply_operator_to_range(runtime, VimOperator::Yank, range, false, cursor)?;
+                    apply_visual_operator(runtime, VimOperator::Yank)?;
                 }
                 _ => {}
             }
@@ -1926,14 +2413,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
-            let action = {
+            let (action, query) = {
                 let ui = shell_ui_mut(runtime)?;
                 let action = ui
                     .picker()
                     .and_then(PickerOverlay::selected_action)
                     .ok_or_else(|| "picker has no selected item".to_owned())?;
+                let query = ui
+                    .picker()
+                    .map(|picker| picker.session().query().to_owned())
+                    .unwrap_or_default();
                 ui.close_picker();
-                action
+                (action, query)
             };
 
             match action {
@@ -1959,6 +2450,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::OpenFile(path) => {
                     open_workspace_file(runtime, &path)?;
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::VimSearch(direction) => {
+                    submit_vim_search(runtime, direction, &query)?;
                 }
                 PickerAction::InstallTreeSitterLanguage(language_id) => {
                     install_tree_sitter_language(runtime, &language_id)?;
@@ -2063,6 +2557,135 @@ fn reverse_find_kind(kind: VimFindKind) -> VimFindKind {
     }
 }
 
+fn reverse_search_direction(direction: VimSearchDirection) -> VimSearchDirection {
+    match direction {
+        VimSearchDirection::Forward => VimSearchDirection::Backward,
+        VimSearchDirection::Backward => VimSearchDirection::Forward,
+    }
+}
+
+fn vim_delimited_text_object(chord: &str) -> Option<(char, char)> {
+    match chord {
+        "(" | ")" | "b" => Some(('(', ')')),
+        "[" | "]" => Some(('[', ']')),
+        "{" | "}" | "B" => Some(('{', '}')),
+        ">" => Some(('<', '>')),
+        "\"" => Some(('"', '"')),
+        "'" => Some(('\'', '\'')),
+        "`" => Some(('`', '`')),
+        _ => None,
+    }
+}
+
+fn vim_text_object_kind(chord: &str) -> Option<VimTextObjectKind> {
+    match chord {
+        "w" => Some(VimTextObjectKind::Word),
+        "W" => Some(VimTextObjectKind::BigWord),
+        "s" => Some(VimTextObjectKind::Sentence),
+        "p" => Some(VimTextObjectKind::Paragraph),
+        "t" => Some(VimTextObjectKind::Tag),
+        _ => vim_delimited_text_object(chord)
+            .map(|(open, close)| VimTextObjectKind::Delimited { open, close }),
+    }
+}
+
+fn matches_pattern_at(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> bool {
+    pattern.iter().enumerate().all(|(offset, expected)| {
+        buffer
+            .text
+            .char_at_point(buffer.text.point_from_char_index(start_char + offset))
+            == Some(*expected)
+    })
+}
+
+fn search_forward(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    wrap: bool,
+) -> Option<TextPoint> {
+    if pattern.is_empty() || pattern.len() > buffer.text.char_count() {
+        return None;
+    }
+
+    let max_start = buffer.text.char_count().saturating_sub(pattern.len());
+    let first_pass_start = start_char.min(max_start.saturating_add(1));
+    for char_index in first_pass_start..=max_start {
+        if matches_pattern_at(buffer, char_index, pattern) {
+            return Some(buffer.text.point_from_char_index(char_index));
+        }
+    }
+
+    if wrap {
+        for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
+            if matches_pattern_at(buffer, char_index, pattern) {
+                return Some(buffer.text.point_from_char_index(char_index));
+            }
+        }
+    }
+
+    None
+}
+
+fn search_backward(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    wrap: bool,
+) -> Option<TextPoint> {
+    if pattern.is_empty() || pattern.len() > buffer.text.char_count() {
+        return None;
+    }
+
+    let max_start = buffer.text.char_count().saturating_sub(pattern.len());
+    let first_pass_start = start_char.min(max_start);
+    for char_index in (0..=first_pass_start).rev() {
+        if matches_pattern_at(buffer, char_index, pattern) {
+            return Some(buffer.text.point_from_char_index(char_index));
+        }
+    }
+
+    if wrap && first_pass_start < max_start {
+        for char_index in ((first_pass_start + 1)..=max_start).rev() {
+            if matches_pattern_at(buffer, char_index, pattern) {
+                return Some(buffer.text.point_from_char_index(char_index));
+            }
+        }
+    }
+
+    None
+}
+
+fn search_buffer(
+    buffer: &ShellBuffer,
+    direction: VimSearchDirection,
+    query: &str,
+) -> Option<TextPoint> {
+    let pattern = query.chars().collect::<Vec<_>>();
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let cursor = buffer.cursor_point();
+    match direction {
+        VimSearchDirection::Forward => {
+            let start_char = buffer
+                .point_after(cursor)
+                .map(|point| buffer.text.point_to_char_index(point))
+                .unwrap_or(buffer.text.char_count());
+            search_forward(buffer, start_char, &pattern, true)
+        }
+        VimSearchDirection::Backward => {
+            let start_char = buffer
+                .text
+                .point_before(cursor)
+                .map(|point| buffer.text.point_to_char_index(point))
+                .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
+            search_backward(buffer, start_char, &pattern, true)
+        }
+    }
+}
+
 fn move_buffer_with_motion(
     buffer: &mut ShellBuffer,
     motion: ShellMotion,
@@ -2077,13 +2700,56 @@ fn move_buffer_with_motion(
         ShellMotion::WordForward => {
             (0..repeat).fold(false, |moved, _| buffer.move_word_forward() || moved)
         }
+        ShellMotion::BigWordForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_forward() || moved)
+        }
         ShellMotion::WordBackward => {
             (0..repeat).fold(false, |moved, _| buffer.move_word_backward() || moved)
         }
+        ShellMotion::BigWordBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_backward() || moved)
+        }
         ShellMotion::WordEnd => (0..repeat).fold(false, |moved, _| buffer.move_word_end() || moved),
+        ShellMotion::BigWordEnd => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_end() || moved)
+        }
+        ShellMotion::SentenceForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_sentence_forward() || moved)
+        }
+        ShellMotion::SentenceBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_sentence_backward() || moved)
+        }
+        ShellMotion::ParagraphForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_paragraph_forward() || moved)
+        }
+        ShellMotion::ParagraphBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_paragraph_backward() || moved)
+        }
+        ShellMotion::WordEndBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_end_backward() || moved)
+        }
+        ShellMotion::BigWordEndBackward => (0..repeat).fold(false, |moved, _| {
+            buffer.move_big_word_end_backward() || moved
+        }),
+        ShellMotion::MatchPair => buffer.move_matching_delimiter(),
         ShellMotion::LineStart => buffer.move_line_start(),
         ShellMotion::LineFirstNonBlank => buffer.move_line_first_non_blank(),
-        ShellMotion::LineEnd => buffer.move_line_end(),
+        ShellMotion::LineEnd => {
+            let line_repeat = repeat.saturating_sub(1);
+            let moved_line = if line_repeat == 0 {
+                false
+            } else {
+                (0..line_repeat).fold(false, |moved, _| buffer.move_down() || moved)
+            };
+            buffer.move_line_end() || moved_line
+        }
+        ShellMotion::ScreenTop => buffer.move_to_viewport_offset(repeat.saturating_sub(1)),
+        ShellMotion::ScreenMiddle => buffer.move_to_viewport_middle(),
+        ShellMotion::ScreenBottom => {
+            let viewport = buffer.viewport_lines();
+            let offset = viewport.saturating_sub(repeat.min(viewport));
+            buffer.move_to_viewport_offset(offset)
+        }
         ShellMotion::FirstLine => {
             if let Some(line) = count {
                 buffer.goto_line(line.saturating_sub(1))
@@ -2102,7 +2768,15 @@ fn move_buffer_with_motion(
 }
 
 fn motion_is_inclusive(motion: ShellMotion) -> bool {
-    matches!(motion, ShellMotion::WordEnd | ShellMotion::LineEnd)
+    matches!(
+        motion,
+        ShellMotion::WordEnd
+            | ShellMotion::BigWordEnd
+            | ShellMotion::WordEndBackward
+            | ShellMotion::BigWordEndBackward
+            | ShellMotion::MatchPair
+            | ShellMotion::LineEnd
+    )
 }
 
 fn charwise_motion_range(
@@ -2129,14 +2803,65 @@ fn charwise_motion_range(
     (range.start() != range.end()).then_some(range.normalized())
 }
 
-fn visual_selection_range(buffer: &ShellBuffer, anchor: TextPoint) -> Option<TextRange> {
+fn visual_selection(
+    buffer: &ShellBuffer,
+    anchor: TextPoint,
+    kind: VisualSelectionKind,
+) -> Option<VisualSelection> {
     let head = buffer.cursor_point();
-    let range = if head >= anchor {
-        TextRange::new(anchor, buffer.point_after(head).unwrap_or(head))
-    } else {
-        TextRange::new(head, buffer.point_after(anchor).unwrap_or(anchor))
-    };
-    (range.start() != range.end()).then_some(range.normalized())
+    match kind {
+        VisualSelectionKind::Character => {
+            let range = if head >= anchor {
+                TextRange::new(anchor, buffer.point_after(head).unwrap_or(head))
+            } else {
+                TextRange::new(head, buffer.point_after(anchor).unwrap_or(anchor))
+            };
+            (range.start() != range.end()).then_some(VisualSelection::Range(range.normalized()))
+        }
+        VisualSelectionKind::Line => {
+            let start_line = anchor.line.min(head.line);
+            let line_count = anchor.line.max(head.line).saturating_sub(start_line) + 1;
+            buffer
+                .line_span_range(start_line, line_count)
+                .map(VisualSelection::Range)
+        }
+        VisualSelectionKind::Block => {
+            let end_col = anchor.column.max(head.column).saturating_add(1);
+            Some(VisualSelection::Block(BlockSelection {
+                start_line: anchor.line.min(head.line),
+                end_line: anchor.line.max(head.line),
+                start_col: anchor.column.min(head.column),
+                end_col,
+            }))
+        }
+    }
+}
+
+fn block_selection_ranges(buffer: &ShellBuffer, selection: BlockSelection) -> Vec<TextRange> {
+    (selection.start_line..=selection.end_line)
+        .filter_map(|line_index| {
+            let line_len = buffer.line_len_chars(line_index);
+            let start = selection.start_col.min(line_len);
+            let end = selection.end_col.min(line_len);
+            (start < end).then(|| {
+                TextRange::new(
+                    TextPoint::new(line_index, start),
+                    TextPoint::new(line_index, end),
+                )
+            })
+        })
+        .collect()
+}
+
+fn line_flash_selection_for_range(
+    buffer: &ShellBuffer,
+    range: TextRange,
+) -> Option<VisualSelection> {
+    let range = range.normalized();
+    let line_count = range.end().line.saturating_sub(range.start().line) + 1;
+    buffer
+        .line_span_range(range.start().line, line_count)
+        .map(VisualSelection::Range)
 }
 
 fn apply_operator_to_range(
@@ -2145,6 +2870,7 @@ fn apply_operator_to_range(
     range: TextRange,
     linewise: bool,
     original_cursor: TextPoint,
+    flash_selection: Option<VisualSelection>,
 ) -> Result<(), String> {
     let removed = active_shell_buffer_mut(runtime)?.slice(range);
     if removed.is_empty() {
@@ -2152,9 +2878,10 @@ fn apply_operator_to_range(
         return Ok(());
     }
 
-    shell_ui_mut(runtime)?.vim_mut().yank = Some(YankRegister {
-        text: removed.clone(),
-        linewise,
+    shell_ui_mut(runtime)?.vim_mut().yank = Some(if linewise {
+        YankRegister::Line(removed.clone())
+    } else {
+        YankRegister::Character(removed.clone())
     });
 
     match operator {
@@ -2168,6 +2895,7 @@ fn apply_operator_to_range(
             let buffer = active_shell_buffer_mut(runtime)?;
             if linewise && removed.ends_with('\n') {
                 buffer.replace_range(range, "\n");
+                buffer.set_cursor(range.start());
             } else {
                 buffer.delete_range(range);
             }
@@ -2175,6 +2903,10 @@ fn apply_operator_to_range(
             shell_ui_mut(runtime)?.enter_insert_mode();
         }
         VimOperator::Yank => {
+            if let Some(selection) = flash_selection {
+                let buffer_id = active_shell_buffer_id(runtime)?;
+                shell_ui_mut(runtime)?.set_yank_flash(buffer_id, selection);
+            }
             active_shell_buffer_mut(runtime)?.set_cursor(original_cursor);
             shell_ui_mut(runtime)?.enter_normal_mode();
         }
@@ -2183,37 +2915,202 @@ fn apply_operator_to_range(
     Ok(())
 }
 
+fn apply_block_operator(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    selection: BlockSelection,
+    original_cursor: TextPoint,
+    flash_selection: Option<VisualSelection>,
+) -> Result<(), String> {
+    let (ranges, yanked) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let ranges = block_selection_ranges(buffer, selection);
+        let yanked = ranges
+            .iter()
+            .map(|range| buffer.slice(*range))
+            .collect::<Vec<_>>();
+        (ranges, yanked)
+    };
+    if ranges.is_empty() {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        return Ok(());
+    }
+
+    shell_ui_mut(runtime)?.vim_mut().yank = Some(YankRegister::Block(yanked));
+    let target_cursor = ranges[0].start();
+
+    match operator {
+        VimOperator::Delete => {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            for range in ranges.iter().rev().copied() {
+                buffer.delete_range(range);
+            }
+            buffer.set_cursor(target_cursor);
+            buffer.mark_syntax_dirty();
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        VimOperator::Change => {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            for range in ranges.iter().rev().copied() {
+                buffer.delete_range(range);
+            }
+            buffer.set_cursor(target_cursor);
+            buffer.mark_syntax_dirty();
+            shell_ui_mut(runtime)?.enter_insert_mode();
+        }
+        VimOperator::Yank => {
+            if let Some(selection) = flash_selection {
+                let buffer_id = active_shell_buffer_id(runtime)?;
+                shell_ui_mut(runtime)?.set_yank_flash(buffer_id, selection);
+            }
+            active_shell_buffer_mut(runtime)?.set_cursor(original_cursor);
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
+    let (selection, cursor, kind) = {
+        let ui = shell_ui(runtime)?;
+        let anchor = ui
+            .vim()
+            .visual_anchor
+            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+        let kind = ui.vim().visual_kind;
+        let buffer = shell_ui(runtime)?
+            .buffer(active_shell_buffer_id(runtime)?)
+            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
+        (
+            visual_selection(buffer, anchor, kind)
+                .ok_or_else(|| "visual selection is empty".to_owned())?,
+            buffer.cursor_point(),
+            kind,
+        )
+    };
+
+    match selection {
+        VisualSelection::Range(range) => apply_operator_to_range(
+            runtime,
+            operator,
+            range,
+            matches!(kind, VisualSelectionKind::Line),
+            cursor,
+            (operator == VimOperator::Yank).then_some(selection),
+        ),
+        VisualSelection::Block(block) => apply_block_operator(
+            runtime,
+            operator,
+            block,
+            cursor,
+            (operator == VimOperator::Yank).then_some(selection),
+        ),
+    }
+}
+
 fn apply_linewise_operator(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
     line_count: usize,
 ) -> Result<(), String> {
-    let (range, original_cursor) = {
+    let (range, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
         let range = buffer
             .line_span_range(buffer.cursor_row(), line_count.max(1))
             .ok_or_else(|| "linewise Vim range could not be resolved".to_owned())?;
-        (range, original_cursor)
+        (range, original_cursor, Some(VisualSelection::Range(range)))
     };
-    apply_operator_to_range(runtime, operator, range, true, original_cursor)
+    apply_operator_to_range(
+        runtime,
+        operator,
+        range,
+        true,
+        original_cursor,
+        flash_selection,
+    )
 }
 
 fn apply_text_object_operator(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
+    kind: VimTextObjectKind,
     around: bool,
     count: usize,
 ) -> Result<(), String> {
-    let (range, original_cursor) = {
+    let (range, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
         let range = buffer
-            .word_object_range(around, count.max(1))
-            .ok_or_else(|| "word text object is unavailable at the current cursor".to_owned())?;
-        (range, original_cursor)
+            .text_object_range(kind, around, count.max(1))
+            .ok_or_else(|| "text object is unavailable at the current cursor".to_owned())?;
+        (
+            range,
+            original_cursor,
+            line_flash_selection_for_range(buffer, range),
+        )
     };
-    apply_operator_to_range(runtime, operator, range, false, original_cursor)
+    apply_operator_to_range(
+        runtime,
+        operator,
+        range,
+        false,
+        original_cursor,
+        flash_selection,
+    )
+}
+
+fn apply_motion_alias(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    motion: ShellMotion,
+) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    apply_operator_motion(runtime, operator, count, motion, None)
+}
+
+fn apply_visual_text_object(
+    runtime: &mut EditorRuntime,
+    kind: VimTextObjectKind,
+    around: bool,
+    count: usize,
+) -> Result<(), String> {
+    let (anchor, head) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let range = buffer
+            .text_object_range(kind, around, count.max(1))
+            .ok_or_else(|| "text object is unavailable at the current cursor".to_owned())?;
+        let head = buffer
+            .text
+            .point_before(range.end())
+            .unwrap_or(range.start());
+        (range.start(), head)
+    };
+    active_shell_buffer_mut(runtime)?.set_cursor(head);
+    shell_ui_mut(runtime)?.enter_visual_mode(anchor, VisualSelectionKind::Character);
+    Ok(())
+}
+
+fn delete_chars(runtime: &mut EditorRuntime, backward: bool) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    let motion = if backward {
+        ShellMotion::Left
+    } else {
+        ShellMotion::Right
+    };
+    apply_operator_motion(runtime, VimOperator::Delete, count, motion, Some(1))
+}
+
+fn substitute_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    apply_operator_motion(
+        runtime,
+        VimOperator::Change,
+        count,
+        ShellMotion::Right,
+        Some(1),
+    )
 }
 
 fn apply_operator_motion(
@@ -2223,7 +3120,7 @@ fn apply_operator_motion(
     motion: ShellMotion,
     motion_count: Option<usize>,
 ) -> Result<(), String> {
-    let (range, linewise, original_cursor) = {
+    let (range, linewise, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
         let range = match motion {
@@ -2302,8 +3199,10 @@ fn apply_operator_motion(
                 }
             }
         };
+        let range =
+            range.ok_or_else(|| "Vim operator motion did not resolve a range".to_owned())?;
         (
-            range.ok_or_else(|| "Vim operator motion did not resolve a range".to_owned())?,
+            range,
             matches!(
                 motion,
                 ShellMotion::Down
@@ -2312,10 +3211,18 @@ fn apply_operator_motion(
                     | ShellMotion::LastLine
             ),
             original_cursor,
+            line_flash_selection_for_range(buffer, range),
         )
     };
 
-    apply_operator_to_range(runtime, operator, range, linewise, original_cursor)
+    apply_operator_to_range(
+        runtime,
+        operator,
+        range,
+        linewise,
+        original_cursor,
+        flash_selection,
+    )
 }
 
 fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Result<(), String> {
@@ -2334,6 +3241,56 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
     Ok(())
 }
 
+fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    let buffer = active_shell_buffer_mut(runtime)?;
+    let viewport = buffer.viewport_lines().max(1);
+    match command {
+        ScrollCommand::HalfPageDown => {
+            scroll_buffer_with_cursor(buffer, ((viewport / 2).max(1) * count) as i32);
+            Ok(())
+        }
+        ScrollCommand::HalfPageUp => {
+            scroll_buffer_with_cursor(buffer, -(((viewport / 2).max(1) * count) as i32));
+            Ok(())
+        }
+        ScrollCommand::PageDown => {
+            scroll_buffer_with_cursor(buffer, (viewport * count) as i32);
+            Ok(())
+        }
+        ScrollCommand::PageUp => {
+            scroll_buffer_with_cursor(buffer, -((viewport * count) as i32));
+            Ok(())
+        }
+        ScrollCommand::LineDown => {
+            scroll_buffer_viewport_only(buffer, count as i32);
+            Ok(())
+        }
+        ScrollCommand::LineUp => {
+            scroll_buffer_viewport_only(buffer, -(count as i32));
+            Ok(())
+        }
+    }
+}
+
+fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
+    let screen_offset = buffer.cursor_row().saturating_sub(buffer.scroll_row);
+    buffer.scroll_by(delta);
+    let target_line = buffer.line_at_viewport_offset(screen_offset);
+    let _ = buffer.goto_line(target_line);
+}
+
+fn scroll_buffer_viewport_only(buffer: &mut ShellBuffer, delta: i32) {
+    buffer.scroll_by(delta);
+    let top = buffer.scroll_row;
+    let bottom = buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1));
+    if buffer.cursor_row() < top {
+        let _ = buffer.goto_line(top);
+    } else if buffer.cursor_row() > bottom {
+        let _ = buffer.goto_line(bottom);
+    }
+}
+
 fn resolve_find_target(
     runtime: &mut EditorRuntime,
     operator: Option<VimOperator>,
@@ -2344,7 +3301,7 @@ fn resolve_find_target(
     shell_ui_mut(runtime)?.vim_mut().last_find = Some(LastFind { kind, target });
 
     if let Some(operator) = operator {
-        let (range, original_cursor) = {
+        let (range, original_cursor, flash_selection) = {
             let buffer = active_shell_buffer_mut(runtime)?;
             let original_cursor = buffer.cursor_point();
             if !buffer.move_find(kind, target, count.max(1)) {
@@ -2360,9 +3317,20 @@ fn resolve_find_target(
             )
             .ok_or_else(|| "find motion did not resolve a Vim range".to_owned())?;
             buffer.set_cursor(original_cursor);
-            (range, original_cursor)
+            (
+                range,
+                original_cursor,
+                line_flash_selection_for_range(buffer, range),
+            )
         };
-        apply_operator_to_range(runtime, operator, range, false, original_cursor)?;
+        apply_operator_to_range(
+            runtime,
+            operator,
+            range,
+            false,
+            original_cursor,
+            flash_selection,
+        )?;
     } else {
         active_shell_buffer_mut(runtime)?.move_find(kind, target, count.max(1));
         shell_ui_mut(runtime)?.vim_mut().clear_transient();
@@ -2400,36 +3368,152 @@ fn repeat_last_find(runtime: &mut EditorRuntime, reverse: bool) -> Result<(), St
     }
 }
 
+fn open_vim_search_prompt(
+    runtime: &mut EditorRuntime,
+    direction: VimSearchDirection,
+) -> Result<(), String> {
+    let title = match direction {
+        VimSearchDirection::Forward => "Search /",
+        VimSearchDirection::Backward => "Search ?",
+    };
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::prompt(
+        title,
+        PickerAction::VimSearch(direction),
+    ));
+    Ok(())
+}
+
+fn run_vim_search(
+    runtime: &mut EditorRuntime,
+    direction: VimSearchDirection,
+    query: &str,
+) -> Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(());
+    }
+
+    let target = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        search_buffer(buffer, direction, query)
+            .ok_or_else(|| format!("no matches found for `{query}`"))?
+    };
+    active_shell_buffer_mut(runtime)?.set_cursor(target);
+    shell_ui_mut(runtime)?.vim_mut().last_search = Some(LastSearch {
+        direction,
+        query: query.to_owned(),
+    });
+    shell_ui_mut(runtime)?.vim_mut().clear_transient();
+    Ok(())
+}
+
+fn search_word_under_cursor(
+    runtime: &mut EditorRuntime,
+    direction: VimSearchDirection,
+) -> Result<(), String> {
+    let query = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let range = buffer
+            .text_object_range(VimTextObjectKind::Word, false, 1)
+            .ok_or_else(|| "no Vim word is available at the current cursor".to_owned())?;
+        buffer.slice(range)
+    };
+    run_vim_search(runtime, direction, &query)
+}
+
+fn submit_vim_search(
+    runtime: &mut EditorRuntime,
+    direction: VimSearchDirection,
+    query: &str,
+) -> Result<(), String> {
+    if !query.trim().is_empty() {
+        return run_vim_search(runtime, direction, query);
+    }
+
+    let last_search = shell_ui(runtime)?
+        .vim()
+        .last_search
+        .clone()
+        .ok_or_else(|| "no previous Vim search is available".to_owned())?;
+    run_vim_search(runtime, direction, &last_search.query)
+}
+
+fn repeat_vim_search(runtime: &mut EditorRuntime, reverse: bool) -> Result<(), String> {
+    let last_search = shell_ui(runtime)?
+        .vim()
+        .last_search
+        .clone()
+        .ok_or_else(|| "no previous Vim search is available".to_owned())?;
+    let direction = if reverse {
+        reverse_search_direction(last_search.direction)
+    } else {
+        last_search.direction
+    };
+    run_vim_search(runtime, direction, &last_search.query)
+}
+
 fn resolve_g_prefix(
     runtime: &mut EditorRuntime,
     operator: Option<VimOperator>,
     line_target: Option<usize>,
+    chord: &str,
 ) -> Result<(), String> {
-    if let Some(operator) = operator {
-        let (range, original_cursor) = {
-            let buffer = active_shell_buffer_mut(runtime)?;
-            let original_cursor = buffer.cursor_point();
-            let target_line = line_target.unwrap_or(1).saturating_sub(1);
-            let start_line = target_line.min(buffer.cursor_row());
-            let end_line = target_line.max(buffer.cursor_row());
-            let range = TextRange::new(
-                buffer
-                    .line_range(start_line)
-                    .ok_or_else(|| "gg range start is unavailable".to_owned())?
-                    .start(),
-                buffer
-                    .line_range(end_line)
-                    .ok_or_else(|| "gg range end is unavailable".to_owned())?
-                    .end(),
-            );
-            (range, original_cursor)
-        };
-        apply_operator_to_range(runtime, operator, range, true, original_cursor)
-    } else {
-        let target_line = line_target.unwrap_or(1).saturating_sub(1);
-        active_shell_buffer_mut(runtime)?.goto_line(target_line);
-        shell_ui_mut(runtime)?.vim_mut().clear_transient();
-        Ok(())
+    match chord {
+        "g" => {
+            if let Some(operator) = operator {
+                let (range, original_cursor, flash_selection) = {
+                    let buffer = active_shell_buffer_mut(runtime)?;
+                    let original_cursor = buffer.cursor_point();
+                    let target_line = line_target.unwrap_or(1).saturating_sub(1);
+                    let start_line = target_line.min(buffer.cursor_row());
+                    let end_line = target_line.max(buffer.cursor_row());
+                    let range = TextRange::new(
+                        buffer
+                            .line_range(start_line)
+                            .ok_or_else(|| "gg range start is unavailable".to_owned())?
+                            .start(),
+                        buffer
+                            .line_range(end_line)
+                            .ok_or_else(|| "gg range end is unavailable".to_owned())?
+                            .end(),
+                    );
+                    (range, original_cursor, Some(VisualSelection::Range(range)))
+                };
+                apply_operator_to_range(
+                    runtime,
+                    operator,
+                    range,
+                    true,
+                    original_cursor,
+                    flash_selection,
+                )
+            } else {
+                let target_line = line_target.unwrap_or(1).saturating_sub(1);
+                active_shell_buffer_mut(runtime)?.goto_line(target_line);
+                shell_ui_mut(runtime)?.vim_mut().clear_transient();
+                Ok(())
+            }
+        }
+        "e" | "E" => {
+            let motion = if chord == "e" {
+                ShellMotion::WordEndBackward
+            } else {
+                ShellMotion::BigWordEndBackward
+            };
+            if let Some(operator) = operator {
+                let motion_count = line_target;
+                let operator_count = 1;
+                apply_operator_motion(runtime, operator, operator_count, motion, motion_count)
+            } else {
+                move_buffer_with_motion(active_shell_buffer_mut(runtime)?, motion, line_target);
+                shell_ui_mut(runtime)?.vim_mut().clear_transient();
+                Ok(())
+            }
+        }
+        _ => {
+            shell_ui_mut(runtime)?.vim_mut().clear_transient();
+            Ok(())
+        }
     }
 }
 
@@ -2465,63 +3549,177 @@ fn start_vim_g_prefix(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn start_visual_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+fn start_visual_mode_with_kind(
+    runtime: &mut EditorRuntime,
+    kind: VisualSelectionKind,
+) -> Result<(), String> {
     let cursor = active_shell_buffer_mut(runtime)?.cursor_point();
-    shell_ui_mut(runtime)?.enter_visual_mode(cursor);
+    shell_ui_mut(runtime)?.enter_visual_mode(cursor, kind);
+    Ok(())
+}
+
+fn start_visual_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_visual_mode_with_kind(runtime, VisualSelectionKind::Character)
+}
+
+fn start_visual_line_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_visual_mode_with_kind(runtime, VisualSelectionKind::Line)
+}
+
+fn start_visual_block_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_visual_mode_with_kind(runtime, VisualSelectionKind::Block)
+}
+
+fn start_visual_text_object(runtime: &mut EditorRuntime, around: bool) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::VisualTextObject { around, count });
+    Ok(())
+}
+
+fn toggle_visual_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let mode = shell_ui(runtime)?.input_mode();
+    if mode != InputMode::Visual {
+        return start_visual_mode(runtime);
+    }
+
+    if shell_ui(runtime)?.vim().visual_kind == VisualSelectionKind::Character {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+    } else {
+        let ui = shell_ui_mut(runtime)?;
+        ui.vim_mut().visual_kind = VisualSelectionKind::Character;
+        ui.vim_mut().clear_transient();
+    }
+
+    Ok(())
+}
+
+fn toggle_visual_line_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let mode = shell_ui(runtime)?.input_mode();
+    if mode != InputMode::Visual {
+        return start_visual_line_mode(runtime);
+    }
+
+    if shell_ui(runtime)?.vim().visual_kind == VisualSelectionKind::Line {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+    } else {
+        let ui = shell_ui_mut(runtime)?;
+        ui.vim_mut().visual_kind = VisualSelectionKind::Line;
+        ui.vim_mut().clear_transient();
+    }
+
+    Ok(())
+}
+
+fn toggle_visual_block_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let mode = shell_ui(runtime)?.input_mode();
+    if mode != InputMode::Visual {
+        return start_visual_block_mode(runtime);
+    }
+
+    if shell_ui(runtime)?.vim().visual_kind == VisualSelectionKind::Block {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+    } else {
+        let ui = shell_ui_mut(runtime)?;
+        ui.vim_mut().visual_kind = VisualSelectionKind::Block;
+        ui.vim_mut().clear_transient();
+    }
+
+    Ok(())
+}
+
+fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let current = active_shell_buffer_mut(runtime)?.cursor_point();
+    let anchor = shell_ui(runtime)?
+        .vim()
+        .visual_anchor
+        .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+    active_shell_buffer_mut(runtime)?.set_cursor(anchor);
+    let ui = shell_ui_mut(runtime)?;
+    ui.vim_mut().visual_anchor = Some(current);
+    ui.vim_mut().clear_transient();
     Ok(())
 }
 
 fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     let yank = shell_ui(runtime)?.vim().yank.clone();
-    let Some(mut yank) = yank else {
+    let Some(yank) = yank else {
         return Ok(());
     };
 
-    if yank.linewise && !yank.text.ends_with('\n') {
-        yank.text.push('\n');
-    }
-
     {
         let buffer = active_shell_buffer_mut(runtime)?;
-        if yank.linewise {
-            let line = buffer.cursor_row();
-            let insertion_point = if after {
-                buffer
-                    .line_range(line)
-                    .map(TextRange::end)
-                    .unwrap_or_else(|| buffer.cursor_point())
-            } else {
-                buffer
-                    .line_range(line)
-                    .map(TextRange::start)
-                    .unwrap_or_else(|| buffer.cursor_point())
-            };
-            let text = if after && line + 1 >= buffer.line_count() {
-                format!("\n{}", yank.text)
-            } else {
-                yank.text.clone()
-            };
-            buffer.insert_at(insertion_point, &text);
-            if after {
-                buffer.goto_line(line.saturating_add(1));
-            } else {
-                buffer.goto_line(line);
+        match yank {
+            YankRegister::Character(text) => {
+                let insertion_point = if after {
+                    buffer
+                        .point_after(buffer.cursor_point())
+                        .unwrap_or_else(|| buffer.cursor_point())
+                } else {
+                    buffer.cursor_point()
+                };
+                buffer.insert_at(insertion_point, &text);
             }
-        } else {
-            let insertion_point = if after {
-                buffer
-                    .point_after(buffer.cursor_point())
-                    .unwrap_or_else(|| buffer.cursor_point())
-            } else {
-                buffer.cursor_point()
-            };
-            buffer.insert_at(insertion_point, &yank.text);
+            YankRegister::Line(mut text) => {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                let line = buffer.cursor_row();
+                let insertion_point = if after {
+                    buffer
+                        .line_range(line)
+                        .map(TextRange::end)
+                        .unwrap_or_else(|| buffer.cursor_point())
+                } else {
+                    buffer
+                        .line_range(line)
+                        .map(TextRange::start)
+                        .unwrap_or_else(|| buffer.cursor_point())
+                };
+                let text = if after && line + 1 >= buffer.line_count() {
+                    format!("\n{text}")
+                } else {
+                    text
+                };
+                buffer.insert_at(insertion_point, &text);
+                if after {
+                    buffer.goto_line(line.saturating_add(1));
+                } else {
+                    buffer.goto_line(line);
+                }
+            }
+            YankRegister::Block(lines) => {
+                let origin = buffer.cursor_point();
+                let insertion_col = if after {
+                    origin.column.saturating_add(1)
+                } else {
+                    origin.column
+                };
+                ensure_buffer_has_line(
+                    buffer,
+                    origin.line.saturating_add(lines.len().saturating_sub(1)),
+                );
+                for (offset, segment) in lines.iter().enumerate().rev() {
+                    let target_line = origin.line + offset;
+                    let target_col = insertion_col.min(buffer.line_len_chars(target_line));
+                    buffer.insert_at(TextPoint::new(target_line, target_col), segment);
+                }
+                let target_col = insertion_col.min(buffer.line_len_chars(origin.line));
+                buffer.set_cursor(TextPoint::new(origin.line, target_col));
+            }
         }
         buffer.mark_syntax_dirty();
     }
 
     shell_ui_mut(runtime)?.vim_mut().clear_transient();
     Ok(())
+}
+
+fn ensure_buffer_has_line(buffer: &mut ShellBuffer, target_line: usize) {
+    while buffer.line_count() <= target_line {
+        let last_line = buffer.line_count().saturating_sub(1);
+        let point = TextPoint::new(last_line, buffer.line_len_chars(last_line));
+        buffer.insert_at(point, "\n");
+    }
 }
 
 fn syntax_registry_mut(runtime: &mut EditorRuntime) -> Result<&mut SyntaxRegistry, String> {
@@ -3230,9 +4428,16 @@ fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {
 fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
     if keymod.intersects(ctrl_mod()) {
         return match keycode {
+            Keycode::B => Some("Ctrl+b".to_owned()),
+            Keycode::D => Some("Ctrl+d".to_owned()),
+            Keycode::E => Some("Ctrl+e".to_owned()),
+            Keycode::F => Some("Ctrl+f".to_owned()),
             Keycode::N => Some("Ctrl+n".to_owned()),
             Keycode::P => Some("Ctrl+p".to_owned()),
             Keycode::R => Some("Ctrl+r".to_owned()),
+            Keycode::U => Some("Ctrl+u".to_owned()),
+            Keycode::V => Some("Ctrl+v".to_owned()),
+            Keycode::Y => Some("Ctrl+y".to_owned()),
             Keycode::Grave => Some("Ctrl+`".to_owned()),
             _ => None,
         };
@@ -3272,6 +4477,15 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
 
 fn initial_scratch_lines() -> Vec<String> {
     vec![
+        "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
+        "NORMAL mode is loaded from user/vim.rs out of the box.".to_owned(),
+        "The shell starts in the default workspace and renders its statusline from user/statusline.rs.".to_owned(),
+        "Use h/j/k/l to move, w to jump forward by word, and : to open the command picker.".to_owned(),
+        "Press i to enter INSERT mode, then type directly into the active buffer.".to_owned(),
+        "F3 opens the command picker and F4 opens the buffer picker through user/picker.rs.".to_owned(),
+        "F5 toggles the docked popup window and F6 opens a searchable keybinding picker.".to_owned(),
+        "Inside a picker use Ctrl-n and Ctrl-p to move, Enter to run, and Escape to close.".to_owned(),
+        "F2 splits the layout, Tab changes panes, Ctrl+` opens the terminal buffer, and Ctrl+q quits.".to_owned(),
         "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
         "NORMAL mode is loaded from user/vim.rs out of the box.".to_owned(),
         "The shell starts in the default workspace and renders its statusline from user/statusline.rs.".to_owned(),
@@ -3406,7 +4620,7 @@ fn popup_window_height(content_height: u32, line_height: i32) -> u32 {
 
 #[allow(clippy::too_many_arguments)]
 fn render_shell_state(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
     font: &Font<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
@@ -3418,6 +4632,7 @@ fn render_shell_state(
     cell_width: i32,
     line_height: i32,
     ascent: i32,
+    now: Instant,
 ) -> Result<(), ShellError> {
     let content_height = height;
     let popup_height = runtime_popup
@@ -3429,8 +4644,7 @@ fn render_shell_state(
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
     let pane_rects = horizontal_pane_rects(width, pane_height, panes.len());
 
-    canvas.set_draw_color(Color::RGB(15, 16, 20));
-    canvas.clear();
+    target.clear(Color::RGB(15, 16, 20));
 
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
@@ -3443,12 +4657,12 @@ fn render_shell_state(
             Color::RGB(22, 24, 30)
         };
         fill_rect(
-            canvas,
+            target,
             PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
             background,
         )?;
         fill_rect(
-            canvas,
+            target,
             PixelRectToRect::rect(rect.x, rect.y, rect.width, 1),
             Color::RGB(50, 55, 66),
         )?;
@@ -3456,19 +4670,20 @@ fn render_shell_state(
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let visual_range = (state.input_mode() == InputMode::Visual && active)
                 .then(|| {
-                    state
-                        .vim()
-                        .visual_anchor
-                        .and_then(|anchor| visual_selection_range(buffer, anchor))
+                    state.vim().visual_anchor.and_then(|anchor| {
+                        visual_selection(buffer, anchor, state.vim().visual_kind)
+                    })
                 })
                 .flatten();
+            let yank_flash = state.yank_flash(buffer.id(), now);
             render_buffer(
-                canvas,
+                target,
                 font,
                 buffer,
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 active,
                 visual_range,
+                yank_flash,
                 state.input_mode(),
                 workspace_name,
                 lsp_server,
@@ -3482,7 +4697,7 @@ fn render_shell_state(
 
     if let Some(popup) = runtime_popup {
         render_runtime_popup_overlay(
-            canvas,
+            target,
             font,
             state,
             popup,
@@ -3493,19 +4708,19 @@ fn render_shell_state(
             cell_width,
             line_height,
             ascent,
+            now,
         )?;
     }
 
     if let Some(picker) = state.picker() {
-        render_picker_overlay(canvas, font, picker, width, height, line_height)?;
+        render_picker_overlay(target, font, picker, width, height, line_height)?;
     }
-    canvas.present();
 
     Ok(())
 }
 
 fn render_picker_overlay(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
     font: &Font<'_>,
     picker: &PickerOverlay,
     width: u32,
@@ -3514,7 +4729,7 @@ fn render_picker_overlay(
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
     fill_rounded_rect(
-        canvas,
+        target,
         PixelRectToRect::rect(
             popup_rect.x,
             popup_rect.y,
@@ -3525,7 +4740,7 @@ fn render_picker_overlay(
         Color::RGB(29, 32, 40),
     )?;
     fill_rect(
-        canvas,
+        target,
         PixelRectToRect::rect(
             popup_rect.x + 14,
             popup_rect.y,
@@ -3536,8 +4751,7 @@ fn render_picker_overlay(
     )?;
 
     draw_text(
-        canvas,
-        font,
+        target,
         popup_rect.x + 16,
         popup_rect.y + 16,
         picker.session().title(),
@@ -3546,8 +4760,7 @@ fn render_picker_overlay(
 
     let query = format!("Query > {}", picker.session().query());
     draw_text(
-        canvas,
-        font,
+        target,
         popup_rect.x + 16,
         popup_rect.y + line_height + 24,
         &query,
@@ -3560,8 +4773,7 @@ fn render_picker_overlay(
         picker.session().item_count(),
     );
     draw_text(
-        canvas,
-        font,
+        target,
         popup_rect.x + 16,
         popup_rect.y + (line_height * 2) + 28,
         &summary,
@@ -3591,8 +4803,7 @@ fn render_picker_overlay(
 
     if picker.session().matches().is_empty() {
         draw_text(
-            canvas,
-            font,
+            target,
             popup_rect.x + 16,
             list_top,
             "No matches.",
@@ -3618,7 +4829,7 @@ fn render_picker_overlay(
         let detail_width = content_width.saturating_sub(label_width + 16);
         if selected {
             fill_rect(
-                canvas,
+                target,
                 PixelRectToRect::rect(
                     popup_rect.x + 12,
                     row_y - 2,
@@ -3632,8 +4843,7 @@ fn render_picker_overlay(
         let label = truncate_text_to_width(font, matched.item().label(), label_width)?;
         let detail = truncate_text_to_width(font, matched.item().detail(), detail_width)?;
         draw_text(
-            canvas,
-            font,
+            target,
             content_left,
             row_y,
             &label,
@@ -3644,8 +4854,7 @@ fn render_picker_overlay(
             },
         )?;
         draw_text(
-            canvas,
-            font,
+            target,
             detail_x,
             row_y,
             &detail,
@@ -3659,8 +4868,7 @@ fn render_picker_overlay(
         .and_then(|selected| selected.item().preview())
     {
         draw_text(
-            canvas,
-            font,
+            target,
             popup_rect.x + 16,
             popup_rect.y + popup_rect.height as i32 - line_height - 18,
             &truncate_text_to_width(font, preview, popup_rect.width.saturating_sub(32))?,
@@ -3673,7 +4881,7 @@ fn render_picker_overlay(
 
 #[allow(clippy::too_many_arguments)]
 fn render_runtime_popup_overlay(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
     font: &Font<'_>,
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
@@ -3684,10 +4892,11 @@ fn render_runtime_popup_overlay(
     cell_width: i32,
     line_height: i32,
     ascent: i32,
+    now: Instant,
 ) -> Result<(), ShellError> {
-    fill_rect(canvas, popup_rect, Color::RGB(29, 32, 40))?;
+    fill_rect(target, popup_rect, Color::RGB(29, 32, 40))?;
     fill_rect(
-        canvas,
+        target,
         PixelRectToRect::rect(
             popup_rect.x() + 12,
             popup_rect.y(),
@@ -3697,8 +4906,7 @@ fn render_runtime_popup_overlay(
         Color::RGB(110, 170, 255),
     )?;
     draw_text(
-        canvas,
-        font,
+        target,
         popup_rect.x() + 14,
         popup_rect.y() + 16,
         &popup.title,
@@ -3714,8 +4922,7 @@ fn render_runtime_popup_overlay(
                 Color::RGBA(120, 132, 150, 255)
             };
             draw_text(
-                canvas,
-                font,
+                target,
                 tab_x,
                 popup_rect.y() + line_height + 22,
                 buffer.display_name(),
@@ -3739,16 +4946,18 @@ fn render_runtime_popup_overlay(
                 state
                     .vim()
                     .visual_anchor
-                    .and_then(|anchor| visual_selection_range(buffer, anchor))
+                    .and_then(|anchor| visual_selection(buffer, anchor, state.vim().visual_kind))
             })
             .flatten();
+        let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
-            canvas,
+            target,
             font,
             buffer,
             popup_buffer_rect,
             true,
             visual_range,
+            yank_flash,
             state.input_mode(),
             workspace_name,
             lsp_server,
@@ -3764,12 +4973,13 @@ fn render_runtime_popup_overlay(
 
 #[allow(clippy::too_many_arguments)]
 fn render_buffer(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
     font: &Font<'_>,
     buffer: &ShellBuffer,
     rect: Rect,
     active: bool,
-    visual_range: Option<TextRange>,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     workspace_name: &str,
     lsp_server: Option<&str>,
@@ -3787,6 +4997,10 @@ fn render_buffer(
     let muted = Color::RGBA(120, 132, 150, 255);
     let cursor = Color::RGB(110, 170, 255);
     let selection = Color::RGBA(55, 71, 99, 255);
+    let yank_flash_color = theme_registry
+        .and_then(|registry| registry.resolve("ui.yank-flash"))
+        .map(to_sdl_color)
+        .unwrap_or(Color::RGBA(112, 196, 255, 120));
     let statusline = truncate_text_to_width(
         font,
         &user::statusline::compose(&user::statusline::StatuslineContext {
@@ -3814,7 +5028,7 @@ fn render_buffer(
             InputMode::Insert => (cell_width / 4).max(2) as u32,
         };
         fill_rounded_rect(
-            canvas,
+            target,
             PixelRectToRect::rect(
                 rect.x() + 12 + line_number_width + (cursor_col as i32 * cell_width),
                 body_y + cursor_row_on_screen as i32 * line_height,
@@ -3828,15 +5042,15 @@ fn render_buffer(
 
     for (row_offset, line) in buffer.visible_lines(visible_lines).into_iter().enumerate() {
         let y = body_y + row_offset as i32 * line_height;
-        if let Some((selection_start, selection_end)) = visual_range.and_then(|range| {
-            selection_columns_for_line(
-                range,
-                buffer.scroll_row + row_offset,
-                buffer.line_len_chars(buffer.scroll_row + row_offset),
-            )
-        }) {
+        let line_index = buffer.scroll_row + row_offset;
+        let line_len = buffer.line_len_chars(line_index);
+        if let Some((selection_start, selection_end)) =
+            visual_selection.and_then(|selection_state| {
+                selection_columns_for_visual(selection_state, line_index, line_len)
+            })
+        {
             fill_rect(
-                canvas,
+                target,
                 PixelRectToRect::rect(
                     rect.x() + 12 + line_number_width + selection_start as i32 * cell_width,
                     y,
@@ -3847,16 +5061,30 @@ fn render_buffer(
                 selection,
             )?;
         }
+        if let Some((selection_start, selection_end)) = yank_flash.and_then(|selection_state| {
+            selection_columns_for_visual(selection_state, line_index, line_len)
+        }) {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x() + 12 + line_number_width + selection_start as i32 * cell_width,
+                    y,
+                    ((selection_end.saturating_sub(selection_start)) as i32 * cell_width.max(1))
+                        as u32,
+                    line_height.max(1) as u32,
+                ),
+                yank_flash_color,
+            )?;
+        }
         draw_text(
-            canvas,
-            font,
+            target,
             rect.x() + 12,
             y,
             &format!("{:>4}", buffer.scroll_row + row_offset + 1),
             muted,
         )?;
         draw_buffer_text(
-            canvas,
+            target,
             font,
             rect.x() + 12 + line_number_width,
             y,
@@ -3868,7 +5096,7 @@ fn render_buffer(
     }
 
     fill_rect(
-        canvas,
+        target,
         PixelRectToRect::rect(
             rect.x() + 8,
             statusline_y - 6,
@@ -3878,8 +5106,7 @@ fn render_buffer(
         Color::RGB(50, 55, 66),
     )?;
     draw_text(
-        canvas,
-        font,
+        target,
         rect.x() + 12,
         statusline_y,
         &statusline,
@@ -3888,7 +5115,7 @@ fn render_buffer(
 
     let _ = ascent;
     fill_rect(
-        canvas,
+        target,
         PixelRectToRect::rect(
             rect.x(),
             rect.y() + rect.height() as i32 - 2,
@@ -3903,7 +5130,7 @@ fn render_buffer(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_buffer_text(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
     font: &Font<'_>,
     x: i32,
     y: i32,
@@ -3919,7 +5146,7 @@ fn draw_buffer_text(
         if segment.is_empty() {
             continue;
         }
-        draw_text(canvas, font, draw_x, y, &segment, color)?;
+        draw_text(target, draw_x, y, &segment, color)?;
         draw_x += text_width(font, &segment)? as i32;
     }
     Ok(())
@@ -4011,6 +5238,24 @@ fn selection_columns_for_line(
     (start < end).then_some((start, end))
 }
 
+fn selection_columns_for_visual(
+    selection: VisualSelection,
+    line_index: usize,
+    line_len: usize,
+) -> Option<(usize, usize)> {
+    match selection {
+        VisualSelection::Range(range) => selection_columns_for_line(range, line_index, line_len),
+        VisualSelection::Block(block) => {
+            if line_index < block.start_line || line_index > block.end_line {
+                return None;
+            }
+            let start = block.start_col.min(line_len);
+            let end = block.end_col.min(line_len);
+            (start < end).then_some((start, end))
+        }
+    }
+}
+
 fn index_syntax_lines(snapshot: &SyntaxSnapshot) -> BTreeMap<usize, Vec<LineSyntaxSpan>> {
     let mut syntax_lines = BTreeMap::new();
     for span in &snapshot.highlight_spans {
@@ -4061,9 +5306,75 @@ fn to_sdl_color(color: ThemeColor) -> Color {
     Color::RGBA(color.r, color.g, color.b, color.a)
 }
 
-fn draw_text(
+fn to_render_color(color: Color) -> RenderColor {
+    RenderColor::rgba(color.r, color.g, color.b, color.a)
+}
+
+fn from_render_color(color: RenderColor) -> Color {
+    Color::RGBA(color.r, color.g, color.b, color.a)
+}
+
+fn to_pixel_rect(rect: Rect) -> PixelRect {
+    PixelRect::new(rect.x(), rect.y(), rect.width(), rect.height())
+}
+
+fn present_scene_to_canvas(
     canvas: &mut Canvas<Window>,
     font: &Font<'_>,
+    scene: &[DrawCommand],
+) -> Result<(), ShellError> {
+    for command in scene {
+        match command {
+            DrawCommand::Clear { color } => {
+                canvas.set_draw_color(from_render_color(*color));
+                canvas.clear();
+            }
+            DrawCommand::FillRect { rect, color } => {
+                canvas.set_draw_color(from_render_color(*color));
+                canvas
+                    .fill_rect(PixelRectToRect::from_pixel_rect(*rect))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
+            DrawCommand::FillRoundedRect {
+                rect,
+                radius,
+                color,
+            } => fill_rounded_rect_canvas(
+                canvas,
+                PixelRectToRect::from_pixel_rect(*rect),
+                *radius,
+                from_render_color(*color),
+            )?,
+            DrawCommand::Text { x, y, text, color } => {
+                if text.is_empty() {
+                    continue;
+                }
+
+                let surface = font
+                    .render(text)
+                    .blended(from_render_color(*color))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                let texture_creator = canvas.texture_creator();
+                let texture = texture_creator
+                    .create_texture_from_surface(&surface)
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                canvas
+                    .copy(
+                        &texture,
+                        None,
+                        Rect::new(*x, *y, surface.width(), surface.height()),
+                    )
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
+        }
+    }
+
+    canvas.present();
+    Ok(())
+}
+
+fn draw_text(
+    target: &mut DrawTarget<'_>,
     x: i32,
     y: i32,
     text: &str,
@@ -4073,41 +5384,56 @@ fn draw_text(
         return Ok(());
     }
 
-    let surface = font
-        .render(text)
-        .blended(color)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let texture_creator = canvas.texture_creator();
-    let texture = texture_creator
-        .create_texture_from_surface(&surface)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    canvas
-        .copy(
-            &texture,
-            None,
-            Rect::new(x, y, surface.width(), surface.height()),
-        )
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::Text {
+            x,
+            y,
+            text: text.to_owned(),
+            color: to_render_color(color),
+        }),
+    }
 
     Ok(())
 }
 
-fn fill_rect(canvas: &mut Canvas<Window>, rect: Rect, color: Color) -> Result<(), ShellError> {
-    canvas.set_draw_color(color);
-    canvas
-        .fill_rect(rect)
-        .map_err(|error| ShellError::Sdl(error.to_string()))
+fn fill_rect(target: &mut DrawTarget<'_>, rect: Rect, color: Color) -> Result<(), ShellError> {
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::FillRect {
+            rect: to_pixel_rect(rect),
+            color: to_render_color(color),
+        }),
+    }
+    Ok(())
 }
 
 fn fill_rounded_rect(
-    canvas: &mut Canvas<Window>,
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::FillRoundedRect {
+            rect: to_pixel_rect(rect),
+            radius,
+            color: to_render_color(color),
+        }),
+    }
+    Ok(())
+}
+
+fn fill_rounded_rect_canvas<T: RenderTarget>(
+    canvas: &mut Canvas<T>,
     rect: Rect,
     radius: u32,
     color: Color,
 ) -> Result<(), ShellError> {
     let radius = radius.min(rect.width() / 2).min(rect.height() / 2) as i32;
     if radius <= 1 {
-        return fill_rect(canvas, rect, color);
+        canvas.set_draw_color(color);
+        return canvas
+            .fill_rect(rect)
+            .map_err(|error| ShellError::Sdl(error.to_string()));
     }
 
     canvas.set_draw_color(color);
@@ -4191,6 +5517,10 @@ impl PixelRectToRect {
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect::new(x, y, width, height)
     }
+
+    fn from_pixel_rect(rect: PixelRect) -> Rect {
+        Self::rect(rect.x, rect.y, rect.width, rect.height)
+    }
 }
 
 #[cfg(test)]
@@ -4199,15 +5529,17 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        InputMode, ShellState, delete_runtime_workspace, open_workspace_from_project,
-        switch_runtime_workspace, workspace_delete_picker_overlay, workspace_switch_picker_overlay,
+        BlockSelection, InputMode, ShellConfig, ShellState, VisualSelection, VisualSelectionKind,
+        delete_runtime_workspace, open_workspace_from_project, switch_runtime_workspace,
+        workspace_delete_picker_overlay, workspace_switch_picker_overlay,
     };
-    use editor_buffer::TextBuffer;
+    use editor_buffer::{TextBuffer, TextPoint};
     use editor_core::{BufferKind, HookEvent};
+    use editor_render::RenderBackend;
     use sdl3::keyboard::{Keycode, Mod};
 
     fn temp_workspace_root(name: &str) -> PathBuf {
@@ -4341,6 +5673,430 @@ mod tests {
     }
 
     #[test]
+    fn vim_linewise_visual_mode_and_anchor_swap_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree\n");
+
+        state.handle_text_input("V")?;
+        assert_eq!(state.input_mode()?, InputMode::Visual);
+        assert_eq!(state.ui()?.vim().visual_kind, VisualSelectionKind::Line);
+
+        state.handle_text_input("j")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 1);
+
+        state.handle_text_input("o")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+        assert_eq!(state.ui()?.vim().visual_anchor, Some(TextPoint::new(1, 0)));
+
+        state.handle_text_input("d")?;
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "three\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_visual_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+
+        state.handle_text_input("v")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("w")?;
+        state.handle_text_input("d")?;
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+        assert_eq!(state.active_buffer_mut()?.text.text(), " beta");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+        state.handle_text_input("v")?;
+        state.handle_text_input("a")?;
+        state.handle_text_input("w")?;
+        state.handle_text_input("d")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "beta");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_counted_line_end_and_aliases_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
+
+        state.handle_text_input("2")?;
+        state.handle_text_input("$")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 1);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 2);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta gamma");
+        state.handle_text_input("w")?;
+        state.handle_text_input("D")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "alpha ");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta gamma");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("w")?;
+        state.handle_text_input("C")?;
+        assert_eq!(state.input_mode()?, InputMode::Insert);
+        state.handle_text_input("delta")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "alpha delta");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree\n");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("2")?;
+        state.handle_text_input("Y")?;
+        state.handle_text_input("p")?;
+        assert_eq!(
+            state.active_buffer_mut()?.text.text(),
+            "one\none\ntwo\ntwo\nthree\n"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_substitute_delete_counts_and_visual_toggles_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+
+        state.handle_text_input("2")?;
+        state.handle_text_input("x")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "pha beta");
+
+        state.handle_text_input("2")?;
+        state.handle_text_input("s")?;
+        assert_eq!(state.input_mode()?, InputMode::Insert);
+        state.handle_text_input("Z")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "Za beta");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree\n");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 1));
+        state.handle_text_input("V")?;
+        assert_eq!(state.ui()?.vim().visual_kind, VisualSelectionKind::Line);
+        state.handle_text_input("v")?;
+        assert_eq!(state.input_mode()?, InputMode::Visual);
+        assert_eq!(
+            state.ui()?.vim().visual_kind,
+            VisualSelectionKind::Character
+        );
+        state.handle_text_input("v")?;
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("2")?;
+        state.handle_text_input("S")?;
+        assert_eq!(state.input_mode()?, InputMode::Insert);
+        state.handle_text_input("hello")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "hello\nthree\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_search_prompt_and_repeats_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one two one two");
+
+        state.handle_text_input("/")?;
+        assert!(state.picker_visible()?);
+        state.handle_text_input("one")?;
+        assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+        assert!(!state.picker_visible()?);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
+
+        state.handle_text_input("n")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.handle_text_input("N")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
+
+        state.handle_text_input("?")?;
+        state.handle_text_input("two")?;
+        assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 4);
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("*")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
+
+        state.handle_text_input("#")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_quickref_word_motions_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
+        state.handle_text_input("W")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 11);
+
+        state.handle_text_input("B")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.handle_text_input("E")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 9);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta gamma");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 11));
+        state.handle_text_input("g")?;
+        state.handle_text_input("e")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 9);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 11));
+        state.handle_text_input("g")?;
+        state.handle_text_input("E")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 9);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar])");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 4));
+        state.handle_text_input("%")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 13);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("d")?;
+        state.handle_text_input("W")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "gamma");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar])");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 4));
+        state.handle_text_input("d")?;
+        state.handle_text_input("%")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "call");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_quickref_structure_motions_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("Alpha. Bravo! Charlie?");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input(")")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 7);
+
+        state.handle_text_input("(")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\n\nthree\nfour\n\nfive");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(3, 1));
+        state.handle_text_input("{")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 2);
+
+        state.handle_text_input("{")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(3, 1));
+        state.handle_text_input("{")?;
+        state.handle_text_input("}")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 5);
+
+        state.handle_text_input("}")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 6);
+
+        state.active_buffer_mut()?.set_viewport_lines(4);
+        state.active_buffer_mut()?.scroll_row = 3;
+        state.handle_text_input("H")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 3);
+
+        state.handle_text_input("M")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+        state.handle_text_input("L")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 6);
+
+        state.active_buffer_mut()?.scroll_row = 0;
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        assert!(state.try_runtime_keybinding(Keycode::D, Mod::LCTRLMOD)?);
+        assert_eq!(state.active_buffer_mut()?.scroll_row, 2);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 2);
+
+        assert!(state.try_runtime_keybinding(Keycode::U, Mod::LCTRLMOD)?);
+        assert_eq!(state.active_buffer_mut()?.scroll_row, 0);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+
+        assert!(state.try_runtime_keybinding(Keycode::F, Mod::LCTRLMOD)?);
+        assert_eq!(state.active_buffer_mut()?.scroll_row, 4);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+        assert!(state.try_runtime_keybinding(Keycode::Y, Mod::LCTRLMOD)?);
+        assert_eq!(state.active_buffer_mut()?.scroll_row, 3);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+        assert!(state.try_runtime_keybinding(Keycode::E, Mod::LCTRLMOD)?);
+        assert_eq!(state.active_buffer_mut()?.scroll_row, 4);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_yanks_set_flash_selections() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta\ngamma delta");
+        let buffer_id = state.active_buffer_mut()?.id();
+
+        state.handle_text_input("y")?;
+        state.handle_text_input("w")?;
+        let line_flash = state.ui()?.yank_flash(buffer_id, Instant::now());
+        assert_eq!(
+            line_flash,
+            Some(VisualSelection::Range(
+                state
+                    .active_buffer_mut()?
+                    .line_range(0)
+                    .ok_or("missing line range")?
+            ))
+        );
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("V")?;
+        state.handle_text_input("j")?;
+        state.handle_text_input("y")?;
+        let line_flash = state.ui()?.yank_flash(buffer_id, Instant::now());
+        assert_eq!(
+            line_flash,
+            Some(VisualSelection::Range(
+                state
+                    .active_buffer_mut()?
+                    .line_span_range(0, 2)
+                    .ok_or("missing span")?
+            ))
+        );
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        assert!(state.try_runtime_keybinding(Keycode::V, Mod::LCTRLMOD)?);
+        assert_eq!(state.ui()?.vim().visual_kind, VisualSelectionKind::Block);
+        state.handle_text_input("l")?;
+        state.handle_text_input("j")?;
+        state.handle_text_input("y")?;
+        assert_eq!(
+            state.ui()?.yank_flash(buffer_id, Instant::now()),
+            Some(VisualSelection::Block(BlockSelection {
+                start_line: 0,
+                end_line: 1,
+                start_col: 0,
+                end_col: 2,
+            }))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_delimited_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar], \"baz\")");
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 17));
+        state.handle_text_input("c")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("\"")?;
+        assert_eq!(state.input_mode()?, InputMode::Insert);
+        state.handle_text_input("qux")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(
+            state.active_buffer_mut()?.text.text(),
+            "call(foo[bar], \"qux\")"
+        );
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar], \"baz\")");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 9));
+        state.handle_text_input("v")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("[")?;
+        state.handle_text_input("d")?;
+        assert_eq!(
+            state.active_buffer_mut()?.text.text(),
+            "call(foo[], \"baz\")"
+        );
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar], \"baz\")");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+        state.handle_text_input("d")?;
+        state.handle_text_input("a")?;
+        state.handle_text_input("(")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "call");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("outer{alpha(beta)}");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 12));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("b")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "outer{alpha()}");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("outer{alpha(beta)}");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 12));
+        state.handle_text_input("d")?;
+        state.handle_text_input("a")?;
+        state.handle_text_input("B")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "outer");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_quickref_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 7));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("W")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), " gamma");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("Alpha. Bravo! Charlie?");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 9));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("s")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "Alpha.  Charlie?");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\n\nalpha\nbeta\n\ntwo\n");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(2, 1));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("p")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "one\n\n\ntwo\n");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("foo <bar> baz");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 5));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input(">")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "foo <> baz");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("<div>hello</div>");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+        state.handle_text_input("d")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("t")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "<div></div>");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("<div>hello</div>");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+        state.handle_text_input("v")?;
+        state.handle_text_input("i")?;
+        state.handle_text_input("t")?;
+        state.handle_text_input("d")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "<div></div>");
+
+        Ok(())
+    }
+
+    #[test]
     fn picker_bindings_open_and_navigate_results() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = ShellState::new()?;
 
@@ -4379,11 +6135,22 @@ mod tests {
             matched.item().label() == "F3"
                 && matched.item().detail().contains("picker.open-commands")
         }));
+
+        state.handle_text_input("h")?;
+        let picker = state.ui()?.picker().ok_or("missing keybinding picker")?;
         assert!(picker.session().matches().iter().any(|matched| {
             matched.item().label() == "h" && matched.item().detail().contains("[normal]")
         }));
 
         Ok(())
+    }
+
+    #[test]
+    fn shell_defaults_to_sdl_canvas_backend() {
+        assert_eq!(
+            ShellConfig::default().render_backend,
+            RenderBackend::SdlCanvas
+        );
     }
 
     #[test]

@@ -119,5 +119,6 @@ mod tests {
         assert_eq!(themes.len(), 1);
         assert_eq!(themes[0].id(), "volt-dark");
         assert!(themes[0].color("syntax.keyword").is_some());
+        assert!(themes[0].color("ui.yank-flash").is_some());
     }
 }

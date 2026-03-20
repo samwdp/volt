@@ -156,6 +156,12 @@ impl PickerSession {
         self.recompute_matches();
     }
 
+    /// Replaces the picker items and recomputes matches using the current query.
+    pub fn set_items(&mut self, items: Vec<PickerItem>) {
+        self.items = items;
+        self.recompute_matches();
+    }
+
     /// Moves the selection down by one entry.
     pub fn select_next(&mut self) {
         if self.matches.is_empty() {

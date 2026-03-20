@@ -30,6 +30,62 @@ impl PixelRect {
     }
 }
 
+/// Selects the concrete renderer implementation used by the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderBackend {
+    /// SDL canvas-backed rendering used by the current shell.
+    SdlCanvas,
+    /// Vulkan-backed rendering planned for the native shell.
+    Vulkan,
+}
+
+/// Backend-agnostic RGBA color used by the shell display list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderColor {
+    /// Red channel.
+    pub r: u8,
+    /// Green channel.
+    pub g: u8,
+    /// Blue channel.
+    pub b: u8,
+    /// Alpha channel.
+    pub a: u8,
+}
+
+impl RenderColor {
+    /// Creates an opaque RGB color.
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    /// Creates an RGBA color.
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+/// Backend-agnostic draw command emitted by the shell renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawCommand {
+    /// Clears the output with a solid color.
+    Clear { color: RenderColor },
+    /// Fills a rectangle with a solid color.
+    FillRect { rect: PixelRect, color: RenderColor },
+    /// Fills a rounded rectangle with a solid color.
+    FillRoundedRect {
+        rect: PixelRect,
+        radius: u32,
+        color: RenderColor,
+    },
+    /// Draws a text run at the given origin.
+    Text {
+        x: i32,
+        y: i32,
+        text: String,
+        color: RenderColor,
+    },
+}
+
 /// Errors raised by the render support crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {

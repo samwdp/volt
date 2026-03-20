@@ -6,6 +6,7 @@ pub fn themes() -> Vec<Theme> {
         Theme::new("volt-dark", "Volt Dark")
             .with_token("ui.background", Color::rgb(24, 27, 34))
             .with_token("ui.foreground", Color::rgb(215, 221, 232))
+            .with_token("ui.yank-flash", Color::rgba(97, 175, 239, 110))
             .with_token("syntax.attribute", Color::rgb(97, 175, 239))
             .with_token("syntax.comment", Color::rgb(92, 99, 112))
             .with_token("syntax.constant", Color::rgb(209, 154, 102))

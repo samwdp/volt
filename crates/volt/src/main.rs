@@ -58,10 +58,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         None | Some("--shell-demo") => {
             let summary = run_demo_shell(ShellConfig::default())?;
             println!(
-                "volt shell demo: frames={}, panes={}, popup_visible={}, font={}",
+                "volt shell demo: frames={}, panes={}, popup_visible={}, backend={:?}, renderer={}, font={}",
                 summary.frames_rendered,
                 summary.pane_count,
                 summary.popup_visible,
+                summary.render_backend,
+                summary.renderer_name,
                 summary.font_path,
             );
             return Ok(());
@@ -73,10 +75,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..ShellConfig::default()
             })?;
             println!(
-                "volt hidden shell smoke test: frames={}, panes={}, popup_visible={}, font={}",
+                "volt hidden shell smoke test: frames={}, panes={}, popup_visible={}, backend={:?}, renderer={}, font={}",
                 summary.frames_rendered,
                 summary.pane_count,
                 summary.popup_visible,
+                summary.render_backend,
+                summary.renderer_name,
                 summary.font_path,
             );
             return Ok(());

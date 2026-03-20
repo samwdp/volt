@@ -40,7 +40,7 @@ The repository now has a validated multi-crate foundation that covers the major 
 - an `editor-core` runtime with the `Window -> Workspace -> Pane/Popup -> Buffer` model
 - service, command, hook, and keymap registries
 - an `abi_stable`-shaped compiled `user` library with auto-loaded packages
-- an SDL3 shell demo using SDL_ttf (FreeType-backed) with split panes, auto-loaded `user/*` packages, Vim-style defaults, searchable pickers, user-defined statusline segments, workspace management, and a hidden smoke-test mode
+- an SDL3 shell demo using SDL_ttf (FreeType-backed) with split panes, auto-loaded `user/*` packages, Vim-style defaults, searchable pickers, user-defined statusline segments, workspace management, and the current SDL canvas renderer
 - a rope-backed `editor-buffer` engine with cursor movement, range edits, undo/redo, streaming file reads, and large-buffer coverage
 - an `editor-picker` fuzzy list engine used by the command palette flow
 - `editor-jobs` and `editor-terminal` foundations for async command execution, compile-style runs, and terminal transcripts
@@ -60,7 +60,7 @@ You can run the current shell and bootstrap demos with:
 
 `cargo run -p volt -- --bootstrap-demo`
 
-The default launch path opens the visible SDL3 shell. The bootstrap demo prints a startup summary showing the currently wired picker, job, terminal, LSP, DAP, theme, directory, git, and syntax subsystems.
+The default launch path opens the visible SDL3 shell on the stable SDL canvas path. The hidden smoke-test path prints the selected backend/renderer so you can verify shell startup. The bootstrap demo prints a startup summary showing the currently wired picker, job, terminal, LSP, DAP, theme, directory, git, and syntax subsystems.
 
 Inside the SDL shell, the default user package wiring now gives you:
 
