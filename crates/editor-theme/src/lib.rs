@@ -168,6 +168,11 @@ impl ThemeRegistry {
             .and_then(|theme_id| self.themes.get(theme_id))
     }
 
+    /// Returns all registered themes in alphabetical order by ID.
+    pub fn themes(&self) -> &BTreeMap<String, Theme> {
+        &self.themes
+    }
+
     /// Resolves a token from the active theme.
     pub fn resolve(&self, token: &str) -> Option<Color> {
         self.active_theme().and_then(|theme| theme.color(token))

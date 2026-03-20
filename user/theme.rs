@@ -79,8 +79,10 @@ fn parse_theme(source: &str) -> Option<Theme> {
                         theme = Some(Theme::new(id, name));
                     }
                 }
-                if let (Some(ref mut t), Some(color)) = (theme.as_mut(), parse_hex_color(value)) {
-                    *t = std::mem::take(t).with_token(token, color);
+                if let Some(color) = parse_hex_color(value) {
+                    if let Some(t) = theme.take() {
+                        theme = Some(t.with_token(token, color));
+                    }
                 }
             }
         }
