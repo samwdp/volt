@@ -433,10 +433,6 @@ impl ShellBuffer {
         self.text.point_after(point)
     }
 
-    fn point_before(&self, point: TextPoint) -> Option<TextPoint> {
-        self.text.point_before(point)
-    }
-
     fn move_line_start(&mut self) -> bool {
         let before = self.cursor_point();
         self.text
@@ -794,10 +790,6 @@ impl ShellUiState {
 
     fn input_mode(&self) -> InputMode {
         self.input_mode
-    }
-
-    fn set_input_mode(&mut self, input_mode: InputMode) {
-        self.input_mode = input_mode;
     }
 
     fn enter_normal_mode(&mut self) {
