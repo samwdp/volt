@@ -54,6 +54,7 @@ const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const HOOK_THEME_ACTIVATE: &str = "editor.theme.activate";
 
 /// Configures the demo shell loop.
 #[derive(Debug, Clone)]
@@ -652,6 +653,7 @@ enum PickerAction {
     CreateWorkspace { name: String, root: PathBuf },
     SwitchWorkspace(WorkspaceId),
     DeleteWorkspace(WorkspaceId),
+    ActivateTheme(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1635,6 +1637,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_POPUP_TOGGLE,
         "Shows or closes the docked popup window.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_THEME_ACTIVATE,
+        "Activates a registered theme by its identifier.",
+    )?;
 
     runtime
         .subscribe_hook(HOOK_MOVE_LEFT, "shell.move-left", |_, runtime| {
@@ -1975,10 +1982,35 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     delete_runtime_workspace(runtime, workspace_id)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::ActivateTheme(theme_id) => {
+                    runtime
+                        .emit_hook(HOOK_THEME_ACTIVATE, Some(&theme_id))
+                        .map_err(|error| error.to_string())?;
+                }
             }
 
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+
+    runtime
+        .subscribe_hook(
+            HOOK_THEME_ACTIVATE,
+            "shell.theme-activate",
+            |event, runtime| {
+                let theme_id = event
+                    .detail
+                    .as_deref()
+                    .ok_or_else(|| "editor.theme.activate requires a theme id detail".to_owned())?;
+                runtime
+                    .services_mut()
+                    .get_mut::<ThemeRegistry>()
+                    .ok_or_else(|| "theme registry not found".to_owned())?
+                    .activate(theme_id)
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
 
     Ok(())
@@ -2942,6 +2974,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
         "commands" => Ok(command_picker_overlay(runtime)),
         "buffers" => buffer_picker_overlay(runtime),
         "keybindings" => Ok(keybinding_picker_overlay(runtime)),
+        "themes" => Ok(theme_picker_overlay(runtime)),
         "treesitter.languages" => treesitter_install_picker_overlay(runtime),
         "workspace.projects" => workspace_project_picker_overlay(runtime),
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
@@ -2968,6 +3001,32 @@ fn command_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         .collect();
 
     PickerOverlay::from_entries("Command Palette", entries)
+}
+
+fn theme_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
+    let registry = runtime.services().get::<ThemeRegistry>();
+    let active_id = registry
+        .and_then(|r| r.active_theme())
+        .map(|t| t.id().to_owned());
+
+    let entries = registry
+        .into_iter()
+        .flat_map(|r| r.themes().values())
+        .map(|theme| {
+            let is_active = active_id.as_deref() == Some(theme.id());
+            let detail = if is_active {
+                format!("{} (active)", theme.name())
+            } else {
+                theme.name().to_owned()
+            };
+            PickerEntry {
+                item: PickerItem::new(theme.id(), theme.name(), &detail, Some(&detail)),
+                action: PickerAction::ActivateTheme(theme.id().to_owned()),
+            }
+        })
+        .collect();
+
+    PickerOverlay::from_entries("Themes", entries)
 }
 
 fn buffer_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {

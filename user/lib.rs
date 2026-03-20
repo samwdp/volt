@@ -116,8 +116,23 @@ mod tests {
     #[test]
     fn user_library_exports_themes() {
         let themes = themes();
-        assert_eq!(themes.len(), 1);
-        assert_eq!(themes[0].id(), "volt-dark");
-        assert!(themes[0].color("syntax.keyword").is_some());
+        assert_eq!(themes.len(), 6);
+
+        let expected_ids = [
+            "volt-dark",
+            "volt-light",
+            "gruvbox-dark",
+            "gruvbox-light",
+            "vscode-dark",
+            "vscode-light",
+        ];
+        for (theme, expected_id) in themes.iter().zip(expected_ids.iter()) {
+            assert_eq!(theme.id(), *expected_id);
+            assert!(
+                theme.color("syntax.keyword").is_some(),
+                "theme `{}` missing syntax.keyword token",
+                theme.id()
+            );
+        }
     }
 }
