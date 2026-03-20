@@ -252,6 +252,18 @@ pub fn package() -> PluginPackage {
             "start-yank-operator",
         ),
         hook_command(
+            "vim.start-format-operator",
+            "Starts a Vim format operator.",
+            "editor.vim.edit",
+            "start-format-operator",
+        ),
+        hook_command(
+            "vim.visual-format",
+            "Formats the current visual selection.",
+            "editor.vim.edit",
+            "visual-format",
+        ),
+        hook_command(
             "vim.append-after-cursor",
             "Appends after the cursor and enters insert mode.",
             "editor.vim.edit",
@@ -646,6 +658,7 @@ pub fn package() -> PluginPackage {
         normal_binding("r", "vim.replace-char", PluginKeymapScope::Workspace),
         normal_binding("R", "vim.enter-replace-mode", PluginKeymapScope::Workspace),
         normal_binding("~", "vim.toggle-case", PluginKeymapScope::Workspace),
+        normal_binding("=", "vim.start-format-operator", PluginKeymapScope::Workspace),
         // Visual mode
         normal_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
         normal_binding(
@@ -816,6 +829,7 @@ pub fn package() -> PluginPackage {
         visual_binding("y", "vim.visual-yank", PluginKeymapScope::Workspace),
         // Changing text
         visual_binding("c", "vim.visual-change", PluginKeymapScope::Workspace),
+        visual_binding("=", "vim.visual-format", PluginKeymapScope::Workspace),
         visual_binding("u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
         visual_binding("U", "vim.visual-uppercase", PluginKeymapScope::Workspace),
         visual_binding("~", "vim.visual-toggle-case", PluginKeymapScope::Workspace),

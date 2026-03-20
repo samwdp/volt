@@ -15,6 +15,7 @@ pub fn package() -> PluginPackage {
         "Attaches Rust language defaults to the active workspace.",
         vec![
             PluginAction::log_message("Rust language package attached."),
+            PluginAction::emit_hook("workspace.formatter.register", Some("rust|rustfmt")),
             PluginAction::emit_hook("lang.rust.attached", Some("rust")),
         ],
     )])

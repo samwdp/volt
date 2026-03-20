@@ -6,6 +6,8 @@
 
 /// Debug adapter integration hooks and commands.
 pub mod dap;
+/// Buffer management and save commands.
+pub mod buffer;
 /// Git workflows and repository-oriented commands.
 pub mod git;
 /// Language-specific registrations.
@@ -40,6 +42,7 @@ use editor_theme::Theme;
 /// Returns the packages currently compiled into the user library.
 pub fn packages() -> Vec<PluginPackage> {
     vec![
+        buffer::package(),
         lsp::package(),
         dap::package(),
         vim::package(),
@@ -51,6 +54,7 @@ pub fn packages() -> Vec<PluginPackage> {
         oil::package(),
         terminal::package(),
         lang::rust::package(),
+        lang::markdown::package(),
     ]
 }
 
@@ -97,9 +101,38 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert_eq!(languages.len(), 1);
-        assert_eq!(languages[0].id(), "rust");
-        assert_eq!(languages[0].file_extensions(), ["rs"]);
+        assert!(languages.len() >= 3);
+        let ids = languages
+            .iter()
+            .map(|language| language.id())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"rust"));
+        assert!(ids.contains(&"markdown"));
+        assert!(ids.contains(&"markdown-inline"));
+        let rust = languages.iter().find(|language| language.id() == "rust");
+        assert_eq!(
+            rust.map(|language| {
+                language
+                    .file_extensions()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["rs"])
+        );
+        let markdown = languages
+            .iter()
+            .find(|language| language.id() == "markdown");
+        assert_eq!(
+            markdown.map(|language| {
+                language
+                    .file_extensions()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["md", "markdown"])
+        );
     }
 
     #[test]

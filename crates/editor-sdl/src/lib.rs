@@ -4,17 +4,20 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
+    fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    sync::Mutex,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
 use editor_core::{
-    Buffer, BufferId, BufferKind, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode,
-    WorkspaceId, builtins,
+    Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
+    KeymapVimMode, WorkspaceId, builtins,
 };
 use editor_fs::discover_projects;
 use editor_git::list_repository_files;
+use editor_jobs::{JobManager, JobSpec};
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
@@ -26,7 +29,7 @@ use editor_theme::{Color as ThemeColor, ThemeRegistry};
 use sdl3::{
     event::Event,
     keyboard::{Keycode, Mod},
-    pixels::Color,
+    pixels::{Color, PixelFormat},
     rect::Rect,
     render::{Canvas, RenderTarget},
     ttf::Font,
@@ -66,12 +69,20 @@ const HOOK_SCROLL_LINE_UP: &str = "editor.vim.scroll-line-up";
 const HOOK_MODE_INSERT: &str = "editor.mode.insert";
 const HOOK_MODE_NORMAL: &str = "editor.mode.normal";
 const HOOK_VIM_EDIT: &str = "editor.vim.edit";
+const HOOK_BUFFER_SAVE: &str = "buffer.save";
+const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
+const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
+const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";
 const HOOK_PICKER_NEXT: &str = "ui.picker.next";
 const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../volt/assets/logo.png"
+));
 
 /// Configures the demo shell loop.
 #[derive(Debug, Clone)]
@@ -264,6 +275,9 @@ enum VimPending {
         operator: VimOperator,
         count: usize,
     },
+    Format {
+        count: usize,
+    },
     FindTarget {
         operator: Option<VimOperator>,
         kind: VimFindKind,
@@ -311,6 +325,59 @@ enum YankRegister {
     Character(String),
     Line(String),
     Block(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormatterSpec {
+    language_id: String,
+    program: String,
+    args: Vec<String>,
+}
+
+impl FormatterSpec {
+    fn from_hook_detail(detail: &str) -> Result<Self, String> {
+        let mut parts = detail
+            .split('|')
+            .map(str::trim)
+            .filter(|part| !part.is_empty());
+        let language_id = parts
+            .next()
+            .ok_or_else(|| "formatter registration missing language id".to_owned())?;
+        let program = parts
+            .next()
+            .ok_or_else(|| "formatter registration missing program".to_owned())?;
+        let args = parts.map(|part| part.to_owned()).collect();
+        Ok(Self {
+            language_id: language_id.to_owned(),
+            program: program.to_owned(),
+            args,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct FormatterRegistry {
+    formatters: BTreeMap<String, FormatterSpec>,
+}
+
+impl FormatterRegistry {
+    fn register(&mut self, spec: FormatterSpec) -> Result<(), String> {
+        if let Some(existing) = self.formatters.get(&spec.language_id) {
+            if existing == &spec {
+                return Ok(());
+            }
+            return Err(format!(
+                "formatter already registered for language `{}`",
+                spec.language_id
+            ));
+        }
+        self.formatters.insert(spec.language_id.clone(), spec);
+        Ok(())
+    }
+
+    fn formatter_for_language(&self, language_id: &str) -> Option<&FormatterSpec> {
+        self.formatters.get(language_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +599,14 @@ impl ShellBuffer {
 
     fn path(&self) -> Option<&Path> {
         self.text.path()
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.text.is_dirty()
+    }
+
+    fn save_to_path(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.text.save_to_path(path)
     }
 
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
@@ -1433,6 +1508,8 @@ impl ShellState {
         runtime
             .services_mut()
             .insert(ShellUiState::new(workspace_id, scratch, notes, notes_id));
+        runtime.services_mut().insert(FormatterRegistry::default());
+        runtime.services_mut().insert(Mutex::new(JobManager::new()));
         let mut syntax_registry = SyntaxRegistry::new();
         syntax_registry
             .register_all(user::syntax_languages())
@@ -1445,6 +1522,7 @@ impl ShellState {
         runtime.services_mut().insert(theme_registry);
         load_auto_loaded_packages(&mut runtime, &user::packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
         register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
 
         Ok(Self { runtime })
@@ -1642,6 +1720,15 @@ impl ShellState {
                     _ => {}
                 }
 
+                Ok(false)
+            }
+            VimPending::Format { .. } => {
+                if chord == "=" {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                    emit_workspace_format(&mut self.runtime).map_err(ShellError::Runtime)?;
+                    return Ok(true);
+                }
+                self.ui_mut()?.vim_mut().clear_transient();
                 Ok(false)
             }
             VimPending::FindTarget {
@@ -2101,9 +2188,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     if config.hidden {
         window_builder.hidden();
     }
-    let window = window_builder
+    let mut window = window_builder
         .build()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let icon = load_window_icon()?;
+    if !window.set_icon(icon) {
+        return Err(ShellError::Sdl(sdl3::get_error().to_string()));
+    }
     video.text_input().start(&window);
 
     let font = ttf
@@ -2289,6 +2380,22 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Switches the shell into normal mode.",
     )?;
     register_hook(runtime, HOOK_VIM_EDIT, "Runs a Vim editing action.")?;
+    register_hook(runtime, HOOK_BUFFER_SAVE, "Saves the active file buffer.")?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_SAVE,
+        "Saves all modified file buffers in the active workspace.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_FORMAT,
+        "Formats the active buffer or visual selection.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_FORMATTER_REGISTER,
+        "Registers a language formatter for workspace.format.",
+    )?;
     register_hook(runtime, HOOK_PICKER_OPEN, "Opens a named picker provider.")?;
     register_hook(
         runtime,
@@ -2740,6 +2847,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "start-yank-operator" => {
                     start_vim_operator(runtime, VimOperator::Yank)?;
                 }
+                "start-format-operator" => {
+                    start_vim_format(runtime)?;
+                }
                 "start-g-prefix" => {
                     start_vim_g_prefix(runtime)?;
                 }
@@ -2828,6 +2938,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Change)?;
                 }
+                "visual-format" => {
+                    start_change_recording(runtime)?;
+                    emit_workspace_format(runtime)?;
+                }
                 "visual-yank" => {
                     apply_visual_operator(runtime, VimOperator::Yank)?;
                 }
@@ -2845,6 +2959,50 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 _ => {}
             }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_FORMATTER_REGISTER,
+            "shell.formatter-register",
+            |event, runtime| {
+                let detail = event
+                    .detail
+                    .as_deref()
+                    .ok_or_else(|| "formatter registration hook missing detail".to_owned())?;
+                let spec = FormatterSpec::from_hook_detail(detail)?;
+                formatter_registry_mut(runtime)?.register(spec)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_WORKSPACE_FORMAT, "shell.workspace-format", |_, runtime| {
+            format_workspace(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_BUFFER_SAVE, "shell.buffer-save", |event, runtime| {
+            let workspace_id = event
+                .workspace_id
+                .or_else(|| runtime.model().active_workspace_id().ok())
+                .ok_or_else(|| "buffer.save hook missing workspace".to_owned())?;
+            let buffer_id = event
+                .buffer_id
+                .unwrap_or(active_shell_buffer_id(runtime)?);
+            save_buffer(runtime, workspace_id, buffer_id)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_WORKSPACE_SAVE, "shell.workspace-save", |event, runtime| {
+            let workspace_id = event
+                .workspace_id
+                .or_else(|| runtime.model().active_workspace_id().ok())
+                .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
+            save_workspace(runtime, workspace_id)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -2955,6 +3113,33 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn load_window_icon() -> Result<sdl3::surface::Surface<'static>, ShellError> {
+    let image = image::load_from_memory_with_format(WINDOW_ICON_BYTES, image::ImageFormat::Png)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let row_bytes = width as usize * 4;
+    // ABGR8888 maps to RGBA byte order on little-endian, matching image::Rgba8 output.
+    let mut surface = sdl3::surface::Surface::new(width, height, PixelFormat::ABGR8888)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let pitch = surface.pitch() as usize;
+    if pitch < row_bytes {
+        return Err(ShellError::Sdl(format!(
+            "icon pitch {pitch} is smaller than row width {row_bytes}"
+        )));
+    }
+    let raw = rgba.into_raw();
+    surface.with_lock_mut(|buffer| {
+        for row in 0..height as usize {
+            let src_start = row * row_bytes;
+            let dst_start = row * pitch;
+            buffer[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&raw[src_start..src_start + row_bytes]);
+        }
+    });
+    Ok(surface)
+}
+
 fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     if !runtime.hooks().contains("lsp.server-start") {
         return Ok(());
@@ -2980,6 +3165,34 @@ fn register_hook(runtime: &mut EditorRuntime, name: &str, description: &str) -> 
     runtime
         .register_hook(name, description)
         .map_err(|error| error.to_string())
+}
+
+fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let bindings = [
+        ("F3", "picker.open-commands"),
+        ("F4", "picker.open-buffers"),
+        ("F5", "picker.toggle-popup-window"),
+        ("F6", "picker.open-keybindings"),
+    ];
+
+    for (chord, command) in bindings {
+        if !runtime.commands().contains(command) {
+            continue;
+        }
+        if runtime.keymaps().contains(&KeymapScope::Global, chord) {
+            continue;
+        }
+        runtime
+            .register_key_binding(
+                chord,
+                command,
+                KeymapScope::Global,
+                CommandSource::UserPackage("picker".to_owned()),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn shell_ui(runtime: &EditorRuntime) -> Result<&ShellUiState, String> {
@@ -3133,6 +3346,103 @@ fn search_backward(
     None
 }
 
+fn char_at_index(buffer: &ShellBuffer, char_index: usize) -> Option<char> {
+    buffer
+        .text
+        .char_at_point(buffer.text.point_from_char_index(char_index))
+}
+
+fn find_char_forward(buffer: &ShellBuffer, start_char: usize, target: char) -> Option<usize> {
+    let char_count = buffer.text.char_count();
+    for char_index in start_char..char_count {
+        if char_at_index(buffer, char_index) == Some(target) {
+            return Some(char_index);
+        }
+    }
+    None
+}
+
+fn matches_fuzzy_at(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    if char_at_index(buffer, start_char) != Some(pattern[0]) {
+        return false;
+    }
+
+    let mut next_index = start_char.saturating_add(1);
+    for target in pattern.iter().skip(1) {
+        let Some(found) = find_char_forward(buffer, next_index, *target) else {
+            return false;
+        };
+        next_index = found.saturating_add(1);
+    }
+
+    true
+}
+
+fn search_fuzzy_forward(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    wrap: bool,
+) -> Option<TextPoint> {
+    let char_count = buffer.text.char_count();
+    if pattern.is_empty() || pattern.len() > char_count {
+        return None;
+    }
+
+    let max_start = char_count.saturating_sub(1);
+    let first_pass_start = start_char.min(max_start.saturating_add(1));
+    if first_pass_start <= max_start {
+        for char_index in first_pass_start..=max_start {
+            if matches_fuzzy_at(buffer, char_index, pattern) {
+                return Some(buffer.text.point_from_char_index(char_index));
+            }
+        }
+    }
+
+    if wrap {
+        for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
+            if matches_fuzzy_at(buffer, char_index, pattern) {
+                return Some(buffer.text.point_from_char_index(char_index));
+            }
+        }
+    }
+
+    None
+}
+
+fn search_fuzzy_backward(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    wrap: bool,
+) -> Option<TextPoint> {
+    let char_count = buffer.text.char_count();
+    if pattern.is_empty() || pattern.len() > char_count {
+        return None;
+    }
+
+    let max_start = char_count.saturating_sub(1);
+    let first_pass_start = start_char.min(max_start);
+    for char_index in (0..=first_pass_start).rev() {
+        if matches_fuzzy_at(buffer, char_index, pattern) {
+            return Some(buffer.text.point_from_char_index(char_index));
+        }
+    }
+
+    if wrap && first_pass_start < max_start {
+        for char_index in ((first_pass_start + 1)..=max_start).rev() {
+            if matches_fuzzy_at(buffer, char_index, pattern) {
+                return Some(buffer.text.point_from_char_index(char_index));
+            }
+        }
+    }
+
+    None
+}
+
 fn search_buffer(
     buffer: &ShellBuffer,
     direction: VimSearchDirection,
@@ -3144,7 +3454,7 @@ fn search_buffer(
     }
 
     let cursor = buffer.cursor_point();
-    match direction {
+    let exact_match = match direction {
         VimSearchDirection::Forward => {
             let start_char = buffer
                 .point_after(cursor)
@@ -3159,6 +3469,28 @@ fn search_buffer(
                 .map(|point| buffer.text.point_to_char_index(point))
                 .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
             search_backward(buffer, start_char, &pattern, true)
+        }
+    };
+
+    if exact_match.is_some() {
+        return exact_match;
+    }
+
+    match direction {
+        VimSearchDirection::Forward => {
+            let start_char = buffer
+                .point_after(cursor)
+                .map(|point| buffer.text.point_to_char_index(point))
+                .unwrap_or(buffer.text.char_count());
+            search_fuzzy_forward(buffer, start_char, &pattern, true)
+        }
+        VimSearchDirection::Backward => {
+            let start_char = buffer
+                .text
+                .point_before(cursor)
+                .map(|point| buffer.text.point_to_char_index(point))
+                .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
+            search_fuzzy_backward(buffer, start_char, &pattern, true)
         }
     }
 }
@@ -3672,6 +4004,387 @@ fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> 
             cursor,
             (operator == VimOperator::Yank).then_some(selection),
         ),
+    }
+}
+
+fn emit_workspace_format(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    runtime
+        .emit_hook(
+            HOOK_WORKSPACE_FORMAT,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_buffer(buffer_id),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn save_buffer(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let (path, buffer_kind) = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+        (buffer.path().map(Path::to_path_buf), buffer.kind().clone())
+    };
+
+    if buffer_kind != BufferKind::File {
+        return Ok(());
+    }
+
+    let path = path.ok_or_else(|| "buffer.save requires a file path".to_owned())?;
+    runtime
+        .emit_hook(
+            builtins::BEFORE_SAVE,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_buffer(buffer_id)
+                .with_detail(path.display().to_string()),
+        )
+        .map_err(|error| error.to_string())?;
+
+    {
+        let buffer = shell_ui_mut(runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))?;
+        buffer
+            .save_to_path(&path)
+            .map_err(|error| format!("failed to save `{}`: {error}", path.display()))?;
+    }
+
+    runtime
+        .emit_hook(
+            builtins::AFTER_SAVE,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_buffer(buffer_id)
+                .with_detail(path.display().to_string()),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Result<(), String> {
+    let buffer_ids = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        workspace.buffers().map(Buffer::id).collect::<Vec<_>>()
+    };
+
+    for buffer_id in buffer_ids {
+        let (buffer_kind, path) = {
+            let workspace = runtime
+                .model()
+                .workspace(workspace_id)
+                .map_err(|error| error.to_string())?;
+            let buffer = workspace
+                .buffer(buffer_id)
+                .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+            (buffer.kind().clone(), buffer.path().map(Path::to_path_buf))
+        };
+
+        if buffer_kind != BufferKind::File {
+            continue;
+        }
+
+        let is_dirty = {
+            let ui = shell_ui(runtime)?;
+            let buffer = ui
+                .buffer(buffer_id)
+                .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))?;
+            buffer.is_dirty()
+        };
+
+        if !is_dirty {
+            continue;
+        }
+
+        let path = path.ok_or_else(|| format!("file buffer `{buffer_id}` is missing a path"))?;
+        save_buffer(runtime, workspace_id, buffer_id).map_err(|error| {
+            format!("failed to save `{}`: {error}", path.display())
+        })?;
+    }
+
+    Ok(())
+}
+
+fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (path, extension, original_cursor, selection, buffer_kind) = {
+        let ui = shell_ui(runtime)?;
+        let buffer = ui
+            .buffer(buffer_id)
+            .ok_or_else(|| "active buffer is missing".to_owned())?;
+        let path = buffer
+            .path()
+            .ok_or_else(|| "active buffer does not have a file path".to_owned())?;
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_owned);
+        let original_cursor = buffer.cursor_point();
+        let selection = if ui.input_mode() == InputMode::Visual {
+            let anchor = ui
+                .vim()
+                .visual_anchor
+                .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+            let kind = ui.vim().visual_kind;
+            let selection = visual_selection(buffer, anchor, kind)
+                .ok_or_else(|| "visual selection is empty".to_owned())?;
+            Some((selection, anchor, original_cursor, kind))
+        } else {
+            None
+        };
+        (path.to_path_buf(), extension, original_cursor, selection, buffer.kind.clone())
+    };
+
+    if buffer_kind != BufferKind::File {
+        return Err("workspace.format only supports file buffers".to_owned());
+    }
+
+    let formatter = formatter_for_path(runtime, &path)?;
+    let cwd = path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| active_workspace_root(runtime).ok().flatten());
+
+    start_change_recording(runtime)?;
+
+    if let Some((selection, anchor, head, kind)) = selection {
+        store_last_visual_selection(runtime, anchor, head, kind)?;
+        format_visual_selection(
+            runtime,
+            &formatter,
+            selection,
+            extension.as_deref(),
+            cwd.as_deref(),
+            original_cursor,
+        )?;
+    } else {
+        format_entire_buffer(
+            runtime,
+            &formatter,
+            extension.as_deref(),
+            cwd.as_deref(),
+            original_cursor,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn formatter_for_path(runtime: &EditorRuntime, path: &Path) -> Result<FormatterSpec, String> {
+    let syntax = runtime
+        .services()
+        .get::<SyntaxRegistry>()
+        .ok_or_else(|| "syntax registry service missing".to_owned())?;
+    let language = syntax
+        .language_for_path(path)
+        .ok_or_else(|| format!("no syntax language registered for `{}`", path.display()))?;
+    let formatter = formatter_registry(runtime)?
+        .formatter_for_language(language.id())
+        .ok_or_else(|| format!("no formatter registered for language `{}`", language.id()))?;
+    Ok(formatter.clone())
+}
+
+fn format_entire_buffer(
+    runtime: &mut EditorRuntime,
+    formatter: &FormatterSpec,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+    original_cursor: TextPoint,
+) -> Result<(), String> {
+    let input = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        buffer.text.text()
+    };
+    let formatted = format_text_with_formatter(runtime, formatter, &input, extension, cwd)?;
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        if formatted != input {
+            let end = buffer.text.point_from_char_index(buffer.text.char_count());
+            buffer.replace_range(TextRange::new(TextPoint::default(), end), &formatted);
+            buffer.mark_syntax_dirty();
+        }
+        buffer.set_cursor(original_cursor);
+    }
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn format_visual_selection(
+    runtime: &mut EditorRuntime,
+    formatter: &FormatterSpec,
+    selection: VisualSelection,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+    original_cursor: TextPoint,
+) -> Result<(), String> {
+    match selection {
+        VisualSelection::Range(range) => {
+            format_range_with_formatter(runtime, formatter, range, extension, cwd)?;
+        }
+        VisualSelection::Block(block) => {
+            format_block_with_formatter(runtime, formatter, block, extension, cwd)?;
+        }
+    }
+    let buffer = active_shell_buffer_mut(runtime)?;
+    buffer.set_cursor(original_cursor);
+    buffer.mark_syntax_dirty();
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn format_range_with_formatter(
+    runtime: &mut EditorRuntime,
+    formatter: &FormatterSpec,
+    range: TextRange,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
+    let input = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        buffer.slice(range)
+    };
+    let formatted = format_text_with_formatter(runtime, formatter, &input, extension, cwd)?;
+    active_shell_buffer_mut(runtime)?.replace_range(range, &formatted);
+    Ok(())
+}
+
+fn format_block_with_formatter(
+    runtime: &mut EditorRuntime,
+    formatter: &FormatterSpec,
+    selection: BlockSelection,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
+    let (ranges, snippets) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let ranges = block_selection_ranges(buffer, selection);
+        let snippets = ranges
+            .iter()
+            .map(|range| buffer.slice(*range))
+            .collect::<Vec<_>>();
+        (ranges, snippets)
+    };
+
+    if ranges.is_empty() {
+        return Ok(());
+    }
+
+    let mut replacements = Vec::with_capacity(snippets.len());
+    for snippet in snippets {
+        let formatted = format_text_with_formatter(runtime, formatter, &snippet, extension, cwd)?;
+        let formatted = normalize_block_output(&formatted)?;
+        replacements.push(formatted);
+    }
+
+    let buffer = active_shell_buffer_mut(runtime)?;
+    for index in (0..ranges.len()).rev() {
+        buffer.replace_range(ranges[index], &replacements[index]);
+    }
+
+    Ok(())
+}
+
+fn normalize_block_output(formatted: &str) -> Result<String, String> {
+    let trimmed = formatted.trim_end_matches(['\n', '\r']);
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("formatter output spans multiple lines for a block selection".to_owned());
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn format_text_with_formatter(
+    runtime: &mut EditorRuntime,
+    formatter: &FormatterSpec,
+    input: &str,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<String, String> {
+    let temp_path = formatter_temp_path(extension);
+    fs::write(&temp_path, input).map_err(|error| {
+        format!(
+            "failed to write formatter input `{}`: {error}",
+            temp_path.display()
+        )
+    })?;
+
+    let mut args = formatter.args.clone();
+    args.push(temp_path.to_string_lossy().into_owned());
+    let mut spec = JobSpec::command(
+        format!("format-{}", formatter.language_id),
+        formatter.program.clone(),
+        args,
+    );
+    if let Some(cwd) = cwd {
+        spec = spec.with_cwd(cwd.to_path_buf());
+    }
+
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
+    drop(manager);
+    let result = handle.wait().map_err(|error| error.to_string())?;
+
+    if !result.succeeded() {
+        cleanup_formatter_temp(&temp_path);
+        return Err(format!(
+            "formatter `{}` failed: {}",
+            formatter.program,
+            result.transcript()
+        ));
+    }
+
+    let formatted = fs::read_to_string(&temp_path).map_err(|error| {
+        format!(
+            "failed to read formatter output `{}`: {error}",
+            temp_path.display()
+        )
+    })?;
+    cleanup_formatter_temp(&temp_path);
+    Ok(formatted)
+}
+
+fn formatter_temp_path(extension: Option<&str>) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_nanos();
+    let mut filename = format!("volt-format-{}-{unique}", std::process::id());
+    if let Some(extension) = extension.filter(|extension| !extension.is_empty()) {
+        filename.push('.');
+        filename.push_str(extension);
+    }
+    std::env::temp_dir().join(filename)
+}
+
+fn cleanup_formatter_temp(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        eprintln!(
+            "failed to remove formatter temp file `{}`: {error}",
+            path.display()
+        );
     }
 }
 
@@ -4239,6 +4952,13 @@ fn start_vim_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Res
     Ok(())
 }
 
+fn start_vim_format(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_change_recording(runtime)?;
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::Format { count });
+    Ok(())
+}
+
 fn start_vim_find(runtime: &mut EditorRuntime, kind: VimFindKind) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
     let pending_operator = match ui.vim().pending {
@@ -4454,6 +5174,20 @@ fn syntax_registry_mut(runtime: &mut EditorRuntime) -> Result<&mut SyntaxRegistr
         .services_mut()
         .get_mut::<SyntaxRegistry>()
         .ok_or_else(|| "syntax registry service missing".to_owned())
+}
+
+fn formatter_registry(runtime: &EditorRuntime) -> Result<&FormatterRegistry, String> {
+    runtime
+        .services()
+        .get::<FormatterRegistry>()
+        .ok_or_else(|| "formatter registry service missing".to_owned())
+}
+
+fn formatter_registry_mut(runtime: &mut EditorRuntime) -> Result<&mut FormatterRegistry, String> {
+    runtime
+        .services_mut()
+        .get_mut::<FormatterRegistry>()
+        .ok_or_else(|| "formatter registry service missing".to_owned())
 }
 
 fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -6557,6 +7291,19 @@ mod tests {
 
         state.handle_text_input("#")?;
         assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_search_prompt_supports_fuzzy_matches() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one two one two");
+
+        state.handle_text_input("/")?;
+        state.handle_text_input("otw")?;
+        assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
 
         Ok(())
     }
