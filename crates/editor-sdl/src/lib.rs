@@ -177,7 +177,10 @@ enum ShellMotion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VimPending {
-    Operator { operator: VimOperator, count: usize },
+    Operator {
+        operator: VimOperator,
+        count: usize,
+    },
     FindTarget {
         operator: Option<VimOperator>,
         kind: VimFindKind,
@@ -568,7 +571,8 @@ impl ShellBuffer {
         }
 
         let start_line = start_line.min(self.line_count().saturating_sub(1));
-        let end_line = (start_line + count.saturating_sub(1)).min(self.line_count().saturating_sub(1));
+        let end_line =
+            (start_line + count.saturating_sub(1)).min(self.line_count().saturating_sub(1));
         Some(TextRange::new(
             self.line_range(start_line)?.start(),
             self.line_range(end_line)?.end(),
@@ -584,7 +588,9 @@ impl ShellBuffer {
         let mut moved = false;
         for _ in 0..repeat {
             let next = match kind {
-                VimFindKind::ForwardTo => self.text.find_forward_in_line(self.cursor_point(), target),
+                VimFindKind::ForwardTo => {
+                    self.text.find_forward_in_line(self.cursor_point(), target)
+                }
                 VimFindKind::BackwardTo => {
                     self.text.find_backward_in_line(self.cursor_point(), target)
                 }
@@ -1259,14 +1265,16 @@ impl ShellState {
                     (VimOperator::Delete, "d")
                     | (VimOperator::Change, "c")
                     | (VimOperator::Yank, "y") => {
-                        let lines = count.saturating_mul(self.ui_mut()?.vim_mut().take_count_or_one());
+                        let lines =
+                            count.saturating_mul(self.ui_mut()?.vim_mut().take_count_or_one());
                         apply_linewise_operator(&mut self.runtime, operator, lines)
                             .map_err(ShellError::Runtime)?;
                         return Ok(true);
                     }
                     (_, "i") | (_, "a") => {
                         let around = chord == "a";
-                        let count = count.saturating_mul(self.ui_mut()?.vim_mut().take_count_or_one());
+                        let count =
+                            count.saturating_mul(self.ui_mut()?.vim_mut().take_count_or_one());
                         self.ui_mut()?.vim_mut().pending = Some(VimPending::TextObject {
                             operator,
                             around,
@@ -2055,7 +2063,11 @@ fn reverse_find_kind(kind: VimFindKind) -> VimFindKind {
     }
 }
 
-fn move_buffer_with_motion(buffer: &mut ShellBuffer, motion: ShellMotion, count: Option<usize>) -> bool {
+fn move_buffer_with_motion(
+    buffer: &mut ShellBuffer,
+    motion: ShellMotion,
+    count: Option<usize>,
+) -> bool {
     let repeat = count.unwrap_or(1).max(1);
     match motion {
         ShellMotion::Left => (0..repeat).fold(false, |moved, _| buffer.move_left() || moved),
@@ -2225,7 +2237,9 @@ fn apply_operator_motion(
                 let line_count = operator_count
                     .saturating_mul(motion_count.unwrap_or(1))
                     .saturating_add(1);
-                let start_line = buffer.cursor_row().saturating_sub(line_count.saturating_sub(1));
+                let start_line = buffer
+                    .cursor_row()
+                    .saturating_sub(line_count.saturating_sub(1));
                 Some(TextRange::new(
                     buffer
                         .line_range(start_line)
@@ -2270,13 +2284,19 @@ fn apply_operator_motion(
                 ))
             }
             _ => {
-                let repeat = operator_count.saturating_mul(motion_count.unwrap_or(1)).max(1);
+                let repeat = operator_count
+                    .saturating_mul(motion_count.unwrap_or(1))
+                    .max(1);
                 if !move_buffer_with_motion(buffer, motion, Some(repeat)) {
                     None
                 } else {
                     let target = buffer.cursor_point();
-                    let range =
-                        charwise_motion_range(buffer, original_cursor, target, motion_is_inclusive(motion));
+                    let range = charwise_motion_range(
+                        buffer,
+                        original_cursor,
+                        target,
+                        motion_is_inclusive(motion),
+                    );
                     buffer.set_cursor(original_cursor);
                     range
                 }
@@ -2286,7 +2306,10 @@ fn apply_operator_motion(
             range.ok_or_else(|| "Vim operator motion did not resolve a range".to_owned())?,
             matches!(
                 motion,
-                ShellMotion::Down | ShellMotion::Up | ShellMotion::FirstLine | ShellMotion::LastLine
+                ShellMotion::Down
+                    | ShellMotion::Up
+                    | ShellMotion::FirstLine
+                    | ShellMotion::LastLine
             ),
             original_cursor,
         )
@@ -3432,7 +3455,12 @@ fn render_shell_state(
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let visual_range = (state.input_mode() == InputMode::Visual && active)
-                .then(|| state.vim().visual_anchor.and_then(|anchor| visual_selection_range(buffer, anchor)))
+                .then(|| {
+                    state
+                        .vim()
+                        .visual_anchor
+                        .and_then(|anchor| visual_selection_range(buffer, anchor))
+                })
                 .flatten();
             render_buffer(
                 canvas,
@@ -3707,7 +3735,12 @@ fn render_runtime_popup_overlay(
     );
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let visual_range = (state.input_mode() == InputMode::Visual)
-            .then(|| state.vim().visual_anchor.and_then(|anchor| visual_selection_range(buffer, anchor)))
+            .then(|| {
+                state
+                    .vim()
+                    .visual_anchor
+                    .and_then(|anchor| visual_selection_range(buffer, anchor))
+            })
             .flatten();
         render_buffer(
             canvas,
@@ -3807,7 +3840,8 @@ fn render_buffer(
                 PixelRectToRect::rect(
                     rect.x() + 12 + line_number_width + selection_start as i32 * cell_width,
                     y,
-                    ((selection_end.saturating_sub(selection_start)) as i32 * cell_width.max(1)) as u32,
+                    ((selection_end.saturating_sub(selection_start)) as i32 * cell_width.max(1))
+                        as u32,
                     line_height.max(1) as u32,
                 ),
                 selection,
