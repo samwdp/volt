@@ -1,0 +1,28 @@
+[package]
+name = "editor-sdl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+editor-buffer = { path = "../editor-buffer" }
+editor-core = { path = "../editor-core" }
+editor-fs = { path = "../editor-fs" }
+editor-git = { path = "../editor-git" }
+editor-picker = { path = "../editor-picker" }
+editor-plugin-host = { path = "../editor-plugin-host" }
+editor-render = { path = "../editor-render" }
+editor-syntax = { path = "../editor-syntax" }
+editor-theme = { path = "../editor-theme" }
+sdl3 = { version = "0.17.3", features = ["build-from-source-static", "ttf"] }
+sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
+user = { package = "volt-user", path = "../../user" }
+

@@ -1,0 +1,25 @@
+[package]
+name = "editor-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+editor-buffer = { path = "../editor-buffer" }
+libloading = "0.8.9"
+tree-sitter = "0.26.7"
+tree-sitter-language = "0.1.7"
+
+[dev-dependencies]
+tree-sitter-rust = "0.24.1"
+

@@ -1,0 +1,13 @@
+[package]
+name = "editor-plugin-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+editor-plugin-api = { path = "../editor-plugin-api" }

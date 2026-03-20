@@ -1,0 +1,22 @@
+[package]
+name = "volt-user"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "user"
+path = "lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+editor-fs = { path = "../crates/editor-fs" }
+editor-dap = { path = "../crates/editor-dap" }
+editor-lsp = { path = "../crates/editor-lsp" }
+editor-plugin-api = { path = "../crates/editor-plugin-api" }
+editor-syntax = { path = "../crates/editor-syntax" }
+editor-theme = { path = "../crates/editor-theme" }
