@@ -216,6 +216,24 @@ pub fn package() -> PluginPackage {
             "substitute-line",
         ),
         hook_command(
+            "vim.replace-char",
+            "Replaces characters under the cursor without entering insert mode.",
+            "editor.vim.edit",
+            "replace-char",
+        ),
+        hook_command(
+            "vim.enter-replace-mode",
+            "Enters Vim replace mode.",
+            "editor.vim.edit",
+            "enter-replace-mode",
+        ),
+        hook_command(
+            "vim.toggle-case",
+            "Toggles the case of characters under the cursor.",
+            "editor.vim.edit",
+            "toggle-case",
+        ),
+        hook_command(
             "vim.start-delete-operator",
             "Starts a Vim delete operator-pending command.",
             "editor.vim.edit",
@@ -420,6 +438,24 @@ pub fn package() -> PluginPackage {
             "visual-yank",
         ),
         hook_command(
+            "vim.visual-toggle-case",
+            "Toggles the case of the current visual selection.",
+            "editor.vim.edit",
+            "visual-toggle-case",
+        ),
+        hook_command(
+            "vim.visual-lowercase",
+            "Lowercases the current visual selection.",
+            "editor.vim.edit",
+            "visual-lowercase",
+        ),
+        hook_command(
+            "vim.visual-uppercase",
+            "Uppercases the current visual selection.",
+            "editor.vim.edit",
+            "visual-uppercase",
+        ),
+        hook_command(
             "vim.visual-swap-anchor",
             "Swaps the active and anchor ends of the current visual selection.",
             "editor.vim.edit",
@@ -547,6 +583,9 @@ pub fn package() -> PluginPackage {
         normal_binding("C", "vim.change-line-end", PluginKeymapScope::Workspace),
         normal_binding("s", "vim.substitute-char", PluginKeymapScope::Workspace),
         normal_binding("S", "vim.substitute-line", PluginKeymapScope::Workspace),
+        normal_binding("r", "vim.replace-char", PluginKeymapScope::Workspace),
+        normal_binding("R", "vim.enter-replace-mode", PluginKeymapScope::Workspace),
+        normal_binding("~", "vim.toggle-case", PluginKeymapScope::Workspace),
         // Visual mode
         normal_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
         normal_binding(
@@ -667,6 +706,9 @@ pub fn package() -> PluginPackage {
         visual_binding("y", "vim.visual-yank", PluginKeymapScope::Workspace),
         // Changing text
         visual_binding("c", "vim.visual-change", PluginKeymapScope::Workspace),
+        visual_binding("u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
+        visual_binding("U", "vim.visual-uppercase", PluginKeymapScope::Workspace),
+        visual_binding("~", "vim.visual-toggle-case", PluginKeymapScope::Workspace),
         // Text objects (only in Visual mode or after an operator)
         visual_binding(
             "i",

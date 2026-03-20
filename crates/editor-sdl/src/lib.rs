@@ -170,6 +170,7 @@ impl From<RenderError> for ShellError {
 enum InputMode {
     Normal,
     Insert,
+    Replace,
     Visual,
 }
 
@@ -178,6 +179,7 @@ impl InputMode {
         match self {
             Self::Normal => "NORMAL",
             Self::Insert => "INSERT",
+            Self::Replace => "REPLACE",
             Self::Visual => "VISUAL",
         }
     }
@@ -188,6 +190,9 @@ enum VimOperator {
     Delete,
     Change,
     Yank,
+    ToggleCase,
+    Lowercase,
+    Uppercase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +280,9 @@ enum VimPending {
     },
     VisualTextObject {
         around: bool,
+        count: usize,
+    },
+    ReplaceChar {
         count: usize,
     },
 }
@@ -516,6 +524,28 @@ impl ShellBuffer {
         self.text.insert_text(text);
     }
 
+    fn replace_mode_text(&mut self, text: &str) {
+        for character in text.chars() {
+            if character == '\n' {
+                self.text.insert_newline();
+                continue;
+            }
+
+            let point = self.cursor_point();
+            let Some(next) = self.point_after(point) else {
+                self.text.insert_text(&character.to_string());
+                continue;
+            };
+
+            let current = self.slice(TextRange::new(point, next));
+            if current == "\n" {
+                self.text.insert_text(&character.to_string());
+            } else {
+                self.text.replace(TextRange::new(point, next), &character.to_string());
+            }
+        }
+    }
+
     fn insert_newline(&mut self) {
         self.text.insert_newline();
     }
@@ -715,6 +745,25 @@ impl ShellBuffer {
 
     fn replace_range(&mut self, range: TextRange, text: &str) {
         self.text.replace(range, text);
+    }
+
+    fn replace_chars_at_cursor(&mut self, character: char, count: usize) -> bool {
+        let original = self.cursor_point();
+        let mut replaced = false;
+        let mut point = original;
+        for _ in 0..count.max(1) {
+            let Some(next) = self.point_after(point) else {
+                break;
+            };
+            if self.slice(TextRange::new(point, next)) == "\n" {
+                break;
+            }
+            self.replace_range(TextRange::new(point, next), &character.to_string());
+            replaced = true;
+            point = next;
+        }
+        self.set_cursor(original);
+        replaced
     }
 
     fn slice(&self, range: TextRange) -> String {
@@ -1033,6 +1082,13 @@ impl ShellUiState {
 
     fn enter_insert_mode(&mut self) {
         self.input_mode = InputMode::Insert;
+        self.vim.visual_anchor = None;
+        self.vim.visual_kind = VisualSelectionKind::Character;
+        self.vim.clear_transient();
+    }
+
+    fn enter_replace_mode(&mut self) {
+        self.input_mode = InputMode::Replace;
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
@@ -1395,12 +1451,14 @@ impl ShellState {
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_lines as i32),
                     Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_lines as i32)),
                     Keycode::Return | Keycode::KpEnter
-                        if self.input_mode()? == InputMode::Insert =>
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
                         self.active_buffer_mut()?.insert_newline();
                         self.mark_active_buffer_syntax_dirty()?;
                     }
-                    Keycode::Backspace if self.input_mode()? == InputMode::Insert => {
+                    Keycode::Backspace
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
+                    {
                         self.active_buffer_mut()?.backspace();
                         self.mark_active_buffer_syntax_dirty()?;
                     }
@@ -1557,11 +1615,25 @@ impl ShellState {
                 operator,
                 line_target,
             } => {
-                if matches!(chord, "g" | "e" | "E") {
-                    resolve_g_prefix(&mut self.runtime, operator, line_target, chord)
-                        .map_err(ShellError::Runtime)?;
-                } else {
-                    self.ui_mut()?.vim_mut().clear_transient();
+                match chord {
+                    "g" | "e" | "E" => {
+                        resolve_g_prefix(&mut self.runtime, operator, line_target, chord)
+                            .map_err(ShellError::Runtime)?;
+                    }
+                    "~" | "u" | "U" if operator.is_none() => {
+                        let operator = match chord {
+                            "~" => VimOperator::ToggleCase,
+                            "u" => VimOperator::Lowercase,
+                            "U" => VimOperator::Uppercase,
+                            _ => VimOperator::ToggleCase,
+                        };
+                        let count = line_target.unwrap_or(1);
+                        self.ui_mut()?.vim_mut().pending =
+                            Some(VimPending::Operator { operator, count });
+                    }
+                    _ => {
+                        self.ui_mut()?.vim_mut().clear_transient();
+                    }
                 }
                 Ok(true)
             }
@@ -1587,11 +1659,27 @@ impl ShellState {
                 }
                 Ok(true)
             }
+            VimPending::ReplaceChar { count } => {
+                let Some(character) = chord.chars().next() else {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                    return Ok(true);
+                };
+                if character != '\n' {
+                    let replaced = self
+                        .active_buffer_mut()?
+                        .replace_chars_at_cursor(character, count);
+                    if replaced {
+                        self.mark_active_buffer_syntax_dirty()?;
+                    }
+                }
+                self.ui_mut()?.enter_normal_mode();
+                Ok(true)
+            }
         }
     }
 
     fn handle_vim_count_input(&mut self, chord: &str) -> Result<bool, ShellError> {
-        if self.input_mode()? == InputMode::Insert {
+        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) {
             return Ok(false);
         }
 
@@ -1606,7 +1694,7 @@ impl ShellState {
     fn clear_stale_vim_count(&mut self) -> Result<(), ShellError> {
         let should_clear = {
             let ui = self.ui()?;
-            ui.input_mode() != InputMode::Insert
+            !matches!(ui.input_mode(), InputMode::Insert | InputMode::Replace)
                 && ui.vim().pending.is_none()
                 && ui.vim().count.is_some()
         };
@@ -1624,10 +1712,18 @@ impl ShellState {
             return Ok(());
         }
 
-        if self.input_mode()? == InputMode::Insert {
-            self.active_buffer_mut()?.insert_text(text);
-            self.mark_active_buffer_syntax_dirty()?;
-            return Ok(());
+        match self.input_mode()? {
+            InputMode::Insert => {
+                self.active_buffer_mut()?.insert_text(text);
+                self.mark_active_buffer_syntax_dirty()?;
+                return Ok(());
+            }
+            InputMode::Replace => {
+                self.active_buffer_mut()?.replace_mode_text(text);
+                self.mark_active_buffer_syntax_dirty()?;
+                return Ok(());
+            }
+            _ => {}
         }
 
         if let Some(chord) = text_chord(text) {
@@ -1690,7 +1786,7 @@ impl ShellState {
         }
 
         if !self.picker_visible()?
-            && self.input_mode()? != InputMode::Insert
+            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
             && self
                 .runtime
                 .keymaps()
@@ -2217,7 +2313,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_NORMAL, "shell.enter-normal-mode", |_, runtime| {
-            if shell_ui(runtime)?.input_mode() == InputMode::Insert {
+            if matches!(
+                shell_ui(runtime)?.input_mode(),
+                InputMode::Insert | InputMode::Replace
+            ) {
                 let _ = active_shell_buffer_mut(runtime)?.move_left();
             }
             shell_ui_mut(runtime)?.enter_normal_mode();
@@ -2250,6 +2349,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "substitute-line" => {
                     let lines = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
                     apply_linewise_operator(runtime, VimOperator::Change, lines)?;
+                }
+                "replace-char" => {
+                    start_replace_char(runtime)?;
+                }
+                "enter-replace-mode" => {
+                    shell_ui_mut(runtime)?.enter_replace_mode();
+                }
+                "toggle-case" => {
+                    toggle_case_chars(runtime)?;
                 }
                 "append" => {
                     active_shell_buffer_mut(runtime)?.append_after_cursor();
@@ -2365,6 +2473,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 "visual-yank" => {
                     apply_visual_operator(runtime, VimOperator::Yank)?;
+                }
+                "visual-toggle-case" => {
+                    apply_visual_operator(runtime, VimOperator::ToggleCase)?;
+                }
+                "visual-lowercase" => {
+                    apply_visual_operator(runtime, VimOperator::Lowercase)?;
+                }
+                "visual-uppercase" => {
+                    apply_visual_operator(runtime, VimOperator::Uppercase)?;
                 }
                 _ => {}
             }
@@ -2864,6 +2981,25 @@ fn line_flash_selection_for_range(
         .map(VisualSelection::Range)
 }
 
+fn transform_case_text(text: &str, operator: VimOperator) -> String {
+    text.chars()
+        .map(|character| match operator {
+            VimOperator::ToggleCase => {
+                if character.is_lowercase() {
+                    character.to_uppercase().collect::<String>()
+                } else if character.is_uppercase() {
+                    character.to_lowercase().collect::<String>()
+                } else {
+                    character.to_string()
+                }
+            }
+            VimOperator::Lowercase => character.to_lowercase().collect::<String>(),
+            VimOperator::Uppercase => character.to_uppercase().collect::<String>(),
+            _ => character.to_string(),
+        })
+        .collect()
+}
+
 fn apply_operator_to_range(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
@@ -2878,11 +3014,13 @@ fn apply_operator_to_range(
         return Ok(());
     }
 
-    shell_ui_mut(runtime)?.vim_mut().yank = Some(if linewise {
-        YankRegister::Line(removed.clone())
-    } else {
-        YankRegister::Character(removed.clone())
-    });
+    if matches!(operator, VimOperator::Delete | VimOperator::Change | VimOperator::Yank) {
+        shell_ui_mut(runtime)?.vim_mut().yank = Some(if linewise {
+            YankRegister::Line(removed.clone())
+        } else {
+            YankRegister::Character(removed.clone())
+        });
+    }
 
     match operator {
         VimOperator::Delete => {
@@ -2908,6 +3046,14 @@ fn apply_operator_to_range(
                 shell_ui_mut(runtime)?.set_yank_flash(buffer_id, selection);
             }
             active_shell_buffer_mut(runtime)?.set_cursor(original_cursor);
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            let replaced = transform_case_text(&removed, operator);
+            buffer.replace_range(range, &replaced);
+            buffer.set_cursor(original_cursor);
+            buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
         }
     }
@@ -2936,7 +3082,9 @@ fn apply_block_operator(
         return Ok(());
     }
 
-    shell_ui_mut(runtime)?.vim_mut().yank = Some(YankRegister::Block(yanked));
+    if matches!(operator, VimOperator::Delete | VimOperator::Change | VimOperator::Yank) {
+        shell_ui_mut(runtime)?.vim_mut().yank = Some(YankRegister::Block(yanked));
+    }
     let target_cursor = ranges[0].start();
 
     match operator {
@@ -2964,6 +3112,17 @@ fn apply_block_operator(
                 shell_ui_mut(runtime)?.set_yank_flash(buffer_id, selection);
             }
             active_shell_buffer_mut(runtime)?.set_cursor(original_cursor);
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            for range in ranges.iter().copied() {
+                let removed = buffer.slice(range);
+                let replaced = transform_case_text(&removed, operator);
+                buffer.replace_range(range, &replaced);
+            }
+            buffer.set_cursor(original_cursor);
+            buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
         }
     }
@@ -3111,6 +3270,44 @@ fn substitute_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
         ShellMotion::Right,
         Some(1),
     )
+}
+
+fn start_replace_char(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::ReplaceChar { count });
+    Ok(())
+}
+
+fn toggle_case_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    let (range, end_point) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let Some(range) = range_for_char_count(buffer, count) else {
+            return Ok(());
+        };
+        range
+    };
+    let buffer = active_shell_buffer_mut(runtime)?;
+    let removed = buffer.slice(range);
+    let replaced = transform_case_text(&removed, VimOperator::ToggleCase);
+    buffer.replace_range(range, &replaced);
+    buffer.set_cursor(end_point);
+    buffer.mark_syntax_dirty();
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    Ok(())
+}
+
+fn range_for_char_count(buffer: &ShellBuffer, count: usize) -> Option<(TextRange, TextPoint)> {
+    let start = buffer.cursor_point();
+    let mut end = start;
+    for _ in 0..count.max(1) {
+        let next = buffer.point_after(end)?;
+        if buffer.slice(TextRange::new(end, next)) == "\n" {
+            break;
+        }
+        end = next;
+    }
+    (end != start).then_some((TextRange::new(start, end), end))
 }
 
 fn apply_operator_motion(
@@ -4470,7 +4667,7 @@ fn ctrl_mod() -> Mod {
 fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     match input_mode {
         InputMode::Normal => KeymapVimMode::Normal,
-        InputMode::Insert => KeymapVimMode::Insert,
+        InputMode::Insert | InputMode::Replace => KeymapVimMode::Insert,
         InputMode::Visual => KeymapVimMode::Visual,
     }
 }
@@ -5025,7 +5222,7 @@ fn render_buffer(
     if cursor_row_on_screen < visible_lines {
         let cursor_width = match input_mode {
             InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
-            InputMode::Insert => (cell_width / 4).max(2) as u32,
+            InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
         };
         fill_rounded_rect(
             target,
@@ -5937,6 +6134,68 @@ mod tests {
         assert!(state.try_runtime_keybinding(Keycode::E, Mod::LCTRLMOD)?);
         assert_eq!(state.active_buffer_mut()?.scroll_row, 4);
         assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_quickref_change_ops_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha");
+        state.handle_text_input("r")?;
+        state.handle_text_input("Z")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "Zlpha");
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha");
+        state.handle_text_input("2")?;
+        state.handle_text_input("r")?;
+        state.handle_text_input("x")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "xxpha");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha");
+        state.handle_text_input("R")?;
+        assert_eq!(state.input_mode()?, InputMode::Replace);
+        state.handle_text_input("XYZ")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "XYZha");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("aBcD");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("~")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "ABcD");
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 1);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("aBcD");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("3")?;
+        state.handle_text_input("~")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "AbCD");
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 3);
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("g")?;
+        state.handle_text_input("U")?;
+        state.handle_text_input("w")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "ALPHA beta");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("ALPHA beta");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("g")?;
+        state.handle_text_input("u")?;
+        state.handle_text_input("w")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "alpha beta");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("ABcd");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("v")?;
+        state.handle_text_input("l")?;
+        state.handle_text_input("u")?;
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "abcd");
 
         Ok(())
     }
