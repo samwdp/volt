@@ -285,6 +285,13 @@ enum VimPending {
     ReplaceChar {
         count: usize,
     },
+    Register,
+    MarkSet,
+    MarkJump {
+        linewise: bool,
+    },
+    MacroRecord,
+    MacroPlayback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +311,26 @@ enum YankRegister {
     Character(String),
     Line(String),
     Block(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VimMark {
+    buffer_id: BufferId,
+    point: TextPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VimVisualSnapshot {
+    buffer_id: BufferId,
+    anchor: TextPoint,
+    head: TextPoint,
+    kind: VisualSelectionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VimRecordedInput {
+    Text(String),
+    Chord(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -344,6 +371,22 @@ struct VimState {
     last_find: Option<LastFind>,
     last_search: Option<LastSearch>,
     yank: Option<YankRegister>,
+    registers: BTreeMap<char, YankRegister>,
+    active_register: Option<char>,
+    marks: BTreeMap<char, VimMark>,
+    last_visual: Option<VimVisualSnapshot>,
+    pending_change_prefix: Option<VimRecordedInput>,
+    recording_macro: Option<char>,
+    macro_buffer: Vec<VimRecordedInput>,
+    macros: BTreeMap<char, Vec<VimRecordedInput>>,
+    last_macro: Option<char>,
+    skip_next_macro_input: bool,
+    recording_change: bool,
+    finish_change_on_normal: bool,
+    finish_change_after_input: bool,
+    change_buffer: Vec<VimRecordedInput>,
+    last_change: Vec<VimRecordedInput>,
+    replaying: bool,
 }
 
 impl VimState {
@@ -367,6 +410,7 @@ impl VimState {
     fn clear_transient(&mut self) {
         self.count = None;
         self.pending = None;
+        self.pending_change_prefix = None;
     }
 }
 
@@ -541,7 +585,8 @@ impl ShellBuffer {
             if current == "\n" {
                 self.text.insert_text(&character.to_string());
             } else {
-                self.text.replace(TextRange::new(point, next), &character.to_string());
+                self.text
+                    .replace(TextRange::new(point, next), &character.to_string());
             }
         }
     }
@@ -1617,7 +1662,15 @@ impl ShellState {
             } => {
                 match chord {
                     "g" | "e" | "E" => {
+                        if operator.is_none() {
+                            self.ui_mut()?.vim_mut().pending_change_prefix = None;
+                        }
                         resolve_g_prefix(&mut self.runtime, operator, line_target, chord)
+                            .map_err(ShellError::Runtime)?;
+                    }
+                    "v" if operator.is_none() => {
+                        self.ui_mut()?.vim_mut().pending_change_prefix = None;
+                        restore_last_visual_selection(&mut self.runtime)
                             .map_err(ShellError::Runtime)?;
                     }
                     "~" | "u" | "U" if operator.is_none() => {
@@ -1627,11 +1680,17 @@ impl ShellState {
                             "U" => VimOperator::Uppercase,
                             _ => VimOperator::ToggleCase,
                         };
+                        let prefix = self.ui_mut()?.vim_mut().pending_change_prefix.take();
+                        start_change_recording_with_prefix(&mut self.runtime, prefix)
+                            .map_err(ShellError::Runtime)?;
                         let count = line_target.unwrap_or(1);
                         self.ui_mut()?.vim_mut().pending =
                             Some(VimPending::Operator { operator, count });
                     }
                     _ => {
+                        if operator.is_none() {
+                            self.ui_mut()?.vim_mut().pending_change_prefix = None;
+                        }
                         self.ui_mut()?.vim_mut().clear_transient();
                     }
                 }
@@ -1673,6 +1732,55 @@ impl ShellState {
                     }
                 }
                 self.ui_mut()?.enter_normal_mode();
+                schedule_finish_change(&mut self.runtime).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            VimPending::Register => {
+                if let Some(register) = chord.chars().next() {
+                    self.ui_mut()?.vim_mut().active_register = Some(register);
+                }
+                self.ui_mut()?.vim_mut().clear_transient();
+                Ok(true)
+            }
+            VimPending::MarkSet => {
+                if let Some(mark) = chord.chars().next() {
+                    let buffer_id = active_shell_buffer_id(&self.runtime)
+                        .map_err(ShellError::Runtime)?;
+                    let point = self.active_buffer_mut()?.cursor_point();
+                    self.ui_mut()?.vim_mut().marks.insert(
+                        mark,
+                        VimMark {
+                            buffer_id,
+                            point,
+                        },
+                    );
+                }
+                self.ui_mut()?.vim_mut().clear_transient();
+                Ok(true)
+            }
+            VimPending::MarkJump { linewise } => {
+                if let Some(mark) = chord.chars().next() {
+                    jump_to_mark(&mut self.runtime, mark, linewise)
+                        .map_err(ShellError::Runtime)?;
+                } else {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                }
+                Ok(true)
+            }
+            VimPending::MacroRecord => {
+                if let Some(register) = chord.chars().next() {
+                    start_macro_record(&mut self.runtime, register)
+                        .map_err(ShellError::Runtime)?;
+                } else {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                }
+                Ok(true)
+            }
+            VimPending::MacroPlayback => {
+                let repeat = self.ui_mut()?.vim_mut().take_count_or_one();
+                let register = chord.chars().next();
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.play_macro(register, repeat)?;
                 Ok(true)
             }
         }
@@ -1704,6 +1812,142 @@ impl ShellState {
         Ok(())
     }
 
+    fn record_vim_input(&mut self, input: VimRecordedInput) -> Result<(), ShellError> {
+        let input_mode = self.input_mode()?;
+        let vim = self.ui_mut()?.vim_mut();
+        if vim.replaying {
+            return Ok(());
+        }
+        let skip_macro = matches!(
+            (&input, input_mode),
+            (VimRecordedInput::Text(text), InputMode::Normal | InputMode::Visual)
+                if text == "q"
+        );
+        if vim.recording_macro.is_some() && !skip_macro {
+            if vim.skip_next_macro_input {
+                vim.skip_next_macro_input = false;
+            } else {
+                vim.macro_buffer.push(input.clone());
+            }
+        }
+        if vim.recording_change {
+            vim.change_buffer.push(input);
+        }
+        Ok(())
+    }
+
+    fn maybe_finish_change_after_input(&mut self) -> Result<(), ShellError> {
+        let finish = self.ui_mut()?.vim_mut().finish_change_after_input;
+        if finish {
+            self.ui_mut()?.vim_mut().finish_change_after_input = false;
+            finish_change_recording(&mut self.runtime).map_err(ShellError::Runtime)?;
+        }
+        Ok(())
+    }
+
+    fn execute_recorded_chord(&mut self, chord: &str) -> Result<(), ShellError> {
+        let vim_mode = keymap_vim_mode(self.input_mode()?);
+
+        if self.picker_visible()?
+            && self
+                .runtime
+                .keymaps()
+                .contains_for_mode(&KeymapScope::Popup, vim_mode, chord)
+        {
+            self.runtime
+                .execute_key_binding_for_mode(&KeymapScope::Popup, vim_mode, chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            return Ok(());
+        }
+
+        if self
+            .runtime
+            .keymaps()
+            .contains_for_mode(&KeymapScope::Global, vim_mode, chord)
+        {
+            self.runtime
+                .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            return Ok(());
+        }
+
+        if !self.picker_visible()?
+            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+            && self
+                .runtime
+                .keymaps()
+                .contains_for_mode(&KeymapScope::Workspace, vim_mode, chord)
+        {
+            self.runtime
+                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.sync_active_buffer().map_err(ShellError::Runtime)?;
+            self.clear_stale_vim_count()?;
+        }
+
+        Ok(())
+    }
+
+    fn replay_recorded_inputs(&mut self, inputs: &[VimRecordedInput]) -> Result<(), ShellError> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+
+        self.ui_mut()?.vim_mut().replaying = true;
+        let result = inputs.iter().try_for_each(|input| match input {
+            VimRecordedInput::Text(text) => self.handle_text_input(text),
+            VimRecordedInput::Chord(chord) => self.execute_recorded_chord(chord),
+        });
+        self.ui_mut()?.vim_mut().replaying = false;
+        result
+    }
+
+    fn repeat_last_change(&mut self) -> Result<(), ShellError> {
+        if self.ui()?.vim().replaying {
+            return Ok(());
+        }
+        let repeat = self.ui_mut()?.vim_mut().take_count_or_one();
+        let inputs = self.ui()?.vim().last_change.clone();
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        for _ in 0..repeat {
+            self.replay_recorded_inputs(&inputs)?;
+        }
+        Ok(())
+    }
+
+    fn play_macro(&mut self, register: Option<char>, repeat: usize) -> Result<(), ShellError> {
+        if self.ui()?.vim().replaying {
+            return Ok(());
+        }
+        let inputs = {
+            let vim = self.ui_mut()?.vim_mut();
+            let target = match register {
+                Some('@') => vim.last_macro,
+                Some(register) => Some(register),
+                None => None,
+            };
+            let Some(register) = target else {
+                vim.clear_transient();
+                return Ok(());
+            };
+            let inputs = vim.macros.get(&register).cloned().unwrap_or_default();
+            vim.last_macro = Some(register);
+            inputs
+        };
+
+        if inputs.is_empty() {
+            self.ui_mut()?.vim_mut().clear_transient();
+            return Ok(());
+        }
+        for _ in 0..repeat.max(1) {
+            self.replay_recorded_inputs(&inputs)?;
+        }
+        self.ui_mut()?.vim_mut().clear_transient();
+        Ok(())
+    }
+
     fn handle_text_input(&mut self, text: &str) -> Result<(), ShellError> {
         if self.picker_visible()? {
             if let Some(picker) = self.ui_mut()?.picker_mut() {
@@ -1716,11 +1960,15 @@ impl ShellState {
             InputMode::Insert => {
                 self.active_buffer_mut()?.insert_text(text);
                 self.mark_active_buffer_syntax_dirty()?;
+                self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
             InputMode::Replace => {
                 self.active_buffer_mut()?.replace_mode_text(text);
                 self.mark_active_buffer_syntax_dirty()?;
+                self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
             _ => {}
@@ -1728,6 +1976,13 @@ impl ShellState {
 
         if let Some(chord) = text_chord(text) {
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+
+            if chord == "." && !self.picker_visible()? {
+                self.repeat_last_change()?;
                 return Ok(());
             }
 
@@ -1745,6 +2000,8 @@ impl ShellState {
                     .map_err(|error| ShellError::Runtime(error.to_string()))?;
                 self.sync_active_buffer().map_err(ShellError::Runtime)?;
                 self.clear_stale_vim_count()?;
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
             }
         }
 
@@ -1771,6 +2028,8 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Popup, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
             return Ok(true);
         }
 
@@ -1782,6 +2041,8 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
             return Ok(true);
         }
 
@@ -1795,6 +2056,8 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
             return Ok(true);
         }
 
@@ -2232,22 +2495,34 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_MOVE_SCREEN_TOP, "shell.move-screen-top", |_, runtime| {
-            apply_motion_command(runtime, ShellMotion::ScreenTop)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_MOVE_SCREEN_TOP,
+            "shell.move-screen-top",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::ScreenTop)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_MOVE_SCREEN_MIDDLE, "shell.move-screen-middle", |_, runtime| {
-            apply_motion_command(runtime, ShellMotion::ScreenMiddle)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_MOVE_SCREEN_MIDDLE,
+            "shell.move-screen-middle",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::ScreenMiddle)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_MOVE_SCREEN_BOTTOM, "shell.move-screen-bottom", |_, runtime| {
-            apply_motion_command(runtime, ShellMotion::ScreenBottom)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_MOVE_SCREEN_BOTTOM,
+            "shell.move-screen-bottom",
+            |_, runtime| {
+                apply_motion_command(runtime, ShellMotion::ScreenBottom)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
@@ -2276,16 +2551,24 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_SCROLL_HALF_PAGE_UP, "shell.scroll-half-page-up", |_, runtime| {
-            apply_scroll_command(runtime, ScrollCommand::HalfPageUp)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_SCROLL_HALF_PAGE_UP,
+            "shell.scroll-half-page-up",
+            |_, runtime| {
+                apply_scroll_command(runtime, ScrollCommand::HalfPageUp)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_SCROLL_PAGE_DOWN, "shell.scroll-page-down", |_, runtime| {
-            apply_scroll_command(runtime, ScrollCommand::PageDown)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_SCROLL_PAGE_DOWN,
+            "shell.scroll-page-down",
+            |_, runtime| {
+                apply_scroll_command(runtime, ScrollCommand::PageDown)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_SCROLL_PAGE_UP, "shell.scroll-page-up", |_, runtime| {
@@ -2294,10 +2577,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_SCROLL_LINE_DOWN, "shell.scroll-line-down", |_, runtime| {
-            apply_scroll_command(runtime, ScrollCommand::LineDown)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_SCROLL_LINE_DOWN,
+            "shell.scroll-line-down",
+            |_, runtime| {
+                apply_scroll_command(runtime, ScrollCommand::LineDown)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_SCROLL_LINE_UP, "shell.scroll-line-up", |_, runtime| {
@@ -2307,12 +2594,34 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_INSERT, "shell.enter-insert-mode", |_, runtime| {
+            start_change_recording(runtime)?;
+            mark_change_finish_on_normal(runtime)?;
             shell_ui_mut(runtime)?.enter_insert_mode();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_NORMAL, "shell.enter-normal-mode", |_, runtime| {
+            let finish_change = {
+                let vim = shell_ui(runtime)?.vim();
+                vim.recording_change && vim.finish_change_on_normal
+            };
+            let visual_snapshot = {
+                let (anchor, kind) = {
+                    let ui = shell_ui(runtime)?;
+                    if ui.input_mode() != InputMode::Visual {
+                        (None, ui.vim().visual_kind)
+                    } else {
+                        (ui.vim().visual_anchor, ui.vim().visual_kind)
+                    }
+                };
+                if let Some(anchor) = anchor {
+                    let head = active_shell_buffer_mut(runtime)?.cursor_point();
+                    Some((anchor, head, kind))
+                } else {
+                    None
+                }
+            };
             if matches!(
                 shell_ui(runtime)?.input_mode(),
                 InputMode::Insert | InputMode::Replace
@@ -2320,6 +2629,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 let _ = active_shell_buffer_mut(runtime)?.move_left();
             }
             shell_ui_mut(runtime)?.enter_normal_mode();
+            if let Some((anchor, head, kind)) = visual_snapshot {
+                store_last_visual_selection(runtime, anchor, head, kind)?;
+            }
+            if finish_change {
+                finish_change_recording(runtime)?;
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -2334,9 +2649,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     delete_chars(runtime, true)?;
                 }
                 "delete-line-end" => {
+                    start_change_recording(runtime)?;
                     apply_motion_alias(runtime, VimOperator::Delete, ShellMotion::LineEnd)?;
                 }
                 "change-line-end" => {
+                    start_change_recording(runtime)?;
                     apply_motion_alias(runtime, VimOperator::Change, ShellMotion::LineEnd)?;
                 }
                 "yank-line" => {
@@ -2354,30 +2671,42 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_replace_char(runtime)?;
                 }
                 "enter-replace-mode" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     shell_ui_mut(runtime)?.enter_replace_mode();
                 }
                 "toggle-case" => {
                     toggle_case_chars(runtime)?;
                 }
                 "append" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.append_after_cursor();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "append-line-end" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.append_line_end();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "insert-line-start" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.insert_line_start();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "open-line-below" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.open_line_below();
                     buffer.mark_syntax_dirty();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "open-line-above" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.open_line_above();
                     buffer.mark_syntax_dirty();
@@ -2450,6 +2779,32 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "repeat-search-previous" => {
                     repeat_vim_search(runtime, true)?;
                 }
+                "select-register" => {
+                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::Register);
+                }
+                "set-mark" => {
+                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkSet);
+                }
+                "goto-mark-line" => {
+                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
+                        linewise: true,
+                    });
+                }
+                "goto-mark" => {
+                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
+                        linewise: false,
+                    });
+                }
+                "toggle-macro-record" => {
+                    if shell_ui(runtime)?.vim().recording_macro.is_some() {
+                        stop_macro_record(runtime)?;
+                    } else {
+                        shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MacroRecord);
+                    }
+                }
+                "start-macro-playback" => {
+                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MacroPlayback);
+                }
                 "put-after" => {
                     put_yank(runtime, true)?;
                 }
@@ -2466,21 +2821,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_visual_text_object(runtime, true)?;
                 }
                 "visual-delete" => {
+                    start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Delete)?;
                 }
                 "visual-change" => {
+                    start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Change)?;
                 }
                 "visual-yank" => {
                     apply_visual_operator(runtime, VimOperator::Yank)?;
                 }
                 "visual-toggle-case" => {
+                    start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::ToggleCase)?;
                 }
                 "visual-lowercase" => {
+                    start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Lowercase)?;
                 }
                 "visual-uppercase" => {
+                    start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Uppercase)?;
                 }
                 _ => {}
@@ -3000,6 +3360,138 @@ fn transform_case_text(text: &str, operator: VimOperator) -> String {
         .collect()
 }
 
+fn store_yank_register(runtime: &mut EditorRuntime, yank: YankRegister) -> Result<(), String> {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    vim.yank = Some(yank.clone());
+    if let Some(register) = vim.active_register.take() {
+        vim.registers.insert(register, yank);
+    }
+    Ok(())
+}
+
+fn start_change_recording(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    if vim.replaying {
+        return Ok(());
+    }
+    if !vim.recording_change {
+        vim.recording_change = true;
+        vim.change_buffer.clear();
+    }
+    Ok(())
+}
+
+fn start_change_recording_with_prefix(
+    runtime: &mut EditorRuntime,
+    prefix: Option<VimRecordedInput>,
+) -> Result<(), String> {
+    start_change_recording(runtime)?;
+    if let Some(input) = prefix {
+        let vim = shell_ui_mut(runtime)?.vim_mut();
+        if vim.change_buffer.is_empty() {
+            vim.change_buffer.push(input);
+        }
+    }
+    Ok(())
+}
+
+fn mark_change_finish_on_normal(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.vim_mut().finish_change_on_normal = true;
+    Ok(())
+}
+
+fn schedule_finish_change(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.vim_mut().finish_change_after_input = true;
+    Ok(())
+}
+
+fn finish_change_recording(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    if vim.recording_change {
+        if !vim.change_buffer.is_empty() {
+            vim.last_change = vim.change_buffer.clone();
+        }
+        vim.change_buffer.clear();
+        vim.recording_change = false;
+        vim.finish_change_on_normal = false;
+        vim.finish_change_after_input = false;
+    }
+    Ok(())
+}
+
+fn start_macro_record(runtime: &mut EditorRuntime, register: char) -> Result<(), String> {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    vim.recording_macro = Some(register);
+    vim.macro_buffer.clear();
+    vim.skip_next_macro_input = true;
+    vim.clear_transient();
+    Ok(())
+}
+
+fn stop_macro_record(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    if let Some(register) = vim.recording_macro.take() {
+        let recorded = std::mem::take(&mut vim.macro_buffer);
+        vim.macros.insert(register, recorded);
+    }
+    vim.clear_transient();
+    Ok(())
+}
+
+fn store_last_visual_selection(
+    runtime: &mut EditorRuntime,
+    anchor: TextPoint,
+    head: TextPoint,
+    kind: VisualSelectionKind,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    shell_ui_mut(runtime)?.vim_mut().last_visual = Some(VimVisualSnapshot {
+        buffer_id,
+        anchor,
+        head,
+        kind,
+    });
+    Ok(())
+}
+
+fn restore_last_visual_selection(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let snapshot = shell_ui(runtime)?.vim().last_visual;
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    let ui = shell_ui_mut(runtime)?;
+    ui.focus_buffer(snapshot.buffer_id);
+    let buffer = ui
+        .buffer_mut(snapshot.buffer_id)
+        .ok_or_else(|| "visual buffer is missing".to_owned())?;
+    buffer.set_cursor(snapshot.head);
+    ui.enter_visual_mode(snapshot.anchor, snapshot.kind);
+    Ok(())
+}
+
+fn jump_to_mark(
+    runtime: &mut EditorRuntime,
+    mark: char,
+    linewise: bool,
+) -> Result<(), String> {
+    let snapshot = shell_ui(runtime)?.vim().marks.get(&mark).copied();
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    let ui = shell_ui_mut(runtime)?;
+    ui.focus_buffer(snapshot.buffer_id);
+    let buffer = ui
+        .buffer_mut(snapshot.buffer_id)
+        .ok_or_else(|| "mark buffer is missing".to_owned())?;
+    if linewise {
+        buffer.goto_line(snapshot.point.line);
+    } else {
+        buffer.set_cursor(snapshot.point);
+    }
+    ui.vim_mut().clear_transient();
+    Ok(())
+}
+
 fn apply_operator_to_range(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
@@ -3014,12 +3506,16 @@ fn apply_operator_to_range(
         return Ok(());
     }
 
-    if matches!(operator, VimOperator::Delete | VimOperator::Change | VimOperator::Yank) {
-        shell_ui_mut(runtime)?.vim_mut().yank = Some(if linewise {
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        let yank = if linewise {
             YankRegister::Line(removed.clone())
         } else {
             YankRegister::Character(removed.clone())
-        });
+        };
+        store_yank_register(runtime, yank)?;
     }
 
     match operator {
@@ -3028,6 +3524,7 @@ fn apply_operator_to_range(
             buffer.delete_range(range);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
             let buffer = active_shell_buffer_mut(runtime)?;
@@ -3039,6 +3536,7 @@ fn apply_operator_to_range(
             }
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_insert_mode();
+            mark_change_finish_on_normal(runtime)?;
         }
         VimOperator::Yank => {
             if let Some(selection) = flash_selection {
@@ -3055,6 +3553,7 @@ fn apply_operator_to_range(
             buffer.set_cursor(original_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
         }
     }
 
@@ -3082,8 +3581,11 @@ fn apply_block_operator(
         return Ok(());
     }
 
-    if matches!(operator, VimOperator::Delete | VimOperator::Change | VimOperator::Yank) {
-        shell_ui_mut(runtime)?.vim_mut().yank = Some(YankRegister::Block(yanked));
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        store_yank_register(runtime, YankRegister::Block(yanked))?;
     }
     let target_cursor = ranges[0].start();
 
@@ -3096,6 +3598,7 @@ fn apply_block_operator(
             buffer.set_cursor(target_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
             let buffer = active_shell_buffer_mut(runtime)?;
@@ -3105,6 +3608,7 @@ fn apply_block_operator(
             buffer.set_cursor(target_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_insert_mode();
+            mark_change_finish_on_normal(runtime)?;
         }
         VimOperator::Yank => {
             if let Some(selection) = flash_selection {
@@ -3124,6 +3628,7 @@ fn apply_block_operator(
             buffer.set_cursor(original_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
         }
     }
 
@@ -3131,7 +3636,7 @@ fn apply_block_operator(
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
-    let (selection, cursor, kind) = {
+    let (selection, cursor, kind, anchor) = {
         let ui = shell_ui(runtime)?;
         let anchor = ui
             .vim()
@@ -3146,8 +3651,10 @@ fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> 
                 .ok_or_else(|| "visual selection is empty".to_owned())?,
             buffer.cursor_point(),
             kind,
+            anchor,
         )
     };
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
 
     match selection {
         VisualSelection::Range(range) => apply_operator_to_range(
@@ -3252,6 +3759,7 @@ fn apply_visual_text_object(
 }
 
 fn delete_chars(runtime: &mut EditorRuntime, backward: bool) -> Result<(), String> {
+    start_change_recording(runtime)?;
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     let motion = if backward {
         ShellMotion::Left
@@ -3262,6 +3770,7 @@ fn delete_chars(runtime: &mut EditorRuntime, backward: bool) -> Result<(), Strin
 }
 
 fn substitute_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_change_recording(runtime)?;
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     apply_operator_motion(
         runtime,
@@ -3273,12 +3782,14 @@ fn substitute_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn start_replace_char(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_change_recording(runtime)?;
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::ReplaceChar { count });
     Ok(())
 }
 
 fn toggle_case_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
+    start_change_recording(runtime)?;
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     let (range, end_point) = {
         let buffer = active_shell_buffer_mut(runtime)?;
@@ -3294,6 +3805,7 @@ fn toggle_case_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
     buffer.set_cursor(end_point);
     buffer.mark_syntax_dirty();
     shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
     Ok(())
 }
 
@@ -3715,6 +4227,13 @@ fn resolve_g_prefix(
 }
 
 fn start_vim_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::ToggleCase | VimOperator::Lowercase
+            | VimOperator::Uppercase
+    ) {
+        start_change_recording(runtime)?;
+    }
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::Operator { operator, count });
     Ok(())
@@ -3739,7 +4258,9 @@ fn start_vim_find(runtime: &mut EditorRuntime, kind: VimFindKind) -> Result<(), 
 
 fn start_vim_g_prefix(runtime: &mut EditorRuntime) -> Result<(), String> {
     let line_target = shell_ui_mut(runtime)?.vim_mut().take_count();
-    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::GPrefix {
+    let vim = shell_ui_mut(runtime)?.vim_mut();
+    vim.pending_change_prefix = Some(VimRecordedInput::Text("g".to_owned()));
+    vim.pending = Some(VimPending::GPrefix {
         operator: None,
         line_target,
     });
@@ -3838,7 +4359,15 @@ fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
-    let yank = shell_ui(runtime)?.vim().yank.clone();
+    start_change_recording(runtime)?;
+    let yank = {
+        let vim = shell_ui_mut(runtime)?.vim_mut();
+        if let Some(register) = vim.active_register.take() {
+            vim.registers.get(&register).cloned().or_else(|| vim.yank.clone())
+        } else {
+            vim.yank.clone()
+        }
+    };
     let Some(yank) = yank else {
         return Ok(());
     };
@@ -3908,6 +4437,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     }
 
     shell_ui_mut(runtime)?.vim_mut().clear_transient();
+    schedule_finish_change(runtime)?;
     Ok(())
 }
 
@@ -4882,6 +5412,7 @@ fn render_shell_state(
                 visual_range,
                 yank_flash,
                 state.input_mode(),
+                state.vim().recording_macro,
                 workspace_name,
                 lsp_server,
                 theme_registry,
@@ -5156,6 +5687,7 @@ fn render_runtime_popup_overlay(
             visual_range,
             yank_flash,
             state.input_mode(),
+            state.vim().recording_macro,
             workspace_name,
             lsp_server,
             theme_registry,
@@ -5178,6 +5710,7 @@ fn render_buffer(
     visual_selection: Option<VisualSelection>,
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
+    recording_macro: Option<char>,
     workspace_name: &str,
     lsp_server: Option<&str>,
     theme_registry: Option<&ThemeRegistry>,
@@ -5202,6 +5735,7 @@ fn render_buffer(
         font,
         &user::statusline::compose(&user::statusline::StatuslineContext {
             vim_mode: input_mode.label(),
+            recording_macro,
             workspace_name,
             buffer_name: buffer.display_name(),
             line: buffer.cursor_row() + 1,
@@ -6196,6 +6730,56 @@ mod tests {
         state.handle_text_input("u")?;
         assert_eq!(state.input_mode()?, InputMode::Normal);
         assert_eq!(state.active_buffer_mut()?.text.text(), "abcd");
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_quickref_repeat_registers_work() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+        state.handle_text_input("d")?;
+        state.handle_text_input("w")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "beta");
+
+        state.handle_text_input(".")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("alpha");
+        state.handle_text_input("q")?;
+        state.handle_text_input("a")?;
+        state.handle_text_input("A")?;
+        state.handle_text_input("!")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        state.handle_text_input("q")?;
+        assert!(state
+            .ui()?
+            .vim()
+            .macros
+            .contains_key(&'a'));
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("beta");
+        state.handle_text_input("@")?;
+        state.handle_text_input("a")?;
+        assert_eq!(state.active_buffer_mut()?.text.text(), "beta!");
+
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\n");
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 1));
+        state.handle_text_input("m")?;
+        state.handle_text_input("a")?;
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 0));
+        state.handle_text_input("'")?;
+        state.handle_text_input("a")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 0);
+
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 0));
+        state.handle_text_input("`")?;
+        state.handle_text_input("a")?;
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), 1);
 
         Ok(())
     }

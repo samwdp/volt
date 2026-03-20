@@ -907,11 +907,7 @@ impl TextBuffer {
         } else {
             self.cursor.line
         };
-        let Some(target) = boundaries
-            .iter()
-            .copied()
-            .rfind(|line| *line < search_line)
-        else {
+        let Some(target) = boundaries.iter().copied().rfind(|line| *line < search_line) else {
             let target = TextPoint::new(0, 0);
             if target == self.cursor {
                 return false;

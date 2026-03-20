@@ -408,6 +408,42 @@ pub fn package() -> PluginPackage {
             "repeat-search-previous",
         ),
         hook_command(
+            "vim.select-register",
+            "Selects a Vim register for the next operation.",
+            "editor.vim.edit",
+            "select-register",
+        ),
+        hook_command(
+            "vim.set-mark",
+            "Sets a Vim mark at the current cursor.",
+            "editor.vim.edit",
+            "set-mark",
+        ),
+        hook_command(
+            "vim.goto-mark-line",
+            "Jumps to the line of a Vim mark.",
+            "editor.vim.edit",
+            "goto-mark-line",
+        ),
+        hook_command(
+            "vim.goto-mark",
+            "Jumps to the exact position of a Vim mark.",
+            "editor.vim.edit",
+            "goto-mark",
+        ),
+        hook_command(
+            "vim.toggle-macro-record",
+            "Starts or stops Vim macro recording.",
+            "editor.vim.edit",
+            "toggle-macro-record",
+        ),
+        hook_command(
+            "vim.start-macro-playback",
+            "Plays back a recorded Vim macro.",
+            "editor.vim.edit",
+            "start-macro-playback",
+        ),
+        hook_command(
             "vim.put-after",
             "Puts the most recent Vim yank after the cursor.",
             "editor.vim.edit",
@@ -493,10 +529,26 @@ pub fn package() -> PluginPackage {
         normal_binding("$", "vim.move-line-end", PluginKeymapScope::Workspace),
         // Various motions
         normal_binding("%", "vim.match-pair", PluginKeymapScope::Workspace),
-        normal_binding("(", "vim.move-sentence-backward", PluginKeymapScope::Workspace),
-        normal_binding(")", "vim.move-sentence-forward", PluginKeymapScope::Workspace),
-        normal_binding("{", "vim.move-paragraph-backward", PluginKeymapScope::Workspace),
-        normal_binding("}", "vim.move-paragraph-forward", PluginKeymapScope::Workspace),
+        normal_binding(
+            "(",
+            "vim.move-sentence-backward",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            ")",
+            "vim.move-sentence-forward",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "{",
+            "vim.move-paragraph-backward",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "}",
+            "vim.move-paragraph-forward",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("H", "vim.move-screen-top", PluginKeymapScope::Workspace),
         normal_binding("M", "vim.move-screen-middle", PluginKeymapScope::Workspace),
         normal_binding("L", "vim.move-screen-bottom", PluginKeymapScope::Workspace),
@@ -553,6 +605,14 @@ pub fn package() -> PluginPackage {
             "vim.repeat-search-previous",
             PluginKeymapScope::Workspace,
         ),
+        // Registers and macros
+        normal_binding("\"", "vim.select-register", PluginKeymapScope::Workspace),
+        normal_binding("q", "vim.toggle-macro-record", PluginKeymapScope::Workspace),
+        normal_binding("@", "vim.start-macro-playback", PluginKeymapScope::Workspace),
+        // Marks
+        normal_binding("m", "vim.set-mark", PluginKeymapScope::Workspace),
+        normal_binding("'", "vim.goto-mark-line", PluginKeymapScope::Workspace),
+        normal_binding("`", "vim.goto-mark", PluginKeymapScope::Workspace),
         // Inserting text
         normal_binding("a", "vim.append-after-cursor", PluginKeymapScope::Workspace),
         normal_binding("A", "vim.append-line-end", PluginKeymapScope::Workspace),
@@ -601,11 +661,27 @@ pub fn package() -> PluginPackage {
         // Undo/Redo commands
         normal_binding("u", "vim.undo", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
-        normal_binding("Ctrl+d", "vim.scroll-half-page-down", PluginKeymapScope::Workspace),
+        normal_binding(
+            "Ctrl+d",
+            "vim.scroll-half-page-down",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("Ctrl+r", "vim.redo", PluginKeymapScope::Workspace),
-        normal_binding("Ctrl+u", "vim.scroll-half-page-up", PluginKeymapScope::Workspace),
-        normal_binding("Ctrl+e", "vim.scroll-line-down", PluginKeymapScope::Workspace),
-        normal_binding("Ctrl+f", "vim.scroll-page-down", PluginKeymapScope::Workspace),
+        normal_binding(
+            "Ctrl+u",
+            "vim.scroll-half-page-up",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "Ctrl+e",
+            "vim.scroll-line-down",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "Ctrl+f",
+            "vim.scroll-page-down",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
         // Insert mode keys
         PluginKeyBinding::new("Escape", "vim.enter-normal-mode", PluginKeymapScope::Global)
@@ -639,10 +715,26 @@ pub fn package() -> PluginPackage {
         visual_binding("$", "vim.move-line-end", PluginKeymapScope::Workspace),
         // Various motions
         visual_binding("%", "vim.match-pair", PluginKeymapScope::Workspace),
-        visual_binding("(", "vim.move-sentence-backward", PluginKeymapScope::Workspace),
-        visual_binding(")", "vim.move-sentence-forward", PluginKeymapScope::Workspace),
-        visual_binding("{", "vim.move-paragraph-backward", PluginKeymapScope::Workspace),
-        visual_binding("}", "vim.move-paragraph-forward", PluginKeymapScope::Workspace),
+        visual_binding(
+            "(",
+            "vim.move-sentence-backward",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            ")",
+            "vim.move-sentence-forward",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "{",
+            "vim.move-paragraph-backward",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "}",
+            "vim.move-paragraph-forward",
+            PluginKeymapScope::Workspace,
+        ),
         visual_binding("H", "vim.move-screen-top", PluginKeymapScope::Workspace),
         visual_binding("M", "vim.move-screen-middle", PluginKeymapScope::Workspace),
         visual_binding("L", "vim.move-screen-bottom", PluginKeymapScope::Workspace),
@@ -693,11 +785,29 @@ pub fn package() -> PluginPackage {
             "vim.repeat-search-previous",
             PluginKeymapScope::Workspace,
         ),
+        // Registers
+        visual_binding("\"", "vim.select-register", PluginKeymapScope::Workspace),
         visual_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
-        visual_binding("Ctrl+d", "vim.scroll-half-page-down", PluginKeymapScope::Workspace),
-        visual_binding("Ctrl+u", "vim.scroll-half-page-up", PluginKeymapScope::Workspace),
-        visual_binding("Ctrl+e", "vim.scroll-line-down", PluginKeymapScope::Workspace),
-        visual_binding("Ctrl+f", "vim.scroll-page-down", PluginKeymapScope::Workspace),
+        visual_binding(
+            "Ctrl+d",
+            "vim.scroll-half-page-down",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "Ctrl+u",
+            "vim.scroll-half-page-up",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "Ctrl+e",
+            "vim.scroll-line-down",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "Ctrl+f",
+            "vim.scroll-page-down",
+            PluginKeymapScope::Workspace,
+        ),
         visual_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
         // Deleting text
         visual_binding("d", "vim.visual-delete", PluginKeymapScope::Workspace),

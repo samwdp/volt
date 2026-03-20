@@ -3,6 +3,8 @@
 pub struct StatuslineContext<'a> {
     /// Current modal editing label.
     pub vim_mode: &'a str,
+    /// Register currently recording a macro, if any.
+    pub recording_macro: Option<char>,
     /// Active workspace display name.
     pub workspace_name: &'a str,
     /// Active buffer display name.
@@ -25,6 +27,7 @@ pub type StatuslineSegment = for<'a> fn(&StatuslineContext<'a>) -> Option<String
 pub fn segments() -> Vec<StatuslineSegment> {
     vec![
         mode_segment,
+        macro_recording_segment,
         workspace_segment,
         buffer_segment,
         position_segment,
@@ -43,6 +46,12 @@ pub fn compose(context: &StatuslineContext<'_>) -> String {
 
 fn mode_segment(context: &StatuslineContext<'_>) -> Option<String> {
     Some(context.vim_mode.to_owned())
+}
+
+fn macro_recording_segment(context: &StatuslineContext<'_>) -> Option<String> {
+    context
+        .recording_macro
+        .map(|register| format!("@{register}"))
 }
 
 fn workspace_segment(context: &StatuslineContext<'_>) -> Option<String> {
@@ -69,6 +78,7 @@ mod tests {
     fn compose_joins_the_default_user_segments() {
         let statusline = compose(&StatuslineContext {
             vim_mode: "NORMAL",
+            recording_macro: None,
             workspace_name: "default",
             buffer_name: "*scratch*",
             line: 3,
@@ -86,6 +96,7 @@ mod tests {
     fn compose_skips_empty_optional_segments() {
         let statusline = compose(&StatuslineContext {
             vim_mode: "INSERT",
+            recording_macro: None,
             workspace_name: "default",
             buffer_name: "*scratch*",
             line: 1,
@@ -94,5 +105,20 @@ mod tests {
         });
 
         assert_eq!(statusline, "INSERT | default | *scratch* | Ln 1, Col 1");
+    }
+
+    #[test]
+    fn compose_includes_macro_recording_register() {
+        let statusline = compose(&StatuslineContext {
+            vim_mode: "NORMAL",
+            recording_macro: Some('q'),
+            workspace_name: "default",
+            buffer_name: "*scratch*",
+            line: 1,
+            column: 1,
+            lsp_server: None,
+        });
+
+        assert_eq!(statusline, "NORMAL | @q | default | *scratch* | Ln 1, Col 1");
     }
 }
