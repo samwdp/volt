@@ -75,5 +75,7 @@ Inside the SDL shell, the default user package wiring now gives you:
 - `workspace.new`, `workspace.switch`, `workspace.delete`, and `workspace.list-files` commands backed by `user/workspace.rs`
 
 Theme files live under `user/themes/*.toml` and support UI options like font, font size, opacity,
-opacity type (`transparent` or `blurred`), and cursor/picker roundness. SDL3 does not currently
-expose blur controls, so `blurred` falls back to standard window opacity.
+opacity type (`transparent`, `blurred`, `auto`, `none`, `mica`, `mica-alt`, `acrylic`, `tabbed`),
+and cursor/picker roundness. On Windows 11 these backdrop values map to the system backdrop types
+so blur only affects the window frame; non-Windows platforms ignore the backdrop and keep the
+window fully opaque.

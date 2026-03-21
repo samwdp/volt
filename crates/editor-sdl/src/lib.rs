@@ -129,14 +129,32 @@ impl Default for ShellConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpacityType {
     Transparent,
-    Blurred,
+    Win32Backdrop(Win32Backdrop),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Win32Backdrop {
+    Auto,
+    None,
+    Mica,
+    MicaAlt,
+    Acrylic,
+    Tabbed,
 }
 
 impl OpacityType {
     fn from_value(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        let value = value.trim().to_ascii_lowercase();
+        match value.as_str() {
             "transparent" => Some(Self::Transparent),
-            "blurred" => Some(Self::Blurred),
+            "blurred" | "blur" | "acrylic" => Some(Self::Win32Backdrop(Win32Backdrop::Acrylic)),
+            "auto" => Some(Self::Win32Backdrop(Win32Backdrop::Auto)),
+            "none" | "disable" | "disabled" => Some(Self::Win32Backdrop(Win32Backdrop::None)),
+            "mica" => Some(Self::Win32Backdrop(Win32Backdrop::Mica)),
+            "mica-alt" | "mica_alt" | "micaalt" => {
+                Some(Self::Win32Backdrop(Win32Backdrop::MicaAlt))
+            }
+            "tabbed" => Some(Self::Win32Backdrop(Win32Backdrop::Tabbed)),
             _ => None,
         }
     }
@@ -2513,11 +2531,76 @@ fn apply_window_opacity(
     opacity_type: OpacityType,
 ) -> Result<(), ShellError> {
     let opacity = match opacity_type {
-        OpacityType::Transparent | OpacityType::Blurred => opacity,
+        OpacityType::Transparent => opacity,
+        OpacityType::Win32Backdrop(_) => 1.0,
     };
     window
         .set_opacity(opacity)
-        .map_err(|error| ShellError::Sdl(error.to_string()))
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    apply_win32_backdrop(window, opacity_type)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_win32_backdrop(window: &Window, opacity_type: OpacityType) -> Result<(), ShellError> {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMSBT_AUTO, DWMSBT_MAINWINDOW, DWMSBT_NONE,
+        DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    };
+
+    let backdrop = match opacity_type {
+        OpacityType::Transparent => Win32Backdrop::None,
+        OpacityType::Win32Backdrop(backdrop) => backdrop,
+    };
+    let backdrop_value = match backdrop {
+        Win32Backdrop::Auto => DWMSBT_AUTO,
+        Win32Backdrop::None => DWMSBT_NONE,
+        Win32Backdrop::Mica => DWMSBT_MAINWINDOW,
+        Win32Backdrop::MicaAlt => DWMSBT_TABBEDWINDOW,
+        Win32Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+        Win32Backdrop::Tabbed => DWMSBT_TABBEDWINDOW,
+    };
+    let Some(hwnd) = win32_hwnd(window) else {
+        return Ok(());
+    };
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop_value as *const _ as *const _,
+            std::mem::size_of_val(&backdrop_value) as u32,
+        )
+    };
+    if result != 0 {
+        return Err(ShellError::Sdl(format!(
+            "failed to set win32 backdrop: {result}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_win32_backdrop(_: &Window, _: OpacityType) -> Result<(), ShellError> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn win32_hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use sdl3::sys;
+    use std::ptr;
+
+    unsafe {
+        let properties = sys::video::SDL_GetWindowProperties(window.raw());
+        if properties == 0 {
+            return None;
+        }
+        let hwnd = sys::properties::SDL_GetPointerProperty(
+            properties,
+            sys::video::SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            ptr::null_mut(),
+        );
+        (!hwnd.is_null()).then_some(hwnd as windows_sys::Win32::Foundation::HWND)
+    }
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
