@@ -1982,6 +1982,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_theme_runtime(
     ttf: &sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
@@ -2040,10 +2041,10 @@ fn theme_runtime_settings(
 }
 
 fn resolve_font_path(request: Option<&str>) -> Result<PathBuf, ShellError> {
-    if let Some(request) = request.and_then(|value| (!value.is_empty()).then_some(value)) {
-        if let Some(path) = resolve_font_request(request) {
-            return Ok(path);
-        }
+    if let Some(request) = request.and_then(|value| (!value.is_empty()).then_some(value))
+        && let Some(path) = resolve_font_request(request)
+    {
+        return Ok(path);
     }
     find_system_monospace_font().map_err(ShellError::from)
 }
@@ -3218,14 +3219,10 @@ fn find_char_forward(
     case_sensitive: bool,
 ) -> Option<usize> {
     let char_count = buffer.text.char_count();
-    for char_index in start_char..char_count {
-        if char_at_index(buffer, char_index).map(|ch| normalize_search_char(ch, case_sensitive))
+    (start_char..char_count).find(|&char_index| {
+        char_at_index(buffer, char_index).map(|ch| normalize_search_char(ch, case_sensitive))
             == Some(target)
-        {
-            return Some(char_index);
-        }
-    }
-    None
+    })
 }
 
 fn fuzzy_match_end(
@@ -3244,9 +3241,7 @@ fn fuzzy_match_end(
     let mut last_index = start_char;
     let mut next_index = start_char.saturating_add(1);
     for target in pattern.iter().skip(1) {
-        let Some(found) = find_char_forward(buffer, next_index, *target, case_sensitive) else {
-            return None;
-        };
+        let found = find_char_forward(buffer, next_index, *target, case_sensitive)?;
         last_index = found;
         next_index = found.saturating_add(1);
     }
@@ -3277,7 +3272,7 @@ fn search_fuzzy_forward(
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
-            if best.map_or(true, |(_, best_span)| span < best_span) {
+            if best.is_none_or(|(_, best_span)| span < best_span) {
                 best = Some((char_index, span));
             }
         }
@@ -3293,7 +3288,7 @@ fn search_fuzzy_forward(
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
-            if best.map_or(true, |(_, best_span)| span < best_span) {
+            if best.is_none_or(|(_, best_span)| span < best_span) {
                 best = Some((char_index, span));
             }
         }
@@ -3323,7 +3318,7 @@ fn search_fuzzy_backward(
             continue;
         };
         let span = end_index.saturating_sub(char_index);
-        if best.map_or(true, |(_, best_span)| span < best_span) {
+        if best.is_none_or(|(_, best_span)| span < best_span) {
             best = Some((char_index, span));
         }
     }
@@ -3338,7 +3333,7 @@ fn search_fuzzy_backward(
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
-            if best.map_or(true, |(_, best_span)| span < best_span) {
+            if best.is_none_or(|(_, best_span)| span < best_span) {
                 best = Some((char_index, span));
             }
         }
@@ -3454,17 +3449,14 @@ fn fuzzy_match_end_in_chars(
     let mut last_index = start;
     let mut next_index = start.saturating_add(1);
     for target in pattern.iter().skip(1) {
-        let Some(found) = chars
+        let found = chars
             .get(next_index..)
             .and_then(|slice| {
                 slice
                     .iter()
                     .position(|ch| normalize_search_char(*ch, case_sensitive) == *target)
             })
-            .map(|offset| next_index + offset)
-        else {
-            return None;
-        };
+            .map(|offset| next_index + offset)?;
         last_index = found;
         next_index = found.saturating_add(1);
     }
