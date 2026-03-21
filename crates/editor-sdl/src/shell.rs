@@ -3,7 +3,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -100,7 +100,7 @@ struct ClipboardContext {
 }
 
 thread_local! {
-    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = RefCell::new(None);
+    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
 }
 
 fn register_clipboard_context(video: sdl3::VideoSubsystem) {
@@ -726,6 +726,9 @@ enum PickerAction {
     ExecuteCommand(String),
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
+    CreateWorkspaceFile {
+        root: PathBuf,
+    },
     ActivateTheme(String),
     VimSearch(VimSearchDirection),
     VimSearchResult {
@@ -2975,6 +2978,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     open_workspace_file(runtime, &path)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::CreateWorkspaceFile { root } => {
+                    create_workspace_file_from_query(runtime, &root, &query)?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::ActivateTheme(theme_id) => {
                     let registry = runtime
                         .services_mut()
@@ -4018,7 +4025,7 @@ fn store_yank_register(
     let vim = shell_ui_mut(runtime)?.vim_mut();
     vim.yank = Some(yank.clone());
     if let Some(register) = vim.active_register.take() {
-        vim.registers.insert(register, yank);
+        vim.registers.insert(register, yank.clone());
     }
     if sync_to_system_clipboard {
         let text = yank_to_clipboard_text(&yank);
@@ -5448,9 +5455,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
         vim.registers.get(&register).cloned().or(fallback_yank)
     } else {
         let clipboard_text = read_system_clipboard();
-        let clipboard_yank = clipboard_text
-            .as_deref()
-            .and_then(|text| yank_from_clipboard_text(text));
+        let clipboard_yank = clipboard_text.as_deref().and_then(yank_from_clipboard_text);
         // Prefer internal block yanks when the clipboard matches them, since block shapes
         // cannot be reconstructed from clipboard text alone.
         let prefer_internal_block = match (fallback_yank.as_ref(), clipboard_text.as_deref()) {
@@ -5978,6 +5983,50 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
     Ok(buffer_id)
 }
 
+fn create_workspace_file_from_query(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    query: &str,
+) -> Result<(), String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let input_path = PathBuf::from(trimmed);
+    if input_path.is_absolute() {
+        return Err(format!(
+            "workspace file path must be relative: {}",
+            input_path.display()
+        ));
+    }
+
+    if input_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("workspace file path must not contain `..`".to_owned());
+    }
+
+    if input_path.file_name().is_none() {
+        return Err("workspace file path must include a file name".to_owned());
+    }
+
+    let path = root.join(input_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create `{}`: {error}", parent.display()))?;
+    }
+
+    if !path.exists() {
+        fs::File::create(&path)
+            .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
+    }
+
+    open_workspace_file(runtime, &path)?;
+    Ok(())
+}
+
 fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverlay, String> {
     match provider {
         "commands" => Ok(command_picker_overlay(runtime)),
@@ -6215,7 +6264,11 @@ fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverla
         })
         .collect();
 
-    Ok(PickerOverlay::from_entries("Workspace Files", entries))
+    let mut overlay = PickerOverlay::from_entries("Workspace Files", entries);
+    overlay.submit_action = Some(PickerAction::CreateWorkspaceFile {
+        root: root.to_path_buf(),
+    });
+    Ok(overlay)
 }
 
 fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {

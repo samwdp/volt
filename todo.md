@@ -1,5 +1,5 @@
 - [x] TODO: yanking should copy to the system clipboard and "p" and "P" commands should take from the system clipboard and insert the text
-- [ ] TODO: workspace list files should create a new file if there is no match. If i put dir1/dir2/test.md this should create the file at that directory path
+- [x] TODO: workspace list files should create a new file if there is no match. If i put dir1/dir2/test.md this should create the file at that directory path
 - [ ] TODO: smart line wrapping when a line exceeds the width of the screen
 - [ ] TODO: buffer close command => picker to close the buffer and a command to immideaitly close the buffer. Should prompt user to save before closing if it has been modified
 - [ ] TODO: backspace and should repeat when held
