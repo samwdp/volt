@@ -1,4 +1,6 @@
 use std::{
+    borrow::Cow,
+    cell::RefCell,
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
@@ -92,6 +94,71 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
 ));
+
+struct ClipboardContext {
+    video: sdl3::VideoSubsystem,
+}
+
+thread_local! {
+    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = RefCell::new(None);
+}
+
+fn register_clipboard_context(video: sdl3::VideoSubsystem) {
+    CLIPBOARD_CONTEXT.with(|context| {
+        *context.borrow_mut() = Some(ClipboardContext { video });
+    });
+}
+
+fn with_clipboard_util<T>(f: impl FnOnce(&sdl3::clipboard::ClipboardUtil) -> T) -> Option<T> {
+    CLIPBOARD_CONTEXT.with(|context| {
+        context.borrow().as_ref().map(|context| {
+            let clipboard = context.video.clipboard();
+            f(&clipboard)
+        })
+    })
+}
+
+fn write_system_clipboard(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(Err(error)) = with_clipboard_util(|clipboard| clipboard.set_clipboard_text(text)) {
+        eprintln!("Failed to write clipboard text: {error}.");
+    }
+}
+
+fn read_system_clipboard() -> Option<String> {
+    with_clipboard_util(|clipboard| {
+        if !clipboard.has_clipboard_text() {
+            return None;
+        }
+        clipboard.clipboard_text().ok()
+    })
+    .flatten()
+    .filter(|text| !text.is_empty())
+}
+
+fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {
+    match yank {
+        YankRegister::Character(text) => Cow::Borrowed(text),
+        YankRegister::Line(text) => {
+            if text.ends_with('\n') {
+                Cow::Borrowed(text)
+            } else {
+                Cow::Owned(format!("{text}\n"))
+            }
+        }
+        YankRegister::Block(lines) => Cow::Owned(lines.join("\n")),
+    }
+}
+
+fn yank_from_clipboard_text(text: &str) -> Option<YankRegister> {
+    if text.ends_with('\n') {
+        Some(YankRegister::Line(text.to_owned()))
+    } else {
+        Some(YankRegister::Character(text.to_owned()))
+    }
+}
 
 enum DrawTarget<'a> {
     Scene(&'a mut Vec<DrawCommand>),
@@ -1881,6 +1948,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let video = sdl_context
         .video()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
     let mut state = ShellState::new()?;
@@ -3942,11 +4010,19 @@ fn transform_case_text(text: &str, operator: VimOperator) -> String {
         .collect()
 }
 
-fn store_yank_register(runtime: &mut EditorRuntime, yank: YankRegister) -> Result<(), String> {
+fn store_yank_register(
+    runtime: &mut EditorRuntime,
+    yank: YankRegister,
+    sync_to_system_clipboard: bool,
+) -> Result<(), String> {
     let vim = shell_ui_mut(runtime)?.vim_mut();
     vim.yank = Some(yank.clone());
     if let Some(register) = vim.active_register.take() {
         vim.registers.insert(register, yank);
+    }
+    if sync_to_system_clipboard {
+        let text = yank_to_clipboard_text(&yank);
+        write_system_clipboard(text.as_ref());
     }
     Ok(())
 }
@@ -4093,7 +4169,7 @@ fn apply_operator_to_range(
         } else {
             YankRegister::Character(removed.clone())
         };
-        store_yank_register(runtime, yank)?;
+        store_yank_register(runtime, yank, operator == VimOperator::Yank)?;
     }
 
     match operator {
@@ -4163,7 +4239,11 @@ fn apply_block_operator(
         operator,
         VimOperator::Delete | VimOperator::Change | VimOperator::Yank
     ) {
-        store_yank_register(runtime, YankRegister::Block(yanked))?;
+        store_yank_register(
+            runtime,
+            YankRegister::Block(yanked),
+            operator == VimOperator::Yank,
+        )?;
     }
     let target_cursor = ranges[0].start();
 
@@ -5359,15 +5439,35 @@ fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     start_change_recording(runtime)?;
-    let yank = {
+    let (active_register, fallback_yank) = {
         let vim = shell_ui_mut(runtime)?.vim_mut();
-        if let Some(register) = vim.active_register.take() {
-            vim.registers
-                .get(&register)
-                .cloned()
-                .or_else(|| vim.yank.clone())
+        (vim.active_register.take(), vim.yank.clone())
+    };
+    let yank = if let Some(register) = active_register {
+        let vim = shell_ui_mut(runtime)?.vim_mut();
+        vim.registers.get(&register).cloned().or(fallback_yank)
+    } else {
+        let clipboard_text = read_system_clipboard();
+        let clipboard_yank = clipboard_text
+            .as_deref()
+            .and_then(|text| yank_from_clipboard_text(text));
+        // Prefer internal block yanks when the clipboard matches them, since block shapes
+        // cannot be reconstructed from clipboard text alone.
+        let prefer_internal_block = match (fallback_yank.as_ref(), clipboard_text.as_deref()) {
+            (Some(block @ YankRegister::Block(_)), Some(text)) => {
+                let block_text = yank_to_clipboard_text(block);
+                text == block_text.as_ref()
+            }
+            (Some(YankRegister::Block(_)), None) => true,
+            _ => false,
+        };
+        if prefer_internal_block {
+            fallback_yank
+        } else if let Some(clipboard) = clipboard_yank {
+            shell_ui_mut(runtime)?.vim_mut().yank = Some(clipboard.clone());
+            Some(clipboard)
         } else {
-            vim.yank.clone()
+            fallback_yank
         }
     };
     let Some(yank) = yank else {
