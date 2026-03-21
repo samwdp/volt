@@ -2532,6 +2532,7 @@ fn apply_window_opacity(
 ) -> Result<(), ShellError> {
     let opacity = match opacity_type {
         OpacityType::Transparent => opacity,
+        // Keep window opacity at 1.0 for backdrops so text stays fully opaque.
         OpacityType::Win32Backdrop(_) => 1.0,
     };
     window
@@ -2556,7 +2557,7 @@ fn apply_win32_backdrop(window: &Window, opacity_type: OpacityType) -> Result<()
         Win32Backdrop::Auto => DWMSBT_AUTO,
         Win32Backdrop::None => DWMSBT_NONE,
         Win32Backdrop::Mica => DWMSBT_MAINWINDOW,
-        // Mica Alt maps to the tabbed system backdrop on Windows 11.
+        // Mica Alt and tabbed both map to the tabbed system backdrop on Windows 11.
         Win32Backdrop::MicaAlt => DWMSBT_TABBEDWINDOW,
         Win32Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
         Win32Backdrop::Tabbed => DWMSBT_TABBEDWINDOW,
@@ -2574,7 +2575,8 @@ fn apply_win32_backdrop(window: &Window, opacity_type: OpacityType) -> Result<()
     };
     if result != 0 {
         return Err(ShellError::Sdl(format!(
-            "failed to set win32 backdrop: {result}"
+            "failed to set win32 backdrop: 0x{result:08X}",
+            result = result as u32
         )));
     }
     Ok(())
