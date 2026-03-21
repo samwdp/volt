@@ -3369,8 +3369,8 @@ fn vim_text_object_kind(chord: &str) -> Option<VimTextObjectKind> {
     }
 }
 
-fn search_is_case_sensitive(query: &str) -> bool {
-    query.chars().any(|ch| ch.is_uppercase())
+fn search_is_case_sensitive(_query: &str) -> bool {
+    false
 }
 
 fn normalize_search_char(ch: char, case_sensitive: bool) -> char {
@@ -3609,7 +3609,8 @@ fn search_buffer(
     direction: VimSearchDirection,
     query: &str,
 ) -> Option<TextPoint> {
-    let pattern = query.chars().collect::<Vec<_>>();
+    let case_sensitive = search_is_case_sensitive(query);
+    let pattern = normalize_search_pattern(query, case_sensitive);
     if pattern.is_empty() {
         return None;
     }
@@ -3621,7 +3622,7 @@ fn search_buffer(
                 .point_after(cursor)
                 .map(|point| buffer.text.point_to_char_index(point))
                 .unwrap_or(buffer.text.char_count());
-            search_forward(buffer, start_char, &pattern, true)
+            search_forward(buffer, start_char, &pattern, case_sensitive, true)
         }
         VimSearchDirection::Backward => {
             let start_char = buffer
@@ -3629,7 +3630,7 @@ fn search_buffer(
                 .point_before(cursor)
                 .map(|point| buffer.text.point_to_char_index(point))
                 .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
-            search_backward(buffer, start_char, &pattern, true)
+            search_backward(buffer, start_char, &pattern, case_sensitive, true)
         }
     };
 
@@ -3643,7 +3644,7 @@ fn search_buffer(
                 .point_after(cursor)
                 .map(|point| buffer.text.point_to_char_index(point))
                 .unwrap_or(buffer.text.char_count());
-            search_fuzzy_forward(buffer, start_char, &pattern, true)
+            search_fuzzy_forward(buffer, start_char, &pattern, case_sensitive, true)
         }
         VimSearchDirection::Backward => {
             let start_char = buffer
@@ -3651,7 +3652,7 @@ fn search_buffer(
                 .point_before(cursor)
                 .map(|point| buffer.text.point_to_char_index(point))
                 .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
-            search_fuzzy_backward(buffer, start_char, &pattern, true)
+            search_fuzzy_backward(buffer, start_char, &pattern, case_sensitive, true)
         }
     }
 }
@@ -3670,7 +3671,11 @@ struct SearchPickerData {
     selected_index: usize,
 }
 
-fn exact_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<usize> {
+fn exact_match_positions_in_chars(
+    chars: &[char],
+    pattern: &[char],
+    case_sensitive: bool,
+) -> Vec<usize> {
     if pattern.is_empty() || pattern.len() > chars.len() {
         return Vec::new();
     }
@@ -3681,7 +3686,9 @@ fn exact_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<usize
         if pattern
             .iter()
             .enumerate()
-            .all(|(offset, expected)| chars[start + offset] == *expected)
+            .all(|(offset, expected)| {
+                normalize_search_char(chars[start + offset], case_sensitive) == *expected
+            })
         {
             matches.push(start);
         }
@@ -3689,8 +3696,19 @@ fn exact_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<usize
     matches
 }
 
-fn fuzzy_match_end_in_chars(chars: &[char], start: usize, pattern: &[char]) -> Option<usize> {
-    if pattern.is_empty() || chars.get(start) != Some(&pattern[0]) {
+fn fuzzy_match_end_in_chars(
+    chars: &[char],
+    start: usize,
+    pattern: &[char],
+    case_sensitive: bool,
+) -> Option<usize> {
+    if pattern.is_empty()
+        || chars
+            .get(start)
+            .copied()
+            .map(|ch| normalize_search_char(ch, case_sensitive))
+            != Some(pattern[0])
+    {
         return None;
     }
 
@@ -3699,7 +3717,11 @@ fn fuzzy_match_end_in_chars(chars: &[char], start: usize, pattern: &[char]) -> O
     for target in pattern.iter().skip(1) {
         let Some(found) = chars
             .get(next_index..)
-            .and_then(|slice| slice.iter().position(|ch| ch == target))
+            .and_then(|slice| {
+                slice
+                    .iter()
+                    .position(|ch| normalize_search_char(*ch, case_sensitive) == *target)
+            })
             .map(|offset| next_index + offset)
         else {
             return None;
@@ -3710,14 +3732,18 @@ fn fuzzy_match_end_in_chars(chars: &[char], start: usize, pattern: &[char]) -> O
     Some(last_index)
 }
 
-fn fuzzy_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<(usize, usize)> {
+fn fuzzy_match_positions_in_chars(
+    chars: &[char],
+    pattern: &[char],
+    case_sensitive: bool,
+) -> Vec<(usize, usize)> {
     if pattern.is_empty() || pattern.len() > chars.len() {
         return Vec::new();
     }
 
     let mut matches = Vec::new();
     for start in 0..chars.len() {
-        if let Some(end) = fuzzy_match_end_in_chars(chars, start, pattern) {
+        if let Some(end) = fuzzy_match_end_in_chars(chars, start, pattern, case_sensitive) {
             matches.push((start, end.saturating_sub(start)));
         }
     }
@@ -3790,7 +3816,8 @@ fn vim_search_entries(
         };
     }
 
-    let pattern: Vec<char> = query.chars().collect();
+    let case_sensitive = search_is_case_sensitive(query);
+    let pattern = normalize_search_pattern(query, case_sensitive);
     let line_count = buffer.text.line_count();
     let mut matches = Vec::new();
 
@@ -3799,7 +3826,7 @@ fn vim_search_entries(
             continue;
         };
         let chars: Vec<char> = line.chars().collect();
-        let positions = exact_match_positions_in_chars(&chars, &pattern);
+        let positions = exact_match_positions_in_chars(&chars, &pattern, case_sensitive);
         for start in positions {
             let point = TextPoint::new(line_index, start);
             let char_index = buffer.text.point_to_char_index(point);
@@ -3814,15 +3841,15 @@ fn vim_search_entries(
 
     if matches.is_empty() {
         for line_index in 0..line_count {
-            let Some(line) = buffer.text.line(line_index) else {
-                continue;
-            };
-            let chars: Vec<char> = line.chars().collect();
-            let positions = fuzzy_match_positions_in_chars(&chars, &pattern);
-            for (start, span) in positions {
-                let point = TextPoint::new(line_index, start);
-                let char_index = buffer.text.point_to_char_index(point);
-                matches.push(VimSearchMatch {
+        let Some(line) = buffer.text.line(line_index) else {
+            continue;
+        };
+        let chars: Vec<char> = line.chars().collect();
+        let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
+        for (start, span) in positions {
+            let point = TextPoint::new(line_index, start);
+            let char_index = buffer.text.point_to_char_index(point);
+            matches.push(VimSearchMatch {
                     point,
                     char_index,
                     span,
@@ -7854,6 +7881,19 @@ mod tests {
         state.handle_text_input("otw")?;
         assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
         assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_search_prompt_matches_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("Users user");
+
+        state.handle_text_input("/")?;
+        state.handle_text_input("user")?;
+        let picker = state.ui()?.picker().ok_or("missing search picker")?;
+        assert_eq!(picker.session().match_count(), 2);
 
         Ok(())
     }
