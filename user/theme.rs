@@ -42,7 +42,10 @@ pub fn themes() -> Vec<Theme> {
         }
     }
 
-    if let Some(index) = themes.iter().position(|theme| theme.id() == DEFAULT_THEME_ID) {
+    if let Some(index) = themes
+        .iter()
+        .position(|theme| theme.id() == DEFAULT_THEME_ID)
+    {
         let theme = themes.remove(index);
         themes.insert(0, theme);
     }
@@ -83,8 +86,8 @@ fn list_theme_files(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
 }
 
 fn parse_theme(path: &Path, source: &str) -> Result<Theme, String> {
-    let value: toml::Value = toml::from_str(source)
-        .map_err(|error| format!("toml parse error: {error}"))?;
+    let value: toml::Value =
+        toml::from_str(source).map_err(|error| format!("toml parse error: {error}"))?;
     let table = value
         .as_table()
         .ok_or_else(|| "theme root must be a table".to_owned())?;
@@ -147,15 +150,12 @@ fn parse_color(token: &str, value: &toml::Value) -> Result<Color, String> {
             let a = parse_hex_channel(&hex[6..8])?;
             Ok(Color::rgba(r, g, b, a))
         }
-        _ => Err(format!(
-            "token `{token}` must be a 6 or 8 digit hex value"
-        )),
+        _ => Err(format!("token `{token}` must be a 6 or 8 digit hex value")),
     }
 }
 
 fn parse_hex_channel(hex: &str) -> Result<u8, String> {
-    u8::from_str_radix(hex, 16)
-        .map_err(|_| format!("invalid hex channel `{hex}`"))
+    u8::from_str_radix(hex, 16).map_err(|_| format!("invalid hex channel `{hex}`"))
 }
 
 fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String> {
@@ -203,9 +203,6 @@ font_size = 18
         assert!(theme.color("ui.background").is_some());
         assert!(theme.option_string("font").is_some());
         assert!(theme.option_number("font_size").is_some());
-        assert_eq!(
-            theme.option_bool("ui.line-number.relative"),
-            Some(true)
-        );
+        assert_eq!(theme.option_bool("ui.line-number.relative"), Some(true));
     }
 }

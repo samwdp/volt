@@ -292,7 +292,8 @@ impl ThemeRegistry {
 
     /// Resolves a boolean option from the active theme.
     pub fn resolve_bool(&self, option: &str) -> Option<bool> {
-        self.active_theme().and_then(|theme| theme.option_bool(option))
+        self.active_theme()
+            .and_then(|theme| theme.option_bool(option))
     }
 
     /// Resolves a numeric option from the active theme.
@@ -364,10 +365,7 @@ mod tests {
             registry.resolve_option("cursor_roundness"),
             Some(&ThemeOption::Number(3.0))
         );
-        assert_eq!(
-            registry.resolve_bool("ui.line-number.relative"),
-            Some(true)
-        );
+        assert_eq!(registry.resolve_bool("ui.line-number.relative"), Some(true));
         assert_eq!(registry.resolve_number("cursor_roundness"), Some(3.0));
     }
 }

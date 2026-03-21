@@ -4,10 +4,10 @@
 //! under the `user/` directory so the future extension model matches the planned
 //! 4coder-style workflow.
 
-/// Debug adapter integration hooks and commands.
-pub mod dap;
 /// Buffer management and save commands.
 pub mod buffer;
+/// Debug adapter integration hooks and commands.
+pub mod dap;
 /// Git workflows and repository-oriented commands.
 pub mod git;
 /// Language-specific registrations.
@@ -157,11 +157,15 @@ mod tests {
         assert!(ids.contains(&"gruvbox-light"));
         assert!(ids.contains(&"vscode-dark"));
         assert!(ids.contains(&"vscode-light"));
-        assert!(themes
-            .iter()
-            .any(|theme| theme.color("syntax.keyword").is_some()));
-        assert!(themes
-            .iter()
-            .any(|theme| theme.color("ui.yank-flash").is_some()));
+        assert!(
+            themes
+                .iter()
+                .any(|theme| theme.color("syntax.keyword").is_some())
+        );
+        assert!(
+            themes
+                .iter()
+                .any(|theme| theme.color("ui.yank-flash").is_some())
+        );
     }
 }

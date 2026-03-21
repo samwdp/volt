@@ -4,8 +4,7 @@ use std::{
     collections::BTreeMap,
     env,
     error::Error,
-    fmt,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1056,7 +1055,10 @@ enum PickerAction {
         target: TextPoint,
     },
     InstallTreeSitterLanguage(String),
-    CreateWorkspace { name: String, root: PathBuf },
+    CreateWorkspace {
+        name: String,
+        root: PathBuf,
+    },
     SwitchWorkspace(WorkspaceId),
     DeleteWorkspace(WorkspaceId),
 }
@@ -1093,7 +1095,11 @@ impl PickerOverlay {
         }
     }
 
-    fn search(title: impl Into<String>, direction: VimSearchDirection, entries: Vec<PickerEntry>) -> Self {
+    fn search(
+        title: impl Into<String>,
+        direction: VimSearchDirection,
+        entries: Vec<PickerEntry>,
+    ) -> Self {
         let title = title.into();
         let mut actions = BTreeMap::new();
         let items = entries
@@ -1893,24 +1899,20 @@ impl ShellState {
             }
             VimPending::MarkSet => {
                 if let Some(mark) = chord.chars().next() {
-                    let buffer_id = active_shell_buffer_id(&self.runtime)
-                        .map_err(ShellError::Runtime)?;
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let point = self.active_buffer_mut()?.cursor_point();
-                    self.ui_mut()?.vim_mut().marks.insert(
-                        mark,
-                        VimMark {
-                            buffer_id,
-                            point,
-                        },
-                    );
+                    self.ui_mut()?
+                        .vim_mut()
+                        .marks
+                        .insert(mark, VimMark { buffer_id, point });
                 }
                 self.ui_mut()?.vim_mut().clear_transient();
                 Ok(true)
             }
             VimPending::MarkJump { linewise } => {
                 if let Some(mark) = chord.chars().next() {
-                    jump_to_mark(&mut self.runtime, mark, linewise)
-                        .map_err(ShellError::Runtime)?;
+                    jump_to_mark(&mut self.runtime, mark, linewise).map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
                 }
@@ -1918,8 +1920,7 @@ impl ShellState {
             }
             VimPending::MacroRecord => {
                 if let Some(register) = chord.chars().next() {
-                    start_macro_record(&mut self.runtime, register)
-                        .map_err(ShellError::Runtime)?;
+                    start_macro_record(&mut self.runtime, register).map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
                 }
@@ -3090,14 +3091,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkSet);
                 }
                 "goto-mark-line" => {
-                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
-                        linewise: true,
-                    });
+                    shell_ui_mut(runtime)?.vim_mut().pending =
+                        Some(VimPending::MarkJump { linewise: true });
                 }
                 "goto-mark" => {
-                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
-                        linewise: false,
-                    });
+                    shell_ui_mut(runtime)?.vim_mut().pending =
+                        Some(VimPending::MarkJump { linewise: false });
                 }
                 "toggle-macro-record" => {
                     if shell_ui(runtime)?.vim().recording_macro.is_some() {
@@ -3182,10 +3181,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_WORKSPACE_FORMAT, "shell.workspace-format", |_, runtime| {
-            format_workspace(runtime)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_WORKSPACE_FORMAT,
+            "shell.workspace-format",
+            |_, runtime| {
+                format_workspace(runtime)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_BUFFER_SAVE, "shell.buffer-save", |event, runtime| {
@@ -3193,22 +3196,24 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .workspace_id
                 .or_else(|| runtime.model().active_workspace_id().ok())
                 .ok_or_else(|| "buffer.save hook missing workspace".to_owned())?;
-            let buffer_id = event
-                .buffer_id
-                .unwrap_or(active_shell_buffer_id(runtime)?);
+            let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
             save_buffer(runtime, workspace_id, buffer_id)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_WORKSPACE_SAVE, "shell.workspace-save", |event, runtime| {
-            let workspace_id = event
-                .workspace_id
-                .or_else(|| runtime.model().active_workspace_id().ok())
-                .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
-            save_workspace(runtime, workspace_id)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_WORKSPACE_SAVE,
+            "shell.workspace-save",
+            |event, runtime| {
+                let workspace_id = event
+                    .workspace_id
+                    .or_else(|| runtime.model().active_workspace_id().ok())
+                    .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
+                save_workspace(runtime, workspace_id)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_OPEN, "shell.open-picker", |event, runtime| {
@@ -3295,7 +3300,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         .services_mut()
                         .get_mut::<ThemeRegistry>()
                         .ok_or_else(|| "theme registry service missing".to_owned())?;
-                    registry.activate(&theme_id).map_err(|error| error.to_string())?;
+                    registry
+                        .activate(&theme_id)
+                        .map_err(|error| error.to_string())?;
                 }
                 PickerAction::VimSearch(direction) => {
                     submit_vim_search(runtime, direction, &query)?;
@@ -3601,8 +3608,7 @@ fn find_char_forward(
 ) -> Option<usize> {
     let char_count = buffer.text.char_count();
     for char_index in start_char..char_count {
-        if char_at_index(buffer, char_index)
-            .map(|ch| normalize_search_char(ch, case_sensitive))
+        if char_at_index(buffer, char_index).map(|ch| normalize_search_char(ch, case_sensitive))
             == Some(target)
         {
             return Some(char_index);
@@ -3618,8 +3624,7 @@ fn fuzzy_match_end(
     case_sensitive: bool,
 ) -> Option<usize> {
     if pattern.is_empty()
-        || char_at_index(buffer, start_char)
-            .map(|ch| normalize_search_char(ch, case_sensitive))
+        || char_at_index(buffer, start_char).map(|ch| normalize_search_char(ch, case_sensitive))
             != Some(pattern[0])
     {
         return None;
@@ -3656,7 +3661,8 @@ fn search_fuzzy_forward(
 
     if first_pass_start <= max_start {
         for char_index in first_pass_start..=max_start {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3671,7 +3677,8 @@ fn search_fuzzy_forward(
 
     if wrap {
         for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3715,7 +3722,8 @@ fn search_fuzzy_backward(
 
     if wrap && first_pass_start < max_start {
         for char_index in ((first_pass_start + 1)..=max_start).rev() {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3807,13 +3815,9 @@ fn exact_match_positions_in_chars(
     let max_start = chars.len().saturating_sub(pattern.len());
     let mut matches = Vec::new();
     for start in 0..=max_start {
-        if pattern
-            .iter()
-            .enumerate()
-            .all(|(offset, expected)| {
-                normalize_search_char(chars[start + offset], case_sensitive) == *expected
-            })
-        {
+        if pattern.iter().enumerate().all(|(offset, expected)| {
+            normalize_search_char(chars[start + offset], case_sensitive) == *expected
+        }) {
             matches.push(start);
         }
     }
@@ -3874,7 +3878,11 @@ fn fuzzy_match_positions_in_chars(
     matches
 }
 
-fn search_start_char(buffer: &ShellBuffer, direction: VimSearchDirection, pattern_len: usize) -> usize {
+fn search_start_char(
+    buffer: &ShellBuffer,
+    direction: VimSearchDirection,
+    pattern_len: usize,
+) -> usize {
     let cursor = buffer.cursor_point();
     match direction {
         VimSearchDirection::Forward => buffer
@@ -3965,15 +3973,15 @@ fn vim_search_entries(
 
     if matches.is_empty() {
         for line_index in 0..line_count {
-        let Some(line) = buffer.text.line(line_index) else {
-            continue;
-        };
-        let chars: Vec<char> = line.chars().collect();
-        let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
-        for (start, span) in positions {
-            let point = TextPoint::new(line_index, start);
-            let char_index = buffer.text.point_to_char_index(point);
-            matches.push(VimSearchMatch {
+            let Some(line) = buffer.text.line(line_index) else {
+                continue;
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
+            for (start, span) in positions {
+                let point = TextPoint::new(line_index, start);
+                let char_index = buffer.text.point_to_char_index(point);
+                matches.push(VimSearchMatch {
                     point,
                     char_index,
                     span,
@@ -4440,11 +4448,7 @@ fn restore_last_visual_selection(runtime: &mut EditorRuntime) -> Result<(), Stri
     Ok(())
 }
 
-fn jump_to_mark(
-    runtime: &mut EditorRuntime,
-    mark: char,
-    linewise: bool,
-) -> Result<(), String> {
+fn jump_to_mark(runtime: &mut EditorRuntime, mark: char, linewise: bool) -> Result<(), String> {
     let snapshot = shell_ui(runtime)?.vim().marks.get(&mark).copied();
     let Some(snapshot) = snapshot else {
         return Ok(());
@@ -4580,7 +4584,12 @@ fn apply_block_operator(
                 buffer.set_cursor(target_cursor);
                 buffer.mark_syntax_dirty();
             }
-            prepare_block_insert_state(runtime, selection, selection.start_col, target_cursor.line)?;
+            prepare_block_insert_state(
+                runtime,
+                selection,
+                selection.start_col,
+                target_cursor.line,
+            )?;
             shell_ui_mut(runtime)?.enter_insert_mode();
             mark_change_finish_on_normal(runtime)?;
         }
@@ -4755,9 +4764,8 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
         }
 
         let path = path.ok_or_else(|| format!("file buffer `{buffer_id}` is missing a path"))?;
-        save_buffer(runtime, workspace_id, buffer_id).map_err(|error| {
-            format!("failed to save `{}`: {error}", path.display())
-        })?;
+        save_buffer(runtime, workspace_id, buffer_id)
+            .map_err(|error| format!("failed to save `{}`: {error}", path.display()))?;
     }
 
     Ok(())
@@ -4790,7 +4798,13 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
         } else {
             None
         };
-        (path.to_path_buf(), extension, original_cursor, selection, buffer.kind.clone())
+        (
+            path.to_path_buf(),
+            extension,
+            original_cursor,
+            selection,
+            buffer.kind.clone(),
+        )
     };
 
     if buffer_kind != BufferKind::File {
@@ -5440,11 +5454,7 @@ fn open_vim_search_prompt(
         VimSearchDirection::Forward => "Search /",
         VimSearchDirection::Backward => "Search ?",
     };
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::search(
-        title,
-        direction,
-        Vec::new(),
-    ));
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::search(title, direction, Vec::new()));
     Ok(())
 }
 
@@ -5605,7 +5615,10 @@ fn resolve_g_prefix(
 fn start_vim_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
     if matches!(
         operator,
-        VimOperator::Delete | VimOperator::Change | VimOperator::ToggleCase | VimOperator::Lowercase
+        VimOperator::Delete
+            | VimOperator::Change
+            | VimOperator::ToggleCase
+            | VimOperator::Lowercase
             | VimOperator::Uppercase
     ) {
         start_change_recording(runtime)?;
@@ -5746,7 +5759,10 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     let yank = {
         let vim = shell_ui_mut(runtime)?.vim_mut();
         if let Some(register) = vim.active_register.take() {
-            vim.registers.get(&register).cloned().or_else(|| vim.yank.clone())
+            vim.registers
+                .get(&register)
+                .cloned()
+                .or_else(|| vim.yank.clone())
         } else {
             vim.yank.clone()
         }
@@ -7877,9 +7893,7 @@ mod tests {
     fn vim_visual_block_insert_applies_to_all_lines() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = ShellState::new()?;
         state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
-        state
-            .active_buffer_mut()?
-            .set_cursor(TextPoint::new(0, 0));
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
         state.handle_text_input("v")?;
         assert_eq!(state.input_mode()?, InputMode::Visual);
@@ -8278,11 +8292,7 @@ mod tests {
         state.handle_text_input("!")?;
         assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
         state.handle_text_input("q")?;
-        assert!(state
-            .ui()?
-            .vim()
-            .macros
-            .contains_key(&'a'));
+        assert!(state.ui()?.vim().macros.contains_key(&'a'));
 
         state.active_buffer_mut()?.text = TextBuffer::from_text("beta");
         state.handle_text_input("@")?;

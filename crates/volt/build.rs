@@ -84,10 +84,9 @@ fn write_ico_from_png(
     let png_bytes = std::fs::read(png_path)?;
     let (width, height) = png_dimensions(&png_bytes)?;
     if width == 0 || height == 0 || width > 256 || height > 256 {
-        return Err(format!(
-            "icon size must be between 1 and 256 pixels (got {width}x{height})"
-        )
-        .into());
+        return Err(
+            format!("icon size must be between 1 and 256 pixels (got {width}x{height})").into(),
+        );
     }
 
     let width_byte = if width == 256 { 0 } else { width as u8 };

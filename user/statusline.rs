@@ -119,6 +119,9 @@ mod tests {
             lsp_server: None,
         });
 
-        assert_eq!(statusline, "NORMAL | @q | default | *scratch* | Ln 1, Col 1");
+        assert_eq!(
+            statusline,
+            "NORMAL | @q | default | *scratch* | Ln 1, Col 1"
+        );
     }
 }

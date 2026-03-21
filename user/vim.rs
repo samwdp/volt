@@ -632,7 +632,11 @@ pub fn package() -> PluginPackage {
         // Registers and macros
         normal_binding("\"", "vim.select-register", PluginKeymapScope::Workspace),
         normal_binding("q", "vim.toggle-macro-record", PluginKeymapScope::Workspace),
-        normal_binding("@", "vim.start-macro-playback", PluginKeymapScope::Workspace),
+        normal_binding(
+            "@",
+            "vim.start-macro-playback",
+            PluginKeymapScope::Workspace,
+        ),
         // Marks
         normal_binding("m", "vim.set-mark", PluginKeymapScope::Workspace),
         normal_binding("'", "vim.goto-mark-line", PluginKeymapScope::Workspace),
@@ -670,7 +674,11 @@ pub fn package() -> PluginPackage {
         normal_binding("r", "vim.replace-char", PluginKeymapScope::Workspace),
         normal_binding("R", "vim.enter-replace-mode", PluginKeymapScope::Workspace),
         normal_binding("~", "vim.toggle-case", PluginKeymapScope::Workspace),
-        normal_binding("=", "vim.start-format-operator", PluginKeymapScope::Workspace),
+        normal_binding(
+            "=",
+            "vim.start-format-operator",
+            PluginKeymapScope::Workspace,
+        ),
         // Visual mode
         normal_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
         normal_binding(
