@@ -1,47 +1,4 @@
-use std::path::{Path, PathBuf};
-
 use editor_theme::{BlendMode, Color, Theme};
-
-/// Returns the themes directory.
-///
-/// Tries `<cwd>/user/themes` first (runtime layout), then falls back to
-/// `<cwd>/themes` (package-test layout where CWD is already `user/`).
-fn themes_dir() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let with_user = cwd.join("user").join("themes");
-    if with_user.is_dir() {
-        with_user
-    } else {
-        cwd.join("themes")
-    }
-}
-
-/// Loads all `.toml` theme files found in `dir`.
-///
-/// Files that cannot be read or that fail to parse are silently skipped so
-/// that a single bad file never prevents the rest from loading.
-fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut themes = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Some(theme) = parse_theme(&source) {
-            themes.push(theme);
-        }
-    }
-    themes.sort_by(|a, b| a.id().cmp(b.id()));
-    themes
-}
 
 /// Parses a theme from a TOML-like source text.
 ///
@@ -186,19 +143,28 @@ fn parse_hex_color(s: &str) -> Option<Color> {
     }
 }
 
-/// Returns themes loaded from the `user/themes` directory at runtime.
+/// Returns all built-in themes, compiled into the binary via `include_str!`.
 ///
-/// Themes are discovered by scanning the directory for `.toml` files and
-/// parsing each one. Files that fail to parse are silently skipped.
+/// Themes are embedded at compile time from the `user/themes/*.toml` files so
+/// the binary works correctly regardless of the working directory or whether
+/// a `user/themes` folder is present at the installation path.
 pub fn themes() -> Vec<Theme> {
-    load_themes_from_dir(&themes_dir())
+    const BUNDLED: &[&str] = &[
+        include_str!("themes/gruvbox-dark.toml"),
+        include_str!("themes/gruvbox-light.toml"),
+        include_str!("themes/volt-dark.toml"),
+        include_str!("themes/volt-light.toml"),
+        include_str!("themes/vscode-dark.toml"),
+        include_str!("themes/vscode-light.toml"),
+    ];
+    let mut themes: Vec<Theme> = BUNDLED.iter().filter_map(|s| parse_theme(s)).collect();
+    themes.sort_by(|a, b| a.id().cmp(b.id()));
+    themes
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use super::{load_themes_from_dir, parse_hex_color, parse_theme};
+    use super::{parse_hex_color, parse_theme, themes};
     use editor_theme::{BlendMode, Color};
 
     #[test]
@@ -293,31 +259,29 @@ mod tests {
     }
 
     #[test]
-    fn load_themes_from_dir_reads_toml_files() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path();
+    fn themes_returns_all_bundled_themes() {
+        let t = themes();
+        assert_eq!(t.len(), 6);
 
-        fs::write(
-            path.join("alpha.toml"),
-            "id = \"alpha\"\nname = \"Alpha\"\n[tokens]\n\"syntax.keyword\" = \"#ff0000\"\n",
-        )
-        .expect("write");
-        fs::write(
-            path.join("beta.toml"),
-            "id = \"beta\"\nname = \"Beta\"\n[tokens]\n\"syntax.keyword\" = \"#00ff00\"\n",
-        )
-        .expect("write");
-        fs::write(path.join("not-a-theme.txt"), "ignored").expect("write");
+        // Sorted alphabetically by ID: g < v, "volt" < "vscode".
+        let expected_ids = [
+            "gruvbox-dark",
+            "gruvbox-light",
+            "volt-dark",
+            "volt-light",
+            "vscode-dark",
+            "vscode-light",
+        ];
+        for (theme, expected_id) in t.iter().zip(expected_ids.iter()) {
+            assert_eq!(theme.id(), *expected_id);
+            assert!(
+                theme.color("syntax.keyword").is_some(),
+                "theme `{}` missing syntax.keyword token",
+                theme.id()
+            );
+        }
 
-        let themes = load_themes_from_dir(path);
-        assert_eq!(themes.len(), 2);
-        assert_eq!(themes[0].id(), "alpha");
-        assert_eq!(themes[1].id(), "beta");
-    }
-
-    #[test]
-    fn load_themes_from_dir_returns_empty_for_missing_dir() {
-        let themes = load_themes_from_dir(std::path::Path::new("/nonexistent/path/themes"));
-        assert!(themes.is_empty());
+        let volt_dark = t.iter().find(|t| t.id() == "volt-dark").expect("volt-dark");
+        assert!(volt_dark.color("ui.yank-flash").is_some());
     }
 }
