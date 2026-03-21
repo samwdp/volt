@@ -56,6 +56,10 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
 ///
 /// [tokens]
 /// "token.name" = "#rrggbb"
+/// "token.rgba" = "#rrggbbaa"
+///
+/// [options]
+/// "ui.line-number.relative" = true
 /// ```
 ///
 /// Unrecognised lines and invalid color values are silently skipped.
@@ -67,11 +71,21 @@ fn parse_theme(source: &str) -> Option<Theme> {
     let mut font: Option<String> = None;
     let mut font_size: Option<u32> = None;
     let mut theme = None;
+    let mut section = "header";
 
     for line in source.lines() {
         let line = line.trim();
 
-        if line.is_empty() || line.starts_with('[') || line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with('[') {
+            if line.starts_with("[tokens]") {
+                section = "tokens";
+            } else if line.starts_with("[options]") {
+                section = "options";
+            }
             continue;
         }
 
@@ -82,19 +96,22 @@ fn parse_theme(source: &str) -> Option<Theme> {
         let key = key_raw.trim().trim_matches('"');
         let value = value_raw.trim().trim_matches('"');
 
-        match key {
-            "id" => id = Some(value.to_owned()),
-            "name" => name = Some(value.to_owned()),
-            "opacity" => opacity = value.parse::<f32>().ok(),
-            "blend_mode" => {
-                blend_mode = match value {
-                    "blur" => Some(BlendMode::Blur),
-                    _ => Some(BlendMode::Opacity),
-                };
-            }
-            "font" => font = Some(value.to_owned()),
-            "font_size" => font_size = value.parse::<u32>().ok(),
-            token => {
+        match section {
+            "header" => match key {
+                "id" => id = Some(value.to_owned()),
+                "name" => name = Some(value.to_owned()),
+                "opacity" => opacity = value.parse::<f32>().ok(),
+                "blend_mode" => {
+                    blend_mode = match value {
+                        "blur" => Some(BlendMode::Blur),
+                        _ => Some(BlendMode::Opacity),
+                    };
+                }
+                "font" => font = Some(value.to_owned()),
+                "font_size" => font_size = value.parse::<u32>().ok(),
+                _ => {}
+            },
+            "tokens" => {
                 if theme.is_none() {
                     if let (Some(id), Some(name)) = (id.as_deref(), name.as_deref()) {
                         theme = Some(Theme::new(id, name));
@@ -102,10 +119,28 @@ fn parse_theme(source: &str) -> Option<Theme> {
                 }
                 if let Some(color) = parse_hex_color(value) {
                     if let Some(t) = theme.take() {
-                        theme = Some(t.with_token(token, color));
+                        theme = Some(t.with_token(key, color));
                     }
                 }
             }
+            "options" => {
+                if theme.is_none() {
+                    if let (Some(id), Some(name)) = (id.as_deref(), name.as_deref()) {
+                        theme = Some(Theme::new(id, name));
+                    }
+                }
+                let bool_val = match value {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                };
+                if let Some(v) = bool_val {
+                    if let Some(t) = theme.take() {
+                        theme = Some(t.with_option(key, v));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -130,16 +165,25 @@ fn parse_theme(source: &str) -> Option<Theme> {
     Some(built)
 }
 
-/// Parses a `#rrggbb` hex color string into a [`Color`].
+/// Parses a `#rrggbb` or `#rrggbbaa` hex color string into a [`Color`].
 fn parse_hex_color(s: &str) -> Option<Color> {
     let hex = s.strip_prefix('#')?;
-    if hex.len() != 6 {
-        return None;
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Color::rgb(r, g, b))
+        }
+        8 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+            Some(Color::rgba(r, g, b, a))
+        }
+        _ => None,
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some(Color::rgb(r, g, b))
 }
 
 /// Returns themes loaded from the `user/themes` directory at runtime.
@@ -162,6 +206,14 @@ mod tests {
         assert_eq!(parse_hex_color("#181b22"), Some(Color::rgb(0x18, 0x1b, 0x22)));
         assert_eq!(parse_hex_color("#ffffff"), Some(Color::rgb(255, 255, 255)));
         assert_eq!(parse_hex_color("#000000"), Some(Color::rgb(0, 0, 0)));
+    }
+
+    #[test]
+    fn parse_hex_color_rgba_valid() {
+        assert_eq!(
+            parse_hex_color("#61afef6e"),
+            Some(Color::rgba(0x61, 0xaf, 0xef, 0x6e))
+        );
     }
 
     #[test]
@@ -196,6 +248,30 @@ mod tests {
         assert_eq!(theme.blend_mode(), BlendMode::Opacity);
         assert_eq!(theme.font(), None);
         assert_eq!(theme.font_size(), None);
+    }
+
+    #[test]
+    fn parse_theme_parses_rgba_token() {
+        let src = concat!(
+            "id = \"t\"\n",
+            "name = \"T\"\n",
+            "[tokens]\n",
+            "\"ui.yank-flash\" = \"#61afef6e\"\n",
+        );
+        let theme = parse_theme(src).expect("should parse");
+        assert_eq!(theme.color("ui.yank-flash"), Some(Color::rgba(0x61, 0xaf, 0xef, 0x6e)));
+    }
+
+    #[test]
+    fn parse_theme_parses_options() {
+        let src = concat!(
+            "id = \"t\"\n",
+            "name = \"T\"\n",
+            "[options]\n",
+            "\"ui.line-number.relative\" = true\n",
+        );
+        let theme = parse_theme(src).expect("should parse");
+        assert_eq!(theme.option("ui.line-number.relative"), Some(true));
     }
 
     #[test]

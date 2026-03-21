@@ -29,6 +29,11 @@ pub fn package() -> PluginPackage {
             "Lists the current workspace files that are visible to Git.",
             "workspace.files",
         ),
+        PluginCommand::new(
+            "workspace.save",
+            "Saves all modified file buffers in the active workspace.",
+            vec![PluginAction::emit_hook("workspace.save", None::<&str>)],
+        ),
     ])
 }
 

@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build release (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build volt (release)
+        run: cargo build -p volt --release --locked
+
+      - name: Stage release artifact
+        shell: pwsh
+        run: |
+          $dist = Join-Path $PWD "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $ext = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
+          $asset = "volt-$($env:RUNNER_OS.ToLower())-$($env:RUNNER_ARCH.ToLower())$ext"
+          $source = Join-Path $PWD "target/release/volt$ext"
+          Copy-Item -Path $source -Destination (Join-Path $dist $asset)
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-release
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true

@@ -6,6 +6,7 @@ blend_mode = "opacity"
 [tokens]
 "ui.background" = "#181b22"
 "ui.foreground" = "#d7dde8"
+"ui.yank-flash" = "#61afef6e"
 "syntax.attribute" = "#61afef"
 "syntax.comment" = "#5c6370"
 "syntax.constant" = "#d19a66"
@@ -25,3 +26,6 @@ blend_mode = "opacity"
 "syntax.type.builtin" = "#e5c07b"
 "syntax.variable" = "#e06c75"
 "syntax.variable.builtin" = "#e06c75"
+
+[options]
+"ui.line-number.relative" = true

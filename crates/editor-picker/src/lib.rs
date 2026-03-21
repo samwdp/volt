@@ -90,6 +90,7 @@ pub struct PickerSession {
     matches: Vec<PickerMatch>,
     selected_index: usize,
     result_limit: usize,
+    sort_results: bool,
 }
 
 impl PickerSession {
@@ -102,6 +103,7 @@ impl PickerSession {
             matches: Vec::new(),
             selected_index: 0,
             result_limit: usize::MAX,
+            sort_results: true,
         };
         session.recompute_matches();
         session
@@ -144,6 +146,13 @@ impl PickerSession {
         self
     }
 
+    /// Preserves the order of the underlying items when computing matches.
+    pub fn with_preserve_order(mut self) -> Self {
+        self.sort_results = false;
+        self.recompute_matches();
+        self
+    }
+
     /// Updates the retained result limit and recomputes matches.
     pub fn set_result_limit(&mut self, result_limit: usize) {
         self.result_limit = result_limit.max(1);
@@ -154,6 +163,21 @@ impl PickerSession {
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.recompute_matches();
+    }
+
+    /// Replaces the picker items and recomputes matches using the current query.
+    pub fn set_items(&mut self, items: Vec<PickerItem>) {
+        self.items = items;
+        self.recompute_matches();
+    }
+
+    /// Updates the selected match index when matches are available.
+    pub fn set_selected_index(&mut self, index: usize) {
+        if self.matches.is_empty() {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = index.min(self.matches.len() - 1);
+        }
     }
 
     /// Moves the selection down by one entry.
@@ -185,8 +209,10 @@ impl PickerSession {
             .iter()
             .filter_map(|item| match_item(&self.query, item))
             .collect();
-        self.matches
-            .sort_by_key(|matched| (Reverse(matched.score), matched.item.label().to_owned()));
+        if self.sort_results {
+            self.matches
+                .sort_by_key(|matched| (Reverse(matched.score), matched.item.label().to_owned()));
+        }
         if self.matches.len() > self.result_limit {
             self.matches.truncate(self.result_limit);
         }

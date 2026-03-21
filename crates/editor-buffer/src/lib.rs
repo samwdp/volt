@@ -111,6 +111,15 @@ impl Selection {
     }
 }
 
+/// Distinguishes Vim-style `word` and `WORD` semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordKind {
+    /// Alphanumeric and underscore word boundaries.
+    Word,
+    /// Any non-whitespace run.
+    BigWord,
+}
+
 /// Preferred newline representation when writing buffers to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineEnding {
@@ -410,7 +419,31 @@ impl TextBuffer {
 
     /// Returns the current word text object range at a point.
     pub fn word_range_at(&self, point: TextPoint, around: bool, count: usize) -> Option<TextRange> {
-        if self.char_count() == 0 || count == 0 {
+        self.word_range_at_kind(point, WordKind::Word, around, count)
+    }
+
+    /// Returns the current Vim `word` or `WORD` text object range at a point.
+    pub fn word_range_at_kind(
+        &self,
+        point: TextPoint,
+        kind: WordKind,
+        around: bool,
+        count: usize,
+    ) -> Option<TextRange> {
+        self.object_range_at(point, around, count, |character| {
+            matches_word_kind(character, kind)
+        })
+    }
+
+    /// Returns the delimited text object range around a point.
+    pub fn delimited_range_at(
+        &self,
+        point: TextPoint,
+        open: char,
+        close: char,
+        around: bool,
+    ) -> Option<TextRange> {
+        if self.char_count() == 0 {
             return None;
         }
 
@@ -419,27 +452,39 @@ impl TextBuffer {
             char_index = self.char_count().saturating_sub(1);
         }
 
-        if !is_word_char(self.rope.char(char_index)) {
-            while char_index < self.char_count() && !is_word_char(self.rope.char(char_index)) {
-                char_index += 1;
-            }
-            if char_index >= self.char_count() {
-                return None;
-            }
-        }
+        let (start_char, end_char) = if open == close {
+            self.quoted_range_chars(char_index, open)?
+        } else {
+            self.delimited_range_chars(char_index, open, close)?
+        };
 
-        let mut start_char = self.word_start_char(char_index);
-        let mut end_char = self.word_end_char(char_index);
-        for _ in 1..count {
-            let mut next_word = end_char;
-            while next_word < self.char_count() && !is_word_char(self.rope.char(next_word)) {
-                next_word += 1;
-            }
-            if next_word >= self.char_count() {
-                break;
-            }
-            end_char = self.word_end_char(next_word);
-        }
+        let range = if around {
+            TextRange::new(
+                self.char_to_point(start_char),
+                self.char_to_point(end_char + 1),
+            )
+        } else {
+            TextRange::new(
+                self.char_to_point(start_char + 1),
+                self.char_to_point(end_char),
+            )
+        };
+        (range.start() <= range.end()).then_some(range)
+    }
+
+    /// Returns the current sentence text object range at a point.
+    pub fn sentence_range_at(
+        &self,
+        point: TextPoint,
+        around: bool,
+        count: usize,
+    ) -> Option<TextRange> {
+        let sentences = self.collect_sentence_ranges();
+        let index = self.range_index_at(point, &sentences)?;
+        let start_char = sentences[index].0;
+        let end_index = (index + count.max(1).saturating_sub(1)).min(sentences.len() - 1);
+        let mut end_char = sentences[end_index].1;
+        let mut adjusted_start = start_char;
 
         if around {
             let mut trailing = end_char;
@@ -449,16 +494,138 @@ impl TextBuffer {
             if trailing > end_char {
                 end_char = trailing;
             } else {
-                while start_char > 0 && self.rope.char(start_char - 1).is_whitespace() {
-                    start_char -= 1;
+                while adjusted_start > 0 && self.rope.char(adjusted_start - 1).is_whitespace() {
+                    adjusted_start -= 1;
                 }
             }
         }
 
         Some(TextRange::new(
-            self.char_to_point(start_char),
+            self.char_to_point(adjusted_start),
             self.char_to_point(end_char),
         ))
+    }
+
+    /// Returns the current paragraph text object range at a point.
+    pub fn paragraph_range_at(
+        &self,
+        point: TextPoint,
+        around: bool,
+        count: usize,
+    ) -> Option<TextRange> {
+        if self.line_count() == 0 || count == 0 {
+            return None;
+        }
+
+        let mut line_index = point.line.min(self.line_count().saturating_sub(1));
+        if self.line_is_blank(line_index) {
+            let mut next = line_index;
+            while next < self.line_count() && self.line_is_blank(next) {
+                next += 1;
+            }
+            if next < self.line_count() {
+                line_index = next;
+            } else {
+                if line_index == 0 {
+                    return None;
+                }
+                let mut previous = line_index.saturating_sub(1);
+                while previous > 0 && self.line_is_blank(previous) {
+                    previous -= 1;
+                }
+                if self.line_is_blank(previous) {
+                    return None;
+                }
+                line_index = previous;
+            }
+        }
+
+        let mut start_line = line_index;
+        while start_line > 0 && !self.line_is_blank(start_line - 1) {
+            start_line -= 1;
+        }
+
+        let mut end_line = line_index;
+        while end_line + 1 < self.line_count() && !self.line_is_blank(end_line + 1) {
+            end_line += 1;
+        }
+
+        for _ in 1..count {
+            let mut next_line = end_line + 1;
+            while next_line < self.line_count() && self.line_is_blank(next_line) {
+                next_line += 1;
+            }
+            if next_line >= self.line_count() {
+                break;
+            }
+            end_line = next_line;
+            while end_line + 1 < self.line_count() && !self.line_is_blank(end_line + 1) {
+                end_line += 1;
+            }
+        }
+
+        if around {
+            let mut included_trailing_blank = false;
+            let mut trailing = end_line + 1;
+            while trailing < self.line_count() && self.line_is_blank(trailing) {
+                end_line = trailing;
+                included_trailing_blank = true;
+                trailing += 1;
+            }
+            if !included_trailing_blank {
+                while start_line > 0 && self.line_is_blank(start_line - 1) {
+                    start_line -= 1;
+                }
+            }
+        }
+
+        Some(TextRange::new(
+            self.line_range(start_line)?.start(),
+            self.line_range(end_line)?.end(),
+        ))
+    }
+
+    /// Returns the current HTML/XML tag text object range at a point.
+    pub fn tag_range_at(&self, point: TextPoint, around: bool) -> Option<TextRange> {
+        if self.char_count() == 0 {
+            return None;
+        }
+
+        let chars = self.rope.chars().collect::<Vec<_>>();
+        let mut char_index = self.point_to_char(point).min(chars.len().saturating_sub(1));
+        if char_index >= chars.len() {
+            char_index = chars.len().saturating_sub(1);
+        }
+
+        for start in (0..=char_index).rev() {
+            let Some(open_tag) = parse_tag_token(&chars, start) else {
+                continue;
+            };
+            if open_tag.is_closing || open_tag.self_closing {
+                continue;
+            }
+            let Some(close_tag) = find_matching_close_tag(&chars, &open_tag) else {
+                continue;
+            };
+            if !(open_tag.start <= char_index && char_index < close_tag.end_exclusive) {
+                continue;
+            }
+
+            let range = if around {
+                TextRange::new(
+                    self.char_to_point(open_tag.start),
+                    self.char_to_point(close_tag.end_exclusive),
+                )
+            } else {
+                TextRange::new(
+                    self.char_to_point(open_tag.end_exclusive),
+                    self.char_to_point(close_tag.start),
+                )
+            };
+            return (range.start() <= range.end()).then_some(range);
+        }
+
+        None
     }
 
     /// Replaces a range with new text and records the edit for undo/redo.
@@ -591,83 +758,164 @@ impl TextBuffer {
 
     /// Moves the cursor to the start of the next word.
     pub fn move_word_forward(&mut self) -> bool {
-        if self.char_count() == 0 {
-            return false;
-        }
+        self.move_object_forward(WordKind::Word)
+    }
 
-        let original = self.point_to_char(self.cursor);
-        if original >= self.char_count() {
-            return false;
-        }
-
-        let mut char_index = original;
-        if is_word_char(self.rope.char(char_index)) {
-            while char_index < self.char_count() && is_word_char(self.rope.char(char_index)) {
-                char_index += 1;
-            }
-        }
-
-        while char_index < self.char_count() && !is_word_char(self.rope.char(char_index)) {
-            char_index += 1;
-        }
-
-        if char_index == original {
-            return false;
-        }
-
-        self.cursor = self.char_to_point(char_index);
-        true
+    /// Moves the cursor to the start of the next Vim `WORD`.
+    pub fn move_big_word_forward(&mut self) -> bool {
+        self.move_object_forward(WordKind::BigWord)
     }
 
     /// Moves the cursor to the start of the previous word.
     pub fn move_word_backward(&mut self) -> bool {
-        if self.char_count() == 0 {
-            return false;
-        }
+        self.move_object_backward(WordKind::Word)
+    }
 
-        let original = self.point_to_char(self.cursor);
-        if original == 0 {
-            return false;
-        }
-
-        let mut char_index = original.saturating_sub(1);
-        while char_index > 0 && !is_word_char(self.rope.char(char_index)) {
-            char_index -= 1;
-        }
-        if !is_word_char(self.rope.char(char_index)) {
-            return false;
-        }
-        while char_index > 0 && is_word_char(self.rope.char(char_index - 1)) {
-            char_index -= 1;
-        }
-
-        self.cursor = self.char_to_point(char_index);
-        true
+    /// Moves the cursor to the start of the previous Vim `WORD`.
+    pub fn move_big_word_backward(&mut self) -> bool {
+        self.move_object_backward(WordKind::BigWord)
     }
 
     /// Moves the cursor to the end of the current or next word.
     pub fn move_word_end_forward(&mut self) -> bool {
+        self.move_object_end_forward(WordKind::Word)
+    }
+
+    /// Moves the cursor to the end of the current or next Vim `WORD`.
+    pub fn move_big_word_end_forward(&mut self) -> bool {
+        self.move_object_end_forward(WordKind::BigWord)
+    }
+
+    /// Moves the cursor backward to the end of the previous word.
+    pub fn move_word_end_backward(&mut self) -> bool {
+        self.move_object_end_backward(WordKind::Word)
+    }
+
+    /// Moves the cursor backward to the end of the previous Vim `WORD`.
+    pub fn move_big_word_end_backward(&mut self) -> bool {
+        self.move_object_end_backward(WordKind::BigWord)
+    }
+
+    /// Moves the cursor to the matching paired delimiter.
+    pub fn move_matching_delimiter(&mut self) -> bool {
         if self.char_count() == 0 {
             return false;
         }
 
-        let original = self.point_to_char(self.cursor);
-        if original >= self.char_count() {
+        let line = self.cursor.line.min(self.line_count().saturating_sub(1));
+        let Some((line_start, line_end)) = self.line_char_bounds(line) else {
             return false;
+        };
+        let original = self
+            .point_to_char(self.cursor)
+            .min(self.char_count().saturating_sub(1));
+        let target = (original..line_end)
+            .find(|index| delimiter_partner(self.rope.char(*index)).is_some())
+            .or_else(|| {
+                (line_start..original)
+                    .rev()
+                    .find(|index| delimiter_partner(self.rope.char(*index)).is_some())
+            });
+        let Some(target) = target else {
+            return false;
+        };
+
+        let Some((open, close, is_open)) = delimiter_partner(self.rope.char(target)) else {
+            return false;
+        };
+        let destination = if is_open {
+            self.find_matching_close(target, open, close)
+        } else {
+            self.find_matching_open(target, open, close)
+        };
+        let Some(destination) = destination else {
+            return false;
+        };
+
+        self.cursor = self.char_to_point(destination);
+        true
+    }
+
+    /// Moves the cursor to the start of the next sentence.
+    pub fn move_sentence_forward(&mut self) -> bool {
+        let ranges = self.collect_sentence_ranges();
+        let Some(index) = self.range_index_at(self.cursor, &ranges) else {
+            return false;
+        };
+        let target_index = index.saturating_add(1);
+        let Some((target, _)) = ranges.get(target_index).copied() else {
+            return false;
+        };
+        self.cursor = self.char_to_point(target);
+        true
+    }
+
+    /// Moves the cursor to the start of the current or previous sentence.
+    pub fn move_sentence_backward(&mut self) -> bool {
+        let ranges = self.collect_sentence_ranges();
+        let Some(index) = self.range_index_at(self.cursor, &ranges) else {
+            return false;
+        };
+        let current_start = ranges[index].0;
+        let current_point = self.point_to_char(self.cursor);
+        let target_index = if current_point > current_start {
+            index
+        } else {
+            index.saturating_sub(1)
+        };
+        let Some((target, _)) = ranges.get(target_index).copied() else {
+            return false;
+        };
+        self.cursor = self.char_to_point(target);
+        true
+    }
+
+    /// Moves the cursor to the start of the next paragraph.
+    pub fn move_paragraph_forward(&mut self) -> bool {
+        let boundaries = self.paragraph_boundary_lines();
+        if let Some(target) = boundaries
+            .iter()
+            .copied()
+            .find(|line| *line > self.cursor.line)
+        {
+            self.cursor = TextPoint::new(target, 0);
+            return true;
         }
 
-        let mut char_index = original;
-        while char_index < self.char_count() && !is_word_char(self.rope.char(char_index)) {
-            char_index += 1;
-        }
-        if char_index >= self.char_count() {
+        let last_line = (0..self.line_count())
+            .rfind(|line| !self.line_is_blank(*line))
+            .unwrap_or_else(|| self.line_count().saturating_sub(1));
+        let target = self
+            .first_non_blank_in_line(last_line)
+            .unwrap_or(TextPoint::new(last_line, 0));
+        if target == self.cursor {
             return false;
         }
-        while char_index + 1 < self.char_count() && is_word_char(self.rope.char(char_index + 1)) {
-            char_index += 1;
-        }
+        self.cursor = target;
+        true
+    }
 
-        self.cursor = self.char_to_point(char_index);
+    /// Moves the cursor to the start of the current or previous paragraph.
+    pub fn move_paragraph_backward(&mut self) -> bool {
+        let boundaries = self.paragraph_boundary_lines();
+        let search_line = if self.line_is_blank(self.cursor.line) {
+            let mut run_start = self.cursor.line;
+            while run_start > 0 && self.line_is_blank(run_start - 1) {
+                run_start -= 1;
+            }
+            run_start
+        } else {
+            self.cursor.line
+        };
+        let Some(target) = boundaries.iter().copied().rfind(|line| *line < search_line) else {
+            let target = TextPoint::new(0, 0);
+            if target == self.cursor {
+                return false;
+            }
+            self.cursor = target;
+            return true;
+        };
+        self.cursor = TextPoint::new(target, 0);
         true
     }
 
@@ -823,15 +1071,401 @@ impl TextBuffer {
         TextPoint { line, column }
     }
 
-    fn word_start_char(&self, mut char_index: usize) -> usize {
-        while char_index > 0 && is_word_char(self.rope.char(char_index - 1)) {
+    fn object_range_at(
+        &self,
+        point: TextPoint,
+        around: bool,
+        count: usize,
+        predicate: impl Fn(char) -> bool,
+    ) -> Option<TextRange> {
+        if self.char_count() == 0 || count == 0 {
+            return None;
+        }
+
+        let mut char_index = self
+            .point_to_char(point)
+            .min(self.char_count().saturating_sub(1));
+        if !predicate(self.rope.char(char_index)) {
+            while char_index < self.char_count() && !predicate(self.rope.char(char_index)) {
+                char_index += 1;
+            }
+            if char_index >= self.char_count() {
+                return None;
+            }
+        }
+
+        let mut start_char = self.object_start_char(char_index, &predicate);
+        let mut end_char = self.object_end_char(char_index, &predicate);
+        for _ in 1..count {
+            let mut next_object = end_char;
+            while next_object < self.char_count() && !predicate(self.rope.char(next_object)) {
+                next_object += 1;
+            }
+            if next_object >= self.char_count() {
+                break;
+            }
+            end_char = self.object_end_char(next_object, &predicate);
+        }
+
+        if around {
+            let mut trailing = end_char;
+            while trailing < self.char_count() && self.rope.char(trailing).is_whitespace() {
+                trailing += 1;
+            }
+            if trailing > end_char {
+                end_char = trailing;
+            } else {
+                while start_char > 0 && self.rope.char(start_char - 1).is_whitespace() {
+                    start_char -= 1;
+                }
+            }
+        }
+
+        Some(TextRange::new(
+            self.char_to_point(start_char),
+            self.char_to_point(end_char),
+        ))
+    }
+
+    fn move_object_forward(&mut self, kind: WordKind) -> bool {
+        if self.char_count() == 0 {
+            return false;
+        }
+
+        let original = self.point_to_char(self.cursor);
+        if original >= self.char_count() {
+            return false;
+        }
+
+        let mut char_index = original;
+        if matches_word_kind(self.rope.char(char_index), kind) {
+            while char_index < self.char_count()
+                && matches_word_kind(self.rope.char(char_index), kind)
+            {
+                char_index += 1;
+            }
+        }
+
+        while char_index < self.char_count() && !matches_word_kind(self.rope.char(char_index), kind)
+        {
+            char_index += 1;
+        }
+
+        if char_index == original {
+            return false;
+        }
+
+        self.cursor = self.char_to_point(char_index);
+        true
+    }
+
+    fn move_object_backward(&mut self, kind: WordKind) -> bool {
+        if self.char_count() == 0 {
+            return false;
+        }
+
+        let original = self.point_to_char(self.cursor);
+        if original == 0 {
+            return false;
+        }
+
+        let mut char_index = original.saturating_sub(1);
+        while char_index > 0 && !matches_word_kind(self.rope.char(char_index), kind) {
+            char_index -= 1;
+        }
+        if !matches_word_kind(self.rope.char(char_index), kind) {
+            return false;
+        }
+        while char_index > 0 && matches_word_kind(self.rope.char(char_index - 1), kind) {
+            char_index -= 1;
+        }
+
+        self.cursor = self.char_to_point(char_index);
+        true
+    }
+
+    fn move_object_end_forward(&mut self, kind: WordKind) -> bool {
+        if self.char_count() == 0 {
+            return false;
+        }
+
+        let original = self.point_to_char(self.cursor);
+        if original >= self.char_count() {
+            return false;
+        }
+
+        let mut char_index = original;
+        while char_index < self.char_count() && !matches_word_kind(self.rope.char(char_index), kind)
+        {
+            char_index += 1;
+        }
+        if char_index >= self.char_count() {
+            return false;
+        }
+        while char_index + 1 < self.char_count()
+            && matches_word_kind(self.rope.char(char_index + 1), kind)
+        {
+            char_index += 1;
+        }
+
+        self.cursor = self.char_to_point(char_index);
+        true
+    }
+
+    fn move_object_end_backward(&mut self, kind: WordKind) -> bool {
+        if self.char_count() == 0 {
+            return false;
+        }
+
+        let original = self
+            .point_to_char(self.cursor)
+            .min(self.char_count().saturating_sub(1));
+        let mut char_index = original;
+        if matches_word_kind(self.rope.char(char_index), kind) {
+            while char_index > 0 && matches_word_kind(self.rope.char(char_index - 1), kind) {
+                char_index -= 1;
+            }
+            if char_index == 0 {
+                return false;
+            }
+            char_index -= 1;
+        } else if char_index == 0 {
+            return false;
+        } else {
+            char_index -= 1;
+        }
+
+        while char_index > 0 && !matches_word_kind(self.rope.char(char_index), kind) {
+            char_index -= 1;
+        }
+        if !matches_word_kind(self.rope.char(char_index), kind) {
+            return false;
+        }
+        while char_index + 1 < self.char_count()
+            && matches_word_kind(self.rope.char(char_index + 1), kind)
+        {
+            char_index += 1;
+        }
+
+        self.cursor = self.char_to_point(char_index);
+        true
+    }
+
+    fn range_index_at(&self, point: TextPoint, ranges: &[(usize, usize)]) -> Option<usize> {
+        if ranges.is_empty() {
+            return None;
+        }
+
+        let char_index = self
+            .point_to_char(point)
+            .min(self.char_count().saturating_sub(1));
+        ranges
+            .iter()
+            .position(|(start, end)| *start <= char_index && char_index < *end)
+            .or_else(|| ranges.iter().position(|(start, _)| *start > char_index))
+            .or(Some(ranges.len().saturating_sub(1)))
+    }
+
+    fn line_is_blank(&self, line_index: usize) -> bool {
+        self.line(line_index)
+            .map(|line| line.trim().is_empty())
+            .unwrap_or(true)
+    }
+
+    fn collect_sentence_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut start = 0usize;
+        let len = self.char_count();
+
+        while start < len {
+            while start < len && self.rope.char(start).is_whitespace() {
+                start += 1;
+            }
+            if start >= len {
+                break;
+            }
+
+            let mut cursor = start;
+            let mut end = len;
+            while cursor < len {
+                if self.is_blank_line_gap(cursor) {
+                    end = cursor;
+                    break;
+                }
+
+                if self.is_sentence_terminator_at(cursor) {
+                    end = self.sentence_end_char(cursor);
+                    break;
+                }
+
+                cursor += 1;
+            }
+
+            if start < end {
+                ranges.push((start, end));
+            }
+            start = end.max(start + 1);
+        }
+
+        ranges
+    }
+
+    fn paragraph_boundary_lines(&self) -> Vec<usize> {
+        let mut boundaries = Vec::new();
+        let mut line = 0;
+        while line < self.line_count() {
+            if !self.line_is_blank(line) {
+                line += 1;
+                continue;
+            }
+
+            let run_start = line;
+            while line + 1 < self.line_count() && self.line_is_blank(line + 1) {
+                line += 1;
+            }
+            let run_end = line;
+            let separated_blocks = run_start > 0
+                && run_end + 1 < self.line_count()
+                && !self.line_is_blank(run_start - 1)
+                && !self.line_is_blank(run_end + 1);
+            if separated_blocks {
+                boundaries.push(run_start);
+            }
+            line += 1;
+        }
+        boundaries
+    }
+
+    fn is_blank_line_gap(&self, char_index: usize) -> bool {
+        self.rope.char(char_index) == '\n'
+            && char_index + 1 < self.char_count()
+            && self.rope.char(char_index + 1) == '\n'
+    }
+
+    fn is_sentence_terminator_at(&self, char_index: usize) -> bool {
+        let character = self.rope.char(char_index);
+        if !matches!(character, '.' | '!' | '?') {
+            return false;
+        }
+
+        let mut next = char_index + 1;
+        while next < self.char_count() && is_sentence_closer(self.rope.char(next)) {
+            next += 1;
+        }
+
+        next >= self.char_count() || self.rope.char(next).is_whitespace()
+    }
+
+    fn sentence_end_char(&self, char_index: usize) -> usize {
+        let mut end = char_index + 1;
+        while end < self.char_count() && is_sentence_closer(self.rope.char(end)) {
+            end += 1;
+        }
+        end
+    }
+
+    fn object_start_char(&self, mut char_index: usize, predicate: impl Fn(char) -> bool) -> usize {
+        while char_index > 0 && predicate(self.rope.char(char_index - 1)) {
             char_index -= 1;
         }
         char_index
     }
 
-    fn word_end_char(&self, mut char_index: usize) -> usize {
-        while char_index < self.char_count() && is_word_char(self.rope.char(char_index)) {
+    fn delimited_range_chars(
+        &self,
+        char_index: usize,
+        open: char,
+        close: char,
+    ) -> Option<(usize, usize)> {
+        let start_char = self.find_enclosing_open(char_index, open, close)?;
+        let end_char = self.find_matching_close(start_char, open, close)?;
+        Some((start_char, end_char))
+    }
+
+    fn quoted_range_chars(&self, char_index: usize, quote: char) -> Option<(usize, usize)> {
+        let (line_start, line_end) = self.line_char_bounds(self.char_to_point(char_index).line)?;
+        let quotes = (line_start..line_end)
+            .filter(|index| self.rope.char(*index) == quote && !self.char_is_escaped(*index))
+            .collect::<Vec<_>>();
+        quotes.chunks(2).find_map(|pair| {
+            (pair.len() == 2 && pair[0] <= char_index && char_index <= pair[1])
+                .then_some((pair[0], pair[1]))
+        })
+    }
+
+    fn find_enclosing_open(&self, char_index: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for index in (0..=char_index).rev() {
+            let character = self.rope.char(index);
+            if character == open {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            } else if character == close {
+                depth += 1;
+            }
+        }
+        None
+    }
+
+    fn find_matching_close(&self, start_char: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for index in (start_char + 1)..self.char_count() {
+            let character = self.rope.char(index);
+            if character == open {
+                depth += 1;
+            } else if character == close {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    fn find_matching_open(&self, start_char: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for index in (0..start_char).rev() {
+            let character = self.rope.char(index);
+            if character == close {
+                depth += 1;
+            } else if character == open {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    fn line_char_bounds(&self, line_index: usize) -> Option<(usize, usize)> {
+        if line_index >= self.line_count() {
+            return None;
+        }
+        let start_char = self.rope.line_to_char(line_index);
+        let end_char = if line_index + 1 < self.line_count() {
+            self.rope.line_to_char(line_index + 1)
+        } else {
+            self.char_count()
+        };
+        Some((start_char, end_char))
+    }
+
+    fn char_is_escaped(&self, char_index: usize) -> bool {
+        let mut backslashes = 0usize;
+        let mut index = char_index;
+        while index > 0 && self.rope.char(index - 1) == '\\' {
+            backslashes += 1;
+            index -= 1;
+        }
+        backslashes % 2 == 1
+    }
+
+    fn object_end_char(&self, mut char_index: usize, predicate: impl Fn(char) -> bool) -> usize {
+        while char_index < self.char_count() && predicate(self.rope.char(char_index)) {
             char_index += 1;
         }
         char_index
@@ -903,6 +1537,132 @@ fn is_word_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+fn matches_word_kind(character: char, kind: WordKind) -> bool {
+    match kind {
+        WordKind::Word => is_word_char(character),
+        WordKind::BigWord => !character.is_whitespace(),
+    }
+}
+
+fn is_sentence_closer(character: char) -> bool {
+    matches!(character, '"' | '\'' | ')' | ']' | '}')
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TagToken {
+    name: String,
+    start: usize,
+    end_exclusive: usize,
+    is_closing: bool,
+    self_closing: bool,
+}
+
+fn parse_tag_token(chars: &[char], start: usize) -> Option<TagToken> {
+    if chars.get(start) != Some(&'<') {
+        return None;
+    }
+
+    let mut cursor = start + 1;
+    match chars.get(cursor)? {
+        '!' | '?' => return None,
+        _ => {}
+    }
+
+    let is_closing = if chars.get(cursor) == Some(&'/') {
+        cursor += 1;
+        true
+    } else {
+        false
+    };
+
+    while chars
+        .get(cursor)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        cursor += 1;
+    }
+
+    let name_start = cursor;
+    while chars
+        .get(cursor)
+        .is_some_and(|character| is_tag_name_char(*character))
+    {
+        cursor += 1;
+    }
+    if cursor == name_start {
+        return None;
+    }
+
+    let mut end = cursor;
+    while end < chars.len() && chars[end] != '>' {
+        end += 1;
+    }
+    if end >= chars.len() {
+        return None;
+    }
+
+    let name = chars[name_start..cursor].iter().collect::<String>();
+    let mut tail = end;
+    while tail > cursor && chars[tail - 1].is_whitespace() {
+        tail -= 1;
+    }
+
+    Some(TagToken {
+        name,
+        start,
+        end_exclusive: end + 1,
+        is_closing,
+        self_closing: !is_closing && tail > cursor && chars[tail - 1] == '/',
+    })
+}
+
+fn find_matching_close_tag(chars: &[char], open_tag: &TagToken) -> Option<TagToken> {
+    let mut cursor = open_tag.end_exclusive;
+    let mut depth = 0usize;
+    while cursor < chars.len() {
+        if chars[cursor] != '<' {
+            cursor += 1;
+            continue;
+        }
+
+        let Some(tag) = parse_tag_token(chars, cursor) else {
+            cursor += 1;
+            continue;
+        };
+
+        if tag.name == open_tag.name {
+            if tag.is_closing {
+                if depth == 0 {
+                    return Some(tag);
+                }
+                depth -= 1;
+            } else if !tag.self_closing {
+                depth += 1;
+            }
+        }
+
+        cursor = tag.end_exclusive;
+    }
+
+    None
+}
+
+fn is_tag_name_char(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '-' | '_' | ':')
+}
+
+fn delimiter_partner(character: char) -> Option<(char, char, bool)> {
+    match character {
+        '(' => Some(('(', ')', true)),
+        ')' => Some(('(', ')', false)),
+        '[' => Some(('[', ']', true)),
+        ']' => Some(('[', ']', false)),
+        '{' => Some(('{', '}', true)),
+        '}' => Some(('{', '}', false)),
+        _ => None,
+    }
+}
+
 fn visible_line_len(slice: RopeSlice<'_>) -> usize {
     let len = slice.len_chars();
     if len == 0 {
@@ -927,7 +1687,7 @@ fn trimmed_line(slice: RopeSlice<'_>) -> String {
 mod tests {
     use std::{fmt::Write as _, io::Cursor};
 
-    use super::{LineEnding, TextBuffer, TextPoint, TextRange};
+    use super::{LineEnding, TextBuffer, TextPoint, TextRange, WordKind};
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
@@ -1056,6 +1816,61 @@ mod tests {
     }
 
     #[test]
+    fn big_word_backward_end_and_match_pair_cover_quickref_motion_slice() {
+        let mut buffer = TextBuffer::from_text("alpha-beta gamma");
+        buffer.set_cursor(TextPoint::new(0, 0));
+
+        assert!(buffer.move_big_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 11));
+
+        assert!(buffer.move_big_word_end_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 15));
+
+        assert!(buffer.move_big_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 11));
+
+        assert!(buffer.move_big_word_end_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 9));
+
+        let mut buffer = TextBuffer::from_text("call(foo[bar])");
+        buffer.set_cursor(TextPoint::new(0, 4));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 13));
+
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 4));
+    }
+
+    #[test]
+    fn sentence_and_paragraph_motions_cover_structure_navigation() {
+        let mut buffer = TextBuffer::from_text("Alpha. Bravo! Charlie?\n\nDelta\nEcho\n\nFoxtrot");
+        buffer.set_cursor(TextPoint::new(0, 2));
+        assert!(buffer.move_sentence_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 7));
+
+        assert!(buffer.move_sentence_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 0));
+
+        buffer.set_cursor(TextPoint::new(2, 1));
+        assert!(buffer.move_paragraph_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(1, 0));
+
+        assert!(buffer.move_paragraph_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 0));
+
+        buffer.set_cursor(TextPoint::new(2, 1));
+        assert!(buffer.move_paragraph_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(4, 0));
+
+        assert!(buffer.move_paragraph_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(1, 0));
+
+        buffer.set_cursor(TextPoint::new(5, 1));
+        assert!(buffer.move_paragraph_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(5, 0));
+    }
+
+    #[test]
     fn line_ranges_and_char_searches_resolve_expected_points() {
         let buffer = TextBuffer::from_text("alpha beta\ngamma");
 
@@ -1095,5 +1910,100 @@ mod tests {
             .word_range_at(TextPoint::new(0, 7), false, 2)
             .expect("counted word range");
         assert_eq!(buffer.slice(counted), "beta  gamma");
+    }
+
+    #[test]
+    fn word_kind_ranges_cover_big_word_objects() {
+        let buffer = TextBuffer::from_text("alpha-beta gamma");
+
+        let word = buffer
+            .word_range_at_kind(TextPoint::new(0, 7), WordKind::Word, false, 1)
+            .expect("word range");
+        assert_eq!(buffer.slice(word), "beta");
+
+        let big_word = buffer
+            .word_range_at_kind(TextPoint::new(0, 7), WordKind::BigWord, false, 1)
+            .expect("big word range");
+        assert_eq!(buffer.slice(big_word), "alpha-beta");
+
+        let around_big_word = buffer
+            .word_range_at_kind(TextPoint::new(0, 7), WordKind::BigWord, true, 1)
+            .expect("around big word range");
+        assert_eq!(buffer.slice(around_big_word), "alpha-beta ");
+    }
+
+    #[test]
+    fn sentence_ranges_cover_inner_and_around_text_objects() {
+        let buffer = TextBuffer::from_text("Alpha beta.  Gamma delta!  Last bit?");
+
+        let inner = buffer
+            .sentence_range_at(TextPoint::new(0, 15), false, 1)
+            .expect("inner sentence range");
+        assert_eq!(buffer.slice(inner), "Gamma delta!");
+
+        let around = buffer
+            .sentence_range_at(TextPoint::new(0, 15), true, 1)
+            .expect("around sentence range");
+        assert_eq!(buffer.slice(around), "Gamma delta!  ");
+
+        let counted = buffer
+            .sentence_range_at(TextPoint::new(0, 15), false, 2)
+            .expect("counted sentence range");
+        assert_eq!(buffer.slice(counted), "Gamma delta!  Last bit?");
+    }
+
+    #[test]
+    fn paragraph_ranges_cover_inner_and_around_text_objects() {
+        let buffer = TextBuffer::from_text("one\n\nalpha\nbeta\n\ntwo\n");
+
+        let inner = buffer
+            .paragraph_range_at(TextPoint::new(2, 1), false, 1)
+            .expect("inner paragraph range");
+        assert_eq!(buffer.slice(inner), "alpha\nbeta\n");
+
+        let around = buffer
+            .paragraph_range_at(TextPoint::new(2, 1), true, 1)
+            .expect("around paragraph range");
+        assert_eq!(buffer.slice(around), "alpha\nbeta\n\n");
+    }
+
+    #[test]
+    fn delimited_ranges_cover_quotes_and_brackets() {
+        let buffer = TextBuffer::from_text("call(foo[bar], \"baz\")");
+
+        let inner_parens = buffer
+            .delimited_range_at(TextPoint::new(0, 6), '(', ')', false)
+            .expect("inner paren range");
+        assert_eq!(buffer.slice(inner_parens), "foo[bar], \"baz\"");
+
+        let around_brackets = buffer
+            .delimited_range_at(TextPoint::new(0, 9), '[', ']', true)
+            .expect("around bracket range");
+        assert_eq!(buffer.slice(around_brackets), "[bar]");
+
+        let inner_quotes = buffer
+            .delimited_range_at(TextPoint::new(0, 17), '"', '"', false)
+            .expect("inner quote range");
+        assert_eq!(buffer.slice(inner_quotes), "baz");
+    }
+
+    #[test]
+    fn delimited_and_tag_ranges_cover_quickref_objects() {
+        let buffer = TextBuffer::from_text("foo <bar> baz <div>hello</div>");
+
+        let inner_angle = buffer
+            .delimited_range_at(TextPoint::new(0, 5), '<', '>', false)
+            .expect("inner angle range");
+        assert_eq!(buffer.slice(inner_angle), "bar");
+
+        let around_tag = buffer
+            .tag_range_at(TextPoint::new(0, 20), true)
+            .expect("around tag range");
+        assert_eq!(buffer.slice(around_tag), "<div>hello</div>");
+
+        let inner_tag = buffer
+            .tag_range_at(TextPoint::new(0, 20), false)
+            .expect("inner tag range");
+        assert_eq!(buffer.slice(inner_tag), "hello");
     }
 }
