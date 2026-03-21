@@ -122,7 +122,9 @@ fn write_system_clipboard(text: &str) {
     if text.is_empty() {
         return;
     }
-    let _ = with_clipboard_util(|clipboard| clipboard.set_clipboard_text(text));
+    if let Some(Err(error)) = with_clipboard_util(|clipboard| clipboard.set_clipboard_text(text)) {
+        eprintln!("failed to write clipboard text: {error}");
+    }
 }
 
 fn read_system_clipboard() -> Option<String> {
