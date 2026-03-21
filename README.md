@@ -74,8 +74,5 @@ Inside the SDL shell, the default user package wiring now gives you:
 - a per-buffer statusline composed from `user/statusline.rs`
 - `workspace.new`, `workspace.switch`, `workspace.delete`, and `workspace.list-files` commands backed by `user/workspace.rs`
 
-Theme files live under `user/themes/*.toml` and support UI options like font, font size, opacity,
-opacity type (`transparent`, `blurred`, `auto`, `none`, `mica`, `mica-alt`, `acrylic`, `tabbed`),
-and cursor/picker roundness. Backdrop-style opacity types keep the window opacity at 1.0 so font
-rendering stays fully opaque; platform-specific backdrops are not applied in core to avoid unsafe
-Win32 calls.
+Theme files live under `user/themes/*.toml` and support UI options like font, font size, and
+cursor/picker roundness.

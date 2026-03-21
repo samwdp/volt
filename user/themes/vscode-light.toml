@@ -29,7 +29,5 @@ name = "VS Code Light"
 "ui.line-number.relative" = true
 font = "default"
 font_size = 18
-opacity = 1.0
-opacity_type = "transparent"
 cursor_roundness = 2
 picker_roundness = 16

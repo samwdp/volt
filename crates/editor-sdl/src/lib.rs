@@ -83,8 +83,6 @@ const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
-const OPTION_OPACITY: &str = "opacity";
-const OPTION_OPACITY_TYPE: &str = "opacity_type";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
@@ -126,46 +124,10 @@ impl Default for ShellConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpacityType {
-    Transparent,
-    Win32Backdrop(Win32Backdrop),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Win32Backdrop {
-    Auto,
-    None,
-    Mica,
-    MicaAlt,
-    Acrylic,
-    Tabbed,
-}
-
-impl OpacityType {
-    fn from_value(value: &str) -> Option<Self> {
-        let value = value.trim().to_ascii_lowercase();
-        match value.as_str() {
-            "transparent" => Some(Self::Transparent),
-            "blurred" | "blur" | "acrylic" => Some(Self::Win32Backdrop(Win32Backdrop::Acrylic)),
-            "auto" => Some(Self::Win32Backdrop(Win32Backdrop::Auto)),
-            "none" | "disable" | "disabled" => Some(Self::Win32Backdrop(Win32Backdrop::None)),
-            "mica" => Some(Self::Win32Backdrop(Win32Backdrop::Mica)),
-            "mica-alt" | "mica_alt" | "micaalt" => {
-                Some(Self::Win32Backdrop(Win32Backdrop::MicaAlt))
-            }
-            "tabbed" => Some(Self::Win32Backdrop(Win32Backdrop::Tabbed)),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
-    opacity: f32,
-    opacity_type: OpacityType,
 }
 
 /// Summary returned after the demo shell exits.
@@ -2326,8 +2288,6 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
     }
     video.text_input().start(&window);
-    apply_window_opacity(&mut window, theme_settings.opacity, theme_settings.opacity_type)?;
-
     let mut font = ttf
         .load_font(&font_path, theme_settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -2348,7 +2308,6 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
     loop {
         update_theme_runtime(
-            &mut canvas,
             &ttf,
             &state,
             &config,
@@ -2412,7 +2371,6 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 }
 
 fn update_theme_runtime(
-    canvas: &mut Canvas<Window>,
     ttf: &sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
     config: &ShellConfig,
@@ -2446,16 +2404,6 @@ fn update_theme_runtime(
             .max(1) as i32;
     }
 
-    if updated.opacity != theme_settings.opacity
-        || updated.opacity_type != theme_settings.opacity_type
-    {
-        apply_window_opacity(
-            canvas.window_mut(),
-            updated.opacity,
-            updated.opacity_type,
-        )?;
-    }
-
     *theme_settings = updated;
     Ok(())
 }
@@ -2473,20 +2421,9 @@ fn theme_runtime_settings(
         .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
         .map(|value| value.max(1.0).round() as u32)
         .unwrap_or(config.font_size);
-    let opacity = theme_registry
-        .and_then(|registry| registry.resolve_number(OPTION_OPACITY))
-        .map(|value| value.clamp(0.0, 1.0) as f32)
-        .unwrap_or(1.0);
-    let opacity_type = theme_registry
-        .and_then(|registry| registry.resolve_string(OPTION_OPACITY_TYPE))
-        .and_then(OpacityType::from_value)
-        .unwrap_or(OpacityType::Transparent);
-
     ThemeRuntimeSettings {
         font_request,
         font_size,
-        opacity,
-        opacity_type,
     }
 }
 
@@ -2523,22 +2460,6 @@ fn resolve_font_request(request: &str) -> Option<PathBuf> {
         return None;
     }
     find_font_by_name(trimmed)
-}
-
-fn apply_window_opacity(
-    window: &mut Window,
-    opacity: f32,
-    opacity_type: OpacityType,
-) -> Result<(), ShellError> {
-    let opacity = match opacity_type {
-        OpacityType::Transparent => opacity,
-        // Backdrop effects handle translucency themselves, so keep window opacity at 1.0 to avoid
-        // double-blending and keep text fully opaque.
-        OpacityType::Win32Backdrop(_) => 1.0,
-    };
-    window
-        .set_opacity(opacity)
-        .map_err(|error| ShellError::Sdl(error.to_string()))
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {

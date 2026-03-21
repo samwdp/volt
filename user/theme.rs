@@ -194,7 +194,6 @@ name = "Test Theme"
 [options]
 font = "Example Mono"
 font_size = 18
-opacity = 0.85
 "ui.line-number.relative" = true
 "##;
         let theme = parse_theme(std::path::Path::new("test.toml"), source)
@@ -204,7 +203,6 @@ opacity = 0.85
         assert!(theme.color("ui.background").is_some());
         assert!(theme.option_string("font").is_some());
         assert!(theme.option_number("font_size").is_some());
-        assert!(theme.option_number("opacity").is_some());
         assert_eq!(
             theme.option_bool("ui.line-number.relative"),
             Some(true)
