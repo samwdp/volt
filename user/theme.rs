@@ -161,13 +161,13 @@ fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String
     match value {
         toml::Value::Boolean(value) => Ok(ThemeOption::Bool(*value)),
         toml::Value::Integer(value) => {
-            let number = *value as f64;
-            if number as i64 != *value {
+            const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_992;
+            if *value < -MAX_SAFE_INTEGER || *value > MAX_SAFE_INTEGER {
                 return Err(format!(
                     "option `{option}` integer value is too large for a number"
                 ));
             }
-            Ok(ThemeOption::Number(number))
+            Ok(ThemeOption::Number(*value as f64))
         }
         toml::Value::Float(value) => Ok(ThemeOption::Number(*value)),
         toml::Value::String(value) => Ok(ThemeOption::Text(value.clone())),
