@@ -2532,7 +2532,8 @@ fn apply_window_opacity(
 ) -> Result<(), ShellError> {
     let opacity = match opacity_type {
         OpacityType::Transparent => opacity,
-        // Keep window opacity at 1.0 for backdrops so text stays fully opaque.
+        // Backdrop effects handle translucency themselves, so keep window opacity at 1.0 to avoid
+        // double-blending and keep text fully opaque.
         OpacityType::Win32Backdrop(_) => 1.0,
     };
     window
