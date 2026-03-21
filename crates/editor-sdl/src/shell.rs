@@ -522,11 +522,11 @@ impl ShellBuffer {
         self.text.slice(range)
     }
 
-    fn line_range(&self, line_index: usize) -> Option<TextRange> {
+    pub(crate) fn line_range(&self, line_index: usize) -> Option<TextRange> {
         self.text.line_range(line_index)
     }
 
-    fn line_span_range(&self, start_line: usize, count: usize) -> Option<TextRange> {
+    pub(crate) fn line_span_range(&self, start_line: usize, count: usize) -> Option<TextRange> {
         if self.line_count() == 0 || count == 0 {
             return None;
         }
@@ -730,7 +730,7 @@ impl PickerOverlay {
         }
     }
 
-    fn session(&self) -> &PickerSession {
+    pub(crate) fn session(&self) -> &PickerSession {
         &self.session
     }
 
@@ -1143,7 +1143,7 @@ impl ShellUiState {
 }
 
 pub(crate) struct ShellState {
-    runtime: EditorRuntime,
+    pub(crate) runtime: EditorRuntime,
 }
 
 impl ShellState {
