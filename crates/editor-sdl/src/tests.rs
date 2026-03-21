@@ -959,3 +959,43 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn workspace_file_picker_creates_missing_file() -> Result<(), Box<dyn std::error::Error>> {
+    if !git_available() {
+        return Ok(());
+    }
+
+    let mut state = ShellState::new()?;
+    let root = temp_workspace_root("files-create");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join(".gitignore"), "ignored.txt\n")?;
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n")?;
+
+    run_git(&root, &["init", "-q"])?;
+    run_git(&root, &["add", ".gitignore", "src/main.rs"])?;
+    open_workspace_from_project(&mut state.runtime, "files-create", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.list-files")
+        .map_err(|error| error.to_string())?;
+
+    state.handle_text_input("dir1/dir2/test.md")?;
+    let picker = state
+        .ui()?
+        .picker()
+        .ok_or("missing workspace file picker")?;
+    assert!(picker.session().matches().is_empty());
+    assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+    assert!(!state.picker_visible()?);
+
+    let new_path = root.join("dir1").join("dir2").join("test.md");
+    assert!(new_path.exists());
+    let active = state.active_buffer_mut()?;
+    assert_eq!(active.kind, BufferKind::File);
+    assert!(active.display_name().contains("dir1/dir2/test.md"));
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
