@@ -76,6 +76,6 @@ Inside the SDL shell, the default user package wiring now gives you:
 
 Theme files live under `user/themes/*.toml` and support UI options like font, font size, opacity,
 opacity type (`transparent`, `blurred`, `auto`, `none`, `mica`, `mica-alt`, `acrylic`, `tabbed`),
-and cursor/picker roundness. On Windows 11 these backdrop values map to the system backdrop types
-so blur only affects the window frame (note that `mica-alt` and `tabbed` share the same system
-backdrop); non-Windows platforms ignore the backdrop and keep the window fully opaque.
+and cursor/picker roundness. Backdrop-style opacity types keep the window opacity at 1.0 so font
+rendering stays fully opaque; platform-specific backdrops are not applied in core to avoid unsafe
+Win32 calls.
