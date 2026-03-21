@@ -7,6 +7,7 @@ use std::{
 const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
 const THEME_EXTENSION: &str = "toml";
 const DEFAULT_THEME_ID: &str = "volt-dark";
+const THEME_SEARCH_DEPTH: usize = 6;
 
 /// Returns themes loaded from the executable-relative themes directory.
 pub fn themes() -> Vec<Theme> {
@@ -51,7 +52,7 @@ pub fn themes() -> Vec<Theme> {
 fn themes_dir() -> Option<PathBuf> {
     let exe_path = env::current_exe().ok()?;
     let exe_dir = exe_path.parent()?;
-    for ancestor in exe_dir.ancestors() {
+    for ancestor in exe_dir.ancestors().take(THEME_SEARCH_DEPTH) {
         let mut candidate = PathBuf::from(ancestor);
         for part in THEME_DIRECTORY_PARTS {
             candidate = candidate.join(part);
@@ -159,7 +160,15 @@ fn parse_hex_channel(hex: &str) -> Result<u8, String> {
 fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String> {
     match value {
         toml::Value::Boolean(value) => Ok(ThemeOption::Bool(*value)),
-        toml::Value::Integer(value) => Ok(ThemeOption::Number(*value as f64)),
+        toml::Value::Integer(value) => {
+            let number = *value as f64;
+            if number as i64 != *value {
+                return Err(format!(
+                    "option `{option}` integer value is too large for a number"
+                ));
+            }
+            Ok(ThemeOption::Number(number))
+        }
         toml::Value::Float(value) => Ok(ThemeOption::Number(*value)),
         toml::Value::String(value) => Ok(ThemeOption::Text(value.clone())),
         _ => Err(format!(

@@ -237,17 +237,23 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let mut stack = preferred_font_search_roots();
-    while let Some(path) = stack.pop() {
+    let mut stack = preferred_font_search_roots()
+        .into_iter()
+        .map(|path| (path, 0usize))
+        .collect::<Vec<_>>();
+    while let Some((path, depth)) = stack.pop() {
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
         if metadata.is_dir() {
+            if depth >= 6 {
+                continue;
+            }
             let Ok(entries) = fs::read_dir(&path) else {
                 continue;
             };
             for entry in entries.flatten() {
-                stack.push(entry.path());
+                stack.push((entry.path(), depth + 1));
             }
             continue;
         }
