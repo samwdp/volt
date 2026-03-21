@@ -750,6 +750,10 @@ impl ShellBuffer {
         let _ = self.text.backspace();
     }
 
+    fn delete_forward(&mut self) {
+        let _ = self.text.delete_forward();
+    }
+
     fn move_left(&mut self) -> bool {
         self.text.move_left()
     }
@@ -1729,7 +1733,7 @@ impl ShellState {
                 repeat,
                 ..
             } => {
-                if repeat && !matches!(keycode, Keycode::Backspace) {
+                if repeat && !matches!(keycode, Keycode::Backspace | Keycode::Delete) {
                     return Ok(false);
                 }
                 if self.try_runtime_keybinding(keycode, keymod)? {
@@ -1795,6 +1799,12 @@ impl ShellState {
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
                         self.active_buffer_mut()?.backspace();
+                        self.mark_active_buffer_syntax_dirty()?;
+                    }
+                    Keycode::Delete
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
+                    {
+                        self.active_buffer_mut()?.delete_forward();
                         self.mark_active_buffer_syntax_dirty()?;
                     }
                     Keycode::Tab => self.ui_mut()?.cycle_active_pane(),
