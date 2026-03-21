@@ -214,7 +214,7 @@ fn open_buffer(
     if let Some(popup_title) = popup_title {
         runtime
             .model_mut()
-            .open_popup(workspace_id, popup_title, vec![buffer_id], buffer_id)?;
+            .open_popup_buffer(workspace_id, popup_title, buffer_id)?;
     }
 
     Ok(())

@@ -85,6 +85,8 @@ const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const HOOK_POPUP_NEXT: &str = "ui.popup.next";
+const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
@@ -1525,8 +1527,6 @@ impl PickerOverlay {
 
 #[derive(Debug, Clone)]
 struct RuntimePopupSnapshot {
-    title: String,
-    buffer_ids: Vec<BufferId>,
     active_buffer: BufferId,
 }
 
@@ -3738,6 +3738,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(HOOK_POPUP_TOGGLE, "shell.popup-toggle", |_, runtime| {
             toggle_runtime_popup(runtime)?;
             sync_active_buffer(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_POPUP_NEXT, "shell.popup-next", |_, runtime| {
+            cycle_runtime_popup_buffer(runtime, true)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_POPUP_PREVIOUS, "shell.popup-previous", |_, runtime| {
+            cycle_runtime_popup_buffer(runtime, false)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -6757,8 +6769,6 @@ fn active_runtime_popup(runtime: &EditorRuntime) -> Result<Option<RuntimePopupSn
     };
 
     Ok(Some(RuntimePopupSnapshot {
-        title: popup.title().to_owned(),
-        buffer_ids: popup.buffer_ids().to_vec(),
         active_buffer: popup.active_buffer(),
     }))
 }
@@ -6793,6 +6803,32 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.ensure_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
+    Ok(())
+}
+
+fn cycle_runtime_popup_buffer(runtime: &mut EditorRuntime, forward: bool) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = runtime
+        .model_mut()
+        .cycle_popup_buffer(workspace_id, forward)
+        .map_err(|error| error.to_string())?;
+    let Some(buffer_id) = buffer_id else {
+        return Ok(());
+    };
+    let (buffer_name, buffer_kind) = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(buffer_id)
+            .ok_or_else(|| format!("popup buffer `{buffer_id}` is missing"))?;
+        (buffer.name().to_owned(), buffer.kind().clone())
+    };
+    shell_ui_mut(runtime)?.ensure_buffer(buffer_id, &buffer_name, buffer_kind);
     Ok(())
 }
 
@@ -7931,61 +7967,16 @@ fn render_runtime_popup_overlay(
     ascent: i32,
     now: Instant,
 ) -> Result<(), ShellError> {
-    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
-    let foreground = theme_color(
-        theme_registry,
-        "ui.foreground",
-        Color::RGBA(215, 221, 232, 255),
-    );
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
-    let popup_background = adjust_color(base_background, if is_dark { 8 } else { -8 });
-    let muted = blend_color(foreground, base_background, 0.5);
+    let popup_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
+    let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     fill_rect(target, popup_rect, popup_background)?;
     fill_rect(
         target,
-        PixelRectToRect::rect(
-            popup_rect.x() + 12,
-            popup_rect.y(),
-            popup_rect.width().saturating_sub(24),
-            2,
-        ),
-        Color::RGB(110, 170, 255),
+        PixelRectToRect::rect(popup_rect.x(), popup_rect.y(), popup_rect.width(), 1),
+        border_color,
     )?;
-    draw_text(
-        target,
-        popup_rect.x() + 14,
-        popup_rect.y() + 16,
-        &popup.title,
-        foreground,
-    )?;
-
-    let mut tab_x = popup_rect.x() + 14;
-    for buffer_id in &popup.buffer_ids {
-        if let Some(buffer) = state.buffer(*buffer_id) {
-            let tab_color = if *buffer_id == popup.active_buffer {
-                Color::RGBA(110, 170, 255, 255)
-            } else {
-                muted
-            };
-            draw_text(
-                target,
-                tab_x,
-                popup_rect.y() + line_height + 22,
-                buffer.display_name(),
-                tab_color,
-            )?;
-            tab_x += 180;
-        }
-    }
-
-    let popup_buffer_rect = PixelRectToRect::rect(
-        popup_rect.x() + 14,
-        popup_rect.y() + (line_height * 2) + 28,
-        popup_rect.width().saturating_sub(28),
-        popup_rect
-            .height()
-            .saturating_sub((line_height as u32 * 2) + 36),
-    );
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let visual_range = (state.input_mode() == InputMode::Visual)
             .then(|| {
@@ -8000,7 +7991,7 @@ fn render_runtime_popup_overlay(
             target,
             font,
             buffer,
-            popup_buffer_rect,
+            popup_rect,
             true,
             visual_range,
             yank_flash,

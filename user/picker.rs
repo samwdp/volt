@@ -1,5 +1,5 @@
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
 };
 
 /// Returns the metadata for the generic picker UI package.
@@ -64,6 +64,18 @@ pub fn package() -> PluginPackage {
             "ui.popup.toggle",
             None,
         ),
+        hook_command(
+            "popup.next",
+            "Cycles to the next popup buffer.",
+            "ui.popup.next",
+            None,
+        ),
+        hook_command(
+            "popup.previous",
+            "Cycles to the previous popup buffer.",
+            "ui.popup.previous",
+            None,
+        ),
     ])
     .with_key_bindings(vec![
         PluginKeyBinding::new("F3", "picker.open-commands", PluginKeymapScope::Global),
@@ -75,6 +87,10 @@ pub fn package() -> PluginPackage {
         ),
         PluginKeyBinding::new("F6", "picker.open-keybindings", PluginKeymapScope::Global),
         PluginKeyBinding::new("F7", "picker.open-themes", PluginKeymapScope::Global),
+        PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
+            .with_vim_mode(PluginVimMode::Normal),
+        PluginKeyBinding::new("Ctrl+p", "popup.previous", PluginKeymapScope::Global)
+            .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+n", "picker.select-next", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Ctrl+p", "picker.select-previous", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Enter", "picker.submit", PluginKeymapScope::Popup),

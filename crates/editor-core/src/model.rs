@@ -208,6 +208,45 @@ impl Popup {
         self.active_buffer
     }
 
+    fn contains_buffer(&self, buffer_id: BufferId) -> bool {
+        self.buffers.contains(&buffer_id)
+    }
+
+    fn add_buffer(&mut self, buffer_id: BufferId) -> bool {
+        if self.contains_buffer(buffer_id) {
+            return false;
+        }
+        self.buffers.push(buffer_id);
+        true
+    }
+
+    fn set_active_buffer(&mut self, buffer_id: BufferId) -> bool {
+        if !self.contains_buffer(buffer_id) {
+            return false;
+        }
+        self.active_buffer = buffer_id;
+        true
+    }
+
+    fn cycle_buffer(&mut self, forward: bool) -> Option<BufferId> {
+        let len = self.buffers.len();
+        if len == 0 {
+            return None;
+        }
+        let current = self
+            .buffers
+            .iter()
+            .position(|id| *id == self.active_buffer)
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        };
+        self.active_buffer = self.buffers[next];
+        Some(self.active_buffer)
+    }
+
     fn remove_buffer(&mut self, buffer_id: BufferId) -> bool {
         let Some(index) = self.buffers.iter().position(|id| *id == buffer_id) else {
             return false;
@@ -598,6 +637,53 @@ impl EditorModel {
         workspace.popups.insert(popup_id, popup);
 
         Ok(popup_id)
+    }
+
+    /// Opens a popup buffer, creating a popup if needed or appending to the existing popup.
+    pub fn open_popup_buffer(
+        &mut self,
+        workspace_id: WorkspaceId,
+        title: impl Into<String>,
+        buffer_id: BufferId,
+    ) -> Result<PopupId, ModelError> {
+        let popup_id = {
+            let workspace = self.workspace(workspace_id)?;
+            if !workspace.buffers.contains_key(&buffer_id) {
+                return Err(ModelError::BufferNotFound(buffer_id));
+            }
+            workspace.popups.keys().next().copied()
+        };
+
+        if let Some(popup_id) = popup_id {
+            let workspace = self.workspace_mut(workspace_id)?;
+            let popup = workspace
+                .popups
+                .get_mut(&popup_id)
+                .ok_or(ModelError::PopupNotFound(popup_id))?;
+            popup.add_buffer(buffer_id);
+            popup.set_active_buffer(buffer_id);
+            return Ok(popup_id);
+        }
+
+        self.open_popup(workspace_id, title, vec![buffer_id], buffer_id)
+    }
+
+    /// Cycles to the next or previous popup buffer, returning the new active buffer.
+    pub fn cycle_popup_buffer(
+        &mut self,
+        workspace_id: WorkspaceId,
+        forward: bool,
+    ) -> Result<Option<BufferId>, ModelError> {
+        let popup_id = self.workspace(workspace_id)?.popups.keys().next().copied();
+        let Some(popup_id) = popup_id else {
+            return Ok(None);
+        };
+        let workspace = self.workspace_mut(workspace_id)?;
+        let popup = workspace
+            .popups
+            .get_mut(&popup_id)
+            .ok_or(ModelError::PopupNotFound(popup_id))?;
+        Ok(popup.cycle_buffer(forward))
     }
 
     /// Closes a popup in the specified workspace.
