@@ -1726,9 +1726,12 @@ impl ShellState {
             Event::KeyDown {
                 keycode: Some(keycode),
                 keymod,
-                repeat: false,
+                repeat,
                 ..
             } => {
+                if repeat && !matches!(keycode, Keycode::Backspace) {
+                    return Ok(false);
+                }
                 if self.try_runtime_keybinding(keycode, keymod)? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
                     self.ensure_visible(visible_rows, wrap_cols)?;
