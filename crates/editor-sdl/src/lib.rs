@@ -3369,11 +3369,36 @@ fn vim_text_object_kind(chord: &str) -> Option<VimTextObjectKind> {
     }
 }
 
-fn matches_pattern_at(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> bool {
+fn search_is_case_sensitive(query: &str) -> bool {
+    query.chars().any(|ch| ch.is_uppercase())
+}
+
+fn normalize_search_char(ch: char, case_sensitive: bool) -> char {
+    if case_sensitive {
+        ch
+    } else {
+        ch.to_ascii_lowercase()
+    }
+}
+
+fn normalize_search_pattern(query: &str, case_sensitive: bool) -> Vec<char> {
+    query
+        .chars()
+        .map(|ch| normalize_search_char(ch, case_sensitive))
+        .collect()
+}
+
+fn matches_pattern_at(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    case_sensitive: bool,
+) -> bool {
     pattern.iter().enumerate().all(|(offset, expected)| {
         buffer
             .text
             .char_at_point(buffer.text.point_from_char_index(start_char + offset))
+            .map(|ch| normalize_search_char(ch, case_sensitive))
             == Some(*expected)
     })
 }
@@ -3382,6 +3407,7 @@ fn search_forward(
     buffer: &ShellBuffer,
     start_char: usize,
     pattern: &[char],
+    case_sensitive: bool,
     wrap: bool,
 ) -> Option<TextPoint> {
     if pattern.is_empty() || pattern.len() > buffer.text.char_count() {
@@ -3391,14 +3417,14 @@ fn search_forward(
     let max_start = buffer.text.char_count().saturating_sub(pattern.len());
     let first_pass_start = start_char.min(max_start.saturating_add(1));
     for char_index in first_pass_start..=max_start {
-        if matches_pattern_at(buffer, char_index, pattern) {
+        if matches_pattern_at(buffer, char_index, pattern, case_sensitive) {
             return Some(buffer.text.point_from_char_index(char_index));
         }
     }
 
     if wrap {
         for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
-            if matches_pattern_at(buffer, char_index, pattern) {
+            if matches_pattern_at(buffer, char_index, pattern, case_sensitive) {
                 return Some(buffer.text.point_from_char_index(char_index));
             }
         }
@@ -3411,6 +3437,7 @@ fn search_backward(
     buffer: &ShellBuffer,
     start_char: usize,
     pattern: &[char],
+    case_sensitive: bool,
     wrap: bool,
 ) -> Option<TextPoint> {
     if pattern.is_empty() || pattern.len() > buffer.text.char_count() {
@@ -3420,14 +3447,14 @@ fn search_backward(
     let max_start = buffer.text.char_count().saturating_sub(pattern.len());
     let first_pass_start = start_char.min(max_start);
     for char_index in (0..=first_pass_start).rev() {
-        if matches_pattern_at(buffer, char_index, pattern) {
+        if matches_pattern_at(buffer, char_index, pattern, case_sensitive) {
             return Some(buffer.text.point_from_char_index(char_index));
         }
     }
 
     if wrap && first_pass_start < max_start {
         for char_index in ((first_pass_start + 1)..=max_start).rev() {
-            if matches_pattern_at(buffer, char_index, pattern) {
+            if matches_pattern_at(buffer, char_index, pattern, case_sensitive) {
                 return Some(buffer.text.point_from_char_index(char_index));
             }
         }
@@ -3442,25 +3469,42 @@ fn char_at_index(buffer: &ShellBuffer, char_index: usize) -> Option<char> {
         .char_at_point(buffer.text.point_from_char_index(char_index))
 }
 
-fn find_char_forward(buffer: &ShellBuffer, start_char: usize, target: char) -> Option<usize> {
+fn find_char_forward(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    target: char,
+    case_sensitive: bool,
+) -> Option<usize> {
     let char_count = buffer.text.char_count();
     for char_index in start_char..char_count {
-        if char_at_index(buffer, char_index) == Some(target) {
+        if char_at_index(buffer, char_index)
+            .map(|ch| normalize_search_char(ch, case_sensitive))
+            == Some(target)
+        {
             return Some(char_index);
         }
     }
     None
 }
 
-fn fuzzy_match_end(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> Option<usize> {
-    if pattern.is_empty() || char_at_index(buffer, start_char) != Some(pattern[0]) {
+fn fuzzy_match_end(
+    buffer: &ShellBuffer,
+    start_char: usize,
+    pattern: &[char],
+    case_sensitive: bool,
+) -> Option<usize> {
+    if pattern.is_empty()
+        || char_at_index(buffer, start_char)
+            .map(|ch| normalize_search_char(ch, case_sensitive))
+            != Some(pattern[0])
+    {
         return None;
     }
 
     let mut last_index = start_char;
     let mut next_index = start_char.saturating_add(1);
     for target in pattern.iter().skip(1) {
-        let Some(found) = find_char_forward(buffer, next_index, *target) else {
+        let Some(found) = find_char_forward(buffer, next_index, *target, case_sensitive) else {
             return None;
         };
         last_index = found;
@@ -3474,6 +3518,7 @@ fn search_fuzzy_forward(
     buffer: &ShellBuffer,
     start_char: usize,
     pattern: &[char],
+    case_sensitive: bool,
     wrap: bool,
 ) -> Option<TextPoint> {
     let char_count = buffer.text.char_count();
@@ -3487,7 +3532,7 @@ fn search_fuzzy_forward(
 
     if first_pass_start <= max_start {
         for char_index in first_pass_start..=max_start {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3502,7 +3547,7 @@ fn search_fuzzy_forward(
 
     if wrap {
         for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3519,6 +3564,7 @@ fn search_fuzzy_backward(
     buffer: &ShellBuffer,
     start_char: usize,
     pattern: &[char],
+    case_sensitive: bool,
     wrap: bool,
 ) -> Option<TextPoint> {
     let char_count = buffer.text.char_count();
@@ -3531,7 +3577,7 @@ fn search_fuzzy_backward(
     let mut best: Option<(usize, usize)> = None;
 
     for char_index in (0..=first_pass_start).rev() {
-        let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+        let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
             continue;
         };
         let span = end_index.saturating_sub(char_index);
@@ -3545,7 +3591,7 @@ fn search_fuzzy_backward(
 
     if wrap && first_pass_start < max_start {
         for char_index in ((first_pass_start + 1)..=max_start).rev() {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);

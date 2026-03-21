@@ -1,7 +1,7 @@
 #![doc = r#"Tree-sitter language registration, installation, parsing, and capture-to-theme mapping."#]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -501,6 +501,7 @@ struct LoadedLanguage {
 struct ParsedHighlight {
     snapshot: SyntaxSnapshot,
     tree: Tree,
+    source: String,
 }
 
 impl LoadedLanguage {
@@ -767,11 +768,16 @@ impl SyntaxRegistry {
                 let Some(parse) = base_parse.as_ref() else {
                     continue;
                 };
-                let inline_ranges = markdown_inline_ranges(&parse.tree);
-                if inline_ranges.is_empty() {
+                let inline_lines = markdown_inline_line_indices(&parse.tree);
+                if inline_lines.is_empty() {
                     continue;
                 }
-                highlight_loaded_language(extra_language_id, loaded, buffer, Some(&inline_ranges))?
+                highlight_inline_language_per_line(
+                    extra_language_id,
+                    loaded,
+                    &parse.source,
+                    &inline_lines,
+                )?
             } else {
                 highlight_loaded_language(extra_language_id, loaded, buffer, None)?
             };
@@ -996,7 +1002,11 @@ fn highlight_loaded_language_with_tree(
         has_errors: tree.root_node().has_error(),
         highlight_spans,
     };
-    Ok(ParsedHighlight { snapshot, tree })
+    Ok(ParsedHighlight {
+        snapshot,
+        tree,
+        source,
+    })
 }
 
 fn highlight_loaded_language(
@@ -1008,44 +1018,99 @@ fn highlight_loaded_language(
     Ok(highlight_loaded_language_with_tree(language_id, loaded, buffer, ranges)?.snapshot)
 }
 
-fn markdown_inline_ranges(tree: &Tree) -> Vec<Range> {
-    fn collect_inline_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<Range>) {
+fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
+    fn collect_lines(node: tree_sitter::Node<'_>, lines: &mut BTreeSet<usize>) {
         if node.kind() == "inline" {
-            let range = Range {
-                start_byte: node.start_byte(),
-                end_byte: node.end_byte(),
-                start_point: node.start_position(),
-                end_point: node.end_position(),
-            };
-            ranges.push(range);
+            for line in node.start_position().row..=node.end_position().row {
+                lines.insert(line);
+            }
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            collect_inline_ranges(child, ranges);
+            collect_lines(child, lines);
         }
     }
 
-    let mut ranges = Vec::new();
-    collect_inline_ranges(tree.root_node(), &mut ranges);
-    ranges.sort_by_key(|range| range.start_byte);
-    ranges.dedup_by(|left, right| {
-        left.start_byte == right.start_byte && left.end_byte == right.end_byte
-    });
+    let mut lines = BTreeSet::new();
+    collect_lines(tree.root_node(), &mut lines);
+    lines.into_iter().collect()
+}
 
-    let mut filtered = Vec::new();
-    let mut last_end = 0;
-    for range in ranges {
-        if range.start_byte >= range.end_byte {
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, byte) in source.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn line_byte_bounds(line_starts: &[usize], source_len: usize, line: usize) -> Option<(usize, usize)> {
+    let start = *line_starts.get(line)?;
+    let end = if line + 1 < line_starts.len() {
+        line_starts[line + 1].saturating_sub(1)
+    } else {
+        source_len
+    };
+    (start <= end).then_some((start, end))
+}
+
+fn highlight_inline_language_per_line(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    source: &str,
+    line_indices: &[usize],
+) -> Result<SyntaxSnapshot, SyntaxError> {
+    let line_starts = line_start_offsets(source);
+    let mut highlight_spans = Vec::new();
+    let mut has_errors = false;
+
+    for &line_index in line_indices {
+        let Some((start, end)) = line_byte_bounds(&line_starts, source.len(), line_index) else {
+            continue;
+        };
+        if start >= end {
             continue;
         }
-        if range.start_byte < last_end {
-            continue;
+        let line_text = &source[start..end];
+        let mut parser = Parser::new();
+        parser
+            .set_language(&loaded.language)
+            .map_err(|error| SyntaxError::ParserConfiguration {
+                language_id: language_id.to_owned(),
+                message: error.to_string(),
+            })?;
+        let tree = parser
+            .parse(line_text, None)
+            .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))?;
+        has_errors |= tree.root_node().has_error();
+
+        let spans = highlight_tree(loaded, &tree, line_text);
+        let line_len = end.saturating_sub(start);
+        for span in spans {
+            let start_col = span.start_position.column.min(line_len);
+            let end_col = span.end_position.column.min(line_len);
+            if start_col >= end_col {
+                continue;
+            }
+            highlight_spans.push(HighlightSpan {
+                start_byte: start.saturating_add(span.start_byte),
+                end_byte: start.saturating_add(span.end_byte),
+                start_position: SyntaxPoint::new(line_index, start_col),
+                end_position: SyntaxPoint::new(line_index, end_col),
+                capture_name: span.capture_name,
+                theme_token: span.theme_token,
+            });
         }
-        last_end = range.end_byte;
-        filtered.push(range);
     }
 
-    filtered
+    Ok(SyntaxSnapshot {
+        language_id: language_id.to_owned(),
+        root_kind: "inline".to_owned(),
+        has_errors,
+        highlight_spans,
+    })
 }
 
 fn build_shared_library(
