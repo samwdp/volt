@@ -135,6 +135,24 @@ impl Pane {
         self.active_buffer = Some(buffer_id);
     }
 
+    fn remove_buffer(&mut self, buffer_id: BufferId) -> bool {
+        let Some(index) = self.buffers.iter().position(|id| *id == buffer_id) else {
+            return false;
+        };
+        self.buffers.remove(index);
+        if self.active_buffer == Some(buffer_id) {
+            let next = if self.buffers.is_empty() {
+                None
+            } else if index > 0 {
+                self.buffers.get(index - 1).copied()
+            } else {
+                self.buffers.first().copied()
+            };
+            self.active_buffer = next;
+        }
+        true
+    }
+
     /// Returns the pane identifier.
     pub const fn id(&self) -> PaneId {
         self.id
@@ -188,6 +206,27 @@ impl Popup {
     /// Returns the active buffer for the popup.
     pub const fn active_buffer(&self) -> BufferId {
         self.active_buffer
+    }
+
+    fn remove_buffer(&mut self, buffer_id: BufferId) -> bool {
+        let Some(index) = self.buffers.iter().position(|id| *id == buffer_id) else {
+            return false;
+        };
+        self.buffers.remove(index);
+        if self.buffers.is_empty() {
+            return true;
+        }
+        if self.active_buffer == buffer_id {
+            let next = if index > 0 {
+                self.buffers.get(index - 1).copied()
+            } else {
+                self.buffers.first().copied()
+            };
+            if let Some(next) = next {
+                self.active_buffer = next;
+            }
+        }
+        false
     }
 }
 
@@ -487,6 +526,49 @@ impl EditorModel {
         Ok(())
     }
 
+    /// Closes a buffer in the specified workspace.
+    pub fn close_buffer(
+        &mut self,
+        workspace_id: WorkspaceId,
+        buffer_id: BufferId,
+    ) -> Result<(), ModelError> {
+        let workspace = self.workspace_mut(workspace_id)?;
+        if !workspace.buffers.contains_key(&buffer_id) {
+            return Err(ModelError::BufferNotFound(buffer_id));
+        }
+        if workspace.buffers.len() <= 1 {
+            return Err(ModelError::CannotCloseLastBuffer(workspace_id));
+        }
+        workspace.buffers.remove(&buffer_id);
+
+        for pane in workspace.panes.values_mut() {
+            pane.remove_buffer(buffer_id);
+        }
+
+        let mut popups_to_close = Vec::new();
+        for (popup_id, popup) in workspace.popups.iter_mut() {
+            if popup.remove_buffer(buffer_id) {
+                popups_to_close.push(*popup_id);
+            }
+        }
+        for popup_id in popups_to_close {
+            workspace.popups.remove(&popup_id);
+        }
+
+        if let Some(fallback) = workspace.buffers.keys().next().copied() {
+            for pane in workspace.panes.values_mut() {
+                if pane.active_buffer.is_none() {
+                    pane.active_buffer = Some(fallback);
+                    if !pane.buffers.contains(&fallback) {
+                        pane.buffers.push(fallback);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Opens a popup in the specified workspace with multiple buffers.
     pub fn open_popup(
         &mut self,
@@ -617,6 +699,8 @@ pub enum ModelError {
     PopupNotFound(PopupId),
     /// The workspace has no active pane available.
     NoActivePane(WorkspaceId),
+    /// The workspace must keep at least one buffer.
+    CannotCloseLastBuffer(WorkspaceId),
     /// Popups must be created with at least one buffer.
     PopupRequiresBuffers,
     /// The popup active buffer must be included in the popup buffer list.
@@ -645,6 +729,10 @@ impl fmt::Display for ModelError {
             Self::NoActivePane(workspace_id) => {
                 write!(formatter, "workspace {workspace_id} has no active pane")
             }
+            Self::CannotCloseLastBuffer(workspace_id) => write!(
+                formatter,
+                "workspace {workspace_id} must retain at least one buffer"
+            ),
             Self::PopupRequiresBuffers => {
                 formatter.write_str("a popup requires at least one buffer")
             }

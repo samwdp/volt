@@ -8,5 +8,18 @@ pub fn package() -> PluginPackage {
             "Saves the active file buffer to disk.",
             vec![PluginAction::emit_hook("buffer.save", None::<&str>)],
         ),
+        PluginCommand::new(
+            "buffer.close",
+            "Closes the active buffer.",
+            vec![PluginAction::emit_hook("buffer.close", None::<&str>)],
+        ),
+        PluginCommand::new(
+            "buffer.close-picker",
+            "Opens the buffer close picker.",
+            vec![PluginAction::emit_hook(
+                "ui.picker.open",
+                Some("buffers.close"),
+            )],
+        ),
     ])
 }

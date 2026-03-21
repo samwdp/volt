@@ -75,6 +75,7 @@ const HOOK_MODE_INSERT: &str = "editor.mode.insert";
 const HOOK_MODE_NORMAL: &str = "editor.mode.normal";
 const HOOK_VIM_EDIT: &str = "editor.vim.edit";
 const HOOK_BUFFER_SAVE: &str = "buffer.save";
+const HOOK_BUFFER_CLOSE: &str = "buffer.close";
 const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
@@ -1137,6 +1138,9 @@ enum PickerAction {
     NoOp,
     ExecuteCommand(String),
     FocusBuffer(BufferId),
+    CloseBuffer(BufferId),
+    CloseBufferSave(BufferId),
+    CloseBufferDiscard(BufferId),
     OpenFile(PathBuf),
     CreateWorkspaceFile {
         root: PathBuf,
@@ -1501,6 +1505,28 @@ impl ShellUiState {
             *existing = buffer;
         } else {
             self.buffers.push(buffer);
+        }
+    }
+
+    fn remove_buffer(&mut self, buffer_id: BufferId) {
+        self.buffers.retain(|buffer| buffer.id() != buffer_id);
+        for view in self.workspace_views.values_mut() {
+            if view.buffer_ids.contains(&buffer_id) {
+                view.buffer_ids.retain(|id| *id != buffer_id);
+                if let Some(fallback) = view.buffer_ids.first().copied() {
+                    if view.split_buffer_id == buffer_id {
+                        view.split_buffer_id = fallback;
+                    }
+                    for pane in view.panes.iter_mut() {
+                        if pane.buffer_id == buffer_id {
+                            pane.buffer_id = fallback;
+                        }
+                    }
+                }
+            }
+            if view.active_pane >= view.panes.len() {
+                view.active_pane = 0;
+            }
         }
     }
 
@@ -2739,6 +2765,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(runtime, HOOK_VIM_EDIT, "Runs a Vim editing action.")?;
     register_hook(runtime, HOOK_BUFFER_SAVE, "Saves the active file buffer.")?;
+    register_hook(runtime, HOOK_BUFFER_CLOSE, "Closes the active buffer.")?;
     register_hook(
         runtime,
         HOOK_WORKSPACE_SAVE,
@@ -3387,6 +3414,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_BUFFER_CLOSE, "shell.buffer-close", |event, runtime| {
+            let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
+            close_buffer_with_prompt(runtime, buffer_id)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(
             HOOK_WORKSPACE_SAVE,
             "shell.workspace-save",
@@ -3475,6 +3509,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         .map_err(|error| error.to_string())?;
                     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::CloseBuffer(buffer_id) => {
+                    close_buffer_with_prompt(runtime, buffer_id)?;
+                }
+                PickerAction::CloseBufferSave(buffer_id) => {
+                    close_buffer_save(runtime, buffer_id)?;
+                }
+                PickerAction::CloseBufferDiscard(buffer_id) => {
+                    close_buffer_discard(runtime, buffer_id)?;
                 }
                 PickerAction::OpenFile(path) => {
                     open_workspace_file(runtime, &path)?;
@@ -4952,6 +4995,52 @@ fn save_buffer_inner(
                 .with_detail(path.display().to_string()),
         )
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn close_buffer_with_prompt(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let (is_dirty, name) = {
+        let ui = shell_ui(runtime)?;
+        let buffer = ui
+            .buffer(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))?;
+        (buffer.is_dirty(), buffer.display_name().to_owned())
+    };
+    if is_dirty {
+        let picker = buffer_close_confirm_overlay(buffer_id, &name);
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+    close_buffer_immediate(runtime, buffer_id)
+}
+
+fn close_buffer_save(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    save_buffer(runtime, workspace_id, buffer_id)?;
+    close_buffer_immediate(runtime, buffer_id)
+}
+
+fn close_buffer_discard(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    close_buffer_immediate(runtime, buffer_id)
+}
+
+fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .close_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.remove_buffer(buffer_id);
+    sync_active_buffer(runtime)?;
     Ok(())
 }
 
@@ -6638,6 +6727,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
     match provider {
         "commands" => Ok(command_picker_overlay(runtime)),
         "buffers" => buffer_picker_overlay(runtime),
+        "buffers.close" => buffer_close_picker_overlay(runtime),
         "keybindings" => Ok(keybinding_picker_overlay(runtime)),
         "treesitter.languages" => treesitter_install_picker_overlay(runtime),
         "workspace.projects" => workspace_project_picker_overlay(runtime),
@@ -6692,6 +6782,39 @@ fn buffer_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, Strin
         .collect();
 
     Ok(PickerOverlay::from_entries("Buffers", entries))
+}
+
+fn buffer_close_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
+    let ui = shell_ui(runtime)?;
+    let entries = ui
+        .active_workspace_buffer_ids()
+        .into_iter()
+        .flatten()
+        .filter_map(|buffer_id| ui.buffer(*buffer_id))
+        .map(|buffer| {
+            let dirty = if buffer.is_dirty() {
+                "modified"
+            } else {
+                "clean"
+            };
+            PickerEntry {
+                item: PickerItem::new(
+                    buffer.id().to_string(),
+                    buffer.display_name(),
+                    format!("{} | {dirty}", buffer.kind_label()),
+                    Some(format!(
+                        "{} | row {}, col {}",
+                        buffer.kind_label(),
+                        buffer.cursor_row() + 1,
+                        buffer.cursor_col() + 1,
+                    )),
+                ),
+                action: PickerAction::CloseBuffer(buffer.id()),
+            }
+        })
+        .collect();
+
+    Ok(PickerOverlay::from_entries("Close Buffers", entries))
 }
 
 fn treesitter_install_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
@@ -6944,6 +7067,39 @@ fn message_picker_overlay(
             action: PickerAction::NoOp,
         }],
     )
+}
+
+fn buffer_close_confirm_overlay(buffer_id: BufferId, buffer_name: &str) -> PickerOverlay {
+    let entries = vec![
+        PickerEntry {
+            item: PickerItem::new(
+                format!("save:{buffer_id}"),
+                "Save and Close",
+                "Write changes then close the buffer.",
+                None::<String>,
+            ),
+            action: PickerAction::CloseBufferSave(buffer_id),
+        },
+        PickerEntry {
+            item: PickerItem::new(
+                format!("discard:{buffer_id}"),
+                "Discard and Close",
+                "Close the buffer without saving.",
+                None::<String>,
+            ),
+            action: PickerAction::CloseBufferDiscard(buffer_id),
+        },
+        PickerEntry {
+            item: PickerItem::new(
+                format!("cancel:{buffer_id}"),
+                "Cancel",
+                "Keep the buffer open.",
+                None::<String>,
+            ),
+            action: PickerAction::NoOp,
+        },
+    ];
+    PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)
 }
 
 fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {
