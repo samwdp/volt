@@ -2510,11 +2510,8 @@ fn resolve_font_request(request: &str) -> Option<PathBuf> {
 fn apply_window_opacity(
     window: &mut Window,
     opacity: f32,
-    opacity_type: OpacityType,
+    _opacity_type: OpacityType,
 ) -> Result<(), ShellError> {
-    if matches!(opacity_type, OpacityType::Blurred) {
-        // SDL3 does not expose blur controls, so blurred windows fall back to opacity.
-    }
     window
         .set_opacity(opacity)
         .map_err(|error| ShellError::Sdl(error.to_string()))

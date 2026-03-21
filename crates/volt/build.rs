@@ -24,9 +24,11 @@ fn copy_user_themes() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rerun-if-changed={}", themes_dir.display());
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let target_dir =
-        target_output_dir(&out_dir).ok_or("unable to locate target output directory")?;
+    let profile = env::var("PROFILE")?;
+    let target_dir = env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root.join("target"))
+        .join(profile);
     let destination = target_dir.join("user").join("themes");
     fs::create_dir_all(&destination)?;
 
@@ -45,20 +47,6 @@ fn copy_user_themes() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn target_output_dir(out_dir: &std::path::Path) -> Option<PathBuf> {
-    out_dir.ancestors().find_map(|ancestor| {
-        let is_build_dir = ancestor
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "build");
-        if is_build_dir {
-            ancestor.parent().map(PathBuf::from)
-        } else {
-            None
-        }
-    })
 }
 
 #[cfg(target_os = "windows")]
