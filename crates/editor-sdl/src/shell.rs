@@ -100,7 +100,7 @@ struct ClipboardContext {
 }
 
 thread_local! {
-    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = RefCell::new(None);
+    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
 }
 
 fn register_clipboard_context(video: sdl3::VideoSubsystem) {
@@ -726,7 +726,9 @@ enum PickerAction {
     ExecuteCommand(String),
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
-    CreateWorkspaceFile { root: PathBuf },
+    CreateWorkspaceFile {
+        root: PathBuf,
+    },
     ActivateTheme(String),
     VimSearch(VimSearchDirection),
     VimSearchResult {
@@ -4023,7 +4025,7 @@ fn store_yank_register(
     let vim = shell_ui_mut(runtime)?.vim_mut();
     vim.yank = Some(yank.clone());
     if let Some(register) = vim.active_register.take() {
-        vim.registers.insert(register, yank);
+        vim.registers.insert(register, yank.clone());
     }
     if sync_to_system_clipboard {
         let text = yank_to_clipboard_text(&yank);
@@ -5453,9 +5455,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
         vim.registers.get(&register).cloned().or(fallback_yank)
     } else {
         let clipboard_text = read_system_clipboard();
-        let clipboard_yank = clipboard_text
-            .as_deref()
-            .and_then(|text| yank_from_clipboard_text(text));
+        let clipboard_yank = clipboard_text.as_deref().and_then(yank_from_clipboard_text);
         // Prefer internal block yanks when the clipboard matches them, since block shapes
         // cannot be reconstructed from clipboard text alone.
         let prefer_internal_block = match (fallback_yank.as_ref(), clipboard_text.as_deref()) {
