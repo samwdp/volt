@@ -28,6 +28,8 @@ pub mod terminal;
 pub mod theme;
 /// Tree-sitter installer and grammar management package.
 pub mod treesitter;
+/// Undo tree picker and history navigation.
+pub mod undotree;
 /// Vim-style bindings and motions.
 pub mod vim;
 /// Workspace creation and project discovery.
@@ -49,6 +51,7 @@ pub fn packages() -> Vec<PluginPackage> {
         multicursor::package(),
         picker::package(),
         treesitter::package(),
+        undotree::package(),
         workspace::package(),
         git::package(),
         oil::package(),

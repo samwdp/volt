@@ -561,11 +561,204 @@ fn segment_index_for_column(segments: &[LineWrapSegment], column: usize) -> usiz
 }
 
 #[derive(Debug, Clone)]
+struct UndoSnapshot {
+    text: String,
+    cursor: TextPoint,
+}
+
+impl UndoSnapshot {
+    fn from_buffer(buffer: &TextBuffer) -> Self {
+        Self {
+            text: buffer.text(),
+            cursor: buffer.cursor(),
+        }
+    }
+
+    fn preview_line(&self) -> Option<String> {
+        let line = self.text.lines().next().unwrap_or("");
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UndoNode {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    snapshot: UndoSnapshot,
+    sequence: u64,
+    last_child: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct UndoTree {
+    nodes: Vec<UndoNode>,
+    current: usize,
+    next_sequence: u64,
+    last_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+struct UndoTreeEntry {
+    node_id: usize,
+    label: String,
+    detail: String,
+    preview: Option<String>,
+}
+
+impl UndoTree {
+    fn new(buffer: &TextBuffer) -> Self {
+        let snapshot = UndoSnapshot::from_buffer(buffer);
+        Self {
+            nodes: vec![UndoNode {
+                parent: None,
+                children: Vec::new(),
+                snapshot,
+                sequence: 0,
+                last_child: None,
+            }],
+            current: 0,
+            next_sequence: 1,
+            last_revision: buffer.revision(),
+        }
+    }
+
+    fn update_revision(&mut self, revision: u64) {
+        self.last_revision = revision;
+    }
+
+    fn record_snapshot(&mut self, buffer: &TextBuffer) -> bool {
+        let revision = buffer.revision();
+        if revision == self.last_revision {
+            return false;
+        }
+        let snapshot = UndoSnapshot::from_buffer(buffer);
+        let parent = self.current;
+        let node_id = self.nodes.len();
+        let sequence = self.next_sequence;
+        self.nodes.push(UndoNode {
+            parent: Some(parent),
+            children: Vec::new(),
+            snapshot,
+            sequence,
+            last_child: None,
+        });
+        if let Some(parent_node) = self.nodes.get_mut(parent) {
+            parent_node.children.push(node_id);
+            parent_node.last_child = Some(node_id);
+        }
+        self.current = node_id;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.last_revision = revision;
+        true
+    }
+
+    fn undo(&mut self) -> Option<UndoSnapshot> {
+        let parent = self.nodes.get(self.current)?.parent?;
+        let current = self.current;
+        if let Some(parent_node) = self.nodes.get_mut(parent) {
+            parent_node.last_child = Some(current);
+        }
+        self.current = parent;
+        self.nodes
+            .get(self.current)
+            .map(|node| node.snapshot.clone())
+    }
+
+    fn redo(&mut self) -> Option<UndoSnapshot> {
+        let next = {
+            let node = self.nodes.get(self.current)?;
+            node.last_child.or_else(|| node.children.last().copied())
+        }?;
+        self.current = next;
+        self.nodes
+            .get(self.current)
+            .map(|node| node.snapshot.clone())
+    }
+
+    fn select(&mut self, node_id: usize) -> Option<UndoSnapshot> {
+        if node_id >= self.nodes.len() {
+            return None;
+        }
+        if let Some(parent) = self.nodes[node_id].parent
+            && let Some(parent_node) = self.nodes.get_mut(parent)
+        {
+            parent_node.last_child = Some(node_id);
+        }
+        self.current = node_id;
+        self.nodes.get(node_id).map(|node| node.snapshot.clone())
+    }
+
+    fn picker_entries(&self) -> (Vec<UndoTreeEntry>, usize) {
+        let mut entries = Vec::new();
+        let mut selected_index = None;
+        if !self.nodes.is_empty() {
+            self.collect_entries(0, 0, &mut entries, &mut selected_index);
+        }
+        (entries, selected_index.unwrap_or(0))
+    }
+
+    fn collect_entries(
+        &self,
+        node_id: usize,
+        depth: usize,
+        entries: &mut Vec<UndoTreeEntry>,
+        selected_index: &mut Option<usize>,
+    ) {
+        let Some(node) = self.nodes.get(node_id) else {
+            return;
+        };
+        let is_current = node_id == self.current;
+        if is_current {
+            *selected_index = Some(entries.len());
+        }
+        let indent = "  ".repeat(depth);
+        let prefix = if is_current { "* " } else { "  " };
+        let cursor = node.snapshot.cursor;
+        let label = if node.parent.is_none() {
+            format!(
+                "{indent}{prefix}root line {}, col {}",
+                cursor.line + 1,
+                cursor.column + 1
+            )
+        } else {
+            format!(
+                "{indent}{prefix}{} line {}, col {}",
+                node.sequence,
+                cursor.line + 1,
+                cursor.column + 1
+            )
+        };
+        let detail = if is_current {
+            format!("current | children: {}", node.children.len())
+        } else if node.parent.is_none() {
+            format!("root | children: {}", node.children.len())
+        } else {
+            format!("children: {}", node.children.len())
+        };
+        entries.push(UndoTreeEntry {
+            node_id,
+            label,
+            detail,
+            preview: node.snapshot.preview_line(),
+        });
+        for child in &node.children {
+            self.collect_entries(*child, depth + 1, entries, selected_index);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
     name: String,
     pub(crate) kind: BufferKind,
     pub(crate) text: TextBuffer,
+    undo_tree: UndoTree,
     language_id: Option<String>,
     pub(crate) scroll_row: usize,
     viewport_lines: usize,
@@ -582,12 +775,14 @@ impl ShellBuffer {
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        let undo_tree = UndoTree::new(&text);
 
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             text,
+            undo_tree,
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
@@ -599,11 +794,13 @@ impl ShellBuffer {
     }
 
     fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
+        let undo_tree = UndoTree::new(&text);
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             text,
+            undo_tree,
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
@@ -621,12 +818,14 @@ impl ShellBuffer {
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        let undo_tree = UndoTree::new(&text);
 
         Self {
             id: buffer_id,
             name: name.to_owned(),
             kind,
             text,
+            undo_tree,
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
@@ -932,11 +1131,43 @@ impl ShellBuffer {
     }
 
     fn undo(&mut self) {
-        let _ = self.text.undo();
+        let _ = self.undo_tree_undo();
     }
 
     fn redo(&mut self) {
-        let _ = self.text.redo();
+        let _ = self.undo_tree_redo();
+    }
+
+    fn record_undo_snapshot(&mut self) {
+        let _ = self.undo_tree.record_snapshot(&self.text);
+    }
+
+    fn undo_tree_undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo_tree.undo() else {
+            return false;
+        };
+        self.apply_undo_snapshot(&snapshot);
+        true
+    }
+
+    fn undo_tree_redo(&mut self) -> bool {
+        let Some(snapshot) = self.undo_tree.redo() else {
+            return false;
+        };
+        self.apply_undo_snapshot(&snapshot);
+        true
+    }
+
+    fn undo_tree_select(&mut self, node_id: usize) -> bool {
+        let Some(snapshot) = self.undo_tree.select(node_id) else {
+            return false;
+        };
+        self.apply_undo_snapshot(&snapshot);
+        true
+    }
+
+    fn undo_tree_entries(&self) -> (Vec<UndoTreeEntry>, usize) {
+        self.undo_tree.picker_entries()
     }
 
     fn delete_range(&mut self, range: TextRange) {
@@ -986,6 +1217,25 @@ impl ShellBuffer {
             self.line_range(start_line)?.start(),
             self.line_range(end_line)?.end(),
         ))
+    }
+
+    fn full_range(&self) -> TextRange {
+        if self.line_count() == 0 {
+            return TextRange::new(TextPoint::default(), TextPoint::default());
+        }
+        let start = self.line_range(0).map(TextRange::start).unwrap_or_default();
+        let end = self
+            .line_range(self.line_count().saturating_sub(1))
+            .map(TextRange::end)
+            .unwrap_or(start);
+        TextRange::new(start, end)
+    }
+
+    fn apply_undo_snapshot(&mut self, snapshot: &UndoSnapshot) {
+        let range = self.full_range();
+        self.replace_range(range, &snapshot.text);
+        self.set_cursor(snapshot.cursor);
+        self.undo_tree.update_revision(self.text.revision());
     }
 
     fn text_object_range(
@@ -1150,6 +1400,10 @@ enum PickerAction {
         root: PathBuf,
     },
     ActivateTheme(String),
+    UndoTreeNode {
+        buffer_id: BufferId,
+        node_id: usize,
+    },
     VimSearch(VimSearchDirection),
     VimSearchResult {
         direction: VimSearchDirection,
@@ -3549,6 +3803,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         .activate(&theme_id)
                         .map_err(|error| error.to_string())?;
                 }
+                PickerAction::UndoTreeNode { buffer_id, node_id } => {
+                    apply_undo_tree_node(runtime, buffer_id, node_id)?;
+                }
                 PickerAction::VimSearch(direction) => {
                     submit_vim_search(runtime, direction, &query)?;
                 }
@@ -4644,16 +4901,30 @@ fn schedule_finish_change(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn finish_change_recording(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let vim = shell_ui_mut(runtime)?.vim_mut();
-    if vim.recording_change {
-        if !vim.change_buffer.is_empty() {
-            vim.last_change = vim.change_buffer.clone();
+    let record_snapshot = {
+        let vim = shell_ui_mut(runtime)?.vim_mut();
+        if vim.recording_change {
+            if !vim.change_buffer.is_empty() {
+                vim.last_change = vim.change_buffer.clone();
+            }
+            vim.change_buffer.clear();
+            vim.recording_change = false;
+            vim.finish_change_on_normal = false;
+            vim.finish_change_after_input = false;
+            true
+        } else {
+            false
         }
-        vim.change_buffer.clear();
-        vim.recording_change = false;
-        vim.finish_change_on_normal = false;
-        vim.finish_change_after_input = false;
+    };
+    if record_snapshot {
+        record_undo_tree_snapshot(runtime)?;
     }
+    Ok(())
+}
+
+fn record_undo_tree_snapshot(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer = active_shell_buffer_mut(runtime)?;
+    buffer.record_undo_snapshot();
     Ok(())
 }
 
@@ -6747,6 +7018,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
         "workspace.delete" => workspace_delete_picker_overlay(runtime),
         "workspace.files" => workspace_file_picker_overlay(runtime),
+        "undo-tree" => undo_tree_picker_overlay(runtime),
         "themes" => theme_picker_overlay(runtime),
         other => Err(format!("unknown picker provider `{other}`")),
     }
@@ -7067,6 +7339,46 @@ fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String
     Ok(PickerOverlay::from_entries("Themes", entries))
 }
 
+fn undo_tree_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_ui(runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "active buffer is missing".to_owned())?;
+    let (entries, selected_index) = buffer.undo_tree_entries();
+    if entries.is_empty() {
+        return Ok(message_picker_overlay(
+            "Undo Tree",
+            "No undo history",
+            "Make an edit to populate the undo tree.",
+            None::<String>,
+        ));
+    }
+    let mut actions = BTreeMap::new();
+    let items = entries
+        .into_iter()
+        .map(|entry| {
+            let item_id = format!("undo:{}", entry.node_id);
+            actions.insert(
+                item_id.clone(),
+                PickerAction::UndoTreeNode {
+                    buffer_id,
+                    node_id: entry.node_id,
+                },
+            );
+            PickerItem::new(item_id, entry.label, entry.detail, entry.preview)
+        })
+        .collect();
+    let mut session = PickerSession::new("Undo Tree", items)
+        .with_preserve_order()
+        .with_result_limit(256);
+    session.set_selected_index(selected_index);
+    Ok(PickerOverlay {
+        session,
+        actions,
+        submit_action: None,
+    })
+}
+
 fn message_picker_overlay(
     title: &str,
     label: &str,
@@ -7113,6 +7425,20 @@ fn buffer_close_confirm_overlay(buffer_id: BufferId, buffer_name: &str) -> Picke
         },
     ];
     PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)
+}
+
+fn apply_undo_tree_node(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    node_id: usize,
+) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    if buffer.undo_tree_select(node_id) {
+        buffer.mark_syntax_dirty();
+        Ok(())
+    } else {
+        Err("undo tree node is missing".to_owned())
+    }
 }
 
 fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {

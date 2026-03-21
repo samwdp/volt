@@ -1,7 +1,7 @@
 - [x] TODO: buffer close command => picker to close the buffer and a command to immideaitly close the buffer. Should prompt user to save before closing if it has been modified
 - [x] TODO: backspace and should repeat when held
 - [x] TODO: delete key not deleting a character in front of cursor, should repeat when held
-- [ ] TODO: undo/redo should be a tree. I want a user/undotree.rs that will keep track of all the changes and a picker should allow a user to go back in time or forwards in time
+- [x] TODO: undo/redo should be a tree. I want a user/undotree.rs that will keep track of all the changes and a picker should allow a user to go back in time or forwards in time
 - [ ] TODO: popup window is all wrong visually. popup window can contain any number of buffers that are marked as a popup. when a popup window is open I need a a popup next and previous that will cycle through the buffers inside the popup window. a buffer should be treated no differently to a normal window with a buffer. 
 - [ ] TODO: make a horizontal split
 - [ ] TODO: buffers marked as popup should only ever appear in the popup window. never in the main editing panels. so the terminal.popup should only ever appear as a popup, not like it is now when you run that command. it shows the buffer in the popup and in the main area
