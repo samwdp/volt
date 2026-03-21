@@ -31,3 +31,13 @@ font = "default"
 font_size = 18
 cursor_roundness = 2
 picker_roundness = 16
+
+[langs.rust]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.markdown]
+indent = 0
+format_on_save = false
+use_tabs = false

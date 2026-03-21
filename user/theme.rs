@@ -113,6 +113,19 @@ fn parse_theme(path: &Path, source: &str) -> Result<Theme, String> {
         }
     }
 
+    if let Some(langs) = table.get("langs").and_then(toml::Value::as_table) {
+        for (language_id, value) in langs {
+            let language_table = value.as_table().ok_or_else(|| {
+                format!("langs.{language_id} must be a table of language options")
+            })?;
+            for (option, option_value) in language_table {
+                let key = format!("langs.{language_id}.{option}");
+                let parsed = parse_option(&key, option_value)?;
+                theme = theme.with_option(key, parsed);
+            }
+        }
+    }
+
     Ok(theme)
 }
 
@@ -195,6 +208,11 @@ name = "Test Theme"
 font = "Example Mono"
 font_size = 18
 "ui.line-number.relative" = true
+
+[langs.rust]
+indent = 4
+format_on_save = true
+use_tabs = false
 "##;
         let theme = parse_theme(std::path::Path::new("test.toml"), source)
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
@@ -204,5 +222,8 @@ font_size = 18
         assert!(theme.option_string("font").is_some());
         assert!(theme.option_number("font_size").is_some());
         assert_eq!(theme.option_bool("ui.line-number.relative"), Some(true));
+        assert_eq!(theme.option_number("langs.rust.indent"), Some(4.0));
+        assert_eq!(theme.option_bool("langs.rust.format_on_save"), Some(true));
+        assert_eq!(theme.option_bool("langs.rust.use_tabs"), Some(false));
     }
 }

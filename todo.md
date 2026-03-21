@@ -1,7 +1,9 @@
-- [x] TODO: yanking should copy to the system clipboard and "p" and "P" commands should take from the system clipboard and insert the text
-- [x] TODO: workspace list files should create a new file if there is no match. If i put dir1/dir2/test.md this should create the file at that directory path
-- [ ] TODO: smart line wrapping when a line exceeds the width of the screen
 - [ ] TODO: buffer close command => picker to close the buffer and a command to immideaitly close the buffer. Should prompt user to save before closing if it has been modified
 - [ ] TODO: backspace and should repeat when held
-- [ ] TODO: key not deleting a character in front of cursor, should repeat when held
+- [ ] TODO: delete key not deleting a character in front of cursor, should repeat when held
 - [ ] TODO: undo/redo should be a tree. I want a user/undotree.rs that will keep track of all the changes and a picker should allow a user to go back in time or forwards in time
+- [ ] TODO: popup window is all wrong visually. popup window can contain any number of buffers that are marked as a popup. when a popup window is open I need a a popup next and previous that will cycle through the buffers inside the popup window. a buffer should be treated no differently to a normal window with a buffer. 
+- [ ] TODO: make a horizontal split
+- [ ] TODO: buffers marked as popup should only ever appear in the popup window. never in the main editing panels. so the terminal.popup should only ever appear as a popup, not like it is now when you run that command. it shows the buffer in the popup and in the main area
+- [ ] TODO: look into creating user interactive read-only buffers. this will be the starting point for treating a magit style interface
+- [ ] TODO: look into creating a buffer that can take user input text field and run commands from keybinds. you should be able to style this in a way like [editor code assistant mode](Https://github.com/editor-code-assistant/eca-emacs) for emacs

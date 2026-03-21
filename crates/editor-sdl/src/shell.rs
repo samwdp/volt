@@ -187,12 +187,385 @@ struct LineSyntaxSpan {
     theme_token: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LineWrapSegment {
+    start_col: usize,
+    end_col: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LineCharMap {
+    bytes: Vec<usize>,
+    whitespace: Vec<bool>,
+}
+
+impl LineCharMap {
+    fn new(line: &str) -> Self {
+        let mut bytes = Vec::new();
+        let mut whitespace = Vec::new();
+        for (byte_index, character) in line.char_indices() {
+            bytes.push(byte_index);
+            whitespace.push(character.is_whitespace());
+        }
+        bytes.push(line.len());
+        Self { bytes, whitespace }
+    }
+
+    fn len(&self) -> usize {
+        self.whitespace.len()
+    }
+
+    fn slice<'a>(&self, line: &'a str, start_col: usize, end_col: usize) -> &'a str {
+        if start_col >= end_col {
+            return "";
+        }
+        let len = self.len();
+        let start = start_col.min(len);
+        let end = end_col.min(len);
+        let start_byte = self.bytes.get(start).copied().unwrap_or(line.len());
+        let end_byte = self.bytes.get(end).copied().unwrap_or(line.len());
+        &line[start_byte..end_byte]
+    }
+}
+
+fn theme_lang_indent(theme_registry: Option<&ThemeRegistry>, language_id: Option<&str>) -> usize {
+    let Some(registry) = theme_registry else {
+        return 0;
+    };
+    let Some(language_id) = language_id else {
+        return 0;
+    };
+    let key = format!("langs.{language_id}.indent");
+    registry
+        .resolve_number(&key)
+        .map(|value| value.max(0.0).round() as usize)
+        .unwrap_or(0)
+}
+
+fn theme_lang_format_on_save(
+    theme_registry: Option<&ThemeRegistry>,
+    language_id: Option<&str>,
+) -> bool {
+    let Some(registry) = theme_registry else {
+        return false;
+    };
+    let Some(language_id) = language_id else {
+        return false;
+    };
+    let key = format!("langs.{language_id}.format_on_save");
+    registry.resolve_bool(&key).unwrap_or(false)
+}
+
+fn theme_lang_use_tabs(theme_registry: Option<&ThemeRegistry>, language_id: Option<&str>) -> bool {
+    let Some(registry) = theme_registry else {
+        return false;
+    };
+    let Some(language_id) = language_id else {
+        return false;
+    };
+    let key = format!("langs.{language_id}.use_tabs");
+    registry.resolve_bool(&key).unwrap_or(false)
+}
+
+fn theme_color(theme_registry: Option<&ThemeRegistry>, token: &str, fallback: Color) -> Color {
+    theme_registry
+        .and_then(|registry| registry.resolve(token))
+        .map(to_sdl_color)
+        .unwrap_or(fallback)
+}
+
+fn is_dark_color(color: Color) -> bool {
+    let luminance =
+        0.2126 * f32::from(color.r) + 0.7152 * f32::from(color.g) + 0.0722 * f32::from(color.b);
+    luminance < 128.0
+}
+
+fn adjust_color(color: Color, delta: i16) -> Color {
+    let adjust = |channel: u8| -> u8 { (i16::from(channel) + delta).clamp(0, 255) as u8 };
+    Color::RGBA(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
+}
+
+fn blend_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    let blend = |a: u8, b: u8| -> u8 {
+        (f32::from(a) * inv + f32::from(b) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::RGBA(
+        blend(a.r, b.r),
+        blend(a.g, b.g),
+        blend(a.b, b.b),
+        blend(a.a, b.a),
+    )
+}
+
+fn normalize_tabs<'a>(text: &'a str, indent_size: usize, use_tabs: bool) -> Cow<'a, str> {
+    if use_tabs || !text.contains('\t') {
+        return Cow::Borrowed(text);
+    }
+    let indent_size = indent_size.max(1);
+    Cow::Owned(text.replace('\t', &" ".repeat(indent_size)))
+}
+
+fn leading_whitespace_info(line: &str, tab_width: usize) -> (usize, usize) {
+    let tab_width = tab_width.max(1);
+    let mut columns = 0usize;
+    let mut end = 0usize;
+    for (index, character) in line.char_indices() {
+        if !character.is_whitespace() {
+            end = index;
+            return (columns, end);
+        }
+        if character == '\t' {
+            columns = columns.saturating_add(tab_width);
+        } else {
+            columns = columns.saturating_add(1);
+        }
+        end = index + character.len_utf8();
+    }
+    (columns, end)
+}
+
+fn leading_indent_string(line: &str, indent_size: usize) -> String {
+    let (_, end) = leading_whitespace_info(line, indent_size);
+    line[..end].to_owned()
+}
+
+fn trim_indent_unit(indent: &str, indent_size: usize) -> String {
+    if indent.is_empty() || indent_size == 0 {
+        return indent.to_owned();
+    }
+    let tab_width = indent_size.max(1);
+    let mut total_cols = 0usize;
+    for character in indent.chars() {
+        total_cols = total_cols.saturating_add(if character == '\t' { tab_width } else { 1 });
+    }
+    let target_cols = total_cols.saturating_sub(indent_size);
+    let mut cols = 0usize;
+    let mut cut = 0usize;
+    for (index, character) in indent.char_indices() {
+        let width = if character == '\t' { tab_width } else { 1 };
+        if cols.saturating_add(width) > target_cols {
+            break;
+        }
+        cols = cols.saturating_add(width);
+        cut = index + character.len_utf8();
+    }
+    indent[..cut].to_owned()
+}
+
+fn desired_indent_for_line(
+    buffer: &ShellBuffer,
+    line_index: usize,
+    indent_size: usize,
+    use_tabs: bool,
+) -> String {
+    let mut base_line = buffer.text.line(line_index).unwrap_or_default();
+    let mut search_index = line_index;
+    while search_index > 0 && base_line.trim().is_empty() {
+        search_index = search_index.saturating_sub(1);
+        let Some(line) = buffer.text.line(search_index) else {
+            continue;
+        };
+        if !line.trim().is_empty() {
+            base_line = line;
+            break;
+        }
+    }
+    let mut indent = leading_indent_string(&base_line, indent_size);
+    if indent_size > 0 && base_line.trim_end().ends_with('{') {
+        if use_tabs {
+            indent.push('\t');
+        } else {
+            indent.push_str(&" ".repeat(indent_size));
+        }
+    }
+    let current_line = buffer.text.line(line_index).unwrap_or_default();
+    if current_line.trim_start().starts_with('}') {
+        indent = trim_indent_unit(&indent, indent_size);
+    }
+    indent
+}
+
+fn apply_line_indent(
+    buffer: &mut ShellBuffer,
+    line_index: usize,
+    indent_size: usize,
+    indent: &str,
+) {
+    let line = buffer.text.line(line_index).unwrap_or_default();
+    let (_, end) = leading_whitespace_info(&line, indent_size);
+    let current_indent = &line[..end];
+    if current_indent == indent {
+        return;
+    }
+    let end_col = current_indent.chars().count();
+    buffer.replace_range(
+        TextRange::new(
+            TextPoint::new(line_index, 0),
+            TextPoint::new(line_index, end_col),
+        ),
+        indent,
+    );
+    let cursor = buffer.cursor_point();
+    if cursor.line == line_index {
+        let new_indent_cols = indent.chars().count();
+        let delta = new_indent_cols as isize - end_col as isize;
+        let new_col = if cursor.column <= end_col {
+            new_indent_cols
+        } else {
+            let adjusted = cursor.column as isize + delta;
+            if adjusted < new_indent_cols as isize {
+                new_indent_cols
+            } else {
+                adjusted as usize
+            }
+        };
+        buffer.set_cursor(TextPoint::new(line_index, new_col));
+    }
+}
+
+fn format_current_line_indent(buffer: &mut ShellBuffer, indent_size: usize, use_tabs: bool) {
+    let line_index = buffer.cursor_row();
+    let indent = desired_indent_for_line(buffer, line_index, indent_size, use_tabs);
+    apply_line_indent(buffer, line_index, indent_size, &indent);
+}
+
+fn dedent_block_end(buffer: &mut ShellBuffer, indent_size: usize) -> bool {
+    if indent_size == 0 {
+        return false;
+    }
+    let cursor = buffer.cursor_point();
+    let line = buffer.text.line(cursor.line).unwrap_or_default();
+    if !line
+        .chars()
+        .take(cursor.column)
+        .all(|character| character.is_whitespace())
+    {
+        return false;
+    }
+    let (leading_cols, leading_end) = leading_whitespace_info(&line, indent_size);
+    if leading_cols == 0 {
+        return false;
+    }
+    let target_remove_cols = indent_size.min(leading_cols);
+    let mut removed_cols = 0usize;
+    let mut remove_end = 0usize;
+    for (index, character) in line[..leading_end].char_indices() {
+        let width = if character == '\t' {
+            indent_size.max(1)
+        } else {
+            1
+        };
+        if removed_cols + width > target_remove_cols {
+            break;
+        }
+        removed_cols += width;
+        remove_end = index + character.len_utf8();
+        if removed_cols >= target_remove_cols {
+            break;
+        }
+    }
+    if remove_end == 0 {
+        return false;
+    }
+    let removed_chars = line[..remove_end].chars().count();
+    buffer.delete_range(TextRange::new(
+        TextPoint::new(cursor.line, 0),
+        TextPoint::new(cursor.line, removed_chars),
+    ));
+    buffer.set_cursor(TextPoint::new(
+        cursor.line,
+        cursor.column.saturating_sub(removed_chars),
+    ));
+    true
+}
+
+fn wrap_columns_for_width(width: u32, cell_width: i32) -> usize {
+    let cell_width = cell_width.max(1) as u32;
+    let line_number_width = cell_width.saturating_mul(5);
+    let padding = 12u32 + line_number_width;
+    let available = width.saturating_sub(padding).max(cell_width);
+    (available / cell_width).max(1) as usize
+}
+
+fn wrap_line_segments(
+    map: &LineCharMap,
+    first_cols: usize,
+    continuation_cols: usize,
+) -> Vec<LineWrapSegment> {
+    let first_cols = first_cols.max(1);
+    let continuation_cols = continuation_cols.max(1);
+    let len = map.len();
+    if len == 0 {
+        return vec![LineWrapSegment {
+            start_col: 0,
+            end_col: 0,
+        }];
+    }
+
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut max_cols = first_cols;
+    while start < len {
+        let remaining = len - start;
+        if remaining <= max_cols {
+            segments.push(LineWrapSegment {
+                start_col: start,
+                end_col: len,
+            });
+            break;
+        }
+
+        let wrap_limit = start + max_cols;
+        let mut break_at = None;
+        for idx in (start..wrap_limit).rev() {
+            if map.whitespace.get(idx).copied().unwrap_or(false) {
+                break_at = Some(idx + 1);
+                break;
+            }
+        }
+
+        let end = break_at.unwrap_or(wrap_limit);
+        segments.push(LineWrapSegment {
+            start_col: start,
+            end_col: end,
+        });
+        start = end;
+        max_cols = continuation_cols;
+    }
+
+    if segments.is_empty() {
+        segments.push(LineWrapSegment {
+            start_col: 0,
+            end_col: 0,
+        });
+    }
+
+    segments
+}
+
+fn segment_index_for_column(segments: &[LineWrapSegment], column: usize) -> usize {
+    if segments.is_empty() {
+        return 0;
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        if column < segment.end_col || index == segments.len().saturating_sub(1) {
+            return index;
+        }
+    }
+    segments.len().saturating_sub(1)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
     name: String,
     pub(crate) kind: BufferKind,
     pub(crate) text: TextBuffer,
+    language_id: Option<String>,
     pub(crate) scroll_row: usize,
     viewport_lines: usize,
     syntax_error: Option<String>,
@@ -214,6 +587,7 @@ impl ShellBuffer {
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             text,
+            language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
             syntax_error: None,
@@ -229,6 +603,7 @@ impl ShellBuffer {
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             text,
+            language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
             syntax_error: None,
@@ -251,6 +626,7 @@ impl ShellBuffer {
             name: name.to_owned(),
             kind,
             text,
+            language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
             syntax_error: None,
@@ -266,6 +642,10 @@ impl ShellBuffer {
 
     pub(crate) fn display_name(&self) -> &str {
         &self.name
+    }
+
+    fn language_id(&self) -> Option<&str> {
+        self.language_id.as_deref()
     }
 
     fn kind_label(&self) -> String {
@@ -288,10 +668,6 @@ impl ShellBuffer {
         self.text.line_count()
     }
 
-    fn visible_lines(&self, max_lines: usize) -> Vec<String> {
-        self.text.lines(self.scroll_row, max_lines)
-    }
-
     fn line_len_chars(&self, line_index: usize) -> usize {
         self.text.line_len_chars(line_index).unwrap_or(0)
     }
@@ -312,6 +688,10 @@ impl ShellBuffer {
         self.syntax_lines = syntax.as_ref().map(index_syntax_lines).unwrap_or_default();
         self.syntax_dirty = false;
         self.last_edit_at = None;
+    }
+
+    fn set_language_id(&mut self, language_id: Option<String>) {
+        self.language_id = language_id;
     }
 
     fn set_syntax_error(&mut self, error: Option<String>) {
@@ -363,10 +743,6 @@ impl ShellBuffer {
                     .replace(TextRange::new(point, next), &character.to_string());
             }
         }
-    }
-
-    fn insert_newline(&mut self) {
-        self.text.insert_newline();
     }
 
     fn backspace(&mut self) {
@@ -701,16 +1077,52 @@ impl ShellBuffer {
         self.move_to_viewport_offset(middle)
     }
 
-    fn ensure_visible(&mut self, visible_lines: usize) {
+    fn cursor_visual_row_offset(&self, wrap_cols: usize, indent_size: usize) -> Option<usize> {
+        let wrap_cols = wrap_cols.max(1);
+        let cursor_row = self.cursor_row();
+        let cursor_col = self.cursor_col();
+        if cursor_row < self.scroll_row {
+            return Some(0);
+        }
+
+        let mut row_offset = 0usize;
+        for line_index in self.scroll_row..=cursor_row {
+            let line = self.text.line(line_index).unwrap_or_default();
+            let map = LineCharMap::new(&line);
+            let (leading_indent_cols, _) = leading_whitespace_info(&line, indent_size);
+            let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
+            let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
+            let segments = wrap_line_segments(&map, wrap_cols, continuation_cols);
+            if line_index == cursor_row {
+                let segment_index = segment_index_for_column(&segments, cursor_col);
+                row_offset = row_offset.saturating_add(segment_index);
+                return Some(row_offset);
+            }
+            row_offset = row_offset.saturating_add(segments.len());
+        }
+
+        None
+    }
+
+    fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
+        let visible_rows = visible_rows.max(1);
         let cursor_row = self.cursor_row();
         if cursor_row < self.scroll_row {
             self.scroll_row = cursor_row;
             return;
         }
 
-        let bottom = self.scroll_row + visible_lines.saturating_sub(1);
-        if cursor_row > bottom {
-            self.scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
+        loop {
+            let Some(cursor_offset) = self.cursor_visual_row_offset(wrap_cols, indent_size) else {
+                break;
+            };
+            if cursor_offset < visible_rows {
+                break;
+            }
+            if self.scroll_row >= cursor_row {
+                break;
+            }
+            self.scroll_row = self.scroll_row.saturating_add(1);
         }
     }
 }
@@ -1276,8 +1688,13 @@ impl ShellState {
         Ok(Self { runtime })
     }
 
-    fn handle_event(&mut self, event: Event, visible_lines: usize) -> Result<bool, ShellError> {
-        self.active_buffer_mut()?.set_viewport_lines(visible_lines);
+    fn handle_event(
+        &mut self,
+        event: Event,
+        visible_rows: usize,
+        wrap_cols: usize,
+    ) -> Result<bool, ShellError> {
+        self.active_buffer_mut()?.set_viewport_lines(visible_rows);
         match event {
             Event::Quit { .. } => return Ok(true),
             Event::KeyDown {
@@ -1288,7 +1705,7 @@ impl ShellState {
             } => {
                 if self.try_runtime_keybinding(keycode, keymod)? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
-                    self.ensure_visible(visible_lines)?;
+                    self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
                 }
 
@@ -1303,7 +1720,7 @@ impl ShellState {
                         picker.backspace_query();
                         self.refresh_vim_search_picker()?;
                     }
-                    self.ensure_visible(visible_lines)?;
+                    self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
                 }
 
@@ -1320,12 +1737,29 @@ impl ShellState {
                     Keycode::Down => {
                         let _ = self.active_buffer_mut()?.move_down();
                     }
-                    Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_lines as i32),
-                    Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_lines as i32)),
+                    Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_rows as i32),
+                    Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_rows as i32)),
                     Keycode::Return | Keycode::KpEnter
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        self.active_buffer_mut()?.insert_newline();
+                        let (indent_size, use_tabs) = {
+                            let ui = self.ui()?;
+                            let buffer_id = ui.active_buffer_id().ok_or_else(|| {
+                                ShellError::Runtime("active buffer is missing".to_owned())
+                            })?;
+                            let language_id =
+                                ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+                            let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+                            (
+                                theme_lang_indent(theme_registry, language_id),
+                                theme_lang_use_tabs(theme_registry, language_id),
+                            )
+                        };
+                        {
+                            let buffer = self.active_buffer_mut()?;
+                            buffer.insert_text("\n");
+                            format_current_line_indent(buffer, indent_size, use_tabs);
+                        }
                         self.mark_active_buffer_syntax_dirty()?;
                     }
                     Keycode::Backspace
@@ -1345,7 +1779,7 @@ impl ShellState {
             _ => {}
         }
 
-        self.ensure_visible(visible_lines)?;
+        self.ensure_visible(visible_rows, wrap_cols)?;
         Ok(false)
     }
 
@@ -1790,16 +2224,54 @@ impl ShellState {
 
         match self.input_mode()? {
             InputMode::Insert => {
-                self.active_buffer_mut()?.insert_text(text);
+                let (indent_size, use_tabs) = {
+                    let ui = self.ui()?;
+                    let buffer_id = ui.active_buffer_id().ok_or_else(|| {
+                        ShellError::Runtime("active buffer is missing".to_owned())
+                    })?;
+                    let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+                    let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+                    (
+                        theme_lang_indent(theme_registry, language_id),
+                        theme_lang_use_tabs(theme_registry, language_id),
+                    )
+                };
+                let normalized = normalize_tabs(text, indent_size, use_tabs);
+                {
+                    let buffer = self.active_buffer_mut()?;
+                    if text == "}" {
+                        dedent_block_end(buffer, indent_size);
+                    }
+                    buffer.insert_text(normalized.as_ref());
+                }
                 self.mark_active_buffer_syntax_dirty()?;
-                self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
             InputMode::Replace => {
-                self.active_buffer_mut()?.replace_mode_text(text);
+                let (indent_size, use_tabs) = {
+                    let ui = self.ui()?;
+                    let buffer_id = ui.active_buffer_id().ok_or_else(|| {
+                        ShellError::Runtime("active buffer is missing".to_owned())
+                    })?;
+                    let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+                    let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+                    (
+                        theme_lang_indent(theme_registry, language_id),
+                        theme_lang_use_tabs(theme_registry, language_id),
+                    )
+                };
+                let normalized = normalize_tabs(text, indent_size, use_tabs);
+                {
+                    let buffer = self.active_buffer_mut()?;
+                    if text == "}" {
+                        dedent_block_end(buffer, indent_size);
+                    }
+                    buffer.replace_mode_text(normalized.as_ref());
+                }
                 self.mark_active_buffer_syntax_dirty()?;
-                self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
@@ -1926,8 +2398,16 @@ impl ShellState {
         sync_active_buffer(&mut self.runtime)
     }
 
-    fn ensure_visible(&mut self, visible_lines: usize) -> Result<(), ShellError> {
-        self.active_buffer_mut()?.ensure_visible(visible_lines);
+    fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize) -> Result<(), ShellError> {
+        let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+        let language_id = shell_ui(&self.runtime)
+            .map_err(ShellError::Runtime)?
+            .buffer(buffer_id)
+            .and_then(|buffer| buffer.language_id());
+        let indent_size =
+            theme_lang_indent(self.runtime.services().get::<ThemeRegistry>(), language_id);
+        self.active_buffer_mut()?
+            .ensure_visible(visible_rows, wrap_cols, indent_size);
         Ok(())
     }
 
@@ -2004,10 +2484,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         let (render_width, render_height) = canvas
             .output_size()
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        let visible_lines = (((render_height.saturating_sub(72)) as usize) / line_height).max(1);
+        let visible_rows = (((render_height.saturating_sub(72)) as usize) / line_height).max(1);
+        let wrap_cols = wrap_columns_for_width(render_width, cell_width);
 
         for event in event_pump.poll_iter() {
-            if state.handle_event(event, visible_lines)? {
+            if state.handle_event(event, visible_rows, wrap_cols)? {
                 return Ok(ShellSummary {
                     frames_rendered,
                     pane_count: state.pane_count()?,
@@ -2586,6 +3067,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_NORMAL, "shell.enter-normal-mode", |_, runtime| {
+            let cursor_point = active_shell_buffer_mut(runtime)?.cursor_point();
             let finish_change = {
                 let vim = shell_ui(runtime)?.vim();
                 vim.recording_change && vim.finish_change_on_normal
@@ -2606,14 +3088,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     None
                 }
             };
-            if matches!(
-                shell_ui(runtime)?.input_mode(),
-                InputMode::Insert | InputMode::Replace
-            ) {
-                let _ = active_shell_buffer_mut(runtime)?.move_left();
-            }
             apply_pending_block_insert(runtime)?;
             shell_ui_mut(runtime)?.enter_normal_mode();
+            active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
             if let Some((anchor, head, kind)) = visual_snapshot {
                 store_last_visual_selection(runtime, anchor, head, kind)?;
             }
@@ -2684,16 +3161,41 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "open-line-below" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
+                    let (indent_size, use_tabs) = {
+                        let ui = shell_ui(runtime)?;
+                        let buffer_id = active_shell_buffer_id(runtime)?;
+                        let language_id =
+                            ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+                        let theme_registry = runtime.services().get::<ThemeRegistry>();
+                        (
+                            theme_lang_indent(theme_registry, language_id),
+                            theme_lang_use_tabs(theme_registry, language_id),
+                        )
+                    };
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.open_line_below();
+                    format_current_line_indent(buffer, indent_size, use_tabs);
                     buffer.mark_syntax_dirty();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "open-line-above" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
+                    let (indent_size, reference_indent) = {
+                        let ui = shell_ui(runtime)?;
+                        let buffer_id = active_shell_buffer_id(runtime)?;
+                        let buffer = ui
+                            .buffer(buffer_id)
+                            .ok_or_else(|| "active buffer is missing".to_owned())?;
+                        let language_id = buffer.language_id();
+                        let theme_registry = runtime.services().get::<ThemeRegistry>();
+                        let indent_size = theme_lang_indent(theme_registry, language_id);
+                        let line = buffer.text.line(buffer.cursor_row()).unwrap_or_default();
+                        (indent_size, leading_indent_string(&line, indent_size))
+                    };
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.open_line_above();
+                    apply_line_indent(buffer, buffer.cursor_row(), indent_size, &reference_indent);
                     buffer.mark_syntax_dirty();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
@@ -3144,6 +3646,21 @@ fn active_shell_buffer_mut(runtime: &mut EditorRuntime) -> Result<&mut ShellBuff
     shell_ui_mut(runtime)?
         .buffer_mut(buffer_id)
         .ok_or_else(|| "active shell buffer is missing".to_owned())
+}
+
+fn shell_buffer(runtime: &EditorRuntime, buffer_id: BufferId) -> Result<&ShellBuffer, String> {
+    shell_ui(runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))
+}
+
+fn shell_buffer_mut(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<&mut ShellBuffer, String> {
+    shell_ui_mut(runtime)?
+        .buffer_mut(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))
 }
 
 fn reverse_find_kind(kind: VimFindKind) -> VimFindKind {
@@ -4385,6 +4902,28 @@ fn save_buffer(
     }
 
     let path = path.ok_or_else(|| "buffer.save requires a file path".to_owned())?;
+    let language_id = language_id_for_path(runtime, &path).ok();
+    if theme_lang_format_on_save(
+        runtime.services().get::<ThemeRegistry>(),
+        language_id.as_deref(),
+    ) {
+        let language_id = language_id.ok_or_else(|| {
+            format!(
+                "format-on-save enabled but no language registered for `{}`",
+                path.display()
+            )
+        })?;
+        format_buffer_on_save(runtime, buffer_id, &path, &language_id)?;
+    }
+    save_buffer_inner(runtime, workspace_id, buffer_id, &path)
+}
+
+fn save_buffer_inner(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+) -> Result<(), String> {
     runtime
         .emit_hook(
             builtins::BEFORE_SAVE,
@@ -4400,7 +4939,7 @@ fn save_buffer(
             .buffer_mut(buffer_id)
             .ok_or_else(|| format!("buffer `{buffer_id}` is missing from the shell UI"))?;
         buffer
-            .save_to_path(&path)
+            .save_to_path(path)
             .map_err(|error| format!("failed to save `{}`: {error}", path.display()))?;
     }
 
@@ -4532,7 +5071,44 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn format_buffer_on_save(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    path: &Path,
+    language_id: &str,
+) -> Result<(), String> {
+    let formatter = formatter_registry(runtime)?
+        .formatter_for_language(language_id)
+        .ok_or_else(|| format!("no formatter registered for language `{language_id}`"))?
+        .clone();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_owned);
+    let cwd = path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| active_workspace_root(runtime).ok().flatten());
+    let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
+    format_buffer_entire(
+        runtime,
+        buffer_id,
+        &formatter,
+        extension.as_deref(),
+        cwd.as_deref(),
+        original_cursor,
+    )
+}
+
 fn formatter_for_path(runtime: &EditorRuntime, path: &Path) -> Result<FormatterSpec, String> {
+    let language_id = language_id_for_path(runtime, path)?;
+    let formatter = formatter_registry(runtime)?
+        .formatter_for_language(&language_id)
+        .ok_or_else(|| format!("no formatter registered for language `{language_id}`"))?;
+    Ok(formatter.clone())
+}
+
+fn language_id_for_path(runtime: &EditorRuntime, path: &Path) -> Result<String, String> {
     let syntax = runtime
         .services()
         .get::<SyntaxRegistry>()
@@ -4540,10 +5116,7 @@ fn formatter_for_path(runtime: &EditorRuntime, path: &Path) -> Result<FormatterS
     let language = syntax
         .language_for_path(path)
         .ok_or_else(|| format!("no syntax language registered for `{}`", path.display()))?;
-    let formatter = formatter_registry(runtime)?
-        .formatter_for_language(language.id())
-        .ok_or_else(|| format!("no formatter registered for language `{}`", language.id()))?;
-    Ok(formatter.clone())
+    Ok(language.id().to_owned())
 }
 
 fn format_entire_buffer(
@@ -4553,22 +5126,37 @@ fn format_entire_buffer(
     cwd: Option<&Path>,
     original_cursor: TextPoint,
 ) -> Result<(), String> {
-    let input = {
-        let buffer = active_shell_buffer_mut(runtime)?;
-        buffer.text.text()
-    };
-    let formatted = format_text_with_formatter(runtime, formatter, &input, extension, cwd)?;
-    {
-        let buffer = active_shell_buffer_mut(runtime)?;
-        if formatted != input {
-            let end = buffer.text.point_from_char_index(buffer.text.char_count());
-            buffer.replace_range(TextRange::new(TextPoint::default(), end), &formatted);
-            buffer.mark_syntax_dirty();
-        }
-        buffer.set_cursor(original_cursor);
-    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    format_buffer_entire(
+        runtime,
+        buffer_id,
+        formatter,
+        extension,
+        cwd,
+        original_cursor,
+    )?;
     shell_ui_mut(runtime)?.enter_normal_mode();
     schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn format_buffer_entire(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    formatter: &FormatterSpec,
+    extension: Option<&str>,
+    cwd: Option<&Path>,
+    original_cursor: TextPoint,
+) -> Result<(), String> {
+    let input = { shell_buffer(runtime, buffer_id)?.text.text() };
+    let formatted = format_text_with_formatter(runtime, formatter, &input, extension, cwd)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    if formatted != input {
+        let end = buffer.text.point_from_char_index(buffer.text.char_count());
+        buffer.replace_range(TextRange::new(TextPoint::default(), end), &formatted);
+        buffer.mark_syntax_dirty();
+    }
+    buffer.set_cursor(original_cursor);
     Ok(())
 }
 
@@ -5446,6 +6034,16 @@ fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     start_change_recording(runtime)?;
+    let (indent_size, use_tabs) = {
+        let ui = shell_ui(runtime)?;
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+        let theme_registry = runtime.services().get::<ThemeRegistry>();
+        (
+            theme_lang_indent(theme_registry, language_id),
+            theme_lang_use_tabs(theme_registry, language_id),
+        )
+    };
     let (active_register, fallback_yank) = {
         let vim = shell_ui_mut(runtime)?.vim_mut();
         (vim.active_register.take(), vim.yank.clone())
@@ -5539,6 +6137,9 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
                 let target_col = insertion_col.min(buffer.line_len_chars(origin.line));
                 buffer.set_cursor(TextPoint::new(origin.line, target_col));
             }
+        }
+        if buffer.kind == BufferKind::File {
+            format_current_line_indent(buffer, indent_size, use_tabs);
         }
         buffer.mark_syntax_dirty();
     }
@@ -5869,13 +6470,17 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
         if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id) {
             buffer.set_syntax_snapshot(None);
             buffer.set_syntax_error(None);
+            buffer.set_language_id(None);
         }
         return Ok(());
     };
 
-    let syntax_result = {
+    let (language_id, syntax_result) = {
         let registry = syntax_registry_mut(runtime)?;
-        match registry.highlight_buffer_for_path(&path, &text) {
+        let language_id = registry
+            .language_for_path(&path)
+            .map(|language| language.id().to_owned());
+        let syntax_result = match registry.highlight_buffer_for_path(&path, &text) {
             Ok(snapshot) => Ok(snapshot),
             Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
                 if let Err(error) = registry.install_language(&language_id) {
@@ -5885,11 +6490,13 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
                 }
             }
             Err(error) => Err(error),
-        }
+        };
+        (language_id, syntax_result)
     };
 
     let ui = shell_ui_mut(runtime)?;
     if let Some(buffer) = ui.buffer_mut(buffer_id) {
+        buffer.set_language_id(language_id);
         match syntax_result {
             Ok(snapshot) => {
                 buffer.set_syntax_snapshot(Some(snapshot));
@@ -6564,8 +7171,13 @@ fn render_shell_state(
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
     let pane_rects = horizontal_pane_rects(width, pane_height, panes.len());
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let is_dark = is_dark_color(base_background);
+    let pane_active_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
+    let pane_inactive_background = adjust_color(base_background, if is_dark { -6 } else { 6 });
+    let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
 
-    target.clear(Color::RGB(15, 16, 20));
+    target.clear(base_background);
 
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
@@ -6573,9 +7185,9 @@ fn render_shell_state(
             && !state.picker_visible()
             && runtime_popup.is_none();
         let background = if active {
-            Color::RGB(27, 31, 39)
+            pane_active_background
         } else {
-            Color::RGB(22, 24, 30)
+            pane_inactive_background
         };
         fill_rect(
             target,
@@ -6585,7 +7197,7 @@ fn render_shell_state(
         fill_rect(
             target,
             PixelRectToRect::rect(rect.x, rect.y, rect.width, 1),
-            Color::RGB(50, 55, 66),
+            border_color,
         )?;
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
@@ -6663,6 +7275,17 @@ fn render_picker_overlay(
         .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
         .map(|value| value.clamp(0.0, 64.0).round() as u32)
         .unwrap_or(16);
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
+    let foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let popup_background = adjust_color(base_background, if is_dark { 8 } else { -8 });
+    let highlight_background = adjust_color(popup_background, if is_dark { 16 } else { -16 });
+    let muted = blend_color(foreground, base_background, 0.5);
+    let subtle = blend_color(foreground, base_background, 0.7);
     fill_rounded_rect(
         target,
         PixelRectToRect::rect(
@@ -6672,7 +7295,7 @@ fn render_picker_overlay(
             popup_rect.height,
         ),
         picker_roundness,
-        Color::RGB(29, 32, 40),
+        popup_background,
     )?;
     fill_rect(
         target,
@@ -6690,7 +7313,7 @@ fn render_picker_overlay(
         popup_rect.x + 16,
         popup_rect.y + 16,
         picker.session().title(),
-        Color::RGBA(215, 221, 232, 255),
+        foreground,
     )?;
 
     let query = format!("Query > {}", picker.session().query());
@@ -6699,7 +7322,7 @@ fn render_picker_overlay(
         popup_rect.x + 16,
         popup_rect.y + line_height + 24,
         &query,
-        Color::RGBA(180, 191, 208, 255),
+        muted,
     )?;
 
     let summary = format!(
@@ -6712,7 +7335,7 @@ fn render_picker_overlay(
         popup_rect.x + 16,
         popup_rect.y + (line_height * 2) + 28,
         &summary,
-        Color::RGBA(120, 132, 150, 255),
+        subtle,
     )?;
 
     let row_height = (line_height + 8).max(24);
@@ -6737,13 +7360,7 @@ fn render_picker_overlay(
         picker_scroll_top(picker.session().match_count(), selected_index, visible_rows);
 
     if picker.session().matches().is_empty() {
-        draw_text(
-            target,
-            popup_rect.x + 16,
-            list_top,
-            "No matches.",
-            Color::RGBA(120, 132, 150, 255),
-        )?;
+        draw_text(target, popup_rect.x + 16, list_top, "No matches.", subtle)?;
         return Ok(());
     }
 
@@ -6771,7 +7388,7 @@ fn render_picker_overlay(
                     popup_rect.width.saturating_sub(24),
                     row_height as u32,
                 ),
-                Color::RGB(45, 61, 85),
+                highlight_background,
             )?;
         }
 
@@ -6782,19 +7399,9 @@ fn render_picker_overlay(
             content_left,
             row_y,
             &label,
-            if selected {
-                Color::RGBA(255, 255, 255, 255)
-            } else {
-                Color::RGBA(215, 221, 232, 255)
-            },
+            if selected { foreground } else { muted },
         )?;
-        draw_text(
-            target,
-            detail_x,
-            row_y,
-            &detail,
-            Color::RGBA(150, 163, 182, 255),
-        )?;
+        draw_text(target, detail_x, row_y, &detail, muted)?;
     }
 
     if let Some(preview) = picker
@@ -6807,7 +7414,7 @@ fn render_picker_overlay(
             popup_rect.x + 16,
             popup_rect.y + popup_rect.height as i32 - line_height - 18,
             &truncate_text_to_width(font, preview, popup_rect.width.saturating_sub(32))?,
-            Color::RGBA(120, 132, 150, 255),
+            subtle,
         )?;
     }
 
@@ -6829,7 +7436,16 @@ fn render_runtime_popup_overlay(
     ascent: i32,
     now: Instant,
 ) -> Result<(), ShellError> {
-    fill_rect(target, popup_rect, Color::RGB(29, 32, 40))?;
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
+    let foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let popup_background = adjust_color(base_background, if is_dark { 8 } else { -8 });
+    let muted = blend_color(foreground, base_background, 0.5);
+    fill_rect(target, popup_rect, popup_background)?;
     fill_rect(
         target,
         PixelRectToRect::rect(
@@ -6845,7 +7461,7 @@ fn render_runtime_popup_overlay(
         popup_rect.x() + 14,
         popup_rect.y() + 16,
         &popup.title,
-        Color::RGBA(215, 221, 232, 255),
+        foreground,
     )?;
 
     let mut tab_x = popup_rect.x() + 14;
@@ -6854,7 +7470,7 @@ fn render_runtime_popup_overlay(
             let tab_color = if *buffer_id == popup.active_buffer {
                 Color::RGBA(110, 170, 255, 255)
             } else {
-                Color::RGBA(120, 132, 150, 255)
+                muted
             };
             draw_text(
                 target,
@@ -6907,6 +7523,52 @@ fn render_runtime_popup_overlay(
     Ok(())
 }
 
+#[derive(Debug)]
+struct WrappedLine {
+    line_index: usize,
+    line: String,
+    char_map: LineCharMap,
+    segments: Vec<LineWrapSegment>,
+    continuation_indent_cols: usize,
+}
+
+fn collect_wrapped_lines(
+    buffer: &ShellBuffer,
+    start_line: usize,
+    max_rows: usize,
+    wrap_cols: usize,
+    indent_size: usize,
+) -> Vec<WrappedLine> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+
+    let wrap_cols = wrap_cols.max(1);
+    let mut lines = Vec::new();
+    let mut visual_rows = 0usize;
+    let mut line_index = start_line;
+    let line_count = buffer.line_count();
+    while line_index < line_count && visual_rows < max_rows {
+        let line = buffer.text.line(line_index).unwrap_or_default();
+        let char_map = LineCharMap::new(&line);
+        let (leading_indent_cols, _) = leading_whitespace_info(&line, indent_size);
+        let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
+        let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
+        let segments = wrap_line_segments(&char_map, wrap_cols, continuation_cols);
+        visual_rows = visual_rows.saturating_add(segments.len());
+        lines.push(WrappedLine {
+            line_index,
+            line,
+            char_map,
+            segments,
+            continuation_indent_cols,
+        });
+        line_index = line_index.saturating_add(1);
+    }
+
+    lines
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_buffer(
     target: &mut DrawTarget<'_>,
@@ -6925,13 +7587,21 @@ fn render_buffer(
     line_height: i32,
     ascent: i32,
 ) -> Result<(), ShellError> {
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let muted = blend_color(foreground, base_background, 0.5);
+    let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let title_color = if active {
         Color::RGBA(110, 170, 255, 255)
     } else {
-        Color::RGBA(120, 132, 150, 255)
+        muted
     };
-    let text_color = Color::RGBA(215, 221, 232, 255);
-    let muted = Color::RGBA(120, 132, 150, 255);
+    let text_color = foreground;
     let cursor = Color::RGB(110, 170, 255);
     let selection = Color::RGBA(55, 71, 99, 255);
     let relative_line_numbers = theme_registry
@@ -6945,6 +7615,7 @@ fn render_buffer(
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
         .unwrap_or(Color::RGBA(112, 196, 255, 120));
+    let cell_width = cell_width.max(1);
     let statusline = truncate_text_to_width(
         font,
         &user::statusline::compose(&user::statusline::StatuslineContext {
@@ -6962,12 +7633,46 @@ fn render_buffer(
     let body_y = rect.y() + 10;
     let statusline_y = rect.y() + rect.height() as i32 - line_height - 8;
     let visible_body_height = (statusline_y - body_y - 10).max(line_height);
-    let visible_lines = (visible_body_height / line_height.max(1)).max(1) as usize;
+    let visible_rows = (visible_body_height / line_height.max(1)).max(1) as usize;
     let line_number_width = cell_width * 5;
+    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
     let cursor_row = buffer.cursor_row();
     let cursor_col = buffer.cursor_col();
-    let cursor_row_on_screen = cursor_row.saturating_sub(buffer.scroll_row);
-    if cursor_row_on_screen < visible_lines {
+    let wrapped_lines = collect_wrapped_lines(
+        buffer,
+        buffer.scroll_row,
+        visible_rows,
+        wrap_cols,
+        indent_size,
+    );
+    let mut cursor_row_on_screen = None;
+    let mut cursor_col_on_screen = None;
+    let mut cursor_indent_cols = 0usize;
+    let mut visual_row = 0usize;
+    for wrapped in &wrapped_lines {
+        if wrapped.line_index == cursor_row {
+            let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
+            if let Some(segment) = wrapped.segments.get(segment_index) {
+                cursor_row_on_screen = Some(visual_row + segment_index);
+                cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
+                cursor_indent_cols = if segment_index == 0 {
+                    0
+                } else {
+                    wrapped.continuation_indent_cols
+                };
+            }
+        }
+        visual_row = visual_row.saturating_add(wrapped.segments.len());
+        if visual_row >= visible_rows {
+            break;
+        }
+    }
+
+    if let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
+        (cursor_row_on_screen, cursor_col_on_screen)
+        && cursor_row_on_screen < visible_rows
+    {
         let cursor_width = match input_mode {
             InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
             InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
@@ -6975,7 +7680,10 @@ fn render_buffer(
         fill_rounded_rect(
             target,
             PixelRectToRect::rect(
-                rect.x() + 12 + line_number_width + (cursor_col as i32 * cell_width),
+                rect.x()
+                    + 12
+                    + line_number_width
+                    + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
                 body_y + cursor_row_on_screen as i32 * line_height,
                 cursor_width,
                 line_height.max(2) as u32,
@@ -6985,68 +7693,97 @@ fn render_buffer(
         )?;
     }
 
-    for (row_offset, line) in buffer.visible_lines(visible_lines).into_iter().enumerate() {
-        let y = body_y + row_offset as i32 * line_height;
-        let line_index = buffer.scroll_row + row_offset;
+    let text_x = rect.x() + 12 + line_number_width;
+    let mut visual_row = 0usize;
+    for wrapped in wrapped_lines {
+        let line_index = wrapped.line_index;
         let line_len = buffer.line_len_chars(line_index);
-        if let Some((selection_start, selection_end)) =
-            visual_selection.and_then(|selection_state| {
-                selection_columns_for_visual(selection_state, line_index, line_len)
-            })
-        {
-            fill_rect(
-                target,
-                PixelRectToRect::rect(
-                    rect.x() + 12 + line_number_width + selection_start as i32 * cell_width,
-                    y,
-                    ((selection_end.saturating_sub(selection_start)) as i32 * cell_width.max(1))
-                        as u32,
-                    line_height.max(1) as u32,
-                ),
-                selection,
-            )?;
-        }
-        if let Some((selection_start, selection_end)) = yank_flash.and_then(|selection_state| {
+        let selection_range = visual_selection.and_then(|selection_state| {
             selection_columns_for_visual(selection_state, line_index, line_len)
-        }) {
-            fill_rect(
-                target,
-                PixelRectToRect::rect(
-                    rect.x() + 12 + line_number_width + selection_start as i32 * cell_width,
-                    y,
-                    ((selection_end.saturating_sub(selection_start)) as i32 * cell_width.max(1))
-                        as u32,
-                    line_height.max(1) as u32,
-                ),
-                yank_flash_color,
-            )?;
-        }
-        let line_number = if relative_line_numbers {
-            if line_index == cursor_row {
+        });
+        let yank_range = yank_flash.and_then(|selection_state| {
+            selection_columns_for_visual(selection_state, line_index, line_len)
+        });
+        for (segment_index, segment) in wrapped.segments.iter().enumerate() {
+            if visual_row >= visible_rows {
+                break;
+            }
+            let y = body_y + visual_row as i32 * line_height;
+            let segment_indent_cols = if segment_index == 0 {
                 0
             } else {
-                cursor_row.abs_diff(line_index)
+                wrapped.continuation_indent_cols
+            };
+            let segment_x = text_x + (segment_indent_cols as i32 * cell_width);
+            if let Some((selection_start, selection_end)) = selection_range {
+                let start = selection_start.max(segment.start_col);
+                let end = selection_end.min(segment.end_col);
+                if start < end {
+                    fill_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            segment_x
+                                + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            y,
+                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                        ),
+                        selection,
+                    )?;
+                }
             }
-        } else {
-            line_index + 1
-        };
-        draw_text(
-            target,
-            rect.x() + 12,
-            y,
-            &format!("{:>4}", line_number),
-            muted,
-        )?;
-        draw_buffer_text(
-            target,
-            font,
-            rect.x() + 12 + line_number_width,
-            y,
-            &line,
-            buffer.line_syntax_spans(buffer.scroll_row + row_offset),
-            theme_registry,
-            text_color,
-        )?;
+            if let Some((selection_start, selection_end)) = yank_range {
+                let start = selection_start.max(segment.start_col);
+                let end = selection_end.min(segment.end_col);
+                if start < end {
+                    fill_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            segment_x
+                                + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            y,
+                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                        ),
+                        yank_flash_color,
+                    )?;
+                }
+            }
+            if segment_index == 0 {
+                let line_number = if relative_line_numbers {
+                    if line_index == cursor_row {
+                        0
+                    } else {
+                        cursor_row.abs_diff(line_index)
+                    }
+                } else {
+                    line_index + 1
+                };
+                draw_text(
+                    target,
+                    rect.x() + 12,
+                    y,
+                    &format!("{:>4}", line_number),
+                    muted,
+                )?;
+            }
+            draw_buffer_text(
+                target,
+                font,
+                segment_x,
+                y,
+                &wrapped.line,
+                *segment,
+                &wrapped.char_map,
+                buffer.line_syntax_spans(line_index),
+                theme_registry,
+                text_color,
+            )?;
+            visual_row = visual_row.saturating_add(1);
+        }
+        if visual_row >= visible_rows {
+            break;
+        }
     }
 
     fill_rect(
@@ -7057,7 +7794,7 @@ fn render_buffer(
             rect.width().saturating_sub(16),
             1,
         ),
-        Color::RGB(50, 55, 66),
+        border_color,
     )?;
     draw_text(
         target,
@@ -7076,7 +7813,7 @@ fn render_buffer(
             rect.width(),
             1,
         ),
-        Color::RGB(50, 55, 66),
+        border_color,
     )?;
 
     Ok(())
@@ -7089,19 +7826,42 @@ fn draw_buffer_text(
     x: i32,
     y: i32,
     line: &str,
+    segment: LineWrapSegment,
+    char_map: &LineCharMap,
     line_syntax_spans: Option<&[LineSyntaxSpan]>,
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
 ) -> Result<(), ShellError> {
+    let segment_text = char_map.slice(line, segment.start_col, segment.end_col);
+    let mut clipped_spans = Vec::new();
+    if let Some(line_syntax_spans) = line_syntax_spans {
+        for span in line_syntax_spans {
+            let start = span.start.max(segment.start_col);
+            let end = span.end.min(segment.end_col);
+            if start < end {
+                clipped_spans.push(LineSyntaxSpan {
+                    start: start - segment.start_col,
+                    end: end - segment.start_col,
+                    theme_token: span.theme_token.clone(),
+                });
+            }
+        }
+    }
+    let clipped_spans = if clipped_spans.is_empty() {
+        None
+    } else {
+        Some(clipped_spans.as_slice())
+    };
+
     let mut draw_x = x;
-    for (segment, color) in
-        line_color_segments(line, line_syntax_spans, theme_registry, default_color)
+    for (colored_segment, color) in
+        line_color_segments(segment_text, clipped_spans, theme_registry, default_color)
     {
-        if segment.is_empty() {
+        if colored_segment.is_empty() {
             continue;
         }
-        draw_text(target, draw_x, y, &segment, color)?;
-        draw_x += text_width(font, &segment)? as i32;
+        draw_text(target, draw_x, y, &colored_segment, color)?;
+        draw_x += text_width(font, &colored_segment)? as i32;
     }
     Ok(())
 }
