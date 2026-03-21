@@ -3,6 +3,16 @@ use editor_plugin_api::{
 };
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
+const EXTRA_HIGHLIGHT_QUERY: &str = r#"
+[
+  "(" ")" "[" "]" "{" "}"
+] @punctuation.bracket
+
+[
+  "," ";" ":"
+] @punctuation.delimiter
+"#;
+
 /// Returns the metadata for the Rust language package.
 pub fn package() -> PluginPackage {
     PluginPackage::new(
@@ -65,4 +75,5 @@ pub fn syntax_language() -> LanguageConfiguration {
             CaptureThemeMapping::new("variable.builtin", "syntax.variable.builtin"),
         ],
     )
+    .with_extra_highlight_query(EXTRA_HIGHLIGHT_QUERY)
 }

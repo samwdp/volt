@@ -79,6 +79,7 @@ const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
@@ -1028,6 +1029,10 @@ enum PickerAction {
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
     VimSearch(VimSearchDirection),
+    VimSearchResult {
+        direction: VimSearchDirection,
+        target: TextPoint,
+    },
     InstallTreeSitterLanguage(String),
     CreateWorkspace { name: String, root: PathBuf },
     SwitchWorkspace(WorkspaceId),
@@ -1066,11 +1071,23 @@ impl PickerOverlay {
         }
     }
 
-    fn prompt(title: impl Into<String>, action: PickerAction) -> Self {
+    fn search(title: impl Into<String>, direction: VimSearchDirection, entries: Vec<PickerEntry>) -> Self {
+        let title = title.into();
+        let mut actions = BTreeMap::new();
+        let items = entries
+            .into_iter()
+            .map(|entry| {
+                actions.insert(entry.item.id().to_owned(), entry.action);
+                entry.item
+            })
+            .collect();
+
         Self {
-            session: PickerSession::new(title.into(), Vec::new()).with_result_limit(48),
-            actions: BTreeMap::new(),
-            submit_action: Some(action),
+            session: PickerSession::new(title, items)
+                .with_result_limit(48)
+                .with_preserve_order(),
+            actions,
+            submit_action: Some(PickerAction::VimSearch(direction)),
         }
     }
 
@@ -1079,11 +1096,33 @@ impl PickerOverlay {
     }
 
     fn selected_action(&self) -> Option<PickerAction> {
-        if let Some(action) = &self.submit_action {
+        if let Some(selected) = self.session.selected()
+            && let Some(action) = self.actions.get(selected.item().id())
+        {
             return Some(action.clone());
         }
-        let selected = self.session.selected()?;
-        self.actions.get(selected.item().id()).cloned()
+        self.submit_action.clone()
+    }
+
+    fn vim_search_direction(&self) -> Option<VimSearchDirection> {
+        match self.submit_action.as_ref() {
+            Some(PickerAction::VimSearch(direction)) => Some(*direction),
+            _ => None,
+        }
+    }
+
+    fn set_entries(&mut self, entries: Vec<PickerEntry>, selected_index: usize) {
+        let mut actions = BTreeMap::new();
+        let items = entries
+            .into_iter()
+            .map(|entry| {
+                actions.insert(entry.item.id().to_owned(), entry.action);
+                entry.item
+            })
+            .collect();
+        self.actions = actions;
+        self.session.set_items(items);
+        self.session.set_selected_index(selected_index);
     }
 
     fn append_query(&mut self, text: &str) {
@@ -1553,6 +1592,7 @@ impl ShellState {
                         && let Some(picker) = self.ui_mut()?.picker_mut()
                     {
                         picker.backspace_query();
+                        self.refresh_vim_search_picker()?;
                     }
                     self.ensure_visible(visible_lines)?;
                     return Ok(false);
@@ -2040,6 +2080,7 @@ impl ShellState {
             if let Some(picker) = self.ui_mut()?.picker_mut() {
                 picker.append_query(text);
             }
+            self.refresh_vim_search_picker()?;
             return Ok(());
         }
 
@@ -2090,6 +2131,32 @@ impl ShellState {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn refresh_vim_search_picker(&mut self) -> Result<(), ShellError> {
+        let (direction, query) = {
+            let ui = self.ui()?;
+            let Some(picker) = ui.picker() else {
+                return Ok(());
+            };
+            let Some(direction) = picker.vim_search_direction() else {
+                return Ok(());
+            };
+            (direction, picker.session().query().to_owned())
+        };
+
+        let search_data = {
+            let buffer = self.active_buffer_mut()?;
+            vim_search_entries(buffer, direction, &query)
+        };
+
+        if let Some(picker) = self.ui_mut()?.picker_mut()
+            && picker.vim_search_direction().is_some()
+        {
+            picker.set_entries(search_data.entries, search_data.selected_index);
         }
 
         Ok(())
@@ -3089,6 +3156,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::VimSearch(direction) => {
                     submit_vim_search(runtime, direction, &query)?;
                 }
+                PickerAction::VimSearchResult { direction, target } => {
+                    apply_vim_search_result(runtime, direction, target, &query)?;
+                }
                 PickerAction::InstallTreeSitterLanguage(language_id) => {
                     install_tree_sitter_language(runtime, &language_id)?;
                     sync_active_buffer(runtime)?;
@@ -3362,23 +3432,22 @@ fn find_char_forward(buffer: &ShellBuffer, start_char: usize, target: char) -> O
     None
 }
 
-fn matches_fuzzy_at(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    if char_at_index(buffer, start_char) != Some(pattern[0]) {
-        return false;
+fn fuzzy_match_end(buffer: &ShellBuffer, start_char: usize, pattern: &[char]) -> Option<usize> {
+    if pattern.is_empty() || char_at_index(buffer, start_char) != Some(pattern[0]) {
+        return None;
     }
 
+    let mut last_index = start_char;
     let mut next_index = start_char.saturating_add(1);
     for target in pattern.iter().skip(1) {
         let Some(found) = find_char_forward(buffer, next_index, *target) else {
-            return false;
+            return None;
         };
+        last_index = found;
         next_index = found.saturating_add(1);
     }
 
-    true
+    Some(last_index)
 }
 
 fn search_fuzzy_forward(
@@ -3394,23 +3463,36 @@ fn search_fuzzy_forward(
 
     let max_start = char_count.saturating_sub(1);
     let first_pass_start = start_char.min(max_start.saturating_add(1));
+    let mut best: Option<(usize, usize)> = None;
+
     if first_pass_start <= max_start {
         for char_index in first_pass_start..=max_start {
-            if matches_fuzzy_at(buffer, char_index, pattern) {
-                return Some(buffer.text.point_from_char_index(char_index));
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+                continue;
+            };
+            let span = end_index.saturating_sub(char_index);
+            if best.map_or(true, |(_, best_span)| span < best_span) {
+                best = Some((char_index, span));
             }
         }
+    }
+    if best.is_some() {
+        return best.map(|(start, _)| buffer.text.point_from_char_index(start));
     }
 
     if wrap {
         for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
-            if matches_fuzzy_at(buffer, char_index, pattern) {
-                return Some(buffer.text.point_from_char_index(char_index));
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+                continue;
+            };
+            let span = end_index.saturating_sub(char_index);
+            if best.map_or(true, |(_, best_span)| span < best_span) {
+                best = Some((char_index, span));
             }
         }
     }
 
-    None
+    best.map(|(start, _)| buffer.text.point_from_char_index(start))
 }
 
 fn search_fuzzy_backward(
@@ -3426,21 +3508,34 @@ fn search_fuzzy_backward(
 
     let max_start = char_count.saturating_sub(1);
     let first_pass_start = start_char.min(max_start);
+    let mut best: Option<(usize, usize)> = None;
+
     for char_index in (0..=first_pass_start).rev() {
-        if matches_fuzzy_at(buffer, char_index, pattern) {
-            return Some(buffer.text.point_from_char_index(char_index));
+        let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+            continue;
+        };
+        let span = end_index.saturating_sub(char_index);
+        if best.map_or(true, |(_, best_span)| span < best_span) {
+            best = Some((char_index, span));
         }
+    }
+    if best.is_some() {
+        return best.map(|(start, _)| buffer.text.point_from_char_index(start));
     }
 
     if wrap && first_pass_start < max_start {
         for char_index in ((first_pass_start + 1)..=max_start).rev() {
-            if matches_fuzzy_at(buffer, char_index, pattern) {
-                return Some(buffer.text.point_from_char_index(char_index));
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern) else {
+                continue;
+            };
+            let span = end_index.saturating_sub(char_index);
+            if best.map_or(true, |(_, best_span)| span < best_span) {
+                best = Some((char_index, span));
             }
         }
     }
 
-    None
+    best.map(|(start, _)| buffer.text.point_from_char_index(start))
 }
 
 fn search_buffer(
@@ -3492,6 +3587,220 @@ fn search_buffer(
                 .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern.len()));
             search_fuzzy_backward(buffer, start_char, &pattern, true)
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VimSearchMatch {
+    point: TextPoint,
+    char_index: usize,
+    span: usize,
+    line_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct SearchPickerData {
+    entries: Vec<PickerEntry>,
+    selected_index: usize,
+}
+
+fn exact_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<usize> {
+    if pattern.is_empty() || pattern.len() > chars.len() {
+        return Vec::new();
+    }
+
+    let max_start = chars.len().saturating_sub(pattern.len());
+    let mut matches = Vec::new();
+    for start in 0..=max_start {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| chars[start + offset] == *expected)
+        {
+            matches.push(start);
+        }
+    }
+    matches
+}
+
+fn fuzzy_match_end_in_chars(chars: &[char], start: usize, pattern: &[char]) -> Option<usize> {
+    if pattern.is_empty() || chars.get(start) != Some(&pattern[0]) {
+        return None;
+    }
+
+    let mut last_index = start;
+    let mut next_index = start.saturating_add(1);
+    for target in pattern.iter().skip(1) {
+        let Some(found) = chars
+            .get(next_index..)
+            .and_then(|slice| slice.iter().position(|ch| ch == target))
+            .map(|offset| next_index + offset)
+        else {
+            return None;
+        };
+        last_index = found;
+        next_index = found.saturating_add(1);
+    }
+    Some(last_index)
+}
+
+fn fuzzy_match_positions_in_chars(chars: &[char], pattern: &[char]) -> Vec<(usize, usize)> {
+    if pattern.is_empty() || pattern.len() > chars.len() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    for start in 0..chars.len() {
+        if let Some(end) = fuzzy_match_end_in_chars(chars, start, pattern) {
+            matches.push((start, end.saturating_sub(start)));
+        }
+    }
+    matches
+}
+
+fn search_start_char(buffer: &ShellBuffer, direction: VimSearchDirection, pattern_len: usize) -> usize {
+    let cursor = buffer.cursor_point();
+    match direction {
+        VimSearchDirection::Forward => buffer
+            .point_after(cursor)
+            .map(|point| buffer.text.point_to_char_index(point))
+            .unwrap_or(buffer.text.char_count()),
+        VimSearchDirection::Backward => buffer
+            .text
+            .point_before(cursor)
+            .map(|point| buffer.text.point_to_char_index(point))
+            .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern_len)),
+    }
+}
+
+fn pick_search_selection_index(
+    matches: &[VimSearchMatch],
+    direction: VimSearchDirection,
+    start_char: usize,
+) -> usize {
+    if matches.is_empty() {
+        return 0;
+    }
+
+    let mut candidates: Vec<(usize, &VimSearchMatch)> = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, matched)| match direction {
+            VimSearchDirection::Forward => matched.char_index >= start_char,
+            VimSearchDirection::Backward => matched.char_index <= start_char,
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        candidates = matches.iter().enumerate().collect();
+    }
+
+    candidates
+        .into_iter()
+        .min_by(|(_, left), (_, right)| {
+            let span_order = left.span.cmp(&right.span);
+            if span_order != std::cmp::Ordering::Equal {
+                return span_order;
+            }
+            match direction {
+                VimSearchDirection::Forward => left.char_index.cmp(&right.char_index),
+                VimSearchDirection::Backward => right.char_index.cmp(&left.char_index),
+            }
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn vim_search_entries(
+    buffer: &ShellBuffer,
+    direction: VimSearchDirection,
+    query: &str,
+) -> SearchPickerData {
+    let query = query.trim();
+    if query.is_empty() {
+        return SearchPickerData {
+            entries: Vec::new(),
+            selected_index: 0,
+        };
+    }
+
+    let pattern: Vec<char> = query.chars().collect();
+    let line_count = buffer.text.line_count();
+    let mut matches = Vec::new();
+
+    for line_index in 0..line_count {
+        let Some(line) = buffer.text.line(line_index) else {
+            continue;
+        };
+        let chars: Vec<char> = line.chars().collect();
+        let positions = exact_match_positions_in_chars(&chars, &pattern);
+        for start in positions {
+            let point = TextPoint::new(line_index, start);
+            let char_index = buffer.text.point_to_char_index(point);
+            matches.push(VimSearchMatch {
+                point,
+                char_index,
+                span: pattern.len().saturating_sub(1),
+                line_text: line.clone(),
+            });
+        }
+    }
+
+    if matches.is_empty() {
+        for line_index in 0..line_count {
+            let Some(line) = buffer.text.line(line_index) else {
+                continue;
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let positions = fuzzy_match_positions_in_chars(&chars, &pattern);
+            for (start, span) in positions {
+                let point = TextPoint::new(line_index, start);
+                let char_index = buffer.text.point_to_char_index(point);
+                matches.push(VimSearchMatch {
+                    point,
+                    char_index,
+                    span,
+                    line_text: line.clone(),
+                });
+            }
+        }
+    }
+
+    matches.sort_by_key(|matched| (matched.point.line, matched.point.column));
+
+    if matches.len() > SEARCH_PICKER_ITEM_LIMIT {
+        matches.truncate(SEARCH_PICKER_ITEM_LIMIT);
+    }
+
+    let start_char = search_start_char(buffer, direction, pattern.len());
+    let selected_index = pick_search_selection_index(&matches, direction, start_char);
+
+    let entries = matches
+        .into_iter()
+        .map(|matched| {
+            let detail = format!(
+                "Ln {}, Col {}",
+                matched.point.line + 1,
+                matched.point.column + 1
+            );
+            PickerEntry {
+                item: PickerItem::new(
+                    format!("{}:{}", matched.point.line, matched.point.column),
+                    matched.line_text,
+                    detail,
+                    None::<String>,
+                ),
+                action: PickerAction::VimSearchResult {
+                    direction,
+                    target: matched.point,
+                },
+            }
+        })
+        .collect();
+
+    SearchPickerData {
+        entries,
+        selected_index,
     }
 }
 
@@ -4798,9 +5107,10 @@ fn open_vim_search_prompt(
         VimSearchDirection::Forward => "Search /",
         VimSearchDirection::Backward => "Search ?",
     };
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::prompt(
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::search(
         title,
-        PickerAction::VimSearch(direction),
+        direction,
+        Vec::new(),
     ));
     Ok(())
 }
@@ -4820,6 +5130,26 @@ fn run_vim_search(
         search_buffer(buffer, direction, query)
             .ok_or_else(|| format!("no matches found for `{query}`"))?
     };
+    active_shell_buffer_mut(runtime)?.set_cursor(target);
+    shell_ui_mut(runtime)?.vim_mut().last_search = Some(LastSearch {
+        direction,
+        query: query.to_owned(),
+    });
+    shell_ui_mut(runtime)?.vim_mut().clear_transient();
+    Ok(())
+}
+
+fn apply_vim_search_result(
+    runtime: &mut EditorRuntime,
+    direction: VimSearchDirection,
+    target: TextPoint,
+    query: &str,
+) -> Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(());
+    }
+
     active_shell_buffer_mut(runtime)?.set_cursor(target);
     shell_ui_mut(runtime)?.vim_mut().last_search = Some(LastSearch {
         direction,
@@ -5861,7 +6191,9 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         })
         .collect();
 
-    PickerOverlay::from_entries("Keybindings", entries)
+    let mut overlay = PickerOverlay::from_entries("Keybindings", entries);
+    overlay.session.set_result_limit(256);
+    overlay
 }
 
 fn message_picker_overlay(
@@ -7305,6 +7637,33 @@ mod tests {
         assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
         assert_eq!(state.active_buffer_mut()?.cursor_col(), 8);
 
+        Ok(())
+    }
+
+    #[test]
+    fn vim_search_picker_selects_match_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text =
+            TextBuffer::from_text("alpha\nsplit here\nbeta\nsplit again\n");
+
+        state.handle_text_input("/")?;
+        state.handle_text_input("split")?;
+        let picker = state.ui()?.picker().ok_or("missing search picker")?;
+        assert!(picker.session().match_count() > 0);
+        let selected = picker
+            .session()
+            .selected()
+            .ok_or("missing search selection")?;
+        let selected_id = selected.item().id();
+        let (line, column) = selected_id
+            .split_once(':')
+            .ok_or("missing search id delimiter")?;
+        let line: usize = line.parse()?;
+        let column: usize = column.parse()?;
+
+        assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+        assert_eq!(state.active_buffer_mut()?.cursor_row(), line);
+        assert_eq!(state.active_buffer_mut()?.cursor_col(), column);
         Ok(())
     }
 

@@ -143,6 +143,7 @@ pub struct LanguageConfiguration {
     file_extensions: Vec<String>,
     capture_mappings: Vec<CaptureThemeMapping>,
     loader: LanguageLoader,
+    extra_highlight_query: Option<String>,
 }
 
 impl LanguageConfiguration {
@@ -211,6 +212,7 @@ impl LanguageConfiguration {
             file_extensions: normalized_extensions,
             capture_mappings: capture_mappings.into_iter().collect(),
             loader,
+            extra_highlight_query: None,
         }
     }
 
@@ -237,6 +239,17 @@ impl LanguageConfiguration {
             } => Some(highlight_query),
             LanguageLoader::Grammar { .. } => None,
         }
+    }
+
+    /// Adds an extra highlight query appended at load time.
+    pub fn with_extra_highlight_query(mut self, query: impl Into<String>) -> Self {
+        self.extra_highlight_query = Some(query.into());
+        self
+    }
+
+    /// Returns the extra highlight query, when configured.
+    pub fn extra_highlight_query(&self) -> Option<&str> {
+        self.extra_highlight_query.as_deref()
     }
 
     /// Returns the installable grammar metadata, when present.
@@ -643,8 +656,13 @@ impl SyntaxRegistry {
             fs::remove_dir_all(&install_dir)
                 .map_err(|error| io_error("replace installed grammar", &install_dir, error))?;
         }
-        copy_dir_all(&cloned_grammar_dir, &install_dir)?;
-        build_shared_library(language_id, &grammar, &install_dir)?;
+        fs::create_dir_all(&install_dir)
+            .map_err(|error| io_error("create install directory", &install_dir, error))?;
+        let queries_dir = cloned_grammar_dir.join("queries");
+        if queries_dir.exists() {
+            copy_dir_all(&queries_dir, &install_dir.join("queries"))?;
+        }
+        build_shared_library(language_id, &grammar, &cloned_grammar_dir, &self.install_root)?;
 
         self.loaded.remove(language_id);
         Ok(install_dir)
@@ -721,7 +739,14 @@ fn load_language(
             highlight_query,
         } => {
             let language = language_provider();
-            let query = Query::new(&language, highlight_query).map_err(|error| {
+            let mut query_source = highlight_query.to_owned();
+            if let Some(extra_query) = config.extra_highlight_query() {
+                if !query_source.ends_with('\n') {
+                    query_source.push('\n');
+                }
+                query_source.push_str(extra_query);
+            }
+            let query = Query::new(&language, &query_source).map_err(|error| {
                 SyntaxError::InvalidQuery {
                     language_id: config.id().to_owned(),
                     message: error.to_string(),
@@ -745,8 +770,14 @@ fn load_language(
                 });
             }
 
-            let query_source = fs::read_to_string(&query_path)
+            let mut query_source = fs::read_to_string(&query_path)
                 .map_err(|error| io_error("read highlight query", &query_path, error))?;
+            if let Some(extra_query) = config.extra_highlight_query() {
+                if !query_source.ends_with('\n') {
+                    query_source.push('\n');
+                }
+                query_source.push_str(extra_query);
+            }
             let library = unsafe {
                 // SAFETY: The library path is chosen by the installer for a tree-sitter grammar
                 // compiled from generated parser sources. We keep the `Library` alive for at least
@@ -849,9 +880,10 @@ fn highlight_loaded_language(
 fn build_shared_library(
     language_id: &str,
     grammar: &GrammarSource,
-    install_dir: &Path,
+    grammar_dir: &Path,
+    install_root: &Path,
 ) -> Result<(), SyntaxError> {
-    let source_dir = install_dir.join(grammar.source_dir());
+    let source_dir = grammar_dir.join(grammar.source_dir());
     let parser_path = source_dir.join("parser.c");
     if !parser_path.exists() {
         return Err(SyntaxError::Io {
@@ -863,8 +895,7 @@ fn build_shared_library(
 
     let scanner_c = source_dir.join("scanner.c");
     let scanner_cpp = source_dir.join("scanner.cc");
-    let output_path =
-        grammar.installed_library_path(install_dir.parent().unwrap_or_else(|| Path::new(".")));
+    let output_path = grammar.installed_library_path(install_root);
     let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
     let mut command = Command::new(compiler);
     if cfg!(target_os = "macos") {
@@ -886,11 +917,11 @@ fn build_shared_library(
     command.arg(&source_dir);
     command.arg("-o");
     command.arg(&output_path);
-    command.current_dir(install_dir);
+    command.current_dir(grammar_dir);
 
     let output = command
         .output()
-        .map_err(|error| io_error("run grammar compiler", install_dir, error))?;
+        .map_err(|error| io_error("run grammar compiler", grammar_dir, error))?;
     if !output.status.success() {
         return Err(SyntaxError::InstallCommand {
             language_id: language_id.to_owned(),
