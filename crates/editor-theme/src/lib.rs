@@ -42,6 +42,7 @@ pub struct Theme {
     id: String,
     name: String,
     tokens: BTreeMap<String, Color>,
+    options: BTreeMap<String, bool>,
 }
 
 impl Theme {
@@ -51,12 +52,19 @@ impl Theme {
             id: id.into(),
             name: name.into(),
             tokens: BTreeMap::new(),
+            options: BTreeMap::new(),
         }
     }
 
     /// Adds or replaces a theme token color.
     pub fn with_token(mut self, token: impl Into<String>, color: Color) -> Self {
         self.tokens.insert(token.into(), color);
+        self
+    }
+
+    /// Adds or replaces a theme option.
+    pub fn with_option(mut self, option: impl Into<String>, value: bool) -> Self {
+        self.options.insert(option.into(), value);
         self
     }
 
@@ -78,6 +86,11 @@ impl Theme {
     /// Resolves a token color.
     pub fn color(&self, token: &str) -> Option<Color> {
         self.tokens.get(token).copied()
+    }
+
+    /// Resolves a theme option value.
+    pub fn option(&self, option: &str) -> Option<bool> {
+        self.options.get(option).copied()
     }
 }
 
@@ -171,6 +184,11 @@ impl ThemeRegistry {
     /// Resolves a token from the active theme.
     pub fn resolve(&self, token: &str) -> Option<Color> {
         self.active_theme().and_then(|theme| theme.color(token))
+    }
+
+    /// Resolves a boolean option from the active theme.
+    pub fn resolve_option(&self, option: &str) -> Option<bool> {
+        self.active_theme().and_then(|theme| theme.option(option))
     }
 }
 

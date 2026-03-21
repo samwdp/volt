@@ -6929,6 +6929,9 @@ fn render_buffer(
     let muted = Color::RGBA(120, 132, 150, 255);
     let cursor = Color::RGB(110, 170, 255);
     let selection = Color::RGBA(55, 71, 99, 255);
+    let relative_line_numbers = theme_registry
+        .and_then(|registry| registry.resolve_option("ui.line-number.relative"))
+        .unwrap_or(false);
     let yank_flash_color = theme_registry
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
@@ -7009,11 +7012,20 @@ fn render_buffer(
                 yank_flash_color,
             )?;
         }
+        let line_number = if relative_line_numbers {
+            if line_index == cursor_row {
+                0
+            } else {
+                cursor_row.abs_diff(line_index)
+            }
+        } else {
+            line_index + 1
+        };
         draw_text(
             target,
             rect.x() + 12,
             y,
-            &format!("{:>4}", buffer.scroll_row + row_offset + 1),
+            &format!("{:>4}", line_number),
             muted,
         )?;
         draw_buffer_text(

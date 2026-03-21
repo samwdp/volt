@@ -11,7 +11,7 @@ use std::{
 
 use editor_buffer::TextBuffer;
 pub use tree_sitter::Language;
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Parser, Query, QueryCursor, Range, StreamingIterator, Tree};
 use tree_sitter_language::LanguageFn;
 
 /// Human-readable summary of this crate's responsibility.
@@ -144,6 +144,7 @@ pub struct LanguageConfiguration {
     capture_mappings: Vec<CaptureThemeMapping>,
     loader: LanguageLoader,
     extra_highlight_query: Option<String>,
+    additional_highlight_languages: Vec<String>,
 }
 
 impl LanguageConfiguration {
@@ -213,6 +214,7 @@ impl LanguageConfiguration {
             capture_mappings: capture_mappings.into_iter().collect(),
             loader,
             extra_highlight_query: None,
+            additional_highlight_languages: Vec::new(),
         }
     }
 
@@ -250,6 +252,28 @@ impl LanguageConfiguration {
     /// Returns the extra highlight query, when configured.
     pub fn extra_highlight_query(&self) -> Option<&str> {
         self.extra_highlight_query.as_deref()
+    }
+
+    /// Adds additional language ids to merge highlight spans for this language.
+    pub fn with_additional_highlight_languages<I, S>(mut self, languages: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut ids = Vec::new();
+        for language in languages {
+            let language = language.into();
+            if !language.is_empty() && !ids.contains(&language) {
+                ids.push(language);
+            }
+        }
+        self.additional_highlight_languages = ids;
+        self
+    }
+
+    /// Returns additional language ids used to merge highlight spans.
+    pub fn additional_highlight_languages(&self) -> &[String] {
+        &self.additional_highlight_languages
     }
 
     /// Returns the installable grammar metadata, when present.
@@ -357,6 +381,11 @@ pub enum SyntaxError {
     },
     /// The parser did not return a syntax tree.
     ParseCancelled(String),
+    /// Included ranges could not be configured for a parser.
+    IncludedRangesFailed {
+        language_id: String,
+        message: String,
+    },
     /// File-system work required for installation failed.
     Io {
         operation: String,
@@ -424,6 +453,15 @@ impl fmt::Display for SyntaxError {
                     "parser did not produce a tree for `{language_id}`"
                 )
             }
+            Self::IncludedRangesFailed {
+                language_id,
+                message,
+            } => {
+                write!(
+                    formatter,
+                    "setting included ranges failed for `{language_id}`: {message}"
+                )
+            }
             Self::Io {
                 operation,
                 path,
@@ -458,6 +496,11 @@ struct LoadedLanguage {
     language: Language,
     query: Query,
     capture_mappings: BTreeMap<String, String>,
+}
+
+struct ParsedHighlight {
+    snapshot: SyntaxSnapshot,
+    tree: Tree,
 }
 
 impl LoadedLanguage {
@@ -680,12 +723,63 @@ impl SyntaxRegistry {
             .get(&extension)
             .cloned()
             .ok_or_else(|| SyntaxError::UnknownExtension(extension.clone()))?;
+        let config = self
+            .languages
+            .get(&language_id)
+            .cloned()
+            .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
         self.ensure_loaded_language(&language_id)?;
         let loaded = self
             .loaded
             .get(&language_id)
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
-        highlight_loaded_language(&language_id, loaded, buffer)
+        let inline_language_id = "markdown-inline";
+        let needs_inline_ranges = config.id() == "markdown"
+            && config
+                .additional_highlight_languages()
+                .iter()
+                .any(|language| language == inline_language_id);
+
+        let base_parse = if needs_inline_ranges {
+            Some(highlight_loaded_language_with_tree(
+                &language_id,
+                loaded,
+                buffer,
+                None,
+            )?)
+        } else {
+            None
+        };
+
+        let mut snapshot = if let Some(parse) = &base_parse {
+            parse.snapshot.clone()
+        } else {
+            highlight_loaded_language(&language_id, loaded, buffer, None)?
+        };
+
+        for extra_language_id in config.additional_highlight_languages() {
+            self.ensure_loaded_language(extra_language_id)?;
+            let loaded = self
+                .loaded
+                .get(extra_language_id)
+                .ok_or_else(|| SyntaxError::UnknownLanguage(extra_language_id.clone()))?;
+            let extra_snapshot = if needs_inline_ranges && extra_language_id == inline_language_id {
+                let Some(parse) = base_parse.as_ref() else {
+                    continue;
+                };
+                let inline_ranges = markdown_inline_ranges(&parse.tree);
+                if inline_ranges.is_empty() {
+                    continue;
+                }
+                highlight_loaded_language(extra_language_id, loaded, buffer, Some(&inline_ranges))?
+            } else {
+                highlight_loaded_language(extra_language_id, loaded, buffer, None)?
+            };
+            snapshot.highlight_spans.extend(extra_snapshot.highlight_spans);
+            snapshot.has_errors = snapshot.has_errors || extra_snapshot.has_errors;
+        }
+
+        Ok(snapshot)
     }
 
     /// Parses and highlights a buffer using a file path's extension.
@@ -820,11 +914,12 @@ fn load_language(
     }
 }
 
-fn highlight_loaded_language(
+fn parse_tree(
     language_id: &str,
     loaded: &LoadedLanguage,
     buffer: &TextBuffer,
-) -> Result<SyntaxSnapshot, SyntaxError> {
+    ranges: Option<&[Range]>,
+) -> Result<(Tree, String), SyntaxError> {
     let mut parser = Parser::new();
     parser
         .set_language(&loaded.language)
@@ -832,12 +927,28 @@ fn highlight_loaded_language(
             language_id: language_id.to_owned(),
             message: error.to_string(),
         })?;
+    if let Some(ranges) = ranges {
+        parser
+            .set_included_ranges(ranges)
+            .map_err(|error| SyntaxError::IncludedRangesFailed {
+                language_id: language_id.to_owned(),
+                message: error.to_string(),
+            })?;
+    }
 
     let source = buffer.text();
     let tree = parser
         .parse(&source, None)
         .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))?;
 
+    Ok((tree, source))
+}
+
+fn highlight_tree(
+    loaded: &LoadedLanguage,
+    tree: &Tree,
+    source: &str,
+) -> Vec<HighlightSpan> {
     let mut query_cursor = QueryCursor::new();
     let capture_names = loaded.query.capture_names();
     let mut highlight_spans = Vec::new();
@@ -868,13 +979,73 @@ fn highlight_loaded_language(
             });
         }
     }
+    highlight_spans
+}
 
-    Ok(SyntaxSnapshot {
+fn highlight_loaded_language_with_tree(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    buffer: &TextBuffer,
+    ranges: Option<&[Range]>,
+) -> Result<ParsedHighlight, SyntaxError> {
+    let (tree, source) = parse_tree(language_id, loaded, buffer, ranges)?;
+    let highlight_spans = highlight_tree(loaded, &tree, &source);
+    let snapshot = SyntaxSnapshot {
         language_id: language_id.to_owned(),
         root_kind: tree.root_node().kind().to_owned(),
         has_errors: tree.root_node().has_error(),
         highlight_spans,
-    })
+    };
+    Ok(ParsedHighlight { snapshot, tree })
+}
+
+fn highlight_loaded_language(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    buffer: &TextBuffer,
+    ranges: Option<&[Range]>,
+) -> Result<SyntaxSnapshot, SyntaxError> {
+    Ok(highlight_loaded_language_with_tree(language_id, loaded, buffer, ranges)?.snapshot)
+}
+
+fn markdown_inline_ranges(tree: &Tree) -> Vec<Range> {
+    fn collect_inline_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<Range>) {
+        if node.kind() == "inline" {
+            let range = Range {
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_point: node.start_position(),
+                end_point: node.end_position(),
+            };
+            ranges.push(range);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_inline_ranges(child, ranges);
+        }
+    }
+
+    let mut ranges = Vec::new();
+    collect_inline_ranges(tree.root_node(), &mut ranges);
+    ranges.sort_by_key(|range| range.start_byte);
+    ranges.dedup_by(|left, right| {
+        left.start_byte == right.start_byte && left.end_byte == right.end_byte
+    });
+
+    let mut filtered = Vec::new();
+    let mut last_end = 0;
+    for range in ranges {
+        if range.start_byte >= range.end_byte {
+            continue;
+        }
+        if range.start_byte < last_end {
+            continue;
+        }
+        last_end = range.end_byte;
+        filtered.push(range);
+    }
+
+    filtered
 }
 
 fn build_shared_library(
@@ -1079,6 +1250,16 @@ mod tests {
         )
     }
 
+    fn rust_inline_configuration() -> LanguageConfiguration {
+        LanguageConfiguration::new(
+            "rust-inline",
+            [] as [&str; 0],
+            rust_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [CaptureThemeMapping::new("string", "syntax.string.inline")],
+        )
+    }
+
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
@@ -1135,6 +1316,22 @@ fn main() {
                 .iter()
                 .any(|span| span.theme_token == "syntax.string")
         );
+    }
+
+    #[test]
+    fn additional_highlight_languages_merge_spans() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(
+            rust_configuration().with_additional_highlight_languages(["rust-inline"]),
+        ));
+        must(registry.register(rust_inline_configuration()));
+
+        let buffer = TextBuffer::from_text("fn main() { let value = \"volt\"; }");
+        let snapshot = must(registry.highlight_buffer_for_extension("rs", &buffer));
+        assert!(snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.theme_token == "syntax.string.inline"));
     }
 
     #[test]

@@ -1,6 +1,5 @@
-# volt
+![volt](./crates/volt/assets/banner.png)
 
-![volt](./crates/volt/assets/icon.png)
 `volt` is a greenfield native text editor project built in Rust. The long-term direction is an Emacs-inspired, 4coder-style editor with a Rust core, a compiled `user` extension library, and native rendering.
 
 ## Workspace layout

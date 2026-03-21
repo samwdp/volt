@@ -60,6 +60,7 @@ pub fn syntax_language() -> LanguageConfiguration {
             CaptureThemeMapping::new("string.escape", "syntax.string"),
         ],
     )
+    .with_additional_highlight_languages(["markdown-inline"])
 }
 
 /// Returns the syntax registration for the Markdown inline grammar.
