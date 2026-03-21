@@ -73,3 +73,7 @@ Inside the SDL shell, the default user package wiring now gives you:
 - `Ctrl-n`, `Ctrl-p`, and `Enter` to navigate and run picker entries
 - a per-buffer statusline composed from `user/statusline.rs`
 - `workspace.new`, `workspace.switch`, `workspace.delete`, and `workspace.list-files` commands backed by `user/workspace.rs`
+
+Theme files live under `user/themes/*.toml` and support UI options like font, font size, opacity,
+opacity type (`transparent` or `blurred`), and cursor/picker roundness. SDL3 does not currently
+expose blur controls, so `blurred` falls back to standard window opacity.

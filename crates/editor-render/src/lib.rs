@@ -237,6 +237,7 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
         return None;
     }
 
+    const MAX_FONT_SEARCH_DEPTH: usize = 6;
     let mut stack = preferred_font_search_roots()
         .into_iter()
         .map(|path| (path, 0usize))
@@ -246,7 +247,7 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
             continue;
         };
         if metadata.is_dir() {
-            if depth >= 6 {
+            if depth >= MAX_FONT_SEARCH_DEPTH {
                 continue;
             }
             let Ok(entries) = fs::read_dir(&path) else {
