@@ -25,5 +25,5 @@ editor-terminal = { path = "../editor-terminal" }
 editor-theme = { path = "../editor-theme" }
 user = { package = "volt-user", path = "../../user" }
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 embed-resource = "2.5.1"
