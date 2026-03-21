@@ -1,0 +1,7 @@
+- [ ] TODO: yanking should copy to the system clipboard and "p" and "P" commands should take from the system clipboard and insert the text
+- [ ] TODO: workspace list files should create a new file if there is no match. If i put dir1/dir2/test.md this should create the file at that directory path
+- [ ] TODO: smart line wrapping when a line exceeds the width of the screen
+- [ ] TODO: buffer close command => picker to close the buffer and a command to immideaitly close the buffer. Should prompt user to save before closing if it has been modified
+- [ ] TODO: backspace and should repeat when held
+- [ ] TODO: key not deleting a character in front of cursor, should repeat when held
+- [ ] TODO: undo/redo should be a tree. I want a user/undotree.rs that will keep track of all the changes and a picker should allow a user to go back in time or forwards in time
