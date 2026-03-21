@@ -5449,13 +5449,27 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     let yank = if let Some(register) = active_register {
         let vim = shell_ui_mut(runtime)?.vim_mut();
         vim.registers.get(&register).cloned().or(fallback_yank)
-    } else if let Some(clipboard) =
-        read_system_clipboard().and_then(|text| yank_from_clipboard_text(&text))
-    {
-        shell_ui_mut(runtime)?.vim_mut().yank = Some(clipboard.clone());
-        Some(clipboard)
     } else {
-        fallback_yank
+        let clipboard_text = read_system_clipboard();
+        let clipboard_yank = clipboard_text
+            .as_deref()
+            .and_then(|text| yank_from_clipboard_text(text));
+        let prefer_internal_block = match (fallback_yank.as_ref(), clipboard_text.as_deref()) {
+            (Some(block @ YankRegister::Block(_)), Some(text)) => {
+                let block_text = yank_to_clipboard_text(block);
+                text == block_text.as_ref()
+            }
+            (Some(YankRegister::Block(_)), None) => true,
+            _ => false,
+        };
+        if prefer_internal_block {
+            fallback_yank
+        } else if let Some(clipboard) = clipboard_yank {
+            shell_ui_mut(runtime)?.vim_mut().yank = Some(clipboard.clone());
+            Some(clipboard)
+        } else {
+            fallback_yank
+        }
     };
     let Some(yank) = yank else {
         return Ok(());
