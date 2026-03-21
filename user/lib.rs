@@ -4,10 +4,10 @@
 //! under the `user/` directory so the future extension model matches the planned
 //! 4coder-style workflow.
 
-/// Debug adapter integration hooks and commands.
-pub mod dap;
 /// Buffer management and save commands.
 pub mod buffer;
+/// Debug adapter integration hooks and commands.
+pub mod dap;
 /// Git workflows and repository-oriented commands.
 pub mod git;
 /// Language-specific registrations.
@@ -149,9 +149,23 @@ mod tests {
     #[test]
     fn user_library_exports_themes() {
         let themes = themes();
-        assert_eq!(themes.len(), 1);
-        assert_eq!(themes[0].id(), "volt-dark");
-        assert!(themes[0].color("syntax.keyword").is_some());
-        assert!(themes[0].color("ui.yank-flash").is_some());
+        let ids = themes.iter().map(|theme| theme.id()).collect::<Vec<_>>();
+        assert_eq!(themes.len(), 6);
+        assert!(ids.contains(&"volt-dark"));
+        assert!(ids.contains(&"volt-light"));
+        assert!(ids.contains(&"gruvbox-dark"));
+        assert!(ids.contains(&"gruvbox-light"));
+        assert!(ids.contains(&"vscode-dark"));
+        assert!(ids.contains(&"vscode-light"));
+        assert!(
+            themes
+                .iter()
+                .any(|theme| theme.color("syntax.keyword").is_some())
+        );
+        assert!(
+            themes
+                .iter()
+                .any(|theme| theme.color("ui.yank-flash").is_some())
+        );
     }
 }

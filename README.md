@@ -46,7 +46,7 @@ The repository now has a validated multi-crate foundation that covers the major 
 - `editor-jobs` and `editor-terminal` foundations for async command execution, compile-style runs, and terminal transcripts
 - `editor-lsp` and `editor-dap` registries for Rust server/adapter session plans
 - an `editor-syntax` registry with tree-sitter language registration and Rust capture-to-theme-token mappings from `user/lang/rust.rs`
-- an `editor-theme` registry with code-defined themes supplied from `user/theme.rs`
+- an `editor-theme` registry with themes loaded from `user/themes/*.toml`
 - `editor-fs` and `editor-git` models for oil-style directory buffers and magit-style status parsing
 - the SDL shell prefers a system-installed Berkeley Mono Nerd Font when present, with cross-platform monospace fallbacks otherwise
 
@@ -69,6 +69,10 @@ Inside the SDL shell, the default user package wiring now gives you:
 - `F4` for the buffer picker
 - `F5` to toggle the docked popup window
 - `F6` for a searchable keybinding picker
+- `F7` for the theme picker
 - `Ctrl-n`, `Ctrl-p`, and `Enter` to navigate and run picker entries
 - a per-buffer statusline composed from `user/statusline.rs`
 - `workspace.new`, `workspace.switch`, `workspace.delete`, and `workspace.list-files` commands backed by `user/workspace.rs`
+
+Theme files live under `user/themes/*.toml` and support UI options like font, font size, and
+cursor/picker roundness.

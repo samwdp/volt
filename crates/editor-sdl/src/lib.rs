@@ -2,9 +2,9 @@
 
 use std::{
     collections::BTreeMap,
+    env,
     error::Error,
-    fmt,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,7 +22,7 @@ use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, RenderError, centered_rect,
-    find_system_monospace_font, horizontal_pane_rects,
+    find_font_by_name, find_system_monospace_font, horizontal_pane_rects,
 };
 use editor_syntax::{SyntaxError, SyntaxRegistry, SyntaxSnapshot};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
@@ -79,6 +79,11 @@ const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
+const OPTION_FONT: &str = "font";
+const OPTION_FONT_SIZE: &str = "font_size";
+const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
+const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -116,6 +121,12 @@ impl Default for ShellConfig {
             frame_limit: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ThemeRuntimeSettings {
+    font_request: Option<String>,
+    font_size: u32,
 }
 
 /// Summary returned after the demo shell exits.
@@ -1037,13 +1048,17 @@ enum PickerAction {
     ExecuteCommand(String),
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
+    ActivateTheme(String),
     VimSearch(VimSearchDirection),
     VimSearchResult {
         direction: VimSearchDirection,
         target: TextPoint,
     },
     InstallTreeSitterLanguage(String),
-    CreateWorkspace { name: String, root: PathBuf },
+    CreateWorkspace {
+        name: String,
+        root: PathBuf,
+    },
     SwitchWorkspace(WorkspaceId),
     DeleteWorkspace(WorkspaceId),
 }
@@ -1080,7 +1095,11 @@ impl PickerOverlay {
         }
     }
 
-    fn search(title: impl Into<String>, direction: VimSearchDirection, entries: Vec<PickerEntry>) -> Self {
+    fn search(
+        title: impl Into<String>,
+        direction: VimSearchDirection,
+        entries: Vec<PickerEntry>,
+    ) -> Self {
         let title = title.into();
         let mut actions = BTreeMap::new();
         let items = entries
@@ -1880,24 +1899,20 @@ impl ShellState {
             }
             VimPending::MarkSet => {
                 if let Some(mark) = chord.chars().next() {
-                    let buffer_id = active_shell_buffer_id(&self.runtime)
-                        .map_err(ShellError::Runtime)?;
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let point = self.active_buffer_mut()?.cursor_point();
-                    self.ui_mut()?.vim_mut().marks.insert(
-                        mark,
-                        VimMark {
-                            buffer_id,
-                            point,
-                        },
-                    );
+                    self.ui_mut()?
+                        .vim_mut()
+                        .marks
+                        .insert(mark, VimMark { buffer_id, point });
                 }
                 self.ui_mut()?.vim_mut().clear_transient();
                 Ok(true)
             }
             VimPending::MarkJump { linewise } => {
                 if let Some(mark) = chord.chars().next() {
-                    jump_to_mark(&mut self.runtime, mark, linewise)
-                        .map_err(ShellError::Runtime)?;
+                    jump_to_mark(&mut self.runtime, mark, linewise).map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
                 }
@@ -1905,8 +1920,7 @@ impl ShellState {
             }
             VimPending::MacroRecord => {
                 if let Some(register) = chord.chars().next() {
-                    start_macro_record(&mut self.runtime, register)
-                        .map_err(ShellError::Runtime)?;
+                    start_macro_record(&mut self.runtime, register).map_err(ShellError::Runtime)?;
                 } else {
                     self.ui_mut()?.vim_mut().clear_transient();
                 }
@@ -2258,7 +2272,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let font_path = find_system_monospace_font()?;
+    let mut state = ShellState::new()?;
+    let mut theme_settings =
+        theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
+    let mut font_path = resolve_font_path(theme_settings.font_request.as_deref())?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
@@ -2272,13 +2289,12 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
     }
     video.text_input().start(&window);
-
-    let font = ttf
-        .load_font(&font_path, config.font_size as f32)
+    let mut font = ttf
+        .load_font(&font_path, theme_settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let line_height = font.height().max(1) as usize;
-    let ascent = font.ascent();
-    let cell_width = font
+    let mut line_height = font.height().max(1) as usize;
+    let mut ascent = font.ascent();
+    let mut cell_width = font
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
@@ -2289,10 +2305,20 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let mut state = ShellState::new()?;
     let mut frames_rendered = 0;
 
     loop {
+        update_theme_runtime(
+            &ttf,
+            &state,
+            &config,
+            &mut theme_settings,
+            &mut font,
+            &mut font_path,
+            &mut line_height,
+            &mut ascent,
+            &mut cell_width,
+        )?;
         let (render_width, render_height) = canvas
             .output_size()
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -2343,6 +2369,98 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         renderer_name,
         font_path: font_path.display().to_string(),
     })
+}
+
+fn update_theme_runtime(
+    ttf: &sdl3::ttf::Sdl3TtfContext,
+    state: &ShellState,
+    config: &ShellConfig,
+    theme_settings: &mut ThemeRuntimeSettings,
+    font: &mut Font<'_>,
+    font_path: &mut PathBuf,
+    line_height: &mut usize,
+    ascent: &mut i32,
+    cell_width: &mut i32,
+) -> Result<(), ShellError> {
+    let updated = theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), config);
+    if &updated == theme_settings {
+        return Ok(());
+    }
+
+    if updated.font_size != theme_settings.font_size
+        || updated.font_request != theme_settings.font_request
+    {
+        let next_font_path = resolve_font_path(updated.font_request.as_deref())?;
+        let next_font = ttf
+            .load_font(&next_font_path, updated.font_size as f32)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        *font_path = next_font_path;
+        *font = next_font;
+        *line_height = font.height().max(1) as usize;
+        *ascent = font.ascent();
+        *cell_width = font
+            .size_of_char('M')
+            .map_err(|error| ShellError::Sdl(error.to_string()))?
+            .0
+            .max(1) as i32;
+    }
+
+    *theme_settings = updated;
+    Ok(())
+}
+
+fn theme_runtime_settings(
+    theme_registry: Option<&ThemeRegistry>,
+    config: &ShellConfig,
+) -> ThemeRuntimeSettings {
+    let font_request = theme_registry
+        .and_then(|registry| registry.resolve_string(OPTION_FONT))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
+        .map(str::to_owned);
+    let font_size = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
+        .map(|value| value.max(1.0).round() as u32)
+        .unwrap_or(config.font_size);
+    ThemeRuntimeSettings {
+        font_request,
+        font_size,
+    }
+}
+
+fn resolve_font_path(request: Option<&str>) -> Result<PathBuf, ShellError> {
+    if let Some(request) = request.and_then(|value| (!value.is_empty()).then_some(value)) {
+        if let Some(path) = resolve_font_request(request) {
+            return Ok(path);
+        }
+    }
+    find_system_monospace_font().map_err(ShellError::from)
+}
+
+fn resolve_font_request(request: &str) -> Option<PathBuf> {
+    let trimmed = request.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return path.exists().then(|| path.to_path_buf());
+    }
+    if path.extension().is_some() || trimmed.contains('/') || trimmed.contains('\\') {
+        if let Ok(exe_path) = env::current_exe()
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            let candidate = exe_dir.join(path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        return None;
+    }
+    find_font_by_name(trimmed)
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -2973,14 +3091,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkSet);
                 }
                 "goto-mark-line" => {
-                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
-                        linewise: true,
-                    });
+                    shell_ui_mut(runtime)?.vim_mut().pending =
+                        Some(VimPending::MarkJump { linewise: true });
                 }
                 "goto-mark" => {
-                    shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkJump {
-                        linewise: false,
-                    });
+                    shell_ui_mut(runtime)?.vim_mut().pending =
+                        Some(VimPending::MarkJump { linewise: false });
                 }
                 "toggle-macro-record" => {
                     if shell_ui(runtime)?.vim().recording_macro.is_some() {
@@ -3065,10 +3181,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_WORKSPACE_FORMAT, "shell.workspace-format", |_, runtime| {
-            format_workspace(runtime)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_WORKSPACE_FORMAT,
+            "shell.workspace-format",
+            |_, runtime| {
+                format_workspace(runtime)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_BUFFER_SAVE, "shell.buffer-save", |event, runtime| {
@@ -3076,22 +3196,24 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .workspace_id
                 .or_else(|| runtime.model().active_workspace_id().ok())
                 .ok_or_else(|| "buffer.save hook missing workspace".to_owned())?;
-            let buffer_id = event
-                .buffer_id
-                .unwrap_or(active_shell_buffer_id(runtime)?);
+            let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
             save_buffer(runtime, workspace_id, buffer_id)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_WORKSPACE_SAVE, "shell.workspace-save", |event, runtime| {
-            let workspace_id = event
-                .workspace_id
-                .or_else(|| runtime.model().active_workspace_id().ok())
-                .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
-            save_workspace(runtime, workspace_id)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_WORKSPACE_SAVE,
+            "shell.workspace-save",
+            |event, runtime| {
+                let workspace_id = event
+                    .workspace_id
+                    .or_else(|| runtime.model().active_workspace_id().ok())
+                    .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
+                save_workspace(runtime, workspace_id)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_OPEN, "shell.open-picker", |event, runtime| {
@@ -3172,6 +3294,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::OpenFile(path) => {
                     open_workspace_file(runtime, &path)?;
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::ActivateTheme(theme_id) => {
+                    let registry = runtime
+                        .services_mut()
+                        .get_mut::<ThemeRegistry>()
+                        .ok_or_else(|| "theme registry service missing".to_owned())?;
+                    registry
+                        .activate(&theme_id)
+                        .map_err(|error| error.to_string())?;
                 }
                 PickerAction::VimSearch(direction) => {
                     submit_vim_search(runtime, direction, &query)?;
@@ -3477,8 +3608,7 @@ fn find_char_forward(
 ) -> Option<usize> {
     let char_count = buffer.text.char_count();
     for char_index in start_char..char_count {
-        if char_at_index(buffer, char_index)
-            .map(|ch| normalize_search_char(ch, case_sensitive))
+        if char_at_index(buffer, char_index).map(|ch| normalize_search_char(ch, case_sensitive))
             == Some(target)
         {
             return Some(char_index);
@@ -3494,8 +3624,7 @@ fn fuzzy_match_end(
     case_sensitive: bool,
 ) -> Option<usize> {
     if pattern.is_empty()
-        || char_at_index(buffer, start_char)
-            .map(|ch| normalize_search_char(ch, case_sensitive))
+        || char_at_index(buffer, start_char).map(|ch| normalize_search_char(ch, case_sensitive))
             != Some(pattern[0])
     {
         return None;
@@ -3532,7 +3661,8 @@ fn search_fuzzy_forward(
 
     if first_pass_start <= max_start {
         for char_index in first_pass_start..=max_start {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3547,7 +3677,8 @@ fn search_fuzzy_forward(
 
     if wrap {
         for char_index in 0..first_pass_start.min(max_start.saturating_add(1)) {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3591,7 +3722,8 @@ fn search_fuzzy_backward(
 
     if wrap && first_pass_start < max_start {
         for char_index in ((first_pass_start + 1)..=max_start).rev() {
-            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive) else {
+            let Some(end_index) = fuzzy_match_end(buffer, char_index, pattern, case_sensitive)
+            else {
                 continue;
             };
             let span = end_index.saturating_sub(char_index);
@@ -3683,13 +3815,9 @@ fn exact_match_positions_in_chars(
     let max_start = chars.len().saturating_sub(pattern.len());
     let mut matches = Vec::new();
     for start in 0..=max_start {
-        if pattern
-            .iter()
-            .enumerate()
-            .all(|(offset, expected)| {
-                normalize_search_char(chars[start + offset], case_sensitive) == *expected
-            })
-        {
+        if pattern.iter().enumerate().all(|(offset, expected)| {
+            normalize_search_char(chars[start + offset], case_sensitive) == *expected
+        }) {
             matches.push(start);
         }
     }
@@ -3750,7 +3878,11 @@ fn fuzzy_match_positions_in_chars(
     matches
 }
 
-fn search_start_char(buffer: &ShellBuffer, direction: VimSearchDirection, pattern_len: usize) -> usize {
+fn search_start_char(
+    buffer: &ShellBuffer,
+    direction: VimSearchDirection,
+    pattern_len: usize,
+) -> usize {
     let cursor = buffer.cursor_point();
     match direction {
         VimSearchDirection::Forward => buffer
@@ -3841,15 +3973,15 @@ fn vim_search_entries(
 
     if matches.is_empty() {
         for line_index in 0..line_count {
-        let Some(line) = buffer.text.line(line_index) else {
-            continue;
-        };
-        let chars: Vec<char> = line.chars().collect();
-        let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
-        for (start, span) in positions {
-            let point = TextPoint::new(line_index, start);
-            let char_index = buffer.text.point_to_char_index(point);
-            matches.push(VimSearchMatch {
+            let Some(line) = buffer.text.line(line_index) else {
+                continue;
+            };
+            let chars: Vec<char> = line.chars().collect();
+            let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
+            for (start, span) in positions {
+                let point = TextPoint::new(line_index, start);
+                let char_index = buffer.text.point_to_char_index(point);
+                matches.push(VimSearchMatch {
                     point,
                     char_index,
                     span,
@@ -4316,11 +4448,7 @@ fn restore_last_visual_selection(runtime: &mut EditorRuntime) -> Result<(), Stri
     Ok(())
 }
 
-fn jump_to_mark(
-    runtime: &mut EditorRuntime,
-    mark: char,
-    linewise: bool,
-) -> Result<(), String> {
+fn jump_to_mark(runtime: &mut EditorRuntime, mark: char, linewise: bool) -> Result<(), String> {
     let snapshot = shell_ui(runtime)?.vim().marks.get(&mark).copied();
     let Some(snapshot) = snapshot else {
         return Ok(());
@@ -4456,7 +4584,12 @@ fn apply_block_operator(
                 buffer.set_cursor(target_cursor);
                 buffer.mark_syntax_dirty();
             }
-            prepare_block_insert_state(runtime, selection, selection.start_col, target_cursor.line)?;
+            prepare_block_insert_state(
+                runtime,
+                selection,
+                selection.start_col,
+                target_cursor.line,
+            )?;
             shell_ui_mut(runtime)?.enter_insert_mode();
             mark_change_finish_on_normal(runtime)?;
         }
@@ -4631,9 +4764,8 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
         }
 
         let path = path.ok_or_else(|| format!("file buffer `{buffer_id}` is missing a path"))?;
-        save_buffer(runtime, workspace_id, buffer_id).map_err(|error| {
-            format!("failed to save `{}`: {error}", path.display())
-        })?;
+        save_buffer(runtime, workspace_id, buffer_id)
+            .map_err(|error| format!("failed to save `{}`: {error}", path.display()))?;
     }
 
     Ok(())
@@ -4666,7 +4798,13 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
         } else {
             None
         };
-        (path.to_path_buf(), extension, original_cursor, selection, buffer.kind.clone())
+        (
+            path.to_path_buf(),
+            extension,
+            original_cursor,
+            selection,
+            buffer.kind.clone(),
+        )
     };
 
     if buffer_kind != BufferKind::File {
@@ -5316,11 +5454,7 @@ fn open_vim_search_prompt(
         VimSearchDirection::Forward => "Search /",
         VimSearchDirection::Backward => "Search ?",
     };
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::search(
-        title,
-        direction,
-        Vec::new(),
-    ));
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::search(title, direction, Vec::new()));
     Ok(())
 }
 
@@ -5481,7 +5615,10 @@ fn resolve_g_prefix(
 fn start_vim_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
     if matches!(
         operator,
-        VimOperator::Delete | VimOperator::Change | VimOperator::ToggleCase | VimOperator::Lowercase
+        VimOperator::Delete
+            | VimOperator::Change
+            | VimOperator::ToggleCase
+            | VimOperator::Lowercase
             | VimOperator::Uppercase
     ) {
         start_change_recording(runtime)?;
@@ -5622,7 +5759,10 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     let yank = {
         let vim = shell_ui_mut(runtime)?.vim_mut();
         if let Some(register) = vim.active_register.take() {
-            vim.registers.get(&register).cloned().or_else(|| vim.yank.clone())
+            vim.registers
+                .get(&register)
+                .cloned()
+                .or_else(|| vim.yank.clone())
         } else {
             vim.yank.clone()
         }
@@ -6145,6 +6285,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
         "workspace.delete" => workspace_delete_picker_overlay(runtime),
         "workspace.files" => workspace_file_picker_overlay(runtime),
+        "themes" => theme_picker_overlay(runtime),
         other => Err(format!("unknown picker provider `{other}`")),
     }
 }
@@ -6403,6 +6544,24 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
     let mut overlay = PickerOverlay::from_entries("Keybindings", entries);
     overlay.session.set_result_limit(256);
     overlay
+}
+
+fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
+    let registry = runtime
+        .services()
+        .get::<ThemeRegistry>()
+        .ok_or_else(|| "theme registry service missing".to_owned())?;
+    let entries = registry
+        .themes()
+        .map(|theme| {
+            let theme_id = theme.id().to_owned();
+            PickerEntry {
+                item: PickerItem::new(&theme_id, theme.name(), "Theme", Some(theme_id.clone())),
+                action: PickerAction::ActivateTheme(theme_id),
+            }
+        })
+        .collect();
+    Ok(PickerOverlay::from_entries("Themes", entries))
 }
 
 fn message_picker_overlay(
@@ -6716,7 +6875,15 @@ fn render_shell_state(
     }
 
     if let Some(picker) = state.picker() {
-        render_picker_overlay(target, font, picker, width, height, line_height)?;
+        render_picker_overlay(
+            target,
+            font,
+            picker,
+            width,
+            height,
+            line_height,
+            theme_registry,
+        )?;
     }
 
     Ok(())
@@ -6729,8 +6896,13 @@ fn render_picker_overlay(
     width: u32,
     height: u32,
     line_height: i32,
+    theme_registry: Option<&ThemeRegistry>,
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
+    let picker_roundness = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
+        .map(|value| value.clamp(0.0, 64.0).round() as u32)
+        .unwrap_or(16);
     fill_rounded_rect(
         target,
         PixelRectToRect::rect(
@@ -6739,7 +6911,7 @@ fn render_picker_overlay(
             popup_rect.width,
             popup_rect.height,
         ),
-        16,
+        picker_roundness,
         Color::RGB(29, 32, 40),
     )?;
     fill_rect(
@@ -7003,8 +7175,12 @@ fn render_buffer(
     let cursor = Color::RGB(110, 170, 255);
     let selection = Color::RGBA(55, 71, 99, 255);
     let relative_line_numbers = theme_registry
-        .and_then(|registry| registry.resolve_option("ui.line-number.relative"))
+        .and_then(|registry| registry.resolve_bool(OPTION_LINE_NUMBER_RELATIVE))
         .unwrap_or(false);
+    let cursor_roundness = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_CURSOR_ROUNDNESS))
+        .map(|value| value.clamp(0.0, 16.0).round() as u32)
+        .unwrap_or(2);
     let yank_flash_color = theme_registry
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
@@ -7044,7 +7220,7 @@ fn render_buffer(
                 cursor_width,
                 line_height.max(2) as u32,
             ),
-            2,
+            cursor_roundness,
             cursor,
         )?;
     }
@@ -7717,9 +7893,7 @@ mod tests {
     fn vim_visual_block_insert_applies_to_all_lines() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = ShellState::new()?;
         state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
-        state
-            .active_buffer_mut()?
-            .set_cursor(TextPoint::new(0, 0));
+        state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
         state.handle_text_input("v")?;
         assert_eq!(state.input_mode()?, InputMode::Visual);
@@ -8118,11 +8292,7 @@ mod tests {
         state.handle_text_input("!")?;
         assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
         state.handle_text_input("q")?;
-        assert!(state
-            .ui()?
-            .vim()
-            .macros
-            .contains_key(&'a'));
+        assert!(state.ui()?.vim().macros.contains_key(&'a'));
 
         state.active_buffer_mut()?.text = TextBuffer::from_text("beta");
         state.handle_text_input("@")?;

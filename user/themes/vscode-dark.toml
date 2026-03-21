@@ -1,0 +1,33 @@
+id = "vscode-dark"
+name = "VS Code Dark"
+
+[tokens]
+"ui.background" = "#1e1e1e"
+"ui.foreground" = "#d4d4d4"
+"ui.yank-flash" = "#569cd66e"
+"syntax.attribute" = "#9cdcfe"
+"syntax.comment" = "#6a9955"
+"syntax.constant" = "#4fc1ff"
+"syntax.constant.builtin" = "#4fc1ff"
+"syntax.constructor" = "#4ec9b0"
+"syntax.function" = "#dcdcaa"
+"syntax.function.macro" = "#c586c0"
+"syntax.keyword" = "#c586c0"
+"syntax.label" = "#c586c0"
+"syntax.module" = "#4ec9b0"
+"syntax.operator" = "#d4d4d4"
+"syntax.property" = "#9cdcfe"
+"syntax.punctuation.bracket" = "#d4d4d4"
+"syntax.punctuation.delimiter" = "#d4d4d4"
+"syntax.string" = "#ce9178"
+"syntax.type" = "#4ec9b0"
+"syntax.type.builtin" = "#4ec9b0"
+"syntax.variable" = "#9cdcfe"
+"syntax.variable.builtin" = "#4fc1ff"
+
+[options]
+"ui.line-number.relative" = true
+font = "default"
+font_size = 18
+cursor_roundness = 2
+picker_roundness = 16

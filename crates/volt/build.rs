@@ -1,12 +1,53 @@
-#[cfg(target_os = "windows")]
 fn main() {
-    if let Err(error) = build_windows_icon() {
-        panic!("failed to embed Windows icon: {error}");
+    if let Err(error) = copy_user_themes() {
+        panic!("failed to copy user themes: {error}");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(error) = build_windows_icon() {
+            panic!("failed to embed Windows icon: {error}");
+        }
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn main() {}
+fn copy_user_themes() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{env, fs, path::PathBuf};
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or("unable to locate workspace root")?;
+    let themes_dir = workspace_root.join("user").join("themes");
+    if !themes_dir.is_dir() {
+        return Ok(());
+    }
+    println!("cargo:rerun-if-changed={}", themes_dir.display());
+
+    let profile = env::var("PROFILE")?;
+    let target_dir = env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root.join("target"))
+        .join(profile);
+    let destination = target_dir.join("user").join("themes");
+    fs::create_dir_all(&destination)?;
+
+    for entry in fs::read_dir(&themes_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+        {
+            let target = destination.join(entry.file_name());
+            fs::copy(&path, &target)?;
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 fn build_windows_icon() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,10 +84,9 @@ fn write_ico_from_png(
     let png_bytes = std::fs::read(png_path)?;
     let (width, height) = png_dimensions(&png_bytes)?;
     if width == 0 || height == 0 || width > 256 || height > 256 {
-        return Err(format!(
-            "icon size must be between 1 and 256 pixels (got {width}x{height})"
-        )
-        .into());
+        return Err(
+            format!("icon size must be between 1 and 256 pixels (got {width}x{height})").into(),
+        );
     }
 
     let width_byte = if width == 256 { 0 } else { width as u8 };

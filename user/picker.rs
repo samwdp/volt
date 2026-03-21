@@ -29,6 +29,12 @@ pub fn package() -> PluginPackage {
             Some("keybindings"),
         ),
         hook_command(
+            "picker.open-themes",
+            "Opens the theme picker popup.",
+            "ui.picker.open",
+            Some("themes"),
+        ),
+        hook_command(
             "picker.select-next",
             "Moves to the next picker result.",
             "ui.picker.next",
@@ -68,6 +74,7 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Global,
         ),
         PluginKeyBinding::new("F6", "picker.open-keybindings", PluginKeymapScope::Global),
+        PluginKeyBinding::new("F7", "picker.open-themes", PluginKeymapScope::Global),
         PluginKeyBinding::new("Ctrl+n", "picker.select-next", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Ctrl+p", "picker.select-previous", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Enter", "picker.submit", PluginKeymapScope::Popup),

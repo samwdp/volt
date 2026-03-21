@@ -1,0 +1,33 @@
+id = "gruvbox-light"
+name = "Gruvbox Light"
+
+[tokens]
+"ui.background" = "#fbf1c7"
+"ui.foreground" = "#3c3836"
+"ui.yank-flash" = "#4585886e"
+"syntax.attribute" = "#076678"
+"syntax.comment" = "#928374"
+"syntax.constant" = "#b57614"
+"syntax.constant.builtin" = "#b57614"
+"syntax.constructor" = "#8f3f71"
+"syntax.function" = "#076678"
+"syntax.function.macro" = "#af3a03"
+"syntax.keyword" = "#af3a03"
+"syntax.label" = "#af3a03"
+"syntax.module" = "#79740e"
+"syntax.operator" = "#af3a03"
+"syntax.property" = "#b57614"
+"syntax.punctuation.bracket" = "#3c3836"
+"syntax.punctuation.delimiter" = "#3c3836"
+"syntax.string" = "#79740e"
+"syntax.type" = "#427b58"
+"syntax.type.builtin" = "#427b58"
+"syntax.variable" = "#3c3836"
+"syntax.variable.builtin" = "#8f3f71"
+
+[options]
+"ui.line-number.relative" = true
+font = "default"
+font_size = 18
+cursor_roundness = 2
+picker_roundness = 16

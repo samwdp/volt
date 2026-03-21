@@ -706,7 +706,12 @@ impl SyntaxRegistry {
         if queries_dir.exists() {
             copy_dir_all(&queries_dir, &install_dir.join("queries"))?;
         }
-        build_shared_library(language_id, &grammar, &cloned_grammar_dir, &self.install_root)?;
+        build_shared_library(
+            language_id,
+            &grammar,
+            &cloned_grammar_dir,
+            &self.install_root,
+        )?;
 
         self.loaded.remove(language_id);
         Ok(install_dir)
@@ -781,7 +786,9 @@ impl SyntaxRegistry {
             } else {
                 highlight_loaded_language(extra_language_id, loaded, buffer, None)?
             };
-            snapshot.highlight_spans.extend(extra_snapshot.highlight_spans);
+            snapshot
+                .highlight_spans
+                .extend(extra_snapshot.highlight_spans);
             snapshot.has_errors = snapshot.has_errors || extra_snapshot.has_errors;
         }
 
@@ -950,11 +957,7 @@ fn parse_tree(
     Ok((tree, source))
 }
 
-fn highlight_tree(
-    loaded: &LoadedLanguage,
-    tree: &Tree,
-    source: &str,
-) -> Vec<HighlightSpan> {
+fn highlight_tree(loaded: &LoadedLanguage, tree: &Tree, source: &str) -> Vec<HighlightSpan> {
     let mut query_cursor = QueryCursor::new();
     let capture_names = loaded.query.capture_names();
     let mut highlight_spans = Vec::new();
@@ -1046,7 +1049,11 @@ fn line_start_offsets(source: &str) -> Vec<usize> {
     starts
 }
 
-fn line_byte_bounds(line_starts: &[usize], source_len: usize, line: usize) -> Option<(usize, usize)> {
+fn line_byte_bounds(
+    line_starts: &[usize],
+    source_len: usize,
+    line: usize,
+) -> Option<(usize, usize)> {
     let start = *line_starts.get(line)?;
     let end = if line + 1 < line_starts.len() {
         line_starts[line + 1].saturating_sub(1)
@@ -1075,12 +1082,12 @@ fn highlight_inline_language_per_line(
         }
         let line_text = &source[start..end];
         let mut parser = Parser::new();
-        parser
-            .set_language(&loaded.language)
-            .map_err(|error| SyntaxError::ParserConfiguration {
+        parser.set_language(&loaded.language).map_err(|error| {
+            SyntaxError::ParserConfiguration {
                 language_id: language_id.to_owned(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         let tree = parser
             .parse(line_text, None)
             .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))?;
@@ -1386,17 +1393,21 @@ fn main() {
     #[test]
     fn additional_highlight_languages_merge_spans() {
         let mut registry = SyntaxRegistry::new();
-        must(registry.register(
-            rust_configuration().with_additional_highlight_languages(["rust-inline"]),
-        ));
+        must(
+            registry.register(
+                rust_configuration().with_additional_highlight_languages(["rust-inline"]),
+            ),
+        );
         must(registry.register(rust_inline_configuration()));
 
         let buffer = TextBuffer::from_text("fn main() { let value = \"volt\"; }");
         let snapshot = must(registry.highlight_buffer_for_extension("rs", &buffer));
-        assert!(snapshot
-            .highlight_spans
-            .iter()
-            .any(|span| span.theme_token == "syntax.string.inline"));
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|span| span.theme_token == "syntax.string.inline")
+        );
     }
 
     #[test]

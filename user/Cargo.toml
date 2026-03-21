@@ -20,3 +20,4 @@ editor-lsp = { path = "../crates/editor-lsp" }
 editor-plugin-api = { path = "../crates/editor-plugin-api" }
 editor-syntax = { path = "../crates/editor-syntax" }
 editor-theme = { path = "../crates/editor-theme" }
+toml = "0.8.23"

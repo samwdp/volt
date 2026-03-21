@@ -900,6 +900,7 @@ dependencies = [
  "editor-plugin-api",
  "editor-syntax",
  "editor-theme",
+ "toml",
 ]
 
 [[package]]

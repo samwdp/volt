@@ -36,13 +36,92 @@ impl Color {
     }
 }
 
+/// Theme option values parsed from theme definitions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThemeOption {
+    /// Boolean option value.
+    Bool(bool),
+    /// Numeric option value.
+    Number(f64),
+    /// String option value.
+    Text(String),
+}
+
+impl ThemeOption {
+    /// Returns the option as a boolean value, if it is one.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Returns the option as a numeric value, if it is one.
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            Self::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Returns the option as a string slice, if it is one.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Text(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl From<bool> for ThemeOption {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<f64> for ThemeOption {
+    fn from(value: f64) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<f32> for ThemeOption {
+    fn from(value: f32) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<i64> for ThemeOption {
+    fn from(value: i64) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<u64> for ThemeOption {
+    fn from(value: u64) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<String> for ThemeOption {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for ThemeOption {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
 /// Theme definition registered in Rust code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     id: String,
     name: String,
     tokens: BTreeMap<String, Color>,
-    options: BTreeMap<String, bool>,
+    options: BTreeMap<String, ThemeOption>,
 }
 
 impl Theme {
@@ -63,8 +142,8 @@ impl Theme {
     }
 
     /// Adds or replaces a theme option.
-    pub fn with_option(mut self, option: impl Into<String>, value: bool) -> Self {
-        self.options.insert(option.into(), value);
+    pub fn with_option(mut self, option: impl Into<String>, value: impl Into<ThemeOption>) -> Self {
+        self.options.insert(option.into(), value.into());
         self
     }
 
@@ -83,14 +162,34 @@ impl Theme {
         &self.tokens
     }
 
+    /// Returns all registered option values.
+    pub fn options(&self) -> &BTreeMap<String, ThemeOption> {
+        &self.options
+    }
+
     /// Resolves a token color.
     pub fn color(&self, token: &str) -> Option<Color> {
         self.tokens.get(token).copied()
     }
 
     /// Resolves a theme option value.
-    pub fn option(&self, option: &str) -> Option<bool> {
-        self.options.get(option).copied()
+    pub fn option(&self, option: &str) -> Option<&ThemeOption> {
+        self.options.get(option)
+    }
+
+    /// Resolves a boolean theme option value.
+    pub fn option_bool(&self, option: &str) -> Option<bool> {
+        self.option(option).and_then(ThemeOption::as_bool)
+    }
+
+    /// Resolves a numeric theme option value.
+    pub fn option_number(&self, option: &str) -> Option<f64> {
+        self.option(option).and_then(ThemeOption::as_number)
+    }
+
+    /// Resolves a string theme option value.
+    pub fn option_string(&self, option: &str) -> Option<&str> {
+        self.option(option).and_then(ThemeOption::as_str)
     }
 }
 
@@ -119,7 +218,7 @@ impl fmt::Display for ThemeError {
 impl Error for ThemeError {}
 
 /// Registry of available themes and the current active selection.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ThemeRegistry {
     themes: BTreeMap<String, Theme>,
     active_theme: Option<String>,
@@ -186,20 +285,45 @@ impl ThemeRegistry {
         self.active_theme().and_then(|theme| theme.color(token))
     }
 
-    /// Resolves a boolean option from the active theme.
-    pub fn resolve_option(&self, option: &str) -> Option<bool> {
+    /// Resolves an option from the active theme.
+    pub fn resolve_option(&self, option: &str) -> Option<&ThemeOption> {
         self.active_theme().and_then(|theme| theme.option(option))
+    }
+
+    /// Resolves a boolean option from the active theme.
+    pub fn resolve_bool(&self, option: &str) -> Option<bool> {
+        self.active_theme()
+            .and_then(|theme| theme.option_bool(option))
+    }
+
+    /// Resolves a numeric option from the active theme.
+    pub fn resolve_number(&self, option: &str) -> Option<f64> {
+        self.active_theme()
+            .and_then(|theme| theme.option_number(option))
+    }
+
+    /// Resolves a string option from the active theme.
+    pub fn resolve_string(&self, option: &str) -> Option<&str> {
+        self.active_theme()
+            .and_then(|theme| theme.option_string(option))
+    }
+
+    /// Returns all registered themes.
+    pub fn themes(&self) -> impl Iterator<Item = &Theme> {
+        self.themes.values()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Theme, ThemeRegistry};
+    use super::{Color, Theme, ThemeOption, ThemeRegistry};
 
     fn volt_dark() -> Theme {
         Theme::new("volt-dark", "Volt Dark")
             .with_token("syntax.keyword", Color::rgb(198, 120, 221))
             .with_token("syntax.string", Color::rgb(152, 195, 121))
+            .with_option("ui.line-number.relative", true)
+            .with_option("cursor_roundness", 3.0)
     }
 
     fn amber() -> Theme {
@@ -230,5 +354,18 @@ mod tests {
             registry.resolve("syntax.keyword"),
             Some(Color::rgb(255, 191, 105))
         );
+    }
+
+    #[test]
+    fn registry_resolves_option_values() {
+        let mut registry = ThemeRegistry::new();
+        must(registry.register(volt_dark()));
+
+        assert_eq!(
+            registry.resolve_option("cursor_roundness"),
+            Some(&ThemeOption::Number(3.0))
+        );
+        assert_eq!(registry.resolve_bool("ui.line-number.relative"), Some(true));
+        assert_eq!(registry.resolve_number("cursor_roundness"), Some(3.0));
     }
 }
