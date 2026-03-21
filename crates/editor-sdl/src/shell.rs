@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::BTreeMap,
     env, fs,
@@ -135,17 +136,17 @@ fn read_system_clipboard() -> Option<String> {
     .filter(|text| !text.is_empty())
 }
 
-fn yank_to_clipboard_text(yank: &YankRegister) -> String {
+fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {
     match yank {
-        YankRegister::Character(text) => text.clone(),
+        YankRegister::Character(text) => Cow::Borrowed(text),
         YankRegister::Line(text) => {
             if text.ends_with('\n') {
-                text.clone()
+                Cow::Borrowed(text)
             } else {
-                format!("{text}\n")
+                Cow::Owned(format!("{text}\n"))
             }
         }
-        YankRegister::Block(lines) => lines.join("\n"),
+        YankRegister::Block(lines) => Cow::Owned(lines.join("\n")),
     }
 }
 
@@ -4013,16 +4014,16 @@ fn transform_case_text(text: &str, operator: VimOperator) -> String {
 fn store_yank_register(
     runtime: &mut EditorRuntime,
     yank: YankRegister,
-    update_clipboard: bool,
+    sync_to_system_clipboard: bool,
 ) -> Result<(), String> {
     let vim = shell_ui_mut(runtime)?.vim_mut();
     vim.yank = Some(yank.clone());
     if let Some(register) = vim.active_register.take() {
         vim.registers.insert(register, yank);
     }
-    if update_clipboard {
+    if sync_to_system_clipboard {
         let text = yank_to_clipboard_text(&yank);
-        write_system_clipboard(&text);
+        write_system_clipboard(text.as_ref());
     }
     Ok(())
 }
