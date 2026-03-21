@@ -2556,6 +2556,7 @@ fn apply_win32_backdrop(window: &Window, opacity_type: OpacityType) -> Result<()
         Win32Backdrop::Auto => DWMSBT_AUTO,
         Win32Backdrop::None => DWMSBT_NONE,
         Win32Backdrop::Mica => DWMSBT_MAINWINDOW,
+        // Mica Alt maps to the tabbed system backdrop on Windows 11.
         Win32Backdrop::MicaAlt => DWMSBT_TABBEDWINDOW,
         Win32Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
         Win32Backdrop::Tabbed => DWMSBT_TABBEDWINDOW,

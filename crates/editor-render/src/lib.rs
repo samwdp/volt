@@ -292,7 +292,7 @@ fn font_name_matches(path: &Path, normalized: &str) -> bool {
 fn normalize_font_name(name: &str) -> String {
     name.chars()
         .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(|character| character.to_ascii_lowercase())
+        .map(|character| character.to_ascii_lowercase())
         .collect()
 }
 
