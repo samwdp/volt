@@ -286,7 +286,7 @@ fn font_name_matches(path: &Path, normalized: &str) -> bool {
         return false;
     };
     let stem = normalize_font_name(stem);
-    stem == normalized || stem.starts_with(normalized)
+    stem == normalized
 }
 
 fn normalize_font_name(name: &str) -> String {

@@ -162,8 +162,7 @@ fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String
     match value {
         toml::Value::Boolean(value) => Ok(ThemeOption::Bool(*value)),
         toml::Value::Integer(value) => {
-            // 2^53 is the largest consecutive integer exactly representable in IEEE 754 f64.
-            const MAX_THEME_OPTION_INTEGER: i64 = 9_007_199_254_740_992;
+            const MAX_THEME_OPTION_INTEGER: i64 = 9_007_199_254_740_992; // 2^53 in IEEE 754 f64.
             if *value < -MAX_THEME_OPTION_INTEGER || *value > MAX_THEME_OPTION_INTEGER {
                 return Err(format!(
                     "option `{option}` integer value is too large for a number"

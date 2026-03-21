@@ -2512,7 +2512,9 @@ fn apply_window_opacity(
     opacity: f32,
     opacity_type: OpacityType,
 ) -> Result<(), ShellError> {
-    let _ = opacity_type;
+    let opacity = match opacity_type {
+        OpacityType::Transparent | OpacityType::Blurred => opacity,
+    };
     window
         .set_opacity(opacity)
         .map_err(|error| ShellError::Sdl(error.to_string()))
