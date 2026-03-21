@@ -123,7 +123,7 @@ fn write_system_clipboard(text: &str) {
         return;
     }
     if let Some(Err(error)) = with_clipboard_util(|clipboard| clipboard.set_clipboard_text(text)) {
-        eprintln!("failed to write clipboard text: {error}");
+        eprintln!("Failed to write clipboard text: {error}.");
     }
 }
 
@@ -153,9 +153,6 @@ fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {
 }
 
 fn yank_from_clipboard_text(text: &str) -> Option<YankRegister> {
-    if text.is_empty() {
-        return None;
-    }
     if text.ends_with('\n') {
         Some(YankRegister::Line(text.to_owned()))
     } else {
@@ -5454,6 +5451,8 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
         let clipboard_yank = clipboard_text
             .as_deref()
             .and_then(|text| yank_from_clipboard_text(text));
+        // Prefer internal block yanks when the clipboard matches them, since block shapes
+        // cannot be reconstructed from clipboard text alone.
         let prefer_internal_block = match (fallback_yank.as_ref(), clipboard_text.as_deref()) {
             (Some(block @ YankRegister::Block(_)), Some(text)) => {
                 let block_text = yank_to_clipboard_text(block);
