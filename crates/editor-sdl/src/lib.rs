@@ -423,6 +423,14 @@ enum VisualSelection {
     Block(BlockSelection),
 }
 
+#[derive(Debug, Clone)]
+struct BlockInsertState {
+    selection: BlockSelection,
+    insert_col: usize,
+    origin_line: usize,
+    original_line: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct YankFlash {
     buffer_id: BufferId,
@@ -455,6 +463,7 @@ struct VimState {
     change_buffer: Vec<VimRecordedInput>,
     last_change: Vec<VimRecordedInput>,
     replaying: bool,
+    block_insert: Option<BlockInsertState>,
 }
 
 impl VimState {
@@ -2802,6 +2811,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             ) {
                 let _ = active_shell_buffer_mut(runtime)?.move_left();
             }
+            apply_pending_block_insert(runtime)?;
             shell_ui_mut(runtime)?.enter_normal_mode();
             if let Some((anchor, head, kind)) = visual_snapshot {
                 store_last_visual_selection(runtime, anchor, head, kind)?;
@@ -3004,6 +3014,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "visual-change" => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Change)?;
+                }
+                "visual-block-insert" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
+                    start_visual_block_insert(runtime, false)?;
+                }
+                "visual-block-append" => {
+                    start_change_recording(runtime)?;
+                    mark_change_finish_on_normal(runtime)?;
+                    start_visual_block_insert(runtime, true)?;
                 }
                 "visual-format" => {
                     start_change_recording(runtime)?;
@@ -3971,6 +3991,119 @@ fn block_selection_ranges(buffer: &ShellBuffer, selection: BlockSelection) -> Ve
         .collect()
 }
 
+fn line_text_without_newline(buffer: &ShellBuffer, line_index: usize) -> Option<String> {
+    if line_index >= buffer.line_count() {
+        return None;
+    }
+    let line_len = buffer.line_len_chars(line_index);
+    Some(buffer.slice(TextRange::new(
+        TextPoint::new(line_index, 0),
+        TextPoint::new(line_index, line_len),
+    )))
+}
+
+fn resolve_block_insert_text(original: &str, current: &str, insert_col: usize) -> String {
+    let original_chars: Vec<char> = original.chars().collect();
+    let current_chars: Vec<char> = current.chars().collect();
+    let prefix_len = insert_col
+        .min(original_chars.len())
+        .min(current_chars.len());
+    if original_chars[..prefix_len] != current_chars[..prefix_len] {
+        return current_chars[prefix_len..].iter().collect();
+    }
+    let suffix = &original_chars[prefix_len..];
+    if current_chars.len() >= prefix_len + suffix.len() {
+        let suffix_start = current_chars.len() - suffix.len();
+        if current_chars[suffix_start..] == *suffix {
+            return current_chars[prefix_len..suffix_start].iter().collect();
+        }
+    }
+    current_chars[prefix_len..].iter().collect()
+}
+
+fn prepare_block_insert_state(
+    runtime: &mut EditorRuntime,
+    selection: BlockSelection,
+    insert_col: usize,
+    origin_line: usize,
+) -> Result<(), String> {
+    let original_line = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        line_text_without_newline(buffer, origin_line)
+            .ok_or_else(|| "block insert origin line is missing".to_owned())?
+    };
+    shell_ui_mut(runtime)?.vim_mut().block_insert = Some(BlockInsertState {
+        selection,
+        insert_col,
+        origin_line,
+        original_line,
+    });
+    Ok(())
+}
+
+fn apply_pending_block_insert(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let pending = shell_ui_mut(runtime)?.vim_mut().block_insert.take();
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    let origin_line = pending.origin_line;
+    let original_line = pending.original_line;
+    let insert_col = pending.insert_col;
+    let selection = pending.selection;
+    let buffer = active_shell_buffer_mut(runtime)?;
+    let Some(current_line) = line_text_without_newline(buffer, origin_line) else {
+        return Err("block insert origin line is missing".to_owned());
+    };
+    let origin_col = insert_col.min(original_line.chars().count());
+    let inserted = resolve_block_insert_text(&original_line, &current_line, origin_col);
+    if inserted.is_empty() {
+        return Ok(());
+    }
+    let cursor = buffer.cursor_point();
+    for line in (selection.start_line..=selection.end_line).rev() {
+        if line == origin_line || line >= buffer.line_count() {
+            continue;
+        }
+        let target_col = insert_col.min(buffer.line_len_chars(line));
+        buffer.insert_at(TextPoint::new(line, target_col), &inserted);
+    }
+    buffer.set_cursor(cursor);
+    buffer.mark_syntax_dirty();
+    Ok(())
+}
+
+fn start_visual_block_insert(runtime: &mut EditorRuntime, append: bool) -> Result<(), String> {
+    let (selection, insert_col, origin_line) = {
+        let ui = shell_ui(runtime)?;
+        let anchor = ui
+            .vim()
+            .visual_anchor
+            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+        let buffer = ui
+            .buffer(active_shell_buffer_id(runtime)?)
+            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
+        let selection = match visual_selection(buffer, anchor, ui.vim().visual_kind) {
+            Some(VisualSelection::Block(block)) => block,
+            _ => return Err("visual block insert requires block selection".to_owned()),
+        };
+        let insert_col = if append {
+            selection.end_col
+        } else {
+            selection.start_col
+        };
+        (selection, insert_col, selection.start_line)
+    };
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let line_len = buffer.line_len_chars(origin_line);
+        let target_col = insert_col.min(line_len);
+        buffer.set_cursor(TextPoint::new(origin_line, target_col));
+    }
+    prepare_block_insert_state(runtime, selection, insert_col, origin_line)?;
+    shell_ui_mut(runtime)?.enter_insert_mode();
+    Ok(())
+}
+
 fn line_flash_selection_for_range(
     buffer: &ShellBuffer,
     range: TextRange,
@@ -4242,12 +4375,15 @@ fn apply_block_operator(
             schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
-            let buffer = active_shell_buffer_mut(runtime)?;
-            for range in ranges.iter().rev().copied() {
-                buffer.delete_range(range);
+            {
+                let buffer = active_shell_buffer_mut(runtime)?;
+                for range in ranges.iter().rev().copied() {
+                    buffer.delete_range(range);
+                }
+                buffer.set_cursor(target_cursor);
+                buffer.mark_syntax_dirty();
             }
-            buffer.set_cursor(target_cursor);
-            buffer.mark_syntax_dirty();
+            prepare_block_insert_state(runtime, selection, selection.start_col, target_cursor.line)?;
             shell_ui_mut(runtime)?.enter_insert_mode();
             mark_change_finish_on_normal(runtime)?;
         }
@@ -7489,6 +7625,30 @@ mod tests {
         assert_eq!(state.input_mode()?, InputMode::Normal);
         assert_eq!(state.active_buffer_mut()?.text.text(), "three\n");
 
+        Ok(())
+    }
+
+    #[test]
+    fn vim_visual_block_insert_applies_to_all_lines() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ShellState::new()?;
+        state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
+        state
+            .active_buffer_mut()?
+            .set_cursor(TextPoint::new(0, 0));
+
+        state.handle_text_input("v")?;
+        assert_eq!(state.input_mode()?, InputMode::Visual);
+        assert!(state.try_runtime_keybinding(Keycode::V, Mod::LCTRLMOD)?);
+        assert_eq!(state.ui()?.vim().visual_kind, VisualSelectionKind::Block);
+
+        state.handle_text_input("j")?;
+        state.handle_text_input("j")?;
+        state.handle_text_input("I")?;
+        assert_eq!(state.input_mode()?, InputMode::Insert);
+        state.handle_text_input("x")?;
+        assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+        assert_eq!(state.input_mode()?, InputMode::Normal);
+        assert_eq!(state.active_buffer_mut()?.text.text(), "xone\nxtwo\nxthree");
         Ok(())
     }
 

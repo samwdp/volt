@@ -480,6 +480,18 @@ pub fn package() -> PluginPackage {
             "visual-change",
         ),
         hook_command(
+            "vim.visual-block-insert",
+            "Inserts before the visual block selection and enters insert mode.",
+            "editor.vim.edit",
+            "visual-block-insert",
+        ),
+        hook_command(
+            "vim.visual-block-append",
+            "Appends after the visual block selection and enters insert mode.",
+            "editor.vim.edit",
+            "visual-block-append",
+        ),
+        hook_command(
             "vim.visual-yank",
             "Yanks the current visual selection.",
             "editor.vim.edit",
@@ -829,6 +841,8 @@ pub fn package() -> PluginPackage {
         visual_binding("y", "vim.visual-yank", PluginKeymapScope::Workspace),
         // Changing text
         visual_binding("c", "vim.visual-change", PluginKeymapScope::Workspace),
+        visual_binding("I", "vim.visual-block-insert", PluginKeymapScope::Workspace),
+        visual_binding("A", "vim.visual-block-append", PluginKeymapScope::Workspace),
         visual_binding("=", "vim.visual-format", PluginKeymapScope::Workspace),
         visual_binding("u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
         visual_binding("U", "vim.visual-uppercase", PluginKeymapScope::Workspace),
