@@ -7,7 +7,7 @@ use std::{
 const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
 const THEME_EXTENSION: &str = "toml";
 const DEFAULT_THEME_ID: &str = "volt-dark";
-// Enough to walk from target/{profile}/deps binaries back to workspace root.
+// Maximum number of ancestor directories to check when resolving user/themes from current_exe.
 const THEME_SEARCH_DEPTH: usize = 6;
 
 /// Returns themes loaded from the executable-relative themes directory.
@@ -162,7 +162,7 @@ fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String
     match value {
         toml::Value::Boolean(value) => Ok(ThemeOption::Bool(*value)),
         toml::Value::Integer(value) => {
-            // 2^53 is the largest integer exactly representable in f64.
+            // 2^53 is the largest consecutive integer exactly representable in IEEE 754 f64.
             const MAX_THEME_OPTION_INTEGER: i64 = 9_007_199_254_740_992;
             if *value < -MAX_THEME_OPTION_INTEGER || *value > MAX_THEME_OPTION_INTEGER {
                 return Err(format!(

@@ -2510,8 +2510,9 @@ fn resolve_font_request(request: &str) -> Option<PathBuf> {
 fn apply_window_opacity(
     window: &mut Window,
     opacity: f32,
-    _opacity_type: OpacityType,
+    opacity_type: OpacityType,
 ) -> Result<(), ShellError> {
+    let _ = opacity_type;
     window
         .set_opacity(opacity)
         .map_err(|error| ShellError::Sdl(error.to_string()))
@@ -6592,9 +6593,12 @@ fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String
         .ok_or_else(|| "theme registry service missing".to_owned())?;
     let entries = registry
         .themes()
-        .map(|theme| PickerEntry {
-            item: PickerItem::new(theme.id(), theme.name(), "Theme", Some(theme.id().to_owned())),
-            action: PickerAction::ActivateTheme(theme.id().to_owned()),
+        .map(|theme| {
+            let theme_id = theme.id().to_owned();
+            PickerEntry {
+                item: PickerItem::new(&theme_id, theme.name(), "Theme", Some(theme_id.clone())),
+                action: PickerAction::ActivateTheme(theme_id),
+            }
         })
         .collect();
     Ok(PickerOverlay::from_entries("Themes", entries))
