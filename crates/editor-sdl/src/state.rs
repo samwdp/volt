@@ -155,9 +155,9 @@ pub(crate) enum YankRegister {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FormatterSpec {
-    language_id: String,
-    program: String,
-    args: Vec<String>,
+    pub(crate) language_id: String,
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
 }
 
 impl FormatterSpec {

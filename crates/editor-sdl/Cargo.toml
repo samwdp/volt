@@ -23,7 +23,7 @@ editor-plugin-host = { path = "../editor-plugin-host" }
 editor-render = { path = "../editor-render" }
 editor-syntax = { path = "../editor-syntax" }
 editor-theme = { path = "../editor-theme" }
-sdl3 = { version = "0.17.3", features = ["build-from-source-static", "ttf"] }
+sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
 sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
 user = { package = "volt-user", path = "../../user" }

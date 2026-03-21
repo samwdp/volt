@@ -88,12 +88,27 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     "/../volt/assets/logo.png"
 ));
 
+enum DrawTarget<'a> {
+    Scene(&'a mut Vec<DrawCommand>),
+}
+
+impl DrawTarget<'_> {
+    fn clear(&mut self, color: Color) {
+        match self {
+            Self::Scene(scene) => scene.push(DrawCommand::Clear {
+                color: to_render_color(color),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
 }
 
+#[derive(Debug, Clone)]
 struct LineSyntaxSpan {
     start: usize,
     end: usize,
@@ -661,7 +676,7 @@ struct PickerEntry {
 }
 
 #[derive(Debug, Clone)]
-struct PickerOverlay {
+pub(crate) struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
     submit_action: Option<PickerAction>,
