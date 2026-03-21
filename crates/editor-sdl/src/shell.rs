@@ -7,7 +7,12 @@ use std::{
 };
 
 use crate::config::{ShellConfig, ShellError, ShellSummary};
-use crate::state::*;
+use crate::state::{
+    BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
+    LastSearch, ScrollCommand, ShellMotion, VimFindKind, VimMark, VimOperator, VimPending,
+    VimRecordedInput, VimSearchDirection, VimState, VimTextObjectKind, VimVisualSnapshot,
+    VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
+};
 use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
