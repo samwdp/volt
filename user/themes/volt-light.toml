@@ -1,0 +1,35 @@
+id = "volt-light"
+name = "Volt Light"
+
+[tokens]
+"ui.background" = "#f5f6f7"
+"ui.foreground" = "#383a42"
+"ui.yank-flash" = "#61afef6e"
+"syntax.attribute" = "#4078f2"
+"syntax.comment" = "#a0a1a7"
+"syntax.constant" = "#986801"
+"syntax.constant.builtin" = "#986801"
+"syntax.constructor" = "#a626a4"
+"syntax.function" = "#4078f2"
+"syntax.function.macro" = "#0184bc"
+"syntax.keyword" = "#a626a4"
+"syntax.label" = "#e45649"
+"syntax.module" = "#c18401"
+"syntax.operator" = "#0184bc"
+"syntax.property" = "#e45649"
+"syntax.punctuation.bracket" = "#383a42"
+"syntax.punctuation.delimiter" = "#383a42"
+"syntax.string" = "#50a14f"
+"syntax.type" = "#c18401"
+"syntax.type.builtin" = "#c18401"
+"syntax.variable" = "#e45649"
+"syntax.variable.builtin" = "#e45649"
+
+[options]
+"ui.line-number.relative" = true
+font = "default"
+font_size = 18
+opacity = 1.0
+opacity_type = "transparent"
+cursor_roundness = 2
+picker_roundness = 16

@@ -1,0 +1,35 @@
+id = "vscode-light"
+name = "VS Code Light"
+
+[tokens]
+"ui.background" = "#ffffff"
+"ui.foreground" = "#333333"
+"ui.yank-flash" = "#007acc6e"
+"syntax.attribute" = "#001080"
+"syntax.comment" = "#008000"
+"syntax.constant" = "#0070c1"
+"syntax.constant.builtin" = "#0070c1"
+"syntax.constructor" = "#267f99"
+"syntax.function" = "#795e26"
+"syntax.function.macro" = "#af00db"
+"syntax.keyword" = "#0000ff"
+"syntax.label" = "#0000ff"
+"syntax.module" = "#267f99"
+"syntax.operator" = "#333333"
+"syntax.property" = "#001080"
+"syntax.punctuation.bracket" = "#333333"
+"syntax.punctuation.delimiter" = "#333333"
+"syntax.string" = "#a31515"
+"syntax.type" = "#267f99"
+"syntax.type.builtin" = "#267f99"
+"syntax.variable" = "#001080"
+"syntax.variable.builtin" = "#795e26"
+
+[options]
+"ui.line-number.relative" = true
+font = "default"
+font_size = 18
+opacity = 1.0
+opacity_type = "transparent"
+cursor_roundness = 2
+picker_roundness = 16

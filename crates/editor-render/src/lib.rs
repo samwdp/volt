@@ -230,6 +230,64 @@ pub fn find_system_monospace_font() -> Result<PathBuf, RenderError> {
         .ok_or(RenderError::FontNotFound(candidates))
 }
 
+/// Attempts to find a font path by name in platform font directories.
+pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
+    let normalized = normalize_font_name(name);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut stack = preferred_font_search_roots();
+    while let Some(path) = stack.pop() {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            let Ok(entries) = fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+            continue;
+        }
+
+        if !is_font_file(&path) {
+            continue;
+        }
+
+        if font_name_matches(&path, &normalized) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn is_font_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("ttf" | "otf" | "ttc")
+    )
+}
+
+fn font_name_matches(path: &Path, normalized: &str) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    normalize_font_name(stem).contains(normalized)
+}
+
+fn normalize_font_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
 /// Splits the available content area into one or two stacked pane rectangles.
 pub fn horizontal_pane_rects(width: u32, content_height: u32, pane_count: usize) -> Vec<PixelRect> {
     if pane_count <= 1 {

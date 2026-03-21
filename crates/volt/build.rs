@@ -1,12 +1,53 @@
-#[cfg(target_os = "windows")]
 fn main() {
-    if let Err(error) = build_windows_icon() {
-        panic!("failed to embed Windows icon: {error}");
+    if let Err(error) = copy_user_themes() {
+        panic!("failed to copy user themes: {error}");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(error) = build_windows_icon() {
+            panic!("failed to embed Windows icon: {error}");
+        }
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn main() {}
+fn copy_user_themes() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{env, fs, path::PathBuf};
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or("unable to locate workspace root")?;
+    let themes_dir = workspace_root.join("user").join("themes");
+    if !themes_dir.is_dir() {
+        return Ok(());
+    }
+    println!("cargo:rerun-if-changed={}", themes_dir.display());
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let target_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or("unable to locate target output directory")?;
+    let destination = target_dir.join("user").join("themes");
+    fs::create_dir_all(&destination)?;
+
+    for entry in fs::read_dir(&themes_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+        {
+            let target = destination.join(entry.file_name());
+            fs::copy(&path, &target)?;
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 fn build_windows_icon() -> Result<(), Box<dyn std::error::Error>> {

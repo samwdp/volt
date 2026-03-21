@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    env,
     error::Error,
     fmt,
     fs,
@@ -22,7 +23,7 @@ use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, RenderError, centered_rect,
-    find_system_monospace_font, horizontal_pane_rects,
+    find_font_by_name, find_system_monospace_font, horizontal_pane_rects,
 };
 use editor_syntax::{SyntaxError, SyntaxRegistry, SyntaxSnapshot};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
@@ -79,6 +80,13 @@ const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
+const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
+const OPTION_FONT: &str = "font";
+const OPTION_FONT_SIZE: &str = "font_size";
+const OPTION_OPACITY: &str = "opacity";
+const OPTION_OPACITY_TYPE: &str = "opacity_type";
+const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
+const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -116,6 +124,30 @@ impl Default for ShellConfig {
             frame_limit: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpacityType {
+    Transparent,
+    Blurred,
+}
+
+impl OpacityType {
+    fn from_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "transparent" => Some(Self::Transparent),
+            "blurred" => Some(Self::Blurred),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ThemeRuntimeSettings {
+    font_request: Option<String>,
+    font_size: u32,
+    opacity: f32,
+    opacity_type: OpacityType,
 }
 
 /// Summary returned after the demo shell exits.
@@ -1037,6 +1069,7 @@ enum PickerAction {
     ExecuteCommand(String),
     FocusBuffer(BufferId),
     OpenFile(PathBuf),
+    ActivateTheme(String),
     VimSearch(VimSearchDirection),
     VimSearchResult {
         direction: VimSearchDirection,
@@ -2258,7 +2291,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let font_path = find_system_monospace_font()?;
+    let mut state = ShellState::new()?;
+    let mut theme_settings =
+        theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
+    let mut font_path = resolve_font_path(theme_settings.font_request.as_deref())?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
@@ -2272,13 +2308,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
     }
     video.text_input().start(&window);
+    apply_window_opacity(&mut window, theme_settings.opacity, theme_settings.opacity_type)?;
 
-    let font = ttf
-        .load_font(&font_path, config.font_size as f32)
+    let mut font = ttf
+        .load_font(&font_path, theme_settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let line_height = font.height().max(1) as usize;
-    let ascent = font.ascent();
-    let cell_width = font
+    let mut line_height = font.height().max(1) as usize;
+    let mut ascent = font.ascent();
+    let mut cell_width = font
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
@@ -2289,10 +2326,21 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let mut state = ShellState::new()?;
     let mut frames_rendered = 0;
 
     loop {
+        update_theme_runtime(
+            &mut canvas,
+            &ttf,
+            &state,
+            &config,
+            &mut theme_settings,
+            &mut font,
+            &mut font_path,
+            &mut line_height,
+            &mut ascent,
+            &mut cell_width,
+        )?;
         let (render_width, render_height) = canvas
             .output_size()
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -2343,6 +2391,133 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         renderer_name,
         font_path: font_path.display().to_string(),
     })
+}
+
+fn update_theme_runtime(
+    canvas: &mut Canvas<Window>,
+    ttf: &sdl3::ttf::Sdl3TtfContext,
+    state: &ShellState,
+    config: &ShellConfig,
+    theme_settings: &mut ThemeRuntimeSettings,
+    font: &mut Font<'_>,
+    font_path: &mut PathBuf,
+    line_height: &mut usize,
+    ascent: &mut i32,
+    cell_width: &mut i32,
+) -> Result<(), ShellError> {
+    let updated = theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), config);
+    if &updated == theme_settings {
+        return Ok(());
+    }
+
+    if updated.font_size != theme_settings.font_size
+        || updated.font_request != theme_settings.font_request
+    {
+        let next_font_path = resolve_font_path(updated.font_request.as_deref())?;
+        let next_font = ttf
+            .load_font(&next_font_path, updated.font_size as f32)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        *font_path = next_font_path;
+        *font = next_font;
+        *line_height = font.height().max(1) as usize;
+        *ascent = font.ascent();
+        *cell_width = font
+            .size_of_char('M')
+            .map_err(|error| ShellError::Sdl(error.to_string()))?
+            .0
+            .max(1) as i32;
+    }
+
+    if updated.opacity != theme_settings.opacity
+        || updated.opacity_type != theme_settings.opacity_type
+    {
+        apply_window_opacity(
+            canvas.window_mut(),
+            updated.opacity,
+            updated.opacity_type,
+        )?;
+    }
+
+    *theme_settings = updated;
+    Ok(())
+}
+
+fn theme_runtime_settings(
+    theme_registry: Option<&ThemeRegistry>,
+    config: &ShellConfig,
+) -> ThemeRuntimeSettings {
+    let font_request = theme_registry
+        .and_then(|registry| registry.resolve_string(OPTION_FONT))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
+        .map(str::to_owned);
+    let font_size = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
+        .map(|value| value.max(1.0).round() as u32)
+        .unwrap_or(config.font_size);
+    let opacity = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_OPACITY))
+        .map(|value| value.clamp(0.0, 1.0) as f32)
+        .unwrap_or(1.0);
+    let opacity_type = theme_registry
+        .and_then(|registry| registry.resolve_string(OPTION_OPACITY_TYPE))
+        .and_then(OpacityType::from_value)
+        .unwrap_or(OpacityType::Transparent);
+
+    ThemeRuntimeSettings {
+        font_request,
+        font_size,
+        opacity,
+        opacity_type,
+    }
+}
+
+fn resolve_font_path(request: Option<&str>) -> Result<PathBuf, ShellError> {
+    if let Some(request) = request.and_then(|value| (!value.is_empty()).then_some(value)) {
+        if let Some(path) = resolve_font_request(request) {
+            return Ok(path);
+        }
+    }
+    find_system_monospace_font().map_err(ShellError::from)
+}
+
+fn resolve_font_request(request: &str) -> Option<PathBuf> {
+    let trimmed = request.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return path.exists().then(|| path.to_path_buf());
+    }
+    if path.extension().is_some() || trimmed.contains('/') || trimmed.contains('\\') {
+        if let Ok(exe_path) = env::current_exe()
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            let candidate = exe_dir.join(path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        return None;
+    }
+    find_font_by_name(trimmed)
+}
+
+fn apply_window_opacity(
+    window: &mut Window,
+    opacity: f32,
+    opacity_type: OpacityType,
+) -> Result<(), ShellError> {
+    let opacity = match opacity_type {
+        OpacityType::Transparent | OpacityType::Blurred => opacity,
+    };
+    window
+        .set_opacity(opacity)
+        .map_err(|error| ShellError::Sdl(error.to_string()))
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -3172,6 +3347,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::OpenFile(path) => {
                     open_workspace_file(runtime, &path)?;
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::ActivateTheme(theme_id) => {
+                    let registry = runtime
+                        .services_mut()
+                        .get_mut::<ThemeRegistry>()
+                        .ok_or_else(|| "theme registry service missing".to_owned())?;
+                    registry.activate(&theme_id).map_err(|error| error.to_string())?;
                 }
                 PickerAction::VimSearch(direction) => {
                     submit_vim_search(runtime, direction, &query)?;
@@ -6145,6 +6327,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
         "workspace.delete" => workspace_delete_picker_overlay(runtime),
         "workspace.files" => workspace_file_picker_overlay(runtime),
+        "themes" => theme_picker_overlay(runtime),
         other => Err(format!("unknown picker provider `{other}`")),
     }
 }
@@ -6403,6 +6586,21 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
     let mut overlay = PickerOverlay::from_entries("Keybindings", entries);
     overlay.session.set_result_limit(256);
     overlay
+}
+
+fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
+    let registry = runtime
+        .services()
+        .get::<ThemeRegistry>()
+        .ok_or_else(|| "theme registry service missing".to_owned())?;
+    let entries = registry
+        .themes()
+        .map(|theme| PickerEntry {
+            item: PickerItem::new(theme.id(), theme.name(), "Theme", Some(theme.id().to_owned())),
+            action: PickerAction::ActivateTheme(theme.id().to_owned()),
+        })
+        .collect();
+    Ok(PickerOverlay::from_entries("Themes", entries))
 }
 
 fn message_picker_overlay(
@@ -6716,7 +6914,15 @@ fn render_shell_state(
     }
 
     if let Some(picker) = state.picker() {
-        render_picker_overlay(target, font, picker, width, height, line_height)?;
+        render_picker_overlay(
+            target,
+            font,
+            picker,
+            width,
+            height,
+            line_height,
+            theme_registry,
+        )?;
     }
 
     Ok(())
@@ -6729,8 +6935,13 @@ fn render_picker_overlay(
     width: u32,
     height: u32,
     line_height: i32,
+    theme_registry: Option<&ThemeRegistry>,
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
+    let picker_roundness = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
+        .map(|value| value.clamp(0.0, 64.0).round() as u32)
+        .unwrap_or(16);
     fill_rounded_rect(
         target,
         PixelRectToRect::rect(
@@ -6739,7 +6950,7 @@ fn render_picker_overlay(
             popup_rect.width,
             popup_rect.height,
         ),
-        16,
+        picker_roundness,
         Color::RGB(29, 32, 40),
     )?;
     fill_rect(
@@ -7003,8 +7214,12 @@ fn render_buffer(
     let cursor = Color::RGB(110, 170, 255);
     let selection = Color::RGBA(55, 71, 99, 255);
     let relative_line_numbers = theme_registry
-        .and_then(|registry| registry.resolve_option("ui.line-number.relative"))
+        .and_then(|registry| registry.resolve_bool(OPTION_LINE_NUMBER_RELATIVE))
         .unwrap_or(false);
+    let cursor_roundness = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_CURSOR_ROUNDNESS))
+        .map(|value| value.clamp(0.0, 16.0).round() as u32)
+        .unwrap_or(2);
     let yank_flash_color = theme_registry
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
@@ -7044,7 +7259,7 @@ fn render_buffer(
                 cursor_width,
                 line_height.max(2) as u32,
             ),
-            2,
+            cursor_roundness,
             cursor,
         )?;
     }
