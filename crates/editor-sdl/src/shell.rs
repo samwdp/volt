@@ -6019,10 +6019,7 @@ fn create_workspace_file_from_query(
     }
 
     if !path.exists() {
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&path)
+        fs::File::create(&path)
             .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
     }
 
