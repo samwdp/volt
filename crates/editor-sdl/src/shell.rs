@@ -10632,9 +10632,7 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         })
         .collect();
 
-    let mut overlay = PickerOverlay::from_entries("Keybindings", entries);
-    overlay.session.set_result_limit(256);
-    overlay
+    PickerOverlay::from_entries("Keybindings", entries)
 }
 
 fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
