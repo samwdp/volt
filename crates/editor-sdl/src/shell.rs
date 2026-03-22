@@ -8098,6 +8098,108 @@ fn git_action_detail(meta: Option<&SectionLineMeta>, action_id: &str) -> Option<
         .map(str::to_owned)
 }
 
+#[derive(Debug, Clone)]
+struct GitDeleteTarget {
+    path: String,
+    untracked: bool,
+}
+
+fn git_status_delete_target_for_line(
+    buffer: &ShellBuffer,
+    line_index: usize,
+) -> Option<GitDeleteTarget> {
+    let meta = buffer.section_line_meta(line_index)?;
+    let action = meta.action.as_ref()?;
+    let path = action.detail()?;
+    if action.id() == GIT_ACTION_UNSTAGE_FILE {
+        return Some(GitDeleteTarget {
+            path: path.to_owned(),
+            untracked: false,
+        });
+    }
+    if action.id() == GIT_ACTION_STAGE_FILE {
+        let line_text = buffer.text.line(line_index).unwrap_or_default();
+        return Some(GitDeleteTarget {
+            path: path.to_owned(),
+            untracked: git_line_is_untracked(&line_text),
+        });
+    }
+    None
+}
+
+fn visual_selection_line_range(selection: VisualSelection) -> Option<(usize, usize)> {
+    match selection {
+        VisualSelection::Range(range) => {
+            let start_line = range.start().line;
+            let mut end_line = range.end().line;
+            if range.end().column == 0 && end_line > start_line {
+                end_line = end_line.saturating_sub(1);
+            }
+            Some((start_line, end_line.max(start_line)))
+        }
+        VisualSelection::Block(selection) => Some((selection.start_line, selection.end_line)),
+    }
+}
+
+fn git_status_delete_targets(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(Vec<GitDeleteTarget>, bool), String> {
+    let ui = shell_ui(runtime)?;
+    let is_visual = matches!(ui.input_mode(), InputMode::Visual);
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    let mut targets = BTreeMap::new();
+    if is_visual {
+        let anchor = ui
+            .vim()
+            .visual_anchor
+            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+        let selection = visual_selection(buffer, anchor, ui.vim().visual_kind)
+            .ok_or_else(|| "visual selection is empty".to_owned())?;
+        let (start_line, end_line) = visual_selection_line_range(selection).unwrap_or((0, 0));
+        let end_line = end_line.min(buffer.line_count().saturating_sub(1));
+        for line_index in start_line..=end_line {
+            if let Some(target) = git_status_delete_target_for_line(buffer, line_index) {
+                targets.entry(target.path.clone()).or_insert(target);
+            }
+        }
+    } else if let Some(target) =
+        git_status_delete_target_for_line(buffer, buffer.cursor_point().line)
+    {
+        targets.insert(target.path.clone(), target);
+    }
+    Ok((targets.into_values().collect(), is_visual))
+}
+
+fn delete_git_status_targets(
+    runtime: &mut EditorRuntime,
+    targets: &[GitDeleteTarget],
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let root = git_root(runtime)?;
+    for target in targets {
+        if target.untracked {
+            let path = root.join(&target.path);
+            let metadata = fs::metadata(&path)
+                .map_err(|error| format!("failed to stat `{}`: {error}", path.display()))?;
+            if metadata.is_dir() {
+                fs::remove_dir_all(&path)
+                    .map_err(|error| format!("failed to remove `{}`: {error}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("failed to remove `{}`: {error}", path.display()))?;
+            }
+        } else {
+            let args = ["rm", "-f", "--ignore-unmatch", "--", target.path.as_str()];
+            git_command_output(runtime, &root, "rm -f", &args)?;
+        }
+    }
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
 fn git_line_is_untracked(line_text: &str) -> bool {
     line_text.trim_start().starts_with("untracked ")
 }
@@ -9704,6 +9806,17 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             Ok(true)
         }
         "x" => {
+            let (targets, is_visual) = git_status_delete_targets(runtime, buffer_id)?;
+            if !targets.is_empty() {
+                delete_git_status_targets(runtime, &targets)?;
+                if is_visual {
+                    shell_ui_mut(runtime)?.enter_normal_mode();
+                }
+                return Ok(true);
+            }
+            if is_visual {
+                return Err("no deletable files selected".to_owned());
+            }
             reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Mixed)?;
             Ok(true)
         }
@@ -10603,7 +10716,7 @@ fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverla
 }
 
 fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
-    let entries = runtime
+    let mut entries: Vec<PickerEntry> = runtime
         .keymaps()
         .bindings()
         .into_iter()
@@ -10618,7 +10731,7 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
             PickerEntry {
                 item: PickerItem::new(
                     format!("{scope}:{mode}:{}", binding.chord()),
-                    binding.chord(),
+                    format!("{} {}", binding.chord(), binding.command_name()),
                     format!(
                         "{} [{}] -> {}",
                         binding.scope(),
@@ -10632,7 +10745,417 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         })
         .collect();
 
+    entries.extend(contextual_keybinding_entries(
+        "GitStatus",
+        GIT_STATUS_KEYBINDINGS,
+    ));
+    entries.extend(contextual_keybinding_entries(
+        "GitView",
+        GIT_VIEW_KEYBINDINGS,
+    ));
+
     PickerOverlay::from_entries("Keybindings", entries)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContextKeybinding {
+    chord: &'static str,
+    action: &'static str,
+    description: &'static str,
+}
+
+const GIT_STATUS_KEYBINDINGS: &[ContextKeybinding] = &[
+    ContextKeybinding {
+        chord: "g",
+        action: "refresh status",
+        description: "Refreshes the git status buffer.",
+    },
+    ContextKeybinding {
+        chord: "n",
+        action: "next section",
+        description: "Moves to the next git status section.",
+    },
+    ContextKeybinding {
+        chord: "p",
+        action: "previous section",
+        description: "Moves to the previous git status section.",
+    },
+    ContextKeybinding {
+        chord: "s",
+        action: "stage file / stage all",
+        description: "Stages the file under the cursor, or all if none is selected.",
+    },
+    ContextKeybinding {
+        chord: "S",
+        action: "stage all",
+        description: "Stages all unstaged changes.",
+    },
+    ContextKeybinding {
+        chord: "u",
+        action: "unstage file",
+        description: "Unstages the file under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "U",
+        action: "unstage all",
+        description: "Unstages all staged changes.",
+    },
+    ContextKeybinding {
+        chord: "c",
+        action: "commit prefix",
+        description: "Starts the commit prefix (press c again to open commit).",
+    },
+    ContextKeybinding {
+        chord: "c c",
+        action: "open commit buffer",
+        description: "Opens the git commit buffer.",
+    },
+    ContextKeybinding {
+        chord: "P",
+        action: "push prefix",
+        description: "Starts the push prefix (p pushremote, u upstream).",
+    },
+    ContextKeybinding {
+        chord: "P p",
+        action: "push to pushremote",
+        description: "Pushes to the push remote.",
+    },
+    ContextKeybinding {
+        chord: "P u",
+        action: "push to upstream",
+        description: "Pushes to the upstream remote.",
+    },
+    ContextKeybinding {
+        chord: "f",
+        action: "fetch prefix",
+        description: "Starts the fetch prefix (p pushremote, u upstream, a all).",
+    },
+    ContextKeybinding {
+        chord: "f p",
+        action: "fetch pushremote",
+        description: "Fetches from the push remote.",
+    },
+    ContextKeybinding {
+        chord: "f u",
+        action: "fetch upstream",
+        description: "Fetches from the upstream remote.",
+    },
+    ContextKeybinding {
+        chord: "f a",
+        action: "fetch all",
+        description: "Fetches from all remotes.",
+    },
+    ContextKeybinding {
+        chord: "b",
+        action: "branch prefix",
+        description: "Starts the branch prefix (press b again for branches).",
+    },
+    ContextKeybinding {
+        chord: "b b",
+        action: "open branch picker",
+        description: "Opens the git branch picker.",
+    },
+    ContextKeybinding {
+        chord: "d",
+        action: "diff prefix",
+        description: "Starts the diff prefix (d/s/u/w/c/t).",
+    },
+    ContextKeybinding {
+        chord: "d d",
+        action: "diff dwim",
+        description: "Opens the diff most relevant to the cursor line.",
+    },
+    ContextKeybinding {
+        chord: "d s",
+        action: "diff staged",
+        description: "Opens the staged diff.",
+    },
+    ContextKeybinding {
+        chord: "d u",
+        action: "diff unstaged",
+        description: "Opens the unstaged diff.",
+    },
+    ContextKeybinding {
+        chord: "d w",
+        action: "diff worktree",
+        description: "Opens the worktree diff.",
+    },
+    ContextKeybinding {
+        chord: "d c",
+        action: "diff commit at point",
+        description: "Opens the diff for the commit at the cursor.",
+    },
+    ContextKeybinding {
+        chord: "d t",
+        action: "diff stash at point",
+        description: "Opens the diff for the stash at the cursor.",
+    },
+    ContextKeybinding {
+        chord: "l",
+        action: "log prefix",
+        description: "Starts the log prefix (l/h/u/L/b/a).",
+    },
+    ContextKeybinding {
+        chord: "l l",
+        action: "log current",
+        description: "Opens the log for the current file or selection.",
+    },
+    ContextKeybinding {
+        chord: "l h",
+        action: "log head",
+        description: "Opens the HEAD log.",
+    },
+    ContextKeybinding {
+        chord: "l u",
+        action: "log related",
+        description: "Opens the log related to the cursor selection.",
+    },
+    ContextKeybinding {
+        chord: "l L",
+        action: "log branches",
+        description: "Opens logs for branches.",
+    },
+    ContextKeybinding {
+        chord: "l b",
+        action: "log all branches",
+        description: "Opens logs across all branches.",
+    },
+    ContextKeybinding {
+        chord: "l a",
+        action: "log all",
+        description: "Opens the full log.",
+    },
+    ContextKeybinding {
+        chord: "z",
+        action: "stash prefix",
+        description: "Starts the stash prefix (z/i/w/x/a/p/k/v/l).",
+    },
+    ContextKeybinding {
+        chord: "z z",
+        action: "stash both",
+        description: "Stashes both staged and unstaged changes.",
+    },
+    ContextKeybinding {
+        chord: "z i",
+        action: "stash index",
+        description: "Stashes staged changes.",
+    },
+    ContextKeybinding {
+        chord: "z w",
+        action: "stash worktree",
+        description: "Stashes unstaged changes.",
+    },
+    ContextKeybinding {
+        chord: "z x",
+        action: "stash keep index",
+        description: "Stashes unstaged changes and keeps the index.",
+    },
+    ContextKeybinding {
+        chord: "z a",
+        action: "stash apply at point",
+        description: "Applies the stash under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "z p",
+        action: "stash pop at point",
+        description: "Pops the stash under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "z k",
+        action: "stash drop at point",
+        description: "Drops the stash under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "z v",
+        action: "stash show at point",
+        description: "Shows the stash under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "z l",
+        action: "open stash list",
+        description: "Opens the stash list buffer.",
+    },
+    ContextKeybinding {
+        chord: "m",
+        action: "merge prefix",
+        description: "Starts the merge prefix (m/e/n/s/p/a).",
+    },
+    ContextKeybinding {
+        chord: "m m",
+        action: "merge plain / continue",
+        description: "Merges the selected branch or continues a merge.",
+    },
+    ContextKeybinding {
+        chord: "m e",
+        action: "merge edit message",
+        description: "Merges and opens the commit message editor.",
+    },
+    ContextKeybinding {
+        chord: "m n",
+        action: "merge no commit",
+        description: "Merges without committing.",
+    },
+    ContextKeybinding {
+        chord: "m s",
+        action: "merge squash",
+        description: "Performs a squash merge.",
+    },
+    ContextKeybinding {
+        chord: "m p",
+        action: "merge preview",
+        description: "Previews a merge.",
+    },
+    ContextKeybinding {
+        chord: "m a",
+        action: "merge abort",
+        description: "Aborts the current merge.",
+    },
+    ContextKeybinding {
+        chord: "r",
+        action: "rebase prefix",
+        description: "Starts the rebase prefix (p/u/e/i/r/s/a).",
+    },
+    ContextKeybinding {
+        chord: "r p",
+        action: "rebase onto pushremote",
+        description: "Rebases onto the push remote.",
+    },
+    ContextKeybinding {
+        chord: "r u",
+        action: "rebase onto upstream",
+        description: "Rebases onto the upstream.",
+    },
+    ContextKeybinding {
+        chord: "r e",
+        action: "rebase edit / onto branch",
+        description: "Edits the rebase todo or rebases onto a branch.",
+    },
+    ContextKeybinding {
+        chord: "r i",
+        action: "rebase interactive",
+        description: "Starts an interactive rebase.",
+    },
+    ContextKeybinding {
+        chord: "r r",
+        action: "rebase continue",
+        description: "Continues the current rebase.",
+    },
+    ContextKeybinding {
+        chord: "r s",
+        action: "rebase skip",
+        description: "Skips the current rebase step.",
+    },
+    ContextKeybinding {
+        chord: "r a",
+        action: "rebase abort",
+        description: "Aborts the current rebase.",
+    },
+    ContextKeybinding {
+        chord: "Y",
+        action: "open cherry buffer",
+        description: "Opens the cherry-pick buffer.",
+    },
+    ContextKeybinding {
+        chord: "A",
+        action: "cherry-pick prefix",
+        description: "Starts the cherry-pick prefix (A/a/s).",
+    },
+    ContextKeybinding {
+        chord: "A A",
+        action: "cherry-pick / continue",
+        description: "Cherry-picks the selected commit or continues.",
+    },
+    ContextKeybinding {
+        chord: "A a",
+        action: "cherry-pick apply / abort",
+        description: "Applies a cherry-pick or aborts in progress.",
+    },
+    ContextKeybinding {
+        chord: "A s",
+        action: "cherry-pick skip",
+        description: "Skips the current cherry-pick.",
+    },
+    ContextKeybinding {
+        chord: "V",
+        action: "revert prefix",
+        description: "Starts the revert prefix (V/v/s/a).",
+    },
+    ContextKeybinding {
+        chord: "V V",
+        action: "revert / continue",
+        description: "Reverts the selected commit or continues.",
+    },
+    ContextKeybinding {
+        chord: "V v",
+        action: "revert no-commit / abort",
+        description: "Reverts without commit or aborts in progress.",
+    },
+    ContextKeybinding {
+        chord: "V s",
+        action: "revert skip",
+        description: "Skips the current revert/cherry-pick.",
+    },
+    ContextKeybinding {
+        chord: "V a",
+        action: "revert abort",
+        description: "Aborts the current revert/cherry-pick.",
+    },
+    ContextKeybinding {
+        chord: "a",
+        action: "cherry-pick apply at point",
+        description: "Applies the commit under the cursor.",
+    },
+    ContextKeybinding {
+        chord: "X",
+        action: "reset prefix",
+        description: "Starts the reset prefix (m/s/h/k).",
+    },
+    ContextKeybinding {
+        chord: "X m",
+        action: "reset mixed",
+        description: "Resets to the selected commit (mixed).",
+    },
+    ContextKeybinding {
+        chord: "X s",
+        action: "reset soft",
+        description: "Resets to the selected commit (soft).",
+    },
+    ContextKeybinding {
+        chord: "X h",
+        action: "reset hard",
+        description: "Resets to the selected commit (hard).",
+    },
+    ContextKeybinding {
+        chord: "X k",
+        action: "reset keep",
+        description: "Resets to the selected commit (keep).",
+    },
+    ContextKeybinding {
+        chord: "x",
+        action: "delete file(s)",
+        description: "Deletes the file under the cursor or the visual selection.",
+    },
+];
+
+const GIT_VIEW_KEYBINDINGS: &[ContextKeybinding] = &[ContextKeybinding {
+    chord: "g",
+    action: "refresh view",
+    description: "Refreshes git diff/log/stash buffers.",
+}];
+
+fn contextual_keybinding_entries(scope: &str, bindings: &[ContextKeybinding]) -> Vec<PickerEntry> {
+    bindings
+        .iter()
+        .map(|binding| PickerEntry {
+            item: PickerItem::new(
+                format!("{scope}:Normal:{}", binding.chord),
+                format!("{} {scope} {}", binding.chord, binding.action),
+                format!("{scope} [Normal] -> {}", binding.action),
+                Some(binding.description.to_owned()),
+            ),
+            action: PickerAction::NoOp,
+        })
+        .collect()
 }
 
 fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
