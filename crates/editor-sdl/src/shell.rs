@@ -1670,6 +1670,18 @@ enum PaneSplitDirection {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum GitBranchActionKind {
+    Checkout,
+    MergePlain,
+    MergeEdit,
+    MergeNoCommit,
+    MergeSquash,
+    MergePreview,
+    RebaseOnto,
+    RebaseInteractive,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct ShellPane {
     pane_id: PaneId,
     buffer_id: BufferId,
@@ -1706,7 +1718,10 @@ enum PickerAction {
     DeleteWorkspace(WorkspaceId),
     GitPushRemote(String),
     GitFetchRemote(String),
-    GitCheckoutBranch(String),
+    GitBranchAction {
+        action: GitBranchActionKind,
+        branch: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1857,11 +1872,19 @@ enum GitPrefix {
     Diff,
     Log,
     Stash,
+    Merge,
+    Rebase,
 }
 
 #[derive(Debug, Clone)]
 struct GitPrefixState {
     prefix: GitPrefix,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct KeySequenceState {
+    tokens: Vec<String>,
     started_at: Instant,
 }
 
@@ -1876,6 +1899,7 @@ pub(crate) struct ShellUiState {
     vim: VimState,
     pending_ctrl_c: Option<Instant>,
     pending_git_prefix: Option<GitPrefixState>,
+    pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
     yank_flash: Option<YankFlash>,
@@ -1911,6 +1935,7 @@ impl ShellUiState {
             vim: VimState::default(),
             pending_ctrl_c: None,
             pending_git_prefix: None,
+            pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
             yank_flash: None,
@@ -3000,6 +3025,47 @@ impl ShellState {
         Ok(())
     }
 
+    fn handle_key_sequence(
+        &mut self,
+        token: &str,
+        scope: KeymapScope,
+        vim_mode: KeymapVimMode,
+    ) -> Result<bool, ShellError> {
+        let mut tokens = take_key_sequence(&mut self.runtime)
+            .map_err(ShellError::Runtime)?
+            .unwrap_or_default();
+        tokens.push(token.to_owned());
+        let chord = tokens.join(" ");
+
+        if self
+            .runtime
+            .keymaps()
+            .contains_for_mode(&scope, vim_mode, &chord)
+        {
+            self.runtime
+                .execute_key_binding_for_mode(&scope, vim_mode, &chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+            self.sync_active_buffer().map_err(ShellError::Runtime)?;
+            self.clear_stale_vim_count()?;
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
+        if self
+            .runtime
+            .keymaps()
+            .has_sequence_prefix_for_mode(&scope, vim_mode, &tokens)
+        {
+            set_key_sequence(&mut self.runtime, tokens).map_err(ShellError::Runtime)?;
+            return Ok(true);
+        }
+
+        clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+        Ok(false)
+    }
+
     fn replay_recorded_inputs(&mut self, inputs: &[VimRecordedInput]) -> Result<(), ShellError> {
         if inputs.is_empty() {
             return Ok(());
@@ -3062,6 +3128,7 @@ impl ShellState {
 
     pub(crate) fn handle_text_input(&mut self, text: &str) -> Result<(), ShellError> {
         if self.picker_visible()? {
+            clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(picker) = self.ui_mut()?.picker_mut() {
                 picker.append_query(text);
             }
@@ -3071,6 +3138,7 @@ impl ShellState {
 
         match self.input_mode()? {
             InputMode::Insert => {
+                clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
                     let handled = {
                         let buffer = self.active_buffer_mut()?;
@@ -3116,6 +3184,7 @@ impl ShellState {
                 return Ok(());
             }
             InputMode::Replace => {
+                clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
                     let handled = {
                         let buffer = self.active_buffer_mut()?;
@@ -3164,6 +3233,7 @@ impl ShellState {
         }
 
         if let Some(chord) = text_chord(text) {
+            let vim_mode = keymap_vim_mode(self.input_mode()?);
             if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
                 && handle_git_status_chord(&mut self.runtime, &chord)
                     .map_err(ShellError::Runtime)?
@@ -3187,22 +3257,23 @@ impl ShellState {
                 return Ok(());
             }
 
+            let token = normalize_text_token(&chord);
+            if self.handle_key_sequence(&token, KeymapScope::Workspace, vim_mode)? {
+                return Ok(());
+            }
+
             if chord == "." && !self.picker_visible()? {
                 self.repeat_last_change()?;
                 return Ok(());
             }
 
-            if self.runtime.keymaps().contains_for_mode(
-                &KeymapScope::Workspace,
-                keymap_vim_mode(self.input_mode()?),
-                &chord,
-            ) {
+            if self
+                .runtime
+                .keymaps()
+                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+            {
                 self.runtime
-                    .execute_key_binding_for_mode(
-                        &KeymapScope::Workspace,
-                        keymap_vim_mode(self.input_mode()?),
-                        &chord,
-                    )
+                    .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
                     .map_err(|error| ShellError::Runtime(error.to_string()))?;
                 self.sync_active_buffer().map_err(ShellError::Runtime)?;
                 self.clear_stale_vim_count()?;
@@ -3249,6 +3320,7 @@ impl ShellState {
             return Ok(false);
         };
 
+        clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
         let vim_mode = keymap_vim_mode(self.input_mode()?);
 
         if self.picker_visible()?
@@ -3417,8 +3489,28 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         return FrameOutcome::Continue;
                     }
                 };
+                let popup_visible = match state.runtime_popup() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(error) => {
+                        state.record_shell_error("shell.popup-visible-rows", error);
+                        false
+                    }
+                };
+                let popup_height = if popup_visible {
+                    popup_window_height(render_height, line_height as i32)
+                } else {
+                    0
+                };
+                let pane_height = render_height.saturating_sub(popup_height);
+                let active_height = if popup_visible {
+                    popup_height
+                } else {
+                    pane_height
+                };
+                let line_height_px = line_height.max(1) as u32;
                 let visible_rows =
-                    (((render_height.saturating_sub(72)) as usize) / line_height).max(1);
+                    ((active_height.saturating_sub(72)) / line_height_px).max(1) as usize;
                 let wrap_cols = wrap_columns_for_width(render_width, cell_width);
 
                 for event in event_pump.poll_iter() {
@@ -4632,9 +4724,32 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::GitFetchRemote(remote) => {
                     fetch_git_remote(runtime, &remote)?;
                 }
-                PickerAction::GitCheckoutBranch(branch) => {
-                    checkout_git_branch(runtime, &branch)?;
-                }
+                PickerAction::GitBranchAction { action, branch } => match action {
+                    GitBranchActionKind::Checkout => {
+                        checkout_git_branch(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::MergePlain => {
+                        merge_git_plain(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::MergeEdit => {
+                        merge_git_edit(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::MergeNoCommit => {
+                        merge_git_no_commit(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::MergeSquash => {
+                        merge_git_squash(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::MergePreview => {
+                        merge_git_preview(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::RebaseOnto => {
+                        rebase_git_onto(runtime, &branch)?;
+                    }
+                    GitBranchActionKind::RebaseInteractive => {
+                        rebase_git_interactive_onto(runtime, &branch)?;
+                    }
+                },
             }
 
             Ok(())
@@ -8093,6 +8208,18 @@ fn stash_git_worktree(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn stash_git_keep_index(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "stash push --keep-index",
+        &["stash", "push", "--keep-index"],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
 fn stash_git_apply_at_point(
     runtime: &mut EditorRuntime,
     meta: Option<&SectionLineMeta>,
@@ -8136,6 +8263,174 @@ fn stash_git_show_at_point(
     let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
         .ok_or_else(|| "no stash selected".to_owned())?;
     open_git_diff_stash(runtime, &stash)
+}
+
+fn git_merge_in_progress(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let root = git_root(runtime)?;
+    let Some(git_dir) = git_dir_path(runtime, &root) else {
+        return Ok(false);
+    };
+    Ok(git_dir.join("MERGE_HEAD").is_file())
+}
+
+fn git_rebase_in_progress(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let root = git_root(runtime)?;
+    let Some(git_dir) = git_dir_path(runtime, &root) else {
+        return Ok(false);
+    };
+    Ok(git_dir.join("rebase-apply").is_dir() || git_dir.join("rebase-merge").is_dir())
+}
+
+fn merge_git_plain(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "merge", &["merge", branch])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn merge_git_edit(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "merge --no-commit --edit",
+        &["merge", "--no-commit", "--edit", branch],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    open_git_commit_buffer(runtime)
+}
+
+fn merge_git_no_commit(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "merge --no-commit",
+        &["merge", "--no-commit", branch],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn merge_git_squash(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "merge --squash",
+        &["merge", "--squash", branch],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    open_git_commit_buffer(runtime)
+}
+
+fn merge_git_preview(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let args = vec![
+        "--no-pager".to_owned(),
+        "diff".to_owned(),
+        "--no-color".to_owned(),
+        format!("HEAD...{branch}"),
+    ];
+    let view = GitViewState::new("diff", args, "No changes to merge.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn merge_git_continue(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "merge --continue", &["merge", "--continue"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn merge_git_abort(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "merge --abort", &["merge", "--abort"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_onto(runtime: &mut EditorRuntime, target: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "rebase", &["rebase", target])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_interactive_onto(runtime: &mut EditorRuntime, target: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "rebase -i", &["rebase", "-i", target])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_onto_upstream(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let upstream = snapshot
+        .upstream()
+        .ok_or_else(|| "no upstream configured for rebase".to_owned())?;
+    rebase_git_onto(runtime, upstream)
+}
+
+fn rebase_git_onto_pushremote(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let push_remote = snapshot
+        .push_remote()
+        .ok_or_else(|| "no push-remote configured for rebase".to_owned())?;
+    rebase_git_onto(runtime, push_remote)
+}
+
+fn rebase_git_continue(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "rebase --continue",
+        &["rebase", "--continue"],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_skip(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "rebase --skip", &["rebase", "--skip"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_edit_todo(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "rebase --edit-todo",
+        &["rebase", "--edit-todo"],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn rebase_git_abort(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "rebase --abort", &["rebase", "--abort"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn open_git_cherry_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let upstream = snapshot
+        .upstream()
+        .ok_or_else(|| "no upstream configured for cherry".to_owned())?;
+    let args = git_args_with_no_pager("cherry", &["-v", upstream]);
+    let view = GitViewState::new("cherry", args, "No cherry commits.", &[0]);
+    open_git_log_buffer(runtime, view)
 }
 
 fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
@@ -8308,7 +8603,11 @@ fn git_branch_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<Strin
     Ok(branches)
 }
 
-fn open_git_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+fn open_git_branch_picker_with_action(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    action: GitBranchActionKind,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     let branches = git_branch_list(runtime, &root)?;
     if branches.is_empty() {
@@ -8318,16 +8617,23 @@ fn open_git_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
         .into_iter()
         .map(|branch| {
             let item_id = format!("git-branch:{branch}");
-            let action = PickerAction::GitCheckoutBranch(branch.clone());
+            let action = PickerAction::GitBranchAction {
+                action,
+                branch: branch.clone(),
+            };
             PickerEntry {
                 item: PickerItem::new(item_id, branch.clone(), "branch", None::<String>),
                 action,
             }
         })
         .collect();
-    let picker = PickerOverlay::from_entries("Git Branches", entries);
+    let picker = PickerOverlay::from_entries(title, entries);
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
+}
+
+fn open_git_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker_with_action(runtime, "Git Branches", GitBranchActionKind::Checkout)
 }
 
 fn checkout_git_branch(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
@@ -8354,6 +8660,33 @@ fn set_git_prefix(runtime: &mut EditorRuntime, prefix: GitPrefix) -> Result<(), 
         prefix,
         started_at: Instant::now(),
     });
+    Ok(())
+}
+
+fn take_key_sequence(runtime: &mut EditorRuntime) -> Result<Option<Vec<String>>, String> {
+    const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1200);
+    let now = Instant::now();
+    let ui = shell_ui_mut(runtime)?;
+    let tokens = match ui.pending_key_sequence.take() {
+        Some(state) if now.duration_since(state.started_at) <= SEQUENCE_TIMEOUT => {
+            Some(state.tokens)
+        }
+        _ => None,
+    };
+    Ok(tokens)
+}
+
+fn set_key_sequence(runtime: &mut EditorRuntime, tokens: Vec<String>) -> Result<(), String> {
+    let ui = shell_ui_mut(runtime)?;
+    ui.pending_key_sequence = Some(KeySequenceState {
+        tokens,
+        started_at: Instant::now(),
+    });
+    Ok(())
+}
+
+fn clear_key_sequence(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.pending_key_sequence = None;
     Ok(())
 }
 
@@ -8482,6 +8815,124 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 open_git_branch_picker(runtime)?;
                 return Ok(true);
             }
+            GitPrefix::Merge if chord == "m" => {
+                if git_merge_in_progress(runtime)? {
+                    merge_git_continue(runtime)?;
+                } else {
+                    open_git_branch_picker_with_action(
+                        runtime,
+                        "Git Merge",
+                        GitBranchActionKind::MergePlain,
+                    )?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::Merge if chord == "e" => {
+                open_git_branch_picker_with_action(
+                    runtime,
+                    "Git Merge (Edit Message)",
+                    GitBranchActionKind::MergeEdit,
+                )?;
+                return Ok(true);
+            }
+            GitPrefix::Merge if chord == "n" => {
+                open_git_branch_picker_with_action(
+                    runtime,
+                    "Git Merge (No Commit)",
+                    GitBranchActionKind::MergeNoCommit,
+                )?;
+                return Ok(true);
+            }
+            GitPrefix::Merge if chord == "s" => {
+                open_git_branch_picker_with_action(
+                    runtime,
+                    "Git Merge (Squash)",
+                    GitBranchActionKind::MergeSquash,
+                )?;
+                return Ok(true);
+            }
+            GitPrefix::Merge if chord == "p" => {
+                open_git_branch_picker_with_action(
+                    runtime,
+                    "Git Merge (Preview)",
+                    GitBranchActionKind::MergePreview,
+                )?;
+                return Ok(true);
+            }
+            GitPrefix::Merge if chord == "a" => {
+                merge_git_abort(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "p" => {
+                if git_rebase_in_progress(runtime)? {
+                    return Err("rebase already in progress".to_owned());
+                }
+                rebase_git_onto_pushremote(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "u" => {
+                if git_rebase_in_progress(runtime)? {
+                    return Err("rebase already in progress".to_owned());
+                }
+                rebase_git_onto_upstream(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "e" => {
+                if git_rebase_in_progress(runtime)? {
+                    rebase_git_edit_todo(runtime)?;
+                } else {
+                    open_git_branch_picker_with_action(
+                        runtime,
+                        "Git Rebase",
+                        GitBranchActionKind::RebaseOnto,
+                    )?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "i" => {
+                if git_rebase_in_progress(runtime)? {
+                    return Err("rebase already in progress".to_owned());
+                }
+                open_git_branch_picker_with_action(
+                    runtime,
+                    "Git Rebase (Interactive)",
+                    GitBranchActionKind::RebaseInteractive,
+                )?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "r" => {
+                if !git_rebase_in_progress(runtime)? {
+                    return Err("no rebase in progress".to_owned());
+                }
+                rebase_git_continue(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "s" => {
+                if !git_rebase_in_progress(runtime)? {
+                    return Err("rebase subset is not supported yet".to_owned());
+                }
+                rebase_git_skip(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "a" => {
+                if !git_rebase_in_progress(runtime)? {
+                    return Err("no rebase in progress".to_owned());
+                }
+                rebase_git_abort(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Rebase if chord == "f" => {
+                return Err("rebase autosquash is not supported yet".to_owned());
+            }
+            GitPrefix::Rebase if chord == "m" => {
+                return Err("rebase edit-commit is not supported yet".to_owned());
+            }
+            GitPrefix::Rebase if chord == "w" => {
+                return Err("rebase reword is not supported yet".to_owned());
+            }
+            GitPrefix::Rebase if chord == "k" => {
+                return Err("rebase remove-commit is not supported yet".to_owned());
+            }
             GitPrefix::Diff if chord == "d" => {
                 diff_git_dwim(runtime, buffer_id, meta.as_ref(), &line_text)?;
                 return Ok(true);
@@ -8552,7 +9003,8 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 return Ok(true);
             }
             GitPrefix::Stash if chord == "x" => {
-                return Err("git stash keep-index is not supported yet".to_owned());
+                stash_git_keep_index(runtime)?;
+                return Ok(true);
             }
             GitPrefix::Stash if chord == "a" => {
                 stash_git_apply_at_point(runtime, meta.as_ref())?;
@@ -8580,7 +9032,22 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
 
     if !matches!(
         chord,
-        "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g" | "f" | "b" | "d" | "l" | "z"
+        "s" | "S"
+            | "u"
+            | "U"
+            | "c"
+            | "P"
+            | "p"
+            | "n"
+            | "g"
+            | "f"
+            | "b"
+            | "d"
+            | "l"
+            | "z"
+            | "m"
+            | "r"
+            | "Y"
     ) {
         return Ok(false);
     }
@@ -8660,6 +9127,18 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         }
         "z" => {
             set_git_prefix(runtime, GitPrefix::Stash)?;
+            Ok(true)
+        }
+        "m" => {
+            set_git_prefix(runtime, GitPrefix::Merge)?;
+            Ok(true)
+        }
+        "r" => {
+            set_git_prefix(runtime, GitPrefix::Rebase)?;
+            Ok(true)
+        }
+        "Y" => {
+            open_git_cherry_buffer(runtime, buffer_id)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -9919,6 +10398,14 @@ fn text_chord(text: &str) -> Option<String> {
         return None;
     }
     Some(character.to_string())
+}
+
+fn normalize_text_token(chord: &str) -> String {
+    if chord == " " {
+        "Space".to_owned()
+    } else {
+        chord.to_owned()
+    }
 }
 
 fn ctrl_mod() -> Mod {
