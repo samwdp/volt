@@ -1660,6 +1660,8 @@ enum PickerAction {
     SwitchWorkspace(WorkspaceId),
     DeleteWorkspace(WorkspaceId),
     GitPushRemote(String),
+    GitFetchRemote(String),
+    GitCheckoutBranch(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1805,6 +1807,8 @@ impl ShellWorkspaceView {
 enum GitPrefix {
     Commit,
     Push,
+    Fetch,
+    Branch,
 }
 
 #[derive(Debug, Clone)]
@@ -4539,6 +4543,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 PickerAction::GitPushRemote(remote) => {
                     push_git_remote(runtime, &remote)?;
+                }
+                PickerAction::GitFetchRemote(remote) => {
+                    fetch_git_remote(runtime, &remote)?;
+                }
+                PickerAction::GitCheckoutBranch(branch) => {
+                    checkout_git_branch(runtime, &branch)?;
                 }
             }
 
@@ -7709,6 +7719,163 @@ fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn open_git_fetch_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let remotes = git_remote_list(runtime, &root)?;
+    if remotes.is_empty() {
+        return Err("no git remotes found".to_owned());
+    }
+    let entries = remotes
+        .into_iter()
+        .map(|remote| {
+            let item_id = format!("git-fetch-remote:{remote}");
+            let action = PickerAction::GitFetchRemote(remote.clone());
+            PickerEntry {
+                item: PickerItem::new(item_id, remote.clone(), "remote", None::<String>),
+                action,
+            }
+        })
+        .collect();
+    let picker = PickerOverlay::from_entries("Git Fetch", entries);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn git_snapshot_for_buffer(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<GitStatusSnapshot, String> {
+    shell_buffer(runtime, buffer_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git status snapshot is missing".to_owned())
+}
+
+fn remote_name_from_ref(reference: &str) -> Option<String> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.split('/').next().unwrap_or(trimmed).to_owned())
+}
+
+fn remote_and_branch_from_ref(reference: &str) -> Option<(String, String)> {
+    let trimmed = reference.trim();
+    let (remote, branch) = trimmed.split_once('/')?;
+    if remote.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some((remote.to_owned(), branch.to_owned()))
+}
+
+fn fetch_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "fetch", &["fetch", remote])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn fetch_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "fetch --all", &["fetch", "--all"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn fetch_git_pushremote(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
+        fetch_git_remote(runtime, &remote)?;
+        return Ok(());
+    }
+    open_git_fetch_remote_picker(runtime)
+}
+
+fn fetch_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let remote = snapshot
+        .upstream()
+        .and_then(remote_name_from_ref)
+        .ok_or_else(|| "no upstream configured for fetch".to_owned())?;
+    fetch_git_remote(runtime, &remote)
+}
+
+fn push_git_to_pushremote(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
+        push_git_remote(runtime, &remote)?;
+        return Ok(());
+    }
+    open_git_remote_picker(runtime)
+}
+
+fn push_git_to_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let (remote, branch) = snapshot
+        .upstream()
+        .and_then(remote_and_branch_from_ref)
+        .ok_or_else(|| "no upstream configured for push".to_owned())?;
+    push_git_remote_branch(runtime, &remote, &branch)
+}
+
+fn push_git_remote_branch(
+    runtime: &mut EditorRuntime,
+    remote: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "push", &["push", remote, branch])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn git_branch_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<String>, String> {
+    let output = git_command_output(
+        runtime,
+        root,
+        "branch --format",
+        &["branch", "--format=%(refname:short)"],
+    )?;
+    let mut branches = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_owned())
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+fn open_git_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let branches = git_branch_list(runtime, &root)?;
+    if branches.is_empty() {
+        return Err("no git branches found".to_owned());
+    }
+    let entries = branches
+        .into_iter()
+        .map(|branch| {
+            let item_id = format!("git-branch:{branch}");
+            let action = PickerAction::GitCheckoutBranch(branch.clone());
+            PickerEntry {
+                item: PickerItem::new(item_id, branch.clone(), "branch", None::<String>),
+                action,
+            }
+        })
+        .collect();
+    let picker = PickerOverlay::from_entries("Git Branches", entries);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn checkout_git_branch(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "checkout", &["checkout", branch])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
 fn take_git_prefix(runtime: &mut EditorRuntime) -> Result<Option<GitPrefix>, String> {
     const PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
@@ -7827,14 +7994,37 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 return Ok(true);
             }
             GitPrefix::Push if chord == "p" => {
-                open_git_remote_picker(runtime)?;
+                push_git_to_pushremote(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Push if chord == "u" => {
+                push_git_to_upstream(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Fetch if chord == "p" => {
+                fetch_git_pushremote(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Fetch if chord == "u" => {
+                fetch_git_upstream(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Fetch if chord == "a" => {
+                fetch_git_all(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Branch if chord == "b" => {
+                open_git_branch_picker(runtime)?;
                 return Ok(true);
             }
             _ => {}
         }
     }
 
-    if !matches!(chord, "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g") {
+    if !matches!(
+        chord,
+        "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g" | "f" | "b"
+    ) {
         return Ok(false);
     }
 
@@ -7893,6 +8083,14 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         }
         "P" => {
             set_git_prefix(runtime, GitPrefix::Push)?;
+            Ok(true)
+        }
+        "f" => {
+            set_git_prefix(runtime, GitPrefix::Fetch)?;
+            Ok(true)
+        }
+        "b" => {
+            set_git_prefix(runtime, GitPrefix::Branch)?;
             Ok(true)
         }
         _ => Ok(false),
