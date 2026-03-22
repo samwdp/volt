@@ -580,6 +580,37 @@ impl EditorModel {
         Ok(())
     }
 
+    /// Creates a new pane in the workspace containing the provided buffer.
+    pub fn split_pane(
+        &mut self,
+        workspace_id: WorkspaceId,
+        buffer_id: BufferId,
+    ) -> Result<PaneId, ModelError> {
+        let pane_id = self.next_pane_id();
+        let workspace = self.workspace_mut(workspace_id)?;
+        if !workspace.buffers.contains_key(&buffer_id) {
+            return Err(ModelError::BufferNotFound(buffer_id));
+        }
+        let mut pane = Pane::new(pane_id);
+        pane.add_buffer(buffer_id);
+        workspace.panes.insert(pane_id, pane);
+        Ok(pane_id)
+    }
+
+    /// Sets the active pane for the workspace.
+    pub fn focus_pane(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    ) -> Result<(), ModelError> {
+        let workspace = self.workspace_mut(workspace_id)?;
+        if !workspace.panes.contains_key(&pane_id) {
+            return Err(ModelError::PaneNotFound(pane_id));
+        }
+        workspace.active_pane = Some(pane_id);
+        Ok(())
+    }
+
     /// Closes a buffer in the specified workspace.
     pub fn close_buffer(
         &mut self,
@@ -796,6 +827,8 @@ pub enum ModelError {
     WorkspaceNotFound(WorkspaceId),
     /// The requested buffer identifier does not exist.
     BufferNotFound(BufferId),
+    /// The requested pane identifier does not exist.
+    PaneNotFound(PaneId),
     /// The requested popup identifier does not exist.
     PopupNotFound(PopupId),
     /// The workspace has no active pane available.
@@ -823,6 +856,9 @@ impl fmt::Display for ModelError {
             }
             Self::BufferNotFound(buffer_id) => {
                 write!(formatter, "buffer {buffer_id} was not found")
+            }
+            Self::PaneNotFound(pane_id) => {
+                write!(formatter, "pane {pane_id} was not found")
             }
             Self::PopupNotFound(popup_id) => {
                 write!(formatter, "popup {popup_id} was not found")

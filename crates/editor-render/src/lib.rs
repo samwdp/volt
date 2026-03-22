@@ -309,6 +309,19 @@ pub fn horizontal_pane_rects(width: u32, content_height: u32, pane_count: usize)
     ]
 }
 
+/// Splits the available content area into one or two side-by-side pane rectangles.
+pub fn vertical_pane_rects(width: u32, content_height: u32, pane_count: usize) -> Vec<PixelRect> {
+    if pane_count <= 1 {
+        return vec![PixelRect::new(0, 0, width, content_height)];
+    }
+
+    let first_width = width / 2;
+    vec![
+        PixelRect::new(0, 0, first_width, content_height),
+        PixelRect::new(first_width as i32, 0, width - first_width, content_height),
+    ]
+}
+
 /// Returns a centered rectangle of the requested size inside the container.
 pub fn centered_rect(
     container_width: u32,
@@ -336,7 +349,10 @@ pub fn path_exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_rect, horizontal_pane_rects, preferred_font_search_roots, rect_tuple};
+    use super::{
+        centered_rect, horizontal_pane_rects, preferred_font_search_roots, rect_tuple,
+        vertical_pane_rects,
+    };
 
     #[test]
     fn centered_rect_places_content_in_middle() {
@@ -348,6 +364,13 @@ mod tests {
         let rects = horizontal_pane_rects(120, 60, 2);
         assert_eq!(rect_tuple(rects[0]), (0, 0, 120, 30));
         assert_eq!(rect_tuple(rects[1]), (0, 30, 120, 30));
+    }
+
+    #[test]
+    fn vertical_split_returns_two_side_by_side_rects() {
+        let rects = vertical_pane_rects(120, 60, 2);
+        assert_eq!(rect_tuple(rects[0]), (0, 0, 60, 60));
+        assert_eq!(rect_tuple(rects[1]), (60, 0, 60, 60));
     }
 
     #[test]

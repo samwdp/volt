@@ -597,4 +597,51 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn model_splits_pane_and_focuses() -> Result<(), ModelError> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "default", None)?;
+        let scratch_id = runtime.model_mut().create_buffer(
+            workspace_id,
+            "*scratch*",
+            BufferKind::Scratch,
+            None,
+        )?;
+        let notes_id = runtime.model_mut().create_buffer(
+            workspace_id,
+            "*notes*",
+            BufferKind::Scratch,
+            None,
+        )?;
+
+        let initial_pane = runtime
+            .model()
+            .workspace(workspace_id)?
+            .active_pane_id()
+            .ok_or(ModelError::NoActivePane(workspace_id))?;
+        runtime.model_mut().focus_buffer(workspace_id, scratch_id)?;
+
+        let new_pane_id = runtime.model_mut().split_pane(workspace_id, notes_id)?;
+        let workspace = runtime.model().workspace(workspace_id)?;
+        assert_eq!(workspace.pane_count(), 2);
+        assert_eq!(workspace.active_pane_id(), Some(initial_pane));
+        assert_eq!(
+            workspace
+                .pane(new_pane_id)
+                .and_then(|pane| pane.active_buffer()),
+            Some(notes_id)
+        );
+
+        runtime.model_mut().focus_pane(workspace_id, new_pane_id)?;
+        assert_eq!(
+            runtime.model().workspace(workspace_id)?.active_pane_id(),
+            Some(new_pane_id)
+        );
+
+        Ok(())
+    }
 }

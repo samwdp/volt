@@ -1,8 +1,10 @@
 use std::{
+    any::Any,
     borrow::Cow,
     cell::RefCell,
     collections::BTreeMap,
     env, fs,
+    io::Write,
     path::{Component, Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -18,7 +20,7 @@ use crate::state::{
 use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
-    KeymapVimMode, WorkspaceId, builtins,
+    KeymapVimMode, PaneId, WorkspaceId, builtins,
 };
 use editor_fs::discover_projects;
 use editor_git::list_repository_files;
@@ -27,7 +29,7 @@ use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
-    find_system_monospace_font, horizontal_pane_rects,
+    find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
 };
 use editor_syntax::{SyntaxError, SyntaxRegistry, SyntaxSnapshot};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
@@ -87,6 +89,8 @@ const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
+const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
+const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
@@ -97,6 +101,8 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
 ));
+const ERROR_LOG_MAX_ENTRIES: usize = 200;
+const ERROR_LOG_FILE_NAME: &str = "errors.log";
 
 struct ClipboardContext {
     video: sdl3::VideoSubsystem,
@@ -900,6 +906,21 @@ impl ShellBuffer {
         self.syntax_error = error;
     }
 
+    fn replace_with_lines(&mut self, lines: Vec<String>) {
+        let text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text = text;
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.syntax_dirty = false;
+        self.last_edit_at = None;
+        self.scroll_row = 0;
+    }
+
     fn mark_syntax_dirty(&mut self) {
         if self.kind == BufferKind::File {
             self.syntax_dirty = true;
@@ -1384,8 +1405,15 @@ impl ShellBuffer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneSplitDirection {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ShellPane {
+    pane_id: PaneId,
     buffer_id: BufferId,
 }
 
@@ -1536,10 +1564,12 @@ struct ShellWorkspaceView {
     panes: Vec<ShellPane>,
     active_pane: usize,
     split_buffer_id: BufferId,
+    split_direction: Option<PaneSplitDirection>,
 }
 
 impl ShellWorkspaceView {
     fn new(
+        primary_pane_id: PaneId,
         primary_buffer_id: BufferId,
         split_buffer_id: BufferId,
         buffer_ids: Vec<BufferId>,
@@ -1547,10 +1577,12 @@ impl ShellWorkspaceView {
         Self {
             buffer_ids,
             panes: vec![ShellPane {
+                pane_id: primary_pane_id,
                 buffer_id: primary_buffer_id,
             }],
             active_pane: 0,
             split_buffer_id,
+            split_direction: None,
         }
     }
 }
@@ -1572,6 +1604,7 @@ pub(crate) struct ShellUiState {
 impl ShellUiState {
     fn new(
         default_workspace: WorkspaceId,
+        primary_pane_id: PaneId,
         primary: ShellBuffer,
         secondary: ShellBuffer,
         split_buffer_id: BufferId,
@@ -1582,6 +1615,7 @@ impl ShellUiState {
         workspace_views.insert(
             default_workspace,
             ShellWorkspaceView::new(
+                primary_pane_id,
                 primary_buffer_id,
                 split_buffer_id,
                 vec![primary_buffer_id, secondary_buffer_id],
@@ -1678,6 +1712,7 @@ impl ShellUiState {
     fn add_workspace(
         &mut self,
         workspace_id: WorkspaceId,
+        primary_pane_id: PaneId,
         primary: ShellBuffer,
         secondary: ShellBuffer,
         split_buffer_id: BufferId,
@@ -1689,6 +1724,7 @@ impl ShellUiState {
         self.workspace_views.insert(
             workspace_id,
             ShellWorkspaceView::new(
+                primary_pane_id,
                 primary_buffer_id,
                 split_buffer_id,
                 vec![primary_buffer_id, secondary_buffer_id],
@@ -1734,6 +1770,30 @@ impl ShellUiState {
         self.workspace_view()
             .map(|view| view.active_pane)
             .unwrap_or(0)
+    }
+
+    fn active_pane_id(&self) -> Option<PaneId> {
+        self.workspace_view()
+            .and_then(|view| view.panes.get(view.active_pane))
+            .map(|pane| pane.pane_id)
+    }
+
+    fn focus_pane(&mut self, pane_id: PaneId) {
+        if let Some(view) = self.workspace_view_mut()
+            && let Some(index) = view.panes.iter().position(|pane| pane.pane_id == pane_id)
+        {
+            view.active_pane = index;
+        }
+    }
+
+    fn split_buffer_id(&self) -> Option<BufferId> {
+        self.workspace_view().map(|view| view.split_buffer_id)
+    }
+
+    fn pane_split_direction(&self) -> PaneSplitDirection {
+        self.workspace_view()
+            .and_then(|view| view.split_direction)
+            .unwrap_or(PaneSplitDirection::Horizontal)
     }
 
     fn active_workspace_buffer_ids(&self) -> Option<&[BufferId]> {
@@ -1908,22 +1968,102 @@ impl ShellUiState {
         self.close_picker();
     }
 
-    fn split_horizontal(&mut self) {
+    fn split_pane(&mut self, pane_id: PaneId, buffer_id: BufferId, direction: PaneSplitDirection) {
         if let Some(view) = self.workspace_view_mut()
             && view.panes.len() == 1
         {
-            view.panes.push(ShellPane {
-                buffer_id: view.split_buffer_id,
-            });
+            if !view.buffer_ids.contains(&buffer_id) {
+                view.buffer_ids.push(buffer_id);
+            }
+            view.panes.push(ShellPane { pane_id, buffer_id });
+            view.split_direction = Some(direction);
         }
     }
 
-    fn cycle_active_pane(&mut self) {
+    fn cycle_active_pane(&mut self) -> Option<PaneId> {
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
             && view.panes.len() > 1
         {
             view.active_pane = (view.active_pane + 1) % view.panes.len();
+        }
+        self.active_pane_id()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorSeverity {
+    Error,
+}
+
+impl ErrorSeverity {
+    fn label(self) -> &'static str {
+        "error"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ErrorEntry {
+    timestamp: SystemTime,
+    severity: ErrorSeverity,
+    source: String,
+    message: String,
+}
+
+impl ErrorEntry {
+    fn new(severity: ErrorSeverity, source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            timestamp: SystemTime::now(),
+            severity,
+            source: source.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ErrorLog {
+    entries: Vec<ErrorEntry>,
+    buffer_id: BufferId,
+    log_file_path: PathBuf,
+    file_logging_enabled: bool,
+    max_entries: usize,
+}
+
+impl ErrorLog {
+    fn new(buffer_id: BufferId, log_file_path: PathBuf, file_logging_enabled: bool) -> Self {
+        Self {
+            entries: Vec::new(),
+            buffer_id,
+            log_file_path,
+            file_logging_enabled,
+            max_entries: ERROR_LOG_MAX_ENTRIES,
+        }
+    }
+
+    fn record(&mut self, entry: ErrorEntry) -> Vec<String> {
+        self.push_entry(entry.clone());
+        if self.file_logging_enabled
+            && let Err(error) = append_error_log(&self.log_file_path, &entry)
+        {
+            self.file_logging_enabled = false;
+            self.push_entry(ErrorEntry::new(
+                ErrorSeverity::Error,
+                "error-log",
+                format!(
+                    "failed to write error log to `{}`: {error}",
+                    self.log_file_path.display()
+                ),
+            ));
+        }
+        errors_buffer_lines(&self.entries, &self.log_file_path)
+    }
+
+    fn push_entry(&mut self, entry: ErrorEntry) {
+        self.entries.push(entry);
+        if self.entries.len() > self.max_entries {
+            let overflow = self.entries.len() - self.max_entries;
+            self.entries.drain(0..overflow);
         }
     }
 }
@@ -1933,7 +2073,12 @@ pub(crate) struct ShellState {
 }
 
 impl ShellState {
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self, ShellError> {
+        Self::new_with_log(default_error_log_path())
+    }
+
+    pub(crate) fn new_with_log(log_file_path: PathBuf) -> Result<Self, ShellError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
         let workspace_id = runtime
@@ -1951,12 +2096,19 @@ impl ShellState {
             .model_mut()
             .create_buffer(workspace_id, "*scratch*", BufferKind::Scratch, None)
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        let errors_id = runtime
+            .model_mut()
+            .create_buffer(workspace_id, "*errors*", BufferKind::Diagnostics, None)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
 
-        let (scratch, notes) = {
+        let (scratch, notes, primary_pane_id) = {
             let workspace = runtime
                 .model()
                 .workspace(workspace_id)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            let pane_id = workspace.active_pane_id().ok_or_else(|| {
+                ShellError::Runtime("default workspace has no active pane".to_owned())
+            })?;
             let scratch = workspace.buffer(scratch_id).ok_or_else(|| {
                 ShellError::Runtime("scratch buffer missing after bootstrap".to_owned())
             })?;
@@ -1966,12 +2118,26 @@ impl ShellState {
             (
                 ShellBuffer::from_runtime_buffer(scratch, initial_scratch_lines()),
                 ShellBuffer::from_runtime_buffer(notes, initial_notes_lines()),
+                pane_id,
             )
         };
 
-        runtime
-            .services_mut()
-            .insert(ShellUiState::new(workspace_id, scratch, notes, notes_id));
+        let mut ui_state =
+            ShellUiState::new(workspace_id, primary_pane_id, scratch, notes, notes_id);
+        ui_state
+            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics)
+            .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
+        runtime.services_mut().insert(ui_state);
+
+        let log_dir_error = ensure_error_log_directory(&log_file_path).err();
+        runtime.services_mut().insert(ErrorLog::new(
+            errors_id,
+            log_file_path,
+            log_dir_error.is_none(),
+        ));
+        if let Some(error) = log_dir_error {
+            record_runtime_error(&mut runtime, "error-log", error);
+        }
         runtime.services_mut().insert(FormatterRegistry::default());
         runtime.services_mut().insert(Mutex::new(JobManager::new()));
         let mut syntax_registry = SyntaxRegistry::new();
@@ -1990,6 +2156,14 @@ impl ShellState {
         register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
 
         Ok(Self { runtime })
+    }
+
+    fn record_error(&mut self, source: &str, message: impl Into<String>) {
+        record_runtime_error(&mut self.runtime, source, message);
+    }
+
+    fn record_shell_error(&mut self, source: &str, error: ShellError) {
+        self.record_error(source, error.to_string());
     }
 
     fn handle_event(
@@ -2081,8 +2255,13 @@ impl ShellState {
                         self.active_buffer_mut()?.delete_forward();
                         self.mark_active_buffer_syntax_dirty()?;
                     }
-                    Keycode::Tab => self.ui_mut()?.cycle_active_pane(),
-                    Keycode::F2 => self.ui_mut()?.split_horizontal(),
+                    Keycode::Tab => {
+                        cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
+                    }
+                    Keycode::F2 => {
+                        split_runtime_pane(&mut self.runtime, PaneSplitDirection::Horizontal)
+                            .map_err(ShellError::Runtime)?;
+                    }
                     _ => {}
                 }
             }
@@ -2745,6 +2924,9 @@ impl ShellState {
 
 /// Runs the SDL3 + SDL_ttf demo shell.
 pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
+    let log_file_path = default_error_log_path();
+    install_panic_hook(log_file_path.clone());
+
     let sdl_context = sdl3::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
     let video = sdl_context
         .video()
@@ -2752,7 +2934,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let mut state = ShellState::new()?;
+    let mut state = ShellState::new_with_log(log_file_path)?;
     let mut theme_settings =
         theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
     let mut font_path = resolve_font_path(theme_settings.font_request.as_deref())?;
@@ -2787,69 +2969,105 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     let mut frames_rendered = 0;
 
+    enum FrameOutcome {
+        Continue,
+        Quit,
+    }
+
     loop {
-        update_theme_runtime(
-            &ttf,
-            &state,
-            &config,
-            &mut theme_settings,
-            &mut font,
-            &mut font_path,
-            &mut line_height,
-            &mut ascent,
-            &mut cell_width,
-        )?;
-        let (render_width, render_height) = canvas
-            .output_size()
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        let visible_rows = (((render_height.saturating_sub(72)) as usize) / line_height).max(1);
-        let wrap_cols = wrap_columns_for_width(render_width, cell_width);
+        let frame_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> FrameOutcome {
+                if let Err(error) = update_theme_runtime(
+                    &ttf,
+                    &state,
+                    &config,
+                    &mut theme_settings,
+                    &mut font,
+                    &mut font_path,
+                    &mut line_height,
+                    &mut ascent,
+                    &mut cell_width,
+                ) {
+                    state.record_shell_error("shell.update-theme", error);
+                }
 
-        for event in event_pump.poll_iter() {
-            if state.handle_event(event, visible_rows, wrap_cols)? {
-                return Ok(ShellSummary {
+                let (render_width, render_height) = match canvas.output_size() {
+                    Ok(size) => size,
+                    Err(error) => {
+                        state.record_shell_error(
+                            "shell.output-size",
+                            ShellError::Sdl(error.to_string()),
+                        );
+                        return FrameOutcome::Continue;
+                    }
+                };
+                let visible_rows =
+                    (((render_height.saturating_sub(72)) as usize) / line_height).max(1);
+                let wrap_cols = wrap_columns_for_width(render_width, cell_width);
+
+                for event in event_pump.poll_iter() {
+                    match state.handle_event(event, visible_rows, wrap_cols) {
+                        Ok(true) => return FrameOutcome::Quit,
+                        Ok(false) => {}
+                        Err(error) => state.record_shell_error("shell.handle-event", error),
+                    }
+                }
+
+                if let Err(error) = state.refresh_pending_syntax() {
+                    state.record_shell_error("shell.syntax-refresh", error);
+                }
+
+                let mut scene = Vec::new();
+                if let Err(error) = state.render(
+                    &mut DrawTarget::Scene(&mut scene),
+                    &font,
+                    render_width,
+                    render_height,
+                    cell_width,
+                    line_height as i32,
+                    ascent,
+                ) {
+                    state.record_shell_error("shell.render", error);
+                    return FrameOutcome::Continue;
+                }
+                if let Err(error) = present_scene_to_canvas(&mut canvas, &font, &scene) {
+                    state.record_shell_error("shell.present", error);
+                }
+
+                FrameOutcome::Continue
+            }));
+
+        match frame_result {
+            Ok(FrameOutcome::Quit) => {
+                return Ok(build_shell_summary(
+                    &mut state,
                     frames_rendered,
-                    pane_count: state.pane_count()?,
-                    popup_visible: state.popup_visible()?,
-                    render_backend: RenderBackend::SdlCanvas,
-                    renderer_name: renderer_name.clone(),
-                    font_path: font_path.display().to_string(),
-                });
+                    renderer_name.clone(),
+                    &font_path,
+                ));
             }
-        }
-
-        state.refresh_pending_syntax()?;
-
-        let mut scene = Vec::new();
-        state.render(
-            &mut DrawTarget::Scene(&mut scene),
-            &font,
-            render_width,
-            render_height,
-            cell_width,
-            line_height as i32,
-            ascent,
-        )?;
-        present_scene_to_canvas(&mut canvas, &font, &scene)?;
-        frames_rendered += 1;
-
-        if let Some(frame_limit) = config.frame_limit
-            && frames_rendered >= frame_limit
-        {
-            break;
+            Ok(FrameOutcome::Continue) => {
+                frames_rendered += 1;
+                if let Some(frame_limit) = config.frame_limit
+                    && frames_rendered >= frame_limit
+                {
+                    break;
+                }
+            }
+            Err(payload) => {
+                state.record_error("panic", panic_payload_message(payload));
+            }
         }
 
         std::thread::sleep(Duration::from_millis(16));
     }
 
-    Ok(ShellSummary {
+    Ok(build_shell_summary(
+        &mut state,
         frames_rendered,
-        pane_count: state.pane_count()?,
-        popup_visible: state.popup_visible()?,
-        render_backend: RenderBackend::SdlCanvas,
         renderer_name,
-        font_path: font_path.display().to_string(),
-    })
+        &font_path,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3130,6 +3348,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_POPUP_PREVIOUS,
         "Cycles to the previous popup buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PANE_SPLIT_HORIZONTAL,
+        "Splits the active workspace horizontally.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PANE_SPLIT_VERTICAL,
+        "Splits the active workspace vertically.",
     )?;
 
     runtime
@@ -3783,6 +4011,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             cycle_runtime_popup_buffer(runtime, false)?;
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PANE_SPLIT_HORIZONTAL,
+            "shell.pane-split-horizontal",
+            |_, runtime| {
+                split_runtime_pane(runtime, PaneSplitDirection::Horizontal)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PANE_SPLIT_VERTICAL,
+            "shell.pane-split-vertical",
+            |_, runtime| {
+                split_runtime_pane(runtime, PaneSplitDirection::Vertical)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
@@ -6595,12 +6843,14 @@ fn formatter_registry_mut(runtime: &mut EditorRuntime) -> Result<&mut FormatterR
 }
 
 fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let Some((buffer_id, buffer_name, buffer_kind)) = active_runtime_buffer(runtime)? else {
+    let Some((pane_id, buffer_id, buffer_name, buffer_kind)) = active_runtime_buffer(runtime)?
+    else {
         return Ok(());
     };
 
     {
         let ui = shell_ui_mut(runtime)?;
+        ui.focus_pane(pane_id);
         ui.ensure_buffer(buffer_id, &buffer_name, buffer_kind);
         ui.focus_buffer_in_active_pane(buffer_id);
     }
@@ -6727,11 +6977,14 @@ pub(crate) fn open_workspace_from_project(
         .create_buffer(workspace_id, "*scratch*", BufferKind::Scratch, None)
         .map_err(|error| error.to_string())?;
 
-    let (scratch, notes) = {
+    let (scratch, notes, primary_pane_id) = {
         let workspace = runtime
             .model()
             .workspace(workspace_id)
             .map_err(|error| error.to_string())?;
+        let pane_id = workspace
+            .active_pane_id()
+            .ok_or_else(|| "new workspace has no active pane".to_owned())?;
         let scratch = workspace
             .buffer(scratch_id)
             .ok_or_else(|| "new workspace scratch buffer is missing".to_owned())?;
@@ -6747,11 +7000,12 @@ pub(crate) fn open_workspace_from_project(
                 notes,
                 workspace_notes_lines(workspace.name(), workspace.root()),
             ),
+            pane_id,
         )
     };
 
     let ui = shell_ui_mut(runtime)?;
-    ui.add_workspace(workspace_id, scratch, notes, notes_id);
+    ui.add_workspace(workspace_id, primary_pane_id, scratch, notes, notes_id);
     ui.switch_workspace(workspace_id);
 
     runtime
@@ -6872,9 +7126,77 @@ fn cycle_runtime_popup_buffer(runtime: &mut EditorRuntime, forward: bool) -> Res
     Ok(())
 }
 
+fn split_runtime_pane(
+    runtime: &mut EditorRuntime,
+    direction: PaneSplitDirection,
+) -> Result<(), String> {
+    let split_buffer_id = {
+        let ui = shell_ui(runtime)?;
+        if ui.pane_count() > 1 {
+            return Ok(());
+        }
+        ui.split_buffer_id()
+            .ok_or_else(|| "active workspace view is missing".to_owned())?
+    };
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let pane_id = runtime
+        .model_mut()
+        .split_pane(workspace_id, split_buffer_id)
+        .map_err(|error| error.to_string())?;
+    let (buffer_name, buffer_kind) = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(split_buffer_id)
+            .ok_or_else(|| format!("buffer `{split_buffer_id}` is missing"))?;
+        (buffer.name().to_owned(), buffer.kind().clone())
+    };
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind);
+        ui.split_pane(pane_id, split_buffer_id, direction);
+    }
+    let window_id = active_window_id(runtime)?;
+    let hook_name = match direction {
+        PaneSplitDirection::Horizontal => builtins::PANE_SPLIT_HORIZONTAL,
+        PaneSplitDirection::Vertical => builtins::PANE_SPLIT_VERTICAL,
+    };
+    runtime
+        .emit_hook(
+            hook_name,
+            HookEvent::new()
+                .with_window(window_id)
+                .with_workspace(workspace_id)
+                .with_pane(pane_id)
+                .with_buffer(split_buffer_id),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn cycle_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let pane_id = shell_ui_mut(runtime)?.cycle_active_pane();
+    let Some(pane_id) = pane_id else {
+        return Ok(());
+    };
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, pane_id)
+        .map_err(|error| error.to_string())
+}
+
 fn active_runtime_buffer(
     runtime: &EditorRuntime,
-) -> Result<Option<(BufferId, String, BufferKind)>, String> {
+) -> Result<Option<(PaneId, BufferId, String, BufferKind)>, String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -6883,16 +7205,20 @@ fn active_runtime_buffer(
         .model()
         .workspace(workspace_id)
         .map_err(|error| error.to_string())?;
-    let Some(buffer_id) = workspace
-        .active_pane()
-        .and_then(|pane| pane.active_buffer())
-    else {
+    let Some(pane_id) = workspace.active_pane_id() else {
+        return Ok(None);
+    };
+    let pane = workspace
+        .pane(pane_id)
+        .ok_or_else(|| format!("pane `{pane_id}` is missing"))?;
+    let Some(buffer_id) = pane.active_buffer() else {
         return Ok(None);
     };
     let buffer = workspace
         .buffer(buffer_id)
         .ok_or_else(|| format!("runtime buffer `{buffer_id}` is missing"))?;
     Ok(Some((
+        pane_id,
         buffer_id,
         buffer.name().to_owned(),
         buffer.kind().clone(),
@@ -7574,6 +7900,183 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     }
 }
 
+fn default_error_log_path() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        let base = env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        base.join("volt").join(ERROR_LOG_FILE_NAME)
+    } else {
+        let base = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
+            })
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        base.join("volt").join(ERROR_LOG_FILE_NAME)
+    }
+}
+
+fn ensure_error_log_directory(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create log directory `{}`: {error}",
+            parent.display()
+        )
+    })
+}
+
+fn install_panic_hook(log_file_path: PathBuf) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let entry = ErrorEntry::new(ErrorSeverity::Error, "panic", info.to_string());
+        if let Err(error) = append_error_log(&log_file_path, &entry) {
+            eprintln!("Failed to write panic log: {error}");
+        }
+        default_hook(info);
+    }));
+}
+
+fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic payload is not a string".to_owned()
+    }
+}
+
+fn format_timestamp(timestamp: SystemTime) -> String {
+    match timestamp.duration_since(UNIX_EPOCH) {
+        Ok(duration) => format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()),
+        Err(_) => "0.000".to_owned(),
+    }
+}
+
+fn format_error_entry_lines(entry: &ErrorEntry) -> Vec<String> {
+    let timestamp = format_timestamp(entry.timestamp);
+    let mut lines = Vec::new();
+    let mut message_lines = entry.message.lines();
+    if let Some(first) = message_lines.next() {
+        lines.push(format!(
+            "[{timestamp}] {} {}: {first}",
+            entry.severity.label(),
+            entry.source
+        ));
+        for line in message_lines {
+            lines.push(format!("    {line}"));
+        }
+    } else {
+        lines.push(format!(
+            "[{timestamp}] {} {}: <empty>",
+            entry.severity.label(),
+            entry.source
+        ));
+    }
+    lines
+}
+
+fn append_error_log(path: &Path, entry: &ErrorEntry) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("failed to open log `{}`: {error}", path.display()))?;
+    for line in format_error_entry_lines(entry) {
+        writeln!(file, "{line}")
+            .map_err(|error| format!("failed to write log `{}`: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn errors_buffer_lines(entries: &[ErrorEntry], log_path: &Path) -> Vec<String> {
+    let mut lines = initial_errors_lines(Some(log_path));
+    if entries.is_empty() {
+        return lines;
+    }
+    lines.push(String::new());
+    lines.push(format!("Recent errors ({})", entries.len()));
+    for entry in entries {
+        lines.extend(format_error_entry_lines(entry));
+    }
+    lines
+}
+
+fn record_runtime_error(runtime: &mut EditorRuntime, source: &str, message: impl Into<String>) {
+    let entry = ErrorEntry::new(ErrorSeverity::Error, source, message);
+    let (buffer_id, lines) = {
+        let Some(log) = runtime.services_mut().get_mut::<ErrorLog>() else {
+            eprintln!("Error log service missing for: {}.", entry.message);
+            return;
+        };
+        let lines = log.record(entry);
+        (log.buffer_id, lines)
+    };
+    if let Err(error) = update_error_buffer(runtime, buffer_id, lines) {
+        eprintln!("Failed to update errors buffer: {error}");
+    }
+}
+
+fn update_error_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    lines: Vec<String>,
+) -> Result<(), String> {
+    let ui = shell_ui_mut(runtime)?;
+    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics);
+    buffer.replace_with_lines(lines);
+    Ok(())
+}
+
+fn build_shell_summary(
+    state: &mut ShellState,
+    frames_rendered: u32,
+    renderer_name: String,
+    font_path: &Path,
+) -> ShellSummary {
+    let pane_count = match state.pane_count() {
+        Ok(count) => count,
+        Err(error) => {
+            state.record_shell_error("shell.summary.pane-count", error);
+            0
+        }
+    };
+    let popup_visible = match state.popup_visible() {
+        Ok(visible) => visible,
+        Err(error) => {
+            state.record_shell_error("shell.summary.popup-visible", error);
+            false
+        }
+    };
+    ShellSummary {
+        frames_rendered,
+        pane_count,
+        popup_visible,
+        render_backend: RenderBackend::SdlCanvas,
+        renderer_name,
+        font_path: font_path.display().to_string(),
+    }
+}
+
+fn initial_errors_lines(log_path: Option<&Path>) -> Vec<String> {
+    let mut lines = vec![
+        "*errors* captures runtime failures and panics.".to_owned(),
+        "The shell continues running while logging errors here.".to_owned(),
+        "Open the buffer picker (F4) to revisit this buffer.".to_owned(),
+    ];
+    if let Some(path) = log_path {
+        lines.push(format!("Log file: {}", path.display()));
+    } else {
+        lines.push("Log file: <pending>".to_owned());
+    }
+    lines
+}
+
 fn initial_scratch_lines() -> Vec<String> {
     vec![
         "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
@@ -7639,6 +8142,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
     match name {
         "*scratch*" => initial_scratch_lines(),
         "*notes*" => initial_notes_lines(),
+        "*errors*" => initial_errors_lines(None),
         _ => match kind {
             BufferKind::Scratch => vec![
                 format!("{name} is a scratch buffer created by the runtime."),
@@ -7741,7 +8245,10 @@ fn render_shell_state(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let pane_rects = horizontal_pane_rects(width, pane_height, panes.len());
+    let pane_rects = match state.pane_split_direction() {
+        PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
+        PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
+    };
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
     let pane_active_background = adjust_color(base_background, if is_dark { 12 } else { -12 });

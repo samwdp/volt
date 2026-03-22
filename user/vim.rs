@@ -617,6 +617,8 @@ pub fn package() -> PluginPackage {
             "vim.start-search-backward",
             PluginKeymapScope::Workspace,
         ),
+        normal_binding("\\", "pane.split-vertical", PluginKeymapScope::Workspace),
+        normal_binding("|", "pane.split-horizontal", PluginKeymapScope::Workspace),
         normal_binding("*", "vim.search-word-forward", PluginKeymapScope::Workspace),
         normal_binding(
             "#",

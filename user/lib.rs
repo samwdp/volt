@@ -18,6 +18,8 @@ pub mod lsp;
 pub mod multicursor;
 /// Directory editing and navigation workflows.
 pub mod oil;
+/// Pane layout management.
+pub mod pane;
 /// Generic picker UI bindings and popup controls.
 pub mod picker;
 /// User-editable statusline segment composition.
@@ -45,6 +47,7 @@ use editor_theme::Theme;
 pub fn packages() -> Vec<PluginPackage> {
     vec![
         buffer::package(),
+        pane::package(),
         lsp::package(),
         dap::package(),
         vim::package(),
