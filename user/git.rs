@@ -4,12 +4,20 @@ use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
 
 pub const GIT_STATUS_KIND: &str = "git-status";
 pub const GIT_COMMIT_KIND: &str = "git-commit";
+pub const GIT_DIFF_KIND: &str = "git-diff";
+pub const GIT_LOG_KIND: &str = "git-log";
+pub const GIT_STASH_KIND: &str = "git-stash";
 pub const HOOK_GIT_STATUS_OPEN_POPUP: &str = "ui.git.status-open-popup";
+pub const HOOK_GIT_DIFF_OPEN: &str = "ui.git.diff-open";
+pub const HOOK_GIT_LOG_OPEN: &str = "ui.git.log-open";
+pub const HOOK_GIT_STASH_LIST_OPEN: &str = "ui.git.stash-list-open";
 pub const ACTION_STAGE_FILE: &str = "git.stage-file";
 pub const ACTION_STAGE_ALL: &str = "git.stage-all";
 pub const ACTION_UNSTAGE_FILE: &str = "git.unstage-file";
 pub const ACTION_COMMIT_OPEN: &str = "git.commit-open";
 pub const ACTION_PUSH: &str = "git.push";
+pub const ACTION_SHOW_COMMIT: &str = "git.show-commit";
+pub const ACTION_SHOW_STASH: &str = "git.show-stash";
 pub const SECTION_HEADERS: &str = "git.status.headers";
 pub const SECTION_IN_PROGRESS: &str = "git.status.in-progress";
 pub const SECTION_STAGED: &str = "git.status.staged";
@@ -61,6 +69,24 @@ pub fn package() -> PluginPackage {
                 "*git-commit*",
                 GIT_COMMIT_KIND,
                 Some("Git Commit"),
+            )],
+        ),
+        PluginCommand::new(
+            "git.diff",
+            "Opens the git diff buffer.",
+            vec![PluginAction::emit_hook(HOOK_GIT_DIFF_OPEN, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "git.log",
+            "Opens the git log buffer.",
+            vec![PluginAction::emit_hook(HOOK_GIT_LOG_OPEN, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "git.stash-list",
+            "Opens the git stash list buffer.",
+            vec![PluginAction::emit_hook(
+                HOOK_GIT_STASH_LIST_OPEN,
+                None::<&str>,
             )],
         ),
         PluginCommand::new(
@@ -186,7 +212,10 @@ fn stashes_section(snapshot: &GitStatusSnapshot) -> Section {
     let items = snapshot
         .stashes()
         .iter()
-        .map(|entry| SectionItem::new(format!("{} {}", entry.name(), entry.summary())))
+        .map(|entry| {
+            let action = SectionAction::new(ACTION_SHOW_STASH).with_detail(entry.name());
+            SectionItem::new(format!("{} {}", entry.name(), entry.summary())).with_action(action)
+        })
         .collect::<Vec<_>>();
     Section::new(
         SECTION_STASHES,
@@ -213,7 +242,10 @@ fn unpulled_section(snapshot: &GitStatusSnapshot) -> Section {
     };
     let items = entries
         .iter()
-        .map(|entry| SectionItem::new(format!("{} {}", entry.hash(), entry.summary())))
+        .map(|entry| {
+            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            SectionItem::new(format!("{} {}", entry.hash(), entry.summary())).with_action(action)
+        })
         .collect::<Vec<_>>();
     section_with_placeholder(SECTION_UNPULLED, title, items)
 }
@@ -236,7 +268,10 @@ fn unpushed_section(snapshot: &GitStatusSnapshot) -> Section {
     };
     let items = entries
         .iter()
-        .map(|entry| SectionItem::new(format!("{} {}", entry.hash(), entry.summary())))
+        .map(|entry| {
+            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            SectionItem::new(format!("{} {}", entry.hash(), entry.summary())).with_action(action)
+        })
         .collect::<Vec<_>>();
     section_with_placeholder(SECTION_UNPUSHED, title, items)
 }

@@ -99,9 +99,17 @@ const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
 const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
+const GIT_DIFF_KIND: &str = user::git::GIT_DIFF_KIND;
+const GIT_LOG_KIND: &str = user::git::GIT_LOG_KIND;
+const GIT_STASH_KIND: &str = user::git::GIT_STASH_KIND;
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
+const HOOK_GIT_DIFF_OPEN: &str = user::git::HOOK_GIT_DIFF_OPEN;
+const HOOK_GIT_LOG_OPEN: &str = user::git::HOOK_GIT_LOG_OPEN;
+const HOOK_GIT_STASH_LIST_OPEN: &str = user::git::HOOK_GIT_STASH_LIST_OPEN;
 const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
+const GIT_ACTION_SHOW_COMMIT: &str = user::git::ACTION_SHOW_COMMIT;
+const GIT_ACTION_SHOW_STASH: &str = user::git::ACTION_SHOW_STASH;
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
 const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
@@ -111,6 +119,7 @@ const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
+const GIT_LOG_VIEW_LIMIT: usize = 200;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
@@ -829,6 +838,30 @@ struct SectionedBufferState {
     lines: Vec<SectionLineMeta>,
 }
 
+#[derive(Debug, Clone)]
+struct GitViewState {
+    label: String,
+    args: Vec<String>,
+    empty_message: String,
+    allowed_exit_codes: Vec<i32>,
+}
+
+impl GitViewState {
+    fn new(
+        label: impl Into<String>,
+        args: Vec<String>,
+        empty_message: impl Into<String>,
+        allowed_exit_codes: &[i32],
+    ) -> Self {
+        Self {
+            label: label.into(),
+            args,
+            empty_message: empty_message.into(),
+            allowed_exit_codes: allowed_exit_codes.to_vec(),
+        }
+    }
+}
+
 fn format_section_line(line: &SectionRenderLine) -> String {
     let indent = "  ".repeat(line.depth);
     match &line.kind {
@@ -847,6 +880,7 @@ pub(crate) struct ShellBuffer {
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
+    git_view: Option<GitViewState>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -876,6 +910,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             git_snapshot: None,
+            git_view: None,
             text,
             undo_tree,
             language_id: None,
@@ -899,6 +934,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             git_snapshot: None,
+            git_view: None,
             text,
             undo_tree,
             language_id: None,
@@ -929,6 +965,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             git_snapshot: None,
+            git_view: None,
             text,
             undo_tree,
             language_id: None,
@@ -994,6 +1031,14 @@ impl ShellBuffer {
 
     fn set_git_snapshot(&mut self, snapshot: GitStatusSnapshot) {
         self.git_snapshot = Some(snapshot);
+    }
+
+    fn git_view(&self) -> Option<&GitViewState> {
+        self.git_view.as_ref()
+    }
+
+    fn set_git_view(&mut self, view: GitViewState) {
+        self.git_view = Some(view);
     }
 
     fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
@@ -1809,6 +1854,9 @@ enum GitPrefix {
     Push,
     Fetch,
     Branch,
+    Diff,
+    Log,
+    Stash,
 }
 
 #[derive(Debug, Clone)]
@@ -3125,6 +3173,14 @@ impl ShellState {
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && handle_git_view_chord(&mut self.runtime, &chord).map_err(ShellError::Runtime)?
+            {
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -3723,6 +3779,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_GIT_STATUS_OPEN_POPUP,
         "Opens the git status buffer in the popup window.",
+    )?;
+    register_hook(runtime, HOOK_GIT_DIFF_OPEN, "Opens the git diff buffer.")?;
+    register_hook(runtime, HOOK_GIT_LOG_OPEN, "Opens the git log buffer.")?;
+    register_hook(
+        runtime,
+        HOOK_GIT_STASH_LIST_OPEN,
+        "Opens the git stash list buffer.",
     )?;
     register_hook(
         runtime,
@@ -4423,6 +4486,28 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.git-status-open-popup",
             |_, runtime| {
                 open_git_status_popup(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_GIT_DIFF_OPEN, "shell.git-diff-open", |_, runtime| {
+            open_git_diff_worktree(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_GIT_LOG_OPEN, "shell.git-log-open", |_, runtime| {
+            open_git_log_current(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_GIT_STASH_LIST_OPEN,
+            "shell.git-stash-list-open",
+            |_, runtime| {
+                open_git_stash_list_buffer(runtime)?;
                 Ok(())
             },
         )
@@ -7677,6 +7762,382 @@ fn unstage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn git_action_detail(meta: Option<&SectionLineMeta>, action_id: &str) -> Option<String> {
+    meta.and_then(|meta| meta.action.as_ref())
+        .filter(|action| action.id() == action_id)
+        .and_then(|action| action.detail())
+        .map(str::to_owned)
+}
+
+fn git_line_is_untracked(line_text: &str) -> bool {
+    line_text.trim_start().starts_with("untracked ")
+}
+
+fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<String> {
+    let mut args = Vec::with_capacity(2 + extra.len());
+    args.push("--no-pager".to_owned());
+    args.push(command.to_owned());
+    args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    args
+}
+
+fn git_view_lines(runtime: &mut EditorRuntime, view: &GitViewState) -> Result<Vec<String>, String> {
+    let root = git_root(runtime)?;
+    let args = view.args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = git_command_output_allow_exit_codes(
+        runtime,
+        &root,
+        &view.label,
+        &args,
+        &view.allowed_exit_codes,
+    )?;
+    let mut lines = output
+        .lines()
+        .map(|line| line.to_owned())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push(view.empty_message.clone());
+    }
+    Ok(lines)
+}
+
+fn git_view_lines_or_error(runtime: &mut EditorRuntime, view: &GitViewState) -> Vec<String> {
+    match git_view_lines(runtime, view) {
+        Ok(lines) => lines,
+        Err(error) => {
+            record_runtime_error(runtime, &format!("git.{}", view.label), error.clone());
+            vec![format!("Git {} unavailable.", view.label), error]
+        }
+    }
+}
+
+fn open_git_view_buffer(
+    runtime: &mut EditorRuntime,
+    kind: &str,
+    name: &str,
+    view: GitViewState,
+) -> Result<(), String> {
+    let lines = git_view_lines_or_error(runtime, &view);
+    let existing = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| find_shell_buffer_by_kind(ui, kind));
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    if let Some(existing) = existing {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        ui.focus_buffer_in_active_pane(existing);
+        let buffer = shell_buffer_mut(runtime, existing)?;
+        buffer.set_git_view(view);
+        buffer.replace_with_lines(lines);
+        return Ok(());
+    }
+
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            name,
+            BufferKind::Plugin(kind.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    shell_buffer.set_git_view(view);
+    let ui = shell_ui_mut(runtime)?;
+    ui.insert_buffer(shell_buffer);
+    ui.focus_buffer_in_active_pane(buffer_id);
+    Ok(())
+}
+
+fn apply_git_view(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    view: GitViewState,
+) -> Result<(), String> {
+    let lines = git_view_lines_or_error(runtime, &view);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.set_git_view(view);
+    buffer.replace_with_lines(lines);
+    Ok(())
+}
+
+fn open_git_diff_buffer(runtime: &mut EditorRuntime, view: GitViewState) -> Result<(), String> {
+    open_git_view_buffer(runtime, GIT_DIFF_KIND, "*git-diff*", view)
+}
+
+fn open_git_log_buffer(runtime: &mut EditorRuntime, view: GitViewState) -> Result<(), String> {
+    open_git_view_buffer(runtime, GIT_LOG_KIND, "*git-log*", view)
+}
+
+fn open_git_stash_list_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_args_with_no_pager("stash", &["list"]);
+    let view = GitViewState::new("stash", args, "No stashes.", &[0]);
+    open_git_view_buffer(runtime, GIT_STASH_KIND, "*git-stash*", view)
+}
+
+fn open_git_diff_worktree(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_args_with_no_pager("diff", &["--no-color", "HEAD"]);
+    let view = GitViewState::new("diff", args, "No working tree changes.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_staged(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_args_with_no_pager("diff", &["--no-color", "--cached"]);
+    let view = GitViewState::new("diff", args, "No staged changes.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_unstaged(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_args_with_no_pager("diff", &["--no-color"]);
+    let view = GitViewState::new("diff", args, "No unstaged changes.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_staged_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+    let mut args = git_args_with_no_pager("diff", &["--no-color", "--cached", "--"]);
+    args.push(path.to_owned());
+    let view = GitViewState::new("diff", args, "No staged changes.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_unstaged_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+    let mut args = git_args_with_no_pager("diff", &["--no-color", "--"]);
+    args.push(path.to_owned());
+    let view = GitViewState::new("diff", args, "No unstaged changes.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_untracked_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+    let mut args = git_args_with_no_pager("diff", &["--no-color", "--no-index", "--", "/dev/null"]);
+    args.push(path.to_owned());
+    let view = GitViewState::new("diff", args, "No untracked diff.", &[0, 1]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+    let args = git_args_with_no_pager("show", &["--no-color", commit]);
+    let view = GitViewState::new("show", args, "No commit diff.", &[0]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn open_git_diff_stash(runtime: &mut EditorRuntime, stash: &str) -> Result<(), String> {
+    let args = git_args_with_no_pager("stash", &["show", "--no-color", "-p", stash]);
+    let view = GitViewState::new("stash", args, "No stash diff.", &[0]);
+    open_git_diff_buffer(runtime, view)
+}
+
+fn diff_git_dwim(
+    runtime: &mut EditorRuntime,
+    _buffer_id: BufferId,
+    meta: Option<&SectionLineMeta>,
+    line_text: &str,
+) -> Result<(), String> {
+    if let Some(commit) = git_action_detail(meta, GIT_ACTION_SHOW_COMMIT) {
+        return open_git_diff_commit(runtime, &commit);
+    }
+    if let Some(stash) = git_action_detail(meta, GIT_ACTION_SHOW_STASH) {
+        return open_git_diff_stash(runtime, &stash);
+    }
+    if let Some(path) = git_action_detail(meta, GIT_ACTION_UNSTAGE_FILE) {
+        return open_git_diff_staged_file(runtime, &path);
+    }
+    if let Some(path) = git_action_detail(meta, GIT_ACTION_STAGE_FILE) {
+        if git_line_is_untracked(line_text) {
+            return open_git_diff_untracked_file(runtime, &path);
+        }
+        return open_git_diff_unstaged_file(runtime, &path);
+    }
+    if let Some(meta) = meta
+        && let SectionRenderLineKind::Header { id, .. } = &meta.kind
+    {
+        if id == user::git::SECTION_STAGED {
+            return open_git_diff_staged(runtime);
+        }
+        if id == user::git::SECTION_UNSTAGED || id == user::git::SECTION_UNTRACKED {
+            return open_git_diff_unstaged(runtime);
+        }
+    }
+    open_git_diff_worktree(runtime)
+}
+
+fn diff_git_commit_at_point(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    if let Some(commit) = git_action_detail(meta, GIT_ACTION_SHOW_COMMIT) {
+        return open_git_diff_commit(runtime, &commit);
+    }
+    let commit = git_snapshot_for_buffer(runtime, buffer_id)
+        .ok()
+        .and_then(|snapshot| snapshot.head().map(|head| head.hash().to_owned()))
+        .unwrap_or_else(|| "HEAD".to_owned());
+    open_git_diff_commit(runtime, &commit)
+}
+
+fn diff_git_stash_at_point(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
+        .ok_or_else(|| "no stash selected".to_owned())?;
+    open_git_diff_stash(runtime, &stash)
+}
+
+fn git_log_args(extra: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "log".to_owned(),
+        "--no-color".to_owned(),
+        "--oneline".to_owned(),
+        "--decorate".to_owned(),
+        "--graph".to_owned(),
+        "-n".to_owned(),
+        GIT_LOG_VIEW_LIMIT.to_string(),
+    ];
+    args.extend(extra.iter().cloned());
+    args
+}
+
+fn open_git_log_current(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_log_args(&[]);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn open_git_log_head(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_log_args(&["HEAD".to_owned()]);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn open_git_log_related(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let mut refs = Vec::new();
+    if let Some(branch) = snapshot.branch() {
+        refs.push(branch.to_owned());
+    } else {
+        refs.push("HEAD".to_owned());
+    }
+    if let Some(upstream) = snapshot.upstream() {
+        refs.push(upstream.to_owned());
+    }
+    if let Some(push_remote) = snapshot.push_remote() {
+        refs.push(push_remote.to_owned());
+    }
+    refs.sort();
+    refs.dedup();
+    let args = git_log_args(&refs);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn open_git_log_branches(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_log_args(&["--branches".to_owned()]);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn open_git_log_all_branches(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_log_args(&["--branches".to_owned(), "--remotes".to_owned()]);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn open_git_log_all(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let args = git_log_args(&["--all".to_owned()]);
+    let view = GitViewState::new("log", args, "No commits to show.", &[0]);
+    open_git_log_buffer(runtime, view)
+}
+
+fn stash_git_both(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "stash push", &["stash", "push"])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_index(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "stash push --staged",
+        &["stash", "push", "--staged"],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_worktree(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "stash push --keep-index",
+        &["stash", "push", "--keep-index"],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_apply_at_point(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
+        .ok_or_else(|| "no stash selected".to_owned())?;
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "stash apply", &["stash", "apply", &stash])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_pop_at_point(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
+        .ok_or_else(|| "no stash selected".to_owned())?;
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "stash pop", &["stash", "pop", &stash])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_drop_at_point(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
+        .ok_or_else(|| "no stash selected".to_owned())?;
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "stash drop", &["stash", "drop", &stash])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn stash_git_show_at_point(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    let stash = git_action_detail(meta, GIT_ACTION_SHOW_STASH)
+        .ok_or_else(|| "no stash selected".to_owned())?;
+    open_git_diff_stash(runtime, &stash)
+}
+
 fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
     let branch = {
@@ -7966,7 +8427,7 @@ fn toggle_git_section(runtime: &mut EditorRuntime) -> Result<bool, String> {
 
 fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (meta, staged_empty, has_stage_candidates) = {
+    let (meta, line_text, staged_empty, has_stage_candidates) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         if !buffer_is_git_status(&buffer.kind) {
             return Ok(false);
@@ -7974,6 +8435,10 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         let meta = buffer
             .section_line_meta(buffer.cursor_point().line)
             .cloned();
+        let line_text = buffer
+            .text
+            .line(buffer.cursor_point().line)
+            .unwrap_or_default();
         let snapshot = buffer.git_snapshot();
         let staged_empty = snapshot
             .map(|snapshot| snapshot.staged().is_empty())
@@ -7981,7 +8446,7 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         let has_stage_candidates = snapshot
             .map(|snapshot| !(snapshot.unstaged().is_empty() && snapshot.untracked().is_empty()))
             .unwrap_or(false);
-        (meta, staged_empty, has_stage_candidates)
+        (meta, line_text, staged_empty, has_stage_candidates)
     };
 
     if let Some(prefix) = take_git_prefix(runtime)? {
@@ -8017,13 +8482,105 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 open_git_branch_picker(runtime)?;
                 return Ok(true);
             }
+            GitPrefix::Diff if chord == "d" => {
+                diff_git_dwim(runtime, buffer_id, meta.as_ref(), &line_text)?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "s" => {
+                open_git_diff_staged(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "u" => {
+                open_git_diff_unstaged(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "w" => {
+                open_git_diff_worktree(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "c" => {
+                diff_git_commit_at_point(runtime, buffer_id, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "t" => {
+                diff_git_stash_at_point(runtime, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Diff if chord == "r" => {
+                return Err("git diff range is not supported yet".to_owned());
+            }
+            GitPrefix::Diff if chord == "p" => {
+                return Err("git diff paths is not supported yet".to_owned());
+            }
+            GitPrefix::Log if chord == "l" => {
+                open_git_log_current(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Log if chord == "h" => {
+                open_git_log_head(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Log if chord == "u" => {
+                open_git_log_related(runtime, buffer_id)?;
+                return Ok(true);
+            }
+            GitPrefix::Log if chord == "o" => {
+                return Err("git log other is not supported yet".to_owned());
+            }
+            GitPrefix::Log if chord == "L" => {
+                open_git_log_branches(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Log if chord == "b" => {
+                open_git_log_all_branches(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Log if chord == "a" => {
+                open_git_log_all(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "z" => {
+                stash_git_both(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "i" => {
+                stash_git_index(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "w" => {
+                stash_git_worktree(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "x" => {
+                return Err("git stash keep-index is not supported yet".to_owned());
+            }
+            GitPrefix::Stash if chord == "a" => {
+                stash_git_apply_at_point(runtime, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "p" => {
+                stash_git_pop_at_point(runtime, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "k" => {
+                stash_git_drop_at_point(runtime, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "v" => {
+                stash_git_show_at_point(runtime, meta.as_ref())?;
+                return Ok(true);
+            }
+            GitPrefix::Stash if chord == "l" => {
+                open_git_stash_list_buffer(runtime)?;
+                return Ok(true);
+            }
             _ => {}
         }
     }
 
     if !matches!(
         chord,
-        "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g" | "f" | "b"
+        "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g" | "f" | "b" | "d" | "l" | "z"
     ) {
         return Ok(false);
     }
@@ -8093,8 +8650,46 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             set_git_prefix(runtime, GitPrefix::Branch)?;
             Ok(true)
         }
+        "d" => {
+            set_git_prefix(runtime, GitPrefix::Diff)?;
+            Ok(true)
+        }
+        "l" => {
+            set_git_prefix(runtime, GitPrefix::Log)?;
+            Ok(true)
+        }
+        "z" => {
+            set_git_prefix(runtime, GitPrefix::Stash)?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
+}
+
+fn handle_git_view_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
+    if chord != "g" {
+        return Ok(false);
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let view = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let is_git_view = matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind)
+                if plugin_kind == GIT_DIFF_KIND
+                    || plugin_kind == GIT_LOG_KIND
+                    || plugin_kind == GIT_STASH_KIND
+        );
+        if !is_git_view {
+            return Ok(false);
+        }
+        buffer
+            .git_view()
+            .cloned()
+            .ok_or_else(|| "git view state is missing".to_owned())?
+    };
+    apply_git_view(runtime, buffer_id, view)?;
+    Ok(true)
 }
 
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -9124,6 +9719,41 @@ fn git_command_output(
     Ok(result.stdout().to_owned())
 }
 
+fn git_command_output_allow_exit_codes(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    label: &str,
+    args: &[&str],
+    allowed_exit_codes: &[i32],
+) -> Result<String, String> {
+    let spec = JobSpec::command(
+        label,
+        "git",
+        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+    )
+    .with_cwd(root.to_path_buf());
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
+    drop(manager);
+    let result = handle.wait().map_err(|error| error.to_string())?;
+    let exit_code = result.exit_code().ok_or_else(|| {
+        format!(
+            "git {label} failed to return an exit code: {}",
+            result.transcript()
+        )
+    })?;
+    if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
+        return Err(format!("git {label} failed: {}", result.transcript()));
+    }
+    Ok(result.stdout().to_owned())
+}
+
 fn git_command_output_optional(
     runtime: &mut EditorRuntime,
     root: &Path,
@@ -9548,6 +10178,9 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
             (true, Some(InputField::new("Ask > ")))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
         _ => (false, None),
     }
@@ -9598,6 +10231,9 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => Vec::new(),
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => Vec::new(),
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
                 user::git::commit_buffer_template()
             }
