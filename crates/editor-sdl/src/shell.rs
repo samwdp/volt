@@ -1687,12 +1687,24 @@ enum GitCommitActionKind {
     CherryPickNoCommit,
     Revert,
     RevertNoCommit,
+    ResetMixed,
+    ResetSoft,
+    ResetHard,
+    ResetKeep,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum GitSequenceKind {
     CherryPick,
     Revert,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GitResetMode {
+    Mixed,
+    Soft,
+    Hard,
+    Keep,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1894,6 +1906,7 @@ enum GitPrefix {
     Rebase,
     CherryPick,
     Revert,
+    Reset,
 }
 
 #[derive(Debug, Clone)]
@@ -4782,6 +4795,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     }
                     GitCommitActionKind::RevertNoCommit => {
                         revert_git_commit_no_commit(runtime, &commit)?;
+                    }
+                    GitCommitActionKind::ResetMixed => {
+                        reset_git_commit(runtime, &commit, GitResetMode::Mixed)?;
+                    }
+                    GitCommitActionKind::ResetSoft => {
+                        reset_git_commit(runtime, &commit, GitResetMode::Soft)?;
+                    }
+                    GitCommitActionKind::ResetHard => {
+                        reset_git_commit(runtime, &commit, GitResetMode::Hard)?;
+                    }
+                    GitCommitActionKind::ResetKeep => {
+                        reset_git_commit(runtime, &commit, GitResetMode::Keep)?;
                     }
                 },
             }
@@ -8486,6 +8511,40 @@ fn revert_no_commit_at_point_or_picker(
     )
 }
 
+fn reset_git_commit(
+    runtime: &mut EditorRuntime,
+    commit: &str,
+    mode: GitResetMode,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let (label, args) = match mode {
+        GitResetMode::Mixed => ("reset --mixed", vec!["reset", "--mixed", commit]),
+        GitResetMode::Soft => ("reset --soft", vec!["reset", "--soft", commit]),
+        GitResetMode::Hard => ("reset --hard", vec!["reset", "--hard", commit]),
+        GitResetMode::Keep => ("reset --keep", vec!["reset", "--keep", commit]),
+    };
+    git_command_output(runtime, &root, label, &args)?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn reset_commit_at_point_or_picker(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+    mode: GitResetMode,
+) -> Result<(), String> {
+    if let Some(commit) = git_commit_at_point(meta) {
+        return reset_git_commit(runtime, &commit, mode);
+    }
+    let (title, action) = match mode {
+        GitResetMode::Mixed => ("Git Reset (Mixed)", GitCommitActionKind::ResetMixed),
+        GitResetMode::Soft => ("Git Reset (Soft)", GitCommitActionKind::ResetSoft),
+        GitResetMode::Hard => ("Git Reset (Hard)", GitCommitActionKind::ResetHard),
+        GitResetMode::Keep => ("Git Reset (Keep)", GitCommitActionKind::ResetKeep),
+    };
+    open_git_commit_picker_with_action(runtime, title, action)
+}
+
 fn merge_git_plain(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "merge", &["merge", branch])?;
@@ -9328,6 +9387,31 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 sequence_git_abort(runtime, kind)?;
                 return Ok(true);
             }
+            GitPrefix::Reset if chord == "m" => {
+                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Mixed)?;
+                return Ok(true);
+            }
+            GitPrefix::Reset if chord == "s" => {
+                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Soft)?;
+                return Ok(true);
+            }
+            GitPrefix::Reset if chord == "h" => {
+                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Hard)?;
+                return Ok(true);
+            }
+            GitPrefix::Reset if chord == "k" => {
+                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Keep)?;
+                return Ok(true);
+            }
+            GitPrefix::Reset if chord == "i" => {
+                return Err("reset index is not supported yet".to_owned());
+            }
+            GitPrefix::Reset if chord == "w" => {
+                return Err("reset worktree is not supported yet".to_owned());
+            }
+            GitPrefix::Reset if chord == "f" => {
+                return Err("file checkout is not supported yet".to_owned());
+            }
             _ => {}
         }
     }
@@ -9353,6 +9437,8 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             | "A"
             | "V"
             | "a"
+            | "X"
+            | "x"
     ) {
         return Ok(false);
     }
@@ -9456,6 +9542,14 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         }
         "a" => {
             cherry_pick_apply_at_point_or_picker(runtime, meta.as_ref())?;
+            Ok(true)
+        }
+        "X" => {
+            set_git_prefix(runtime, GitPrefix::Reset)?;
+            Ok(true)
+        }
+        "x" => {
+            reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Mixed)?;
             Ok(true)
         }
         _ => Ok(false),
