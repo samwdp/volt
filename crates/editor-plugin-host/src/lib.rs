@@ -204,12 +204,21 @@ fn open_buffer(
     popup_title: Option<&str>,
 ) -> Result<(), ModelError> {
     let workspace_id = runtime.model().active_workspace_id()?;
-    let buffer_id = runtime.model_mut().create_buffer(
-        workspace_id,
-        buffer_name,
-        map_buffer_kind(buffer_kind),
-        None,
-    )?;
+    let buffer_id = if popup_title.is_some() {
+        runtime.model_mut().create_popup_buffer(
+            workspace_id,
+            buffer_name,
+            map_buffer_kind(buffer_kind),
+            None,
+        )?
+    } else {
+        runtime.model_mut().create_buffer(
+            workspace_id,
+            buffer_name,
+            map_buffer_kind(buffer_kind),
+            None,
+        )?
+    };
 
     if let Some(popup_title) = popup_title {
         runtime

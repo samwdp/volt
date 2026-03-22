@@ -546,6 +546,21 @@ impl EditorModel {
         Ok(buffer_id)
     }
 
+    /// Creates a buffer in the specified workspace without attaching it to a pane.
+    pub fn create_popup_buffer(
+        &mut self,
+        workspace_id: WorkspaceId,
+        name: impl Into<String>,
+        kind: BufferKind,
+        path: Option<PathBuf>,
+    ) -> Result<BufferId, ModelError> {
+        let buffer_id = self.next_buffer_id();
+        let workspace = self.workspace_mut(workspace_id)?;
+        let buffer = Buffer::new(buffer_id, name.into(), kind, path);
+        workspace.buffers.insert(buffer_id, buffer);
+        Ok(buffer_id)
+    }
+
     /// Focuses an existing buffer in the workspace's active pane.
     pub fn focus_buffer(
         &mut self,

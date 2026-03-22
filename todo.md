@@ -4,6 +4,6 @@
 - [x] TODO: undo/redo should be a tree. I want a user/undotree.rs that will keep track of all the changes and a picker should allow a user to go back in time or forwards in time
 - [x] TODO: popup window is all wrong visually. popup window can contain any number of buffers that are marked as a popup. when a popup window is open I need a a popup next and previous that will cycle through the buffers inside the popup window. a buffer should be treated no differently to a normal window with a buffer. 
 - [ ] TODO: make a horizontal split
-- [ ] TODO: buffers marked as popup should only ever appear in the popup window. never in the main editing panels. so the terminal.popup should only ever appear as a popup, not like it is now when you run that command. it shows the buffer in the popup and in the main area
+- [x] TODO: buffers marked as popup should only ever appear in the popup window. never in the main editing panels. so the terminal.popup should only ever appear as a popup, not like it is now when you run that command. it shows the buffer in the popup and in the main area
 - [ ] TODO: look into creating user interactive read-only buffers. this will be the starting point for treating a magit style interface
 - [ ] TODO: look into creating a buffer that can take user input text field and run commands from keybinds. you should be able to style this in a way like [editor code assistant mode](Https://github.com/editor-code-assistant/eca-emacs) for emacs

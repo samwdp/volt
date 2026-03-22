@@ -1855,6 +1855,26 @@ impl ShellUiState {
         &mut self.buffers[index]
     }
 
+    fn ensure_popup_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        name: &str,
+        kind: BufferKind,
+    ) -> &mut ShellBuffer {
+        if let Some(index) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.id() == buffer_id)
+        {
+            return &mut self.buffers[index];
+        }
+
+        self.buffers
+            .push(ShellBuffer::placeholder(buffer_id, name, kind));
+        let index = self.buffers.len() - 1;
+        &mut self.buffers[index]
+    }
+
     fn active_buffer_mut(&mut self) -> Option<&mut ShellBuffer> {
         let buffer_id = self
             .workspace_view()?
@@ -2078,7 +2098,7 @@ impl ShellState {
 
     #[allow(clippy::too_many_arguments)]
     fn render(
-        &self,
+        &mut self,
         target: &mut DrawTarget<'_>,
         font: &Font<'_>,
         width: u32,
@@ -2087,8 +2107,8 @@ impl ShellState {
         line_height: i32,
         ascent: i32,
     ) -> Result<(), ShellError> {
-        let ui = self.ui()?;
         let runtime_popup = self.runtime_popup()?;
+        let ui = self.ui()?;
         let theme_registry = self.runtime.services().get::<ThemeRegistry>();
         let workspace_name = self
             .runtime
@@ -2122,7 +2142,7 @@ impl ShellState {
         Ok(self.ui()?.picker_visible())
     }
 
-    fn popup_visible(&self) -> Result<bool, ShellError> {
+    fn popup_visible(&mut self) -> Result<bool, ShellError> {
         Ok(self.picker_visible()? || self.runtime_popup()?.is_some())
     }
 
@@ -2704,8 +2724,13 @@ impl ShellState {
         Ok(())
     }
 
-    fn runtime_popup(&self) -> Result<Option<RuntimePopupSnapshot>, ShellError> {
-        active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)
+    fn runtime_popup(&mut self) -> Result<Option<RuntimePopupSnapshot>, ShellError> {
+        let popup = active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?;
+        if let Some(popup) = popup.as_ref() {
+            ensure_shell_buffer(&mut self.runtime, popup.active_buffer)
+                .map_err(ShellError::Runtime)?;
+        }
+        Ok(popup)
     }
 
     fn mark_active_buffer_syntax_dirty(&mut self) -> Result<(), ShellError> {
@@ -3099,6 +3124,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_POPUP_TOGGLE,
         "Shows or closes the docked popup window.",
+    )?;
+    register_hook(runtime, HOOK_POPUP_NEXT, "Cycles to the next popup buffer.")?;
+    register_hook(
+        runtime,
+        HOOK_POPUP_PREVIOUS,
+        "Cycles to the previous popup buffer.",
     )?;
 
     runtime
@@ -6576,6 +6607,25 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let (buffer_name, buffer_kind) = {
+        let workspace_id = runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+        (buffer.name().to_owned(), buffer.kind().clone())
+    };
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind);
+    Ok(())
+}
+
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
     let now = Instant::now();
     let buffer_ids = {
@@ -6796,13 +6846,13 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
 
     let buffer_id = runtime
         .model_mut()
-        .create_buffer(workspace_id, "*popup*", BufferKind::Diagnostics, None)
+        .create_popup_buffer(workspace_id, "*popup*", BufferKind::Diagnostics, None)
         .map_err(|error| error.to_string())?;
     runtime
         .model_mut()
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
     Ok(())
 }
 
@@ -6818,17 +6868,7 @@ fn cycle_runtime_popup_buffer(runtime: &mut EditorRuntime, forward: bool) -> Res
     let Some(buffer_id) = buffer_id else {
         return Ok(());
     };
-    let (buffer_name, buffer_kind) = {
-        let workspace = runtime
-            .model()
-            .workspace(workspace_id)
-            .map_err(|error| error.to_string())?;
-        let buffer = workspace
-            .buffer(buffer_id)
-            .ok_or_else(|| format!("popup buffer `{buffer_id}` is missing"))?;
-        (buffer.name().to_owned(), buffer.kind().clone())
-    };
-    shell_ui_mut(runtime)?.ensure_buffer(buffer_id, &buffer_name, buffer_kind);
+    ensure_shell_buffer(runtime, buffer_id)?;
     Ok(())
 }
 
