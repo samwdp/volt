@@ -4,6 +4,8 @@ name = "VS Code Light"
 [tokens]
 "ui.background" = "#ffffff"
 "ui.foreground" = "#333333"
+"ui.input.background" = "#ffffff"
+"ui.input.foreground" = "#333333"
 "ui.yank-flash" = "#007acc6e"
 "syntax.attribute" = "#001080"
 "syntax.comment" = "#008000"

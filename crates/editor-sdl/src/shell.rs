@@ -92,6 +92,9 @@ const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
+const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
+const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
+const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
@@ -762,11 +765,55 @@ impl UndoTree {
 }
 
 #[derive(Debug, Clone)]
+struct InputField {
+    prompt: String,
+    text: String,
+}
+
+impl InputField {
+    fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            text: String::new(),
+        }
+    }
+
+    fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn text_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn append_text(&mut self, text: &str) {
+        let filtered: String = text
+            .chars()
+            .filter(|character| *character != '\n')
+            .collect();
+        self.text.push_str(&filtered);
+    }
+
+    fn backspace(&mut self) -> bool {
+        self.text.pop().is_some()
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
     name: String,
     pub(crate) kind: BufferKind,
     read_only: bool,
+    input: Option<InputField>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -786,13 +833,14 @@ impl ShellBuffer {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let read_only = buffer_is_read_only(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind());
 
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             read_only,
+            input,
             text,
             undo_tree,
             language_id: None,
@@ -807,12 +855,13 @@ impl ShellBuffer {
 
     fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
         let undo_tree = UndoTree::new(&text);
-        let read_only = buffer_is_read_only(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind());
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
             read_only,
+            input,
             text,
             undo_tree,
             language_id: None,
@@ -833,13 +882,14 @@ impl ShellBuffer {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let read_only = buffer_is_read_only(&kind);
+        let (read_only, input) = buffer_interaction(&kind);
 
         Self {
             id: buffer_id,
             name: name.to_owned(),
             kind,
             read_only,
+            input,
             text,
             undo_tree,
             language_id: None,
@@ -862,6 +912,52 @@ impl ShellBuffer {
 
     fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    fn has_input_field(&self) -> bool {
+        self.input.is_some()
+    }
+
+    fn input_field(&self) -> Option<&InputField> {
+        self.input.as_ref()
+    }
+
+    fn input_field_mut(&mut self) -> Option<&mut InputField> {
+        self.input.as_mut()
+    }
+
+    fn clear_input(&mut self) -> bool {
+        if let Some(input) = self.input.as_mut() {
+            input.clear();
+            return true;
+        }
+        false
+    }
+
+    fn append_output_lines(&mut self, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        let original_cursor = self.cursor_point();
+        let original_scroll = self.scroll_row;
+        let insert_text = lines.join("\n");
+        if self.line_count() == 0 {
+            self.text.set_cursor(TextPoint::new(0, 0));
+            self.text.insert_text(&insert_text);
+        } else {
+            let last_line = self.line_count().saturating_sub(1);
+            let column = self.line_len_chars(last_line);
+            self.text.set_cursor(TextPoint::new(last_line, column));
+            self.text.insert_text(&format!("\n{insert_text}"));
+        }
+        self.text.mark_clean();
+        self.text.set_cursor(original_cursor);
+        self.scroll_row = original_scroll;
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.syntax_dirty = false;
+        self.last_edit_at = None;
     }
 
     fn language_id(&self) -> Option<&str> {
@@ -2184,6 +2280,12 @@ impl ShellState {
         visible_rows: usize,
         wrap_cols: usize,
     ) -> Result<bool, ShellError> {
+        let visible_rows =
+            if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                visible_rows.saturating_sub(1).max(1)
+            } else {
+                visible_rows
+            };
         self.active_buffer_mut()?.set_viewport_lines(visible_rows);
         match event {
             Event::Quit { .. } => return Ok(true),
@@ -2235,7 +2337,11 @@ impl ShellState {
                     Keycode::Return | Keycode::KpEnter
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if !active_shell_buffer_read_only(&self.runtime)
+                        if active_shell_buffer_has_input(&self.runtime)
+                            .map_err(ShellError::Runtime)?
+                        {
+                            submit_input_buffer(&mut self.runtime).map_err(ShellError::Runtime)?;
+                        } else if !active_shell_buffer_read_only(&self.runtime)
                             .map_err(ShellError::Runtime)?
                         {
                             let (indent_size, use_tabs) = {
@@ -2262,7 +2368,13 @@ impl ShellState {
                     Keycode::Backspace
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if !active_shell_buffer_read_only(&self.runtime)
+                        if active_shell_buffer_has_input(&self.runtime)
+                            .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.backspace();
+                            }
+                        } else if !active_shell_buffer_read_only(&self.runtime)
                             .map_err(ShellError::Runtime)?
                         {
                             self.active_buffer_mut()?.backspace();
@@ -2272,7 +2384,13 @@ impl ShellState {
                     Keycode::Delete
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if !active_shell_buffer_read_only(&self.runtime)
+                        if active_shell_buffer_has_input(&self.runtime)
+                            .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.backspace();
+                            }
+                        } else if !active_shell_buffer_read_only(&self.runtime)
                             .map_err(ShellError::Runtime)?
                         {
                             self.active_buffer_mut()?.delete_forward();
@@ -2740,6 +2858,22 @@ impl ShellState {
 
         match self.input_mode()? {
             InputMode::Insert => {
+                if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                    let handled = {
+                        let buffer = self.active_buffer_mut()?;
+                        if let Some(input) = buffer.input_field_mut() {
+                            input.append_text(text);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if handled {
+                        self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                        self.maybe_finish_change_after_input()?;
+                    }
+                    return Ok(());
+                }
                 if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
                     return Ok(());
                 }
@@ -2769,6 +2903,22 @@ impl ShellState {
                 return Ok(());
             }
             InputMode::Replace => {
+                if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                    let handled = {
+                        let buffer = self.active_buffer_mut()?;
+                        if let Some(input) = buffer.input_field_mut() {
+                            input.append_text(text);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if handled {
+                        self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                        self.maybe_finish_change_after_input()?;
+                    }
+                    return Ok(());
+                }
                 if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
                     return Ok(());
                 }
@@ -2922,12 +3072,18 @@ impl ShellState {
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize) -> Result<(), ShellError> {
         let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-        let language_id = shell_ui(&self.runtime)
+        let (language_id, has_input) = shell_ui(&self.runtime)
             .map_err(ShellError::Runtime)?
             .buffer(buffer_id)
-            .and_then(|buffer| buffer.language_id());
+            .map(|buffer| (buffer.language_id(), buffer.has_input_field()))
+            .unwrap_or((None, false));
         let indent_size =
             theme_lang_indent(self.runtime.services().get::<ThemeRegistry>(), language_id);
+        let visible_rows = if has_input {
+            visible_rows.saturating_sub(1).max(1)
+        } else {
+            visible_rows
+        };
         self.active_buffer_mut()?
             .ensure_visible(visible_rows, wrap_cols, indent_size);
         Ok(())
@@ -3389,6 +3545,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_PANE_SPLIT_VERTICAL,
         "Splits the active workspace vertically.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_INPUT_SUBMIT,
+        "Submits the active input buffer prompt.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_INPUT_CLEAR,
+        "Clears the active input buffer prompt.",
+    )?;
 
     runtime
         .subscribe_hook(HOOK_MOVE_LEFT, "shell.move-left", |_, runtime| {
@@ -3642,7 +3808,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_INSERT, "shell.enter-insert-mode", |_, runtime| {
-            if active_shell_buffer_read_only(runtime)? {
+            if active_shell_buffer_read_only(runtime)? && !active_shell_buffer_has_input(runtime)? {
                 report_read_only(runtime, "insert mode blocked");
                 return Ok(());
             }
@@ -4072,6 +4238,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_INPUT_SUBMIT, "shell.input-submit", |_, runtime| {
+            submit_input_buffer(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_INPUT_CLEAR, "shell.input-clear", |_, runtime| {
+            clear_input_buffer(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
             let (action, query) = {
                 let ui = shell_ui_mut(runtime)?;
@@ -4294,6 +4472,11 @@ fn active_shell_buffer_mut(runtime: &mut EditorRuntime) -> Result<&mut ShellBuff
 fn active_shell_buffer_read_only(runtime: &EditorRuntime) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     Ok(shell_buffer(runtime, buffer_id)?.is_read_only())
+}
+
+fn active_shell_buffer_has_input(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(shell_buffer(runtime, buffer_id)?.has_input_field())
 }
 
 fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
@@ -5587,6 +5770,33 @@ fn emit_workspace_format(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .with_buffer(buffer_id),
         )
         .map_err(|error| error.to_string())
+}
+
+fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (prompt, text) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(input) = buffer.input_field() else {
+            return Ok(());
+        };
+        (input.prompt().to_owned(), input.text().to_owned())
+    };
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.append_output_lines(&[format!("{prompt}{text}")]);
+        buffer.clear_input();
+    }
+    Ok(())
+}
+
+fn clear_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.clear_input();
+    Ok(())
 }
 
 fn save_buffer(
@@ -7947,6 +8157,7 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::D => Some("Ctrl+d".to_owned()),
             Keycode::E => Some("Ctrl+e".to_owned()),
             Keycode::F => Some("Ctrl+f".to_owned()),
+            Keycode::L => Some("Ctrl+l".to_owned()),
             Keycode::N => Some("Ctrl+n".to_owned()),
             Keycode::P => Some("Ctrl+p".to_owned()),
             Keycode::R => Some("Ctrl+r".to_owned()),
@@ -7954,6 +8165,7 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::V => Some("Ctrl+v".to_owned()),
             Keycode::Y => Some("Ctrl+y".to_owned()),
             Keycode::Grave => Some("Ctrl+`".to_owned()),
+            Keycode::Return | Keycode::KpEnter => Some("Ctrl+Enter".to_owned()),
             _ => None,
         };
     }
@@ -8228,11 +8440,14 @@ fn workspace_notes_lines(name: &str, root: Option<&std::path::Path>) -> Vec<Stri
     lines
 }
 
-fn buffer_is_read_only(kind: &BufferKind) -> bool {
-    matches!(
-        kind,
-        BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND
-    )
+fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
+    match kind {
+        BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
+            (true, Some(InputField::new("Ask > ")))
+        }
+        _ => (false, None),
+    }
 }
 
 fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
@@ -8273,6 +8488,11 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 format!("{name} is an interactive read-only buffer."),
                 "Keybindings still run, but edits are blocked.".to_owned(),
                 "Use this as a starting point for magit-style interfaces.".to_owned(),
+            ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => vec![
+                format!("{name} is an interactive input buffer."),
+                "Type into the prompt to submit commands or text.".to_owned(),
+                "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),
@@ -8767,7 +8987,13 @@ fn render_buffer(
 
     let body_y = rect.y() + 10;
     let statusline_y = rect.y() + rect.height() as i32 - line_height - 8;
-    let visible_body_height = (statusline_y - body_y - 10).max(line_height);
+    let input_reserved = if buffer.has_input_field() {
+        (line_height + 8).max(line_height)
+    } else {
+        0
+    };
+    let input_y = statusline_y - input_reserved;
+    let visible_body_height = (input_y - body_y - 10).max(line_height);
     let visible_rows = (visible_body_height / line_height.max(1)).max(1) as usize;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -8804,8 +9030,12 @@ fn render_buffer(
         }
     }
 
-    if let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
-        (cursor_row_on_screen, cursor_col_on_screen)
+    let show_text_cursor = !buffer.has_input_field()
+        || !active
+        || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
+    if show_text_cursor
+        && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
+            (cursor_row_on_screen, cursor_col_on_screen)
         && cursor_row_on_screen < visible_rows
     {
         let cursor_width = match input_mode {
@@ -8918,6 +9148,43 @@ fn render_buffer(
         }
         if visual_row >= visible_rows {
             break;
+        }
+    }
+
+    if let Some(input) = buffer.input_field() {
+        let input_background = theme_color(
+            theme_registry,
+            "ui.input.background",
+            adjust_color(base_background, if is_dark { 8 } else { -8 }),
+        );
+        let input_foreground = theme_color(theme_registry, "ui.input.foreground", foreground);
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                rect.x() + 8,
+                input_y - 4,
+                rect.width().saturating_sub(16),
+                input_reserved.max(line_height) as u32,
+            ),
+            input_background,
+        )?;
+        let input_x = rect.x() + 12 + line_number_width;
+        let input_text = format!("{}{}", input.prompt(), input.text());
+        draw_text(target, input_x, input_y, &input_text, input_foreground)?;
+        if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
+            let input_col = input.prompt().chars().count() + input.text_len();
+            let cursor_width = (cell_width / 4).max(2) as u32;
+            fill_rounded_rect(
+                target,
+                PixelRectToRect::rect(
+                    input_x + (input_col as i32 * cell_width),
+                    input_y,
+                    cursor_width,
+                    line_height.max(2) as u32,
+                ),
+                cursor_roundness,
+                cursor,
+            )?;
         }
     }
 

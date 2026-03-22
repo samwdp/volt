@@ -4,6 +4,8 @@ name = "Gruvbox Dark"
 [tokens]
 "ui.background" = "#282828"
 "ui.foreground" = "#ebdbb2"
+"ui.input.background" = "#282828"
+"ui.input.foreground" = "#ebdbb2"
 "ui.yank-flash" = "#83a5986e"
 "syntax.attribute" = "#83a598"
 "syntax.comment" = "#928374"

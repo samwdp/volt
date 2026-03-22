@@ -278,6 +278,11 @@ impl TextBuffer {
         self.state_id != self.saved_state_id
     }
 
+    /// Marks the current buffer state as clean.
+    pub fn mark_clean(&mut self) {
+        self.saved_state_id = self.state_id;
+    }
+
     /// Returns aggregate statistics for the buffer.
     pub fn stats(&self) -> BufferStats {
         BufferStats {
