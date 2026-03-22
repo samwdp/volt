@@ -101,9 +101,8 @@ const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
 const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
 const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
-const GIT_ACTION_COMMIT_OPEN: &str = user::git::ACTION_COMMIT_OPEN;
+const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
 const GIT_ACTION_PUSH: &str = user::git::ACTION_PUSH;
-const GIT_SECTION_COMMIT: &str = user::git::SECTION_COMMIT;
 const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
 const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
@@ -7626,6 +7625,20 @@ fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn unstage_git_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "reset --", &["reset", "-q", "--", path])?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn unstage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "reset", &["reset", "-q"])?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
 fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
     let branch = {
@@ -7669,7 +7682,7 @@ fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
-    if !matches!(chord, "s" | "S" | "c" | "p") {
+    if !matches!(chord, "s" | "S" | "A" | "u" | "U" | "c" | "p") {
         return Ok(false);
     }
     let buffer_id = active_shell_buffer_id(runtime)?;
@@ -7692,7 +7705,10 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
     };
 
     match chord {
-        "S" => {
+        "S" | "A" => {
+            if !has_stage_candidates {
+                return Err("no unstaged changes to stage".to_owned());
+            }
             stage_git_all(runtime)?;
             Ok(true)
         }
@@ -7712,19 +7728,26 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             stage_git_all(runtime)?;
             Ok(true)
         }
-        "c" => {
-            let in_commit_section = meta
-                .as_ref()
-                .map(|meta| meta.section_id == GIT_SECTION_COMMIT)
-                .unwrap_or(false);
-            let has_commit_action = meta
-                .as_ref()
-                .and_then(|meta| meta.action.as_ref())
-                .map(|action| action.id() == GIT_ACTION_COMMIT_OPEN)
-                .unwrap_or(false);
-            if !in_commit_section && !has_commit_action {
-                return Ok(false);
+        "u" => {
+            if let Some(action) = meta.as_ref().and_then(|meta| meta.action.as_ref())
+                && action.id() == GIT_ACTION_UNSTAGE_FILE
+            {
+                let path = action
+                    .detail()
+                    .ok_or_else(|| "git unstage action missing path".to_owned())?;
+                unstage_git_file(runtime, path)?;
+                return Ok(true);
             }
+            Ok(false)
+        }
+        "U" => {
+            if staged_empty {
+                return Err("no staged changes to unstage".to_owned());
+            }
+            unstage_git_all(runtime)?;
+            Ok(true)
+        }
+        "c" => {
             if staged_empty {
                 return Err("no staged changes to commit".to_owned());
             }

@@ -7,6 +7,7 @@ pub const GIT_COMMIT_KIND: &str = "git-commit";
 pub const HOOK_GIT_STATUS_OPEN_POPUP: &str = "ui.git.status-open-popup";
 pub const ACTION_STAGE_FILE: &str = "git.stage-file";
 pub const ACTION_STAGE_ALL: &str = "git.stage-all";
+pub const ACTION_UNSTAGE_FILE: &str = "git.unstage-file";
 pub const ACTION_COMMIT_OPEN: &str = "git.commit-open";
 pub const ACTION_PUSH: &str = "git.push";
 pub const SECTION_HEADERS: &str = "git.status.headers";
@@ -137,7 +138,10 @@ fn staged_section(snapshot: &GitStatusSnapshot) -> Section {
     let items = snapshot
         .staged()
         .iter()
-        .map(|entry| SectionItem::new(status_entry_label(entry, true)))
+        .map(|entry| {
+            let action = SectionAction::new(ACTION_UNSTAGE_FILE).with_detail(entry.path());
+            SectionItem::new(status_entry_label(entry, true)).with_action(action)
+        })
         .collect::<Vec<_>>();
     section_with_placeholder(
         SECTION_STAGED,
