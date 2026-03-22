@@ -149,7 +149,16 @@ impl SectionTree {
     /// Renders the tree into display lines, honoring collapsed sections.
     pub fn render_lines(&self, state: &SectionCollapseState) -> Vec<SectionRenderLine> {
         let mut lines = Vec::new();
-        for section in &self.sections {
+        for (index, section) in self.sections.iter().enumerate() {
+            if index > 0 {
+                lines.push(SectionRenderLine {
+                    text: String::new(),
+                    depth: 0,
+                    section_id: String::new(),
+                    action: None,
+                    kind: SectionRenderLineKind::Spacer,
+                });
+            }
             render_section(section, 0, state, &mut lines);
         }
         lines
@@ -233,6 +242,7 @@ pub struct SectionRenderLine {
 pub enum SectionRenderLineKind {
     Header { id: String, collapsed: bool },
     Item,
+    Spacer,
 }
 
 #[cfg(test)]

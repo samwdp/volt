@@ -102,8 +102,6 @@ const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
 const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
-const GIT_ACTION_PUSH: &str = user::git::ACTION_PUSH;
-const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
 const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
@@ -821,7 +819,7 @@ impl InputField {
 
 #[derive(Debug, Clone)]
 struct SectionLineMeta {
-    section_id: String,
+    kind: SectionRenderLineKind,
     action: Option<SectionAction>,
 }
 
@@ -834,11 +832,9 @@ struct SectionedBufferState {
 fn format_section_line(line: &SectionRenderLine) -> String {
     let indent = "  ".repeat(line.depth);
     match &line.kind {
-        SectionRenderLineKind::Header { collapsed, .. } => {
-            let marker = if *collapsed { "+ " } else { "- " };
-            format!("{indent}{marker}{}", line.text)
-        }
+        SectionRenderLineKind::Header { .. } => format!("{indent}{}", line.text),
         SectionRenderLineKind::Item => format!("{indent}{}", line.text),
+        SectionRenderLineKind::Spacer => String::new(),
     }
 }
 
@@ -1006,7 +1002,7 @@ impl ShellBuffer {
         for line in lines {
             text_lines.push(format_section_line(&line));
             meta.push(SectionLineMeta {
-                section_id: line.section_id,
+                kind: line.kind,
                 action: line.action,
             });
         }
@@ -1805,6 +1801,18 @@ impl ShellWorkspaceView {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitPrefix {
+    Commit,
+    Push,
+}
+
+#[derive(Debug, Clone)]
+struct GitPrefixState {
+    prefix: GitPrefix,
+    started_at: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellUiState {
     buffers: Vec<ShellBuffer>,
@@ -1815,6 +1823,7 @@ pub(crate) struct ShellUiState {
     input_mode: InputMode,
     vim: VimState,
     pending_ctrl_c: Option<Instant>,
+    pending_git_prefix: Option<GitPrefixState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
     yank_flash: Option<YankFlash>,
@@ -1849,6 +1858,7 @@ impl ShellUiState {
             input_mode: InputMode::Normal,
             vim: VimState::default(),
             pending_ctrl_c: None,
+            pending_git_prefix: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
             yank_flash: None,
@@ -2542,7 +2552,14 @@ impl ShellState {
                         }
                     }
                     Keycode::Tab => {
-                        cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
+                        if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_is_git_status(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            toggle_git_section(&mut self.runtime).map_err(ShellError::Runtime)?;
+                        } else {
+                            cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
+                        }
                     }
                     Keycode::F2 => {
                         split_runtime_pane(&mut self.runtime, PaneSplitDirection::Horizontal)
@@ -4673,6 +4690,13 @@ fn buffer_is_git_status(kind: &BufferKind) -> bool {
 
 fn buffer_is_git_commit(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND)
+}
+
+fn active_shell_buffer_is_git_status(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(buffer_is_git_status(
+        &shell_buffer(runtime, buffer_id)?.kind,
+    ))
 }
 
 fn active_shell_buffer_is_git_commit(runtime: &EditorRuntime) -> Result<bool, String> {
@@ -7351,6 +7375,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         return Ok(());
     };
     let is_git_commit = buffer_is_git_commit(&buffer_kind);
+    let is_git_status = buffer_is_git_status(&buffer_kind);
 
     let previous_buffer = shell_ui(runtime)?.active_buffer_id();
     {
@@ -7360,6 +7385,9 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         ui.focus_buffer_in_active_pane(buffer_id);
         if !is_git_commit {
             ui.pending_ctrl_c = None;
+        }
+        if !is_git_status {
+            ui.pending_git_prefix = None;
         }
     }
     if previous_buffer != Some(buffer_id) {
@@ -7681,10 +7709,95 @@ fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
-    if !matches!(chord, "s" | "S" | "A" | "u" | "U" | "c" | "p") {
+fn take_git_prefix(runtime: &mut EditorRuntime) -> Result<Option<GitPrefix>, String> {
+    const PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
+    let now = Instant::now();
+    let ui = shell_ui_mut(runtime)?;
+    let prefix = match ui.pending_git_prefix.take() {
+        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT => Some(state.prefix),
+        _ => None,
+    };
+    Ok(prefix)
+}
+
+fn set_git_prefix(runtime: &mut EditorRuntime, prefix: GitPrefix) -> Result<(), String> {
+    let ui = shell_ui_mut(runtime)?;
+    ui.pending_git_prefix = Some(GitPrefixState {
+        prefix,
+        started_at: Instant::now(),
+    });
+    Ok(())
+}
+
+fn move_git_section(runtime: &mut EditorRuntime, forward: bool) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (start_line, line_count) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer_is_git_status(&buffer.kind) {
+            return Ok(false);
+        }
+        (buffer.cursor_point().line, buffer.line_count())
+    };
+    if line_count == 0 {
         return Ok(false);
     }
+    if forward {
+        for line in start_line.saturating_add(1)..line_count {
+            if let Some(meta) = shell_buffer(runtime, buffer_id)?.section_line_meta(line)
+                && matches!(meta.kind, SectionRenderLineKind::Header { .. })
+            {
+                shell_buffer_mut(runtime, buffer_id)?.goto_line(line);
+                return Ok(true);
+            }
+        }
+    } else {
+        let mut line = start_line;
+        while line > 0 {
+            line = line.saturating_sub(1);
+            if let Some(meta) = shell_buffer(runtime, buffer_id)?.section_line_meta(line)
+                && matches!(meta.kind, SectionRenderLineKind::Header { .. })
+            {
+                shell_buffer_mut(runtime, buffer_id)?.goto_line(line);
+                return Ok(true);
+            }
+            if line == 0 {
+                break;
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn toggle_git_section(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (section_id, snapshot) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer_is_git_status(&buffer.kind) {
+            return Ok(false);
+        }
+        let meta = buffer
+            .section_line_meta(buffer.cursor_point().line)
+            .cloned();
+        let section_id = match meta.as_ref().map(|meta| &meta.kind) {
+            Some(SectionRenderLineKind::Header { id, .. }) => id.clone(),
+            _ => return Ok(false),
+        };
+        let snapshot = buffer
+            .git_snapshot()
+            .cloned()
+            .ok_or_else(|| "git status snapshot is missing".to_owned())?;
+        (section_id, snapshot)
+    };
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let state = buffer.ensure_section_state();
+        state.collapsed.toggle(&section_id);
+    }
+    apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
+    Ok(true)
+}
+
+fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let (meta, staged_empty, has_stage_candidates) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
@@ -7704,8 +7817,35 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         (meta, staged_empty, has_stage_candidates)
     };
 
+    if let Some(prefix) = take_git_prefix(runtime)? {
+        match prefix {
+            GitPrefix::Commit if chord == "c" => {
+                if staged_empty {
+                    return Err("no staged changes to commit".to_owned());
+                }
+                open_git_commit_buffer(runtime)?;
+                return Ok(true);
+            }
+            GitPrefix::Push if chord == "p" => {
+                open_git_remote_picker(runtime)?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(chord, "s" | "S" | "u" | "U" | "c" | "P" | "p" | "n" | "g") {
+        return Ok(false);
+    }
+
     match chord {
-        "S" | "A" => {
+        "g" => {
+            refresh_git_status_buffer(runtime, buffer_id)?;
+            Ok(true)
+        }
+        "n" => move_git_section(runtime, true),
+        "p" => move_git_section(runtime, false),
+        "S" => {
             if !has_stage_candidates {
                 return Err("no unstaged changes to stage".to_owned());
             }
@@ -7748,27 +7888,12 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             Ok(true)
         }
         "c" => {
-            if staged_empty {
-                return Err("no staged changes to commit".to_owned());
-            }
-            open_git_commit_buffer(runtime)?;
+            set_git_prefix(runtime, GitPrefix::Commit)?;
             Ok(true)
         }
-        "p" => {
-            let is_unpushed = meta
-                .as_ref()
-                .map(|meta| meta.section_id == GIT_SECTION_UNPUSHED)
-                .unwrap_or(false);
-            let is_push_action = meta
-                .as_ref()
-                .and_then(|meta| meta.action.as_ref())
-                .map(|action| action.id() == GIT_ACTION_PUSH)
-                .unwrap_or(false);
-            if is_unpushed || is_push_action {
-                open_git_remote_picker(runtime)?;
-                return Ok(true);
-            }
-            Ok(false)
+        "P" => {
+            set_git_prefix(runtime, GitPrefix::Push)?;
+            Ok(true)
         }
         _ => Ok(false),
     }
