@@ -33,7 +33,7 @@ pub fn package() -> PluginPackage {
             vec![PluginAction::open_buffer(
                 "*git-status*",
                 GIT_STATUS_KIND,
-                Some("Git Status"),
+                None::<&str>,
             )],
         ),
         PluginCommand::new(
@@ -42,7 +42,7 @@ pub fn package() -> PluginPackage {
             vec![PluginAction::open_buffer(
                 "*git-status*",
                 GIT_STATUS_KIND,
-                Some("Git Status"),
+                None::<&str>,
             )],
         ),
         PluginCommand::new(
