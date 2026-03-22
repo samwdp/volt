@@ -4300,6 +4300,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .ok_or_else(|| "buffer.save hook missing workspace".to_owned())?;
             let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
             save_buffer(runtime, workspace_id, buffer_id)?;
+            let _ = refresh_git_status_buffers(runtime);
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -7409,14 +7410,54 @@ fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Result<(), Strin
     refresh_git_status_buffer(runtime, buffer_id)
 }
 
+fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .filter(|buffer| buffer_is_git_status(&buffer.kind))
+            .map(ShellBuffer::id)
+            .collect::<Vec<_>>()
+    };
+    for buffer_id in buffer_ids {
+        let _ = refresh_git_status_buffer(runtime, buffer_id);
+    }
+    Ok(())
+}
+
 fn refresh_git_status_buffer(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git status requires an active workspace root".to_owned())?;
-    let snapshot = git_status_snapshot(runtime, &root)?;
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let snapshot = match git_status_snapshot(runtime, &root) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
     apply_git_status_snapshot(runtime, buffer_id, snapshot)
+}
+
+fn set_git_status_error(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    message: &str,
+) -> Result<(), String> {
+    record_runtime_error(runtime, "git.status", message.to_owned());
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.replace_with_lines(vec![
+        "Git status unavailable.".to_owned(),
+        message.to_owned(),
+    ]);
+    Ok(())
 }
 
 fn apply_git_status_snapshot(
@@ -7547,8 +7588,7 @@ fn git_commit_message(buffer: &ShellBuffer) -> String {
 }
 
 fn commit_git_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git commit requires an active workspace root".to_owned())?;
+    let root = git_root(runtime)?;
     let message = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         git_commit_message(buffer)
@@ -7573,24 +7613,21 @@ fn commit_git_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result
 }
 
 fn stage_git_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git stage requires an active workspace root".to_owned())?;
+    let root = git_root(runtime)?;
     git_command_output(runtime, &root, "add", &["add", "--", path])?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
 }
 
 fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git stage requires an active workspace root".to_owned())?;
+    let root = git_root(runtime)?;
     git_command_output(runtime, &root, "add -A", &["add", "-A"])?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
 }
 
 fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git push requires an active workspace root".to_owned())?;
+    let root = git_root(runtime)?;
     let branch = {
         let buffer_id = active_shell_buffer_id(runtime)?;
         shell_buffer(runtime, buffer_id)?
@@ -7610,8 +7647,7 @@ fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), Stri
 }
 
 fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let root = active_workspace_root(runtime)?
-        .ok_or_else(|| "git push requires an active workspace root".to_owned())?;
+    let root = git_root(runtime)?;
     let remotes = git_remote_list(runtime, &root)?;
     if remotes.is_empty() {
         return Err("no git remotes found".to_owned());
@@ -7747,6 +7783,13 @@ fn active_workspace_root(runtime: &EditorRuntime) -> Result<Option<PathBuf>, Str
         .map_err(|error| error.to_string())?
         .root()
         .map(Path::to_path_buf))
+}
+
+fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_workspace_root(runtime)? {
+        return Ok(root);
+    }
+    env::current_dir().map_err(|error| format!("git status requires a workspace root: {error}"))
 }
 
 fn find_workspace_by_root(
@@ -9208,11 +9251,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Type into the prompt to submit commands or text.".to_owned(),
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
-            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => vec![
-                format!("{name} is a git status buffer."),
-                "Sections refresh when the pane switches or git actions run.".to_owned(),
-                "Use s to stage a file, S to stage all, and c to commit.".to_owned(),
-            ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
                 user::git::commit_buffer_template()
             }
