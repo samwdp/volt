@@ -10,6 +10,8 @@ pub mod buffer;
 pub mod dap;
 /// Git workflows and repository-oriented commands.
 pub mod git;
+/// Interactive read-only buffer workflows.
+pub mod interactive;
 /// Language-specific registrations.
 pub mod lang;
 /// Language server integration hooks and commands.
@@ -47,6 +49,7 @@ use editor_theme::Theme;
 pub fn packages() -> Vec<PluginPackage> {
     vec![
         buffer::package(),
+        interactive::package(),
         pane::package(),
         lsp::package(),
         dap::package(),

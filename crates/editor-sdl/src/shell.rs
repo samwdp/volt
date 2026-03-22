@@ -91,6 +91,7 @@ const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
+const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
@@ -765,6 +766,7 @@ pub(crate) struct ShellBuffer {
     id: BufferId,
     name: String,
     pub(crate) kind: BufferKind,
+    read_only: bool,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -784,11 +786,13 @@ impl ShellBuffer {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
+        let read_only = buffer_is_read_only(buffer.kind());
 
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
+            read_only,
             text,
             undo_tree,
             language_id: None,
@@ -803,10 +807,12 @@ impl ShellBuffer {
 
     fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
         let undo_tree = UndoTree::new(&text);
+        let read_only = buffer_is_read_only(buffer.kind());
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
             kind: buffer.kind().clone(),
+            read_only,
             text,
             undo_tree,
             language_id: None,
@@ -827,11 +833,13 @@ impl ShellBuffer {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
+        let read_only = buffer_is_read_only(&kind);
 
         Self {
             id: buffer_id,
             name: name.to_owned(),
             kind,
+            read_only,
             text,
             undo_tree,
             language_id: None,
@@ -850,6 +858,10 @@ impl ShellBuffer {
 
     pub(crate) fn display_name(&self) -> &str {
         &self.name
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     fn language_id(&self) -> Option<&str> {
@@ -2223,37 +2235,49 @@ impl ShellState {
                     Keycode::Return | Keycode::KpEnter
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        let (indent_size, use_tabs) = {
-                            let ui = self.ui()?;
-                            let buffer_id = ui.active_buffer_id().ok_or_else(|| {
-                                ShellError::Runtime("active buffer is missing".to_owned())
-                            })?;
-                            let language_id =
-                                ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
-                            let theme_registry = self.runtime.services().get::<ThemeRegistry>();
-                            (
-                                theme_lang_indent(theme_registry, language_id),
-                                theme_lang_use_tabs(theme_registry, language_id),
-                            )
-                        };
+                        if !active_shell_buffer_read_only(&self.runtime)
+                            .map_err(ShellError::Runtime)?
                         {
-                            let buffer = self.active_buffer_mut()?;
-                            buffer.insert_text("\n");
-                            format_current_line_indent(buffer, indent_size, use_tabs);
+                            let (indent_size, use_tabs) = {
+                                let ui = self.ui()?;
+                                let buffer_id = ui.active_buffer_id().ok_or_else(|| {
+                                    ShellError::Runtime("active buffer is missing".to_owned())
+                                })?;
+                                let language_id =
+                                    ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+                                let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+                                (
+                                    theme_lang_indent(theme_registry, language_id),
+                                    theme_lang_use_tabs(theme_registry, language_id),
+                                )
+                            };
+                            {
+                                let buffer = self.active_buffer_mut()?;
+                                buffer.insert_text("\n");
+                                format_current_line_indent(buffer, indent_size, use_tabs);
+                            }
+                            self.mark_active_buffer_syntax_dirty()?;
                         }
-                        self.mark_active_buffer_syntax_dirty()?;
                     }
                     Keycode::Backspace
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        self.active_buffer_mut()?.backspace();
-                        self.mark_active_buffer_syntax_dirty()?;
+                        if !active_shell_buffer_read_only(&self.runtime)
+                            .map_err(ShellError::Runtime)?
+                        {
+                            self.active_buffer_mut()?.backspace();
+                            self.mark_active_buffer_syntax_dirty()?;
+                        }
                     }
                     Keycode::Delete
                         if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
                     {
-                        self.active_buffer_mut()?.delete_forward();
-                        self.mark_active_buffer_syntax_dirty()?;
+                        if !active_shell_buffer_read_only(&self.runtime)
+                            .map_err(ShellError::Runtime)?
+                        {
+                            self.active_buffer_mut()?.delete_forward();
+                            self.mark_active_buffer_syntax_dirty()?;
+                        }
                     }
                     Keycode::Tab => {
                         cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
@@ -2716,6 +2740,9 @@ impl ShellState {
 
         match self.input_mode()? {
             InputMode::Insert => {
+                if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
+                    return Ok(());
+                }
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
                     let buffer_id = ui.active_buffer_id().ok_or_else(|| {
@@ -2742,6 +2769,9 @@ impl ShellState {
                 return Ok(());
             }
             InputMode::Replace => {
+                if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
+                    return Ok(());
+                }
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
                     let buffer_id = ui.active_buffer_id().ok_or_else(|| {
@@ -3612,6 +3642,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_INSERT, "shell.enter-insert-mode", |_, runtime| {
+            if active_shell_buffer_read_only(runtime)? {
+                report_read_only(runtime, "insert mode blocked");
+                return Ok(());
+            }
             start_change_recording(runtime)?;
             mark_change_finish_on_normal(runtime)?;
             shell_ui_mut(runtime)?.enter_insert_mode();
@@ -3656,6 +3690,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_VIM_EDIT, "shell.vim-edit", |event, runtime| {
             let detail = event.detail.as_deref().unwrap_or_default();
+            if vim_edit_requires_write(detail) && active_shell_buffer_read_only(runtime)? {
+                let action = format!("{detail} blocked");
+                report_read_only(runtime, &action);
+                return Ok(());
+            }
             match detail {
                 "delete-char" => {
                     delete_chars(runtime, false)?;
@@ -4250,6 +4289,57 @@ fn active_shell_buffer_mut(runtime: &mut EditorRuntime) -> Result<&mut ShellBuff
     shell_ui_mut(runtime)?
         .buffer_mut(buffer_id)
         .ok_or_else(|| "active shell buffer is missing".to_owned())
+}
+
+fn active_shell_buffer_read_only(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(shell_buffer(runtime, buffer_id)?.is_read_only())
+}
+
+fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
+    let message = match active_shell_buffer_id(runtime)
+        .ok()
+        .and_then(|buffer_id| shell_buffer(runtime, buffer_id).ok())
+    {
+        Some(buffer) => format!("buffer `{}` is read-only; {action}", buffer.display_name()),
+        None => format!("read-only buffer; {action}"),
+    };
+    record_runtime_error(runtime, "buffer.read-only", message);
+}
+
+fn vim_edit_requires_write(detail: &str) -> bool {
+    matches!(
+        detail,
+        "delete-char"
+            | "delete-char-before"
+            | "delete-line-end"
+            | "change-line-end"
+            | "substitute-char"
+            | "substitute-line"
+            | "replace-char"
+            | "enter-replace-mode"
+            | "toggle-case"
+            | "append"
+            | "append-line-end"
+            | "insert-line-start"
+            | "open-line-below"
+            | "open-line-above"
+            | "undo"
+            | "redo"
+            | "start-delete-operator"
+            | "start-change-operator"
+            | "start-format-operator"
+            | "put-after"
+            | "put-before"
+            | "visual-delete"
+            | "visual-change"
+            | "visual-format"
+            | "visual-toggle-case"
+            | "visual-lowercase"
+            | "visual-uppercase"
+            | "visual-block-insert"
+            | "visual-block-append"
+    )
 }
 
 fn shell_buffer(runtime: &EditorRuntime, buffer_id: BufferId) -> Result<&ShellBuffer, String> {
@@ -8138,6 +8228,13 @@ fn workspace_notes_lines(name: &str, root: Option<&std::path::Path>) -> Vec<Stri
     lines
 }
 
+fn buffer_is_read_only(kind: &BufferKind) -> bool {
+    matches!(
+        kind,
+        BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND
+    )
+}
+
 fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
     match name {
         "*scratch*" => initial_scratch_lines(),
@@ -8171,6 +8268,11 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
             BufferKind::Diagnostics => vec![
                 format!("{name} is a diagnostics-oriented buffer."),
                 "LSP and DAP packages can surface structured status here.".to_owned(),
+            ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => vec![
+                format!("{name} is an interactive read-only buffer."),
+                "Keybindings still run, but edits are blocked.".to_owned(),
+                "Use this as a starting point for magit-style interfaces.".to_owned(),
             ],
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),
