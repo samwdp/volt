@@ -5,6 +5,7 @@
 - Use `cargo xtask fmt`, `cargo xtask fmt-check`, `cargo xtask check`, `cargo xtask clippy`, `cargo xtask test`, and `cargo xtask ci`. `cargo xtask ci` is the full validation path used by CI.
 - Run a single test with `cargo test -p <package> <test_name>`. Example: `cargo test -p volt-user user_library_exports_themes`.
 - For an exact match, use the module-qualified test name: `cargo test -p volt-user tests::user_library_exports_themes -- --exact`.
+- Before finishing a task, run the runtime smoke test: `cargo run -p volt -- --shell-hidden` (unless the user asks you to skip runtime checks).
 - Useful runtime checks:
   - `cargo run -p volt` launches the SDL shell demo.
   - `cargo run -p volt -- --shell-hidden` runs the one-frame hidden SDL smoke test.
@@ -23,7 +24,7 @@
 ## Repository conventions
 
 - Keep user-facing behavior in `user\*.rs` when possible. Vim bindings, picker commands, statusline segments, theme tokens, language registrations, LSP/DAP defaults, and workspace discovery roots are intended to be edited there and recompiled.
-- `user::packages()` is the source of compiled-in packages. Startup behavior depends on each package's `auto_load` flag: auto-loaded packages are registered on boot, while packages with `auto_load = false` (for example `git` and `oil`) are compiled in but not activated automatically.
+- `user::packages()` is the source of compiled-in packages. Startup behavior depends on each package's `auto_load` flag: auto-loaded packages are registered on boot, while packages with `auto_load = false` (for example `git`) are compiled in but not activated automatically.
 - Prefer the package metadata path over ad hoc wiring. Most user packages are intentionally declarative: commands are built from `PluginAction::{LogMessage, OpenBuffer, EmitHook}` plus optional `PluginHookDeclaration` and `PluginHookBinding` entries.
 - Hooks matter as much as commands. If a package emits a hook or binds a command to a hook detail, the runtime/UI layer must subscribe to that hook or the feature will register but do nothing. This is especially important for `editor.cursor.*`, `editor.vim.edit`, `ui.picker.*`, and workspace-related flows.
 - Keybindings are scoped (`Global`, `Workspace`, `Popup`) and can also be Vim-mode-specific (`Any`, `Normal`, `Insert`, `Visual`). Match existing scope/mode usage before adding new bindings.

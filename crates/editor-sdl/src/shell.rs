@@ -2,10 +2,11 @@ use std::{
     any::Any,
     borrow::Cow,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
     path::{Component, Path, PathBuf},
+    process::Command,
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +24,7 @@ use editor_core::{
     KeymapVimMode, PaneId, SectionAction, SectionCollapseState, SectionRenderLine,
     SectionRenderLineKind, WorkspaceId, builtins,
 };
-use editor_fs::discover_projects;
+use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind, discover_projects};
 use editor_git::{
     GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
     parse_stash_list, parse_status,
@@ -106,10 +107,17 @@ const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
 const HOOK_GIT_DIFF_OPEN: &str = user::git::HOOK_GIT_DIFF_OPEN;
 const HOOK_GIT_LOG_OPEN: &str = user::git::HOOK_GIT_LOG_OPEN;
 const HOOK_GIT_STASH_LIST_OPEN: &str = user::git::HOOK_GIT_STASH_LIST_OPEN;
+const HOOK_OIL_OPEN: &str = user::oil::HOOK_OIL_OPEN;
+const HOOK_OIL_OPEN_PARENT: &str = user::oil::HOOK_OIL_OPEN_PARENT;
 const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = user::git::ACTION_SHOW_COMMIT;
 const GIT_ACTION_SHOW_STASH: &str = user::git::ACTION_SHOW_STASH;
+const OIL_BUFFER_NAME: &str = "*oil*";
+const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
+const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
+const OIL_PREVIEW_KIND: &str = "oil-preview";
+const OIL_HELP_KIND: &str = "oil-help";
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
 const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
@@ -880,6 +888,51 @@ impl GitViewState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectorySortMode {
+    TypeThenName,
+    TypeThenNameDesc,
+}
+
+impl DirectorySortMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TypeThenName => "type+name",
+            Self::TypeThenNameDesc => "type+name desc",
+        }
+    }
+
+    fn cycle(self) -> Self {
+        match self {
+            Self::TypeThenName => Self::TypeThenNameDesc,
+            Self::TypeThenNameDesc => Self::TypeThenName,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryViewState {
+    root: PathBuf,
+    entries: Vec<DirectoryEntry>,
+    show_hidden: bool,
+    sort_mode: DirectorySortMode,
+    trash_enabled: bool,
+    edit_snapshot: Vec<String>,
+}
+
+impl DirectoryViewState {
+    fn new(root: PathBuf, entries: Vec<DirectoryEntry>) -> Self {
+        Self {
+            root,
+            entries,
+            show_hidden: false,
+            sort_mode: DirectorySortMode::TypeThenName,
+            trash_enabled: false,
+            edit_snapshot: Vec::new(),
+        }
+    }
+}
+
 fn format_section_line(line: &SectionRenderLine) -> String {
     let indent = "  ".repeat(line.depth);
     match &line.kind {
@@ -899,6 +952,7 @@ pub(crate) struct ShellBuffer {
     section_state: Option<SectionedBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
+    directory_state: Option<DirectoryViewState>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -968,6 +1022,7 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            directory_state: None,
             text,
             undo_tree,
             language_id: None,
@@ -993,6 +1048,7 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            directory_state: None,
             text,
             undo_tree,
             language_id: None,
@@ -1025,6 +1081,7 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            directory_state: None,
             text,
             undo_tree,
             language_id: None,
@@ -1099,6 +1156,18 @@ impl ShellBuffer {
 
     fn set_git_view(&mut self, view: GitViewState) {
         self.git_view = Some(view);
+    }
+
+    fn directory_state(&self) -> Option<&DirectoryViewState> {
+        self.directory_state.as_ref()
+    }
+
+    fn set_directory_state(&mut self, state: DirectoryViewState) {
+        self.directory_state = Some(state);
+    }
+
+    fn clear_directory_state(&mut self) {
+        self.directory_state = None;
     }
 
     fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
@@ -2034,6 +2103,11 @@ struct GitPrefixState {
 }
 
 #[derive(Debug, Clone)]
+struct DirectoryPrefixState {
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
 struct KeySequenceState {
     tokens: Vec<String>,
     started_at: Instant,
@@ -2050,6 +2124,7 @@ pub(crate) struct ShellUiState {
     vim: VimState,
     pending_ctrl_c: Option<Instant>,
     pending_git_prefix: Option<GitPrefixState>,
+    pending_directory_prefix: Option<DirectoryPrefixState>,
     pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
@@ -2086,6 +2161,7 @@ impl ShellUiState {
             vim: VimState::default(),
             pending_ctrl_c: None,
             pending_git_prefix: None,
+            pending_directory_prefix: None,
             pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
@@ -3429,6 +3505,14 @@ impl ShellState {
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && handle_directory_chord(&mut self.runtime, &chord).map_err(ShellError::Runtime)?
+            {
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -3500,6 +3584,17 @@ impl ShellState {
 
         clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
         let vim_mode = keymap_vim_mode(self.input_mode()?);
+
+        if !self.picker_visible()?
+            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+            && handle_directory_keydown_chord(&mut self.runtime, &chord)
+                .map_err(ShellError::Runtime)?
+        {
+            self.ui_mut()?.vim_mut().clear_transient();
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
 
         if self.picker_visible()?
             && self
@@ -4057,6 +4152,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_GIT_STASH_LIST_OPEN,
         "Opens the git stash list buffer.",
     )?;
+    register_hook(runtime, HOOK_OIL_OPEN, "Opens the oil directory buffer.")?;
+    register_hook(
+        runtime,
+        HOOK_OIL_OPEN_PARENT,
+        "Opens the oil parent directory buffer.",
+    )?;
     register_hook(
         runtime,
         HOOK_INPUT_SUBMIT,
@@ -4332,6 +4433,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_NORMAL, "shell.enter-normal-mode", |_, runtime| {
+            let previous_mode = shell_ui(runtime)?.input_mode();
+            let buffer_id = active_shell_buffer_id(runtime)?;
+            let is_directory = buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind);
             let cursor_point = active_shell_buffer_mut(runtime)?.cursor_point();
             let finish_change = {
                 let vim = shell_ui(runtime)?.vim();
@@ -4361,6 +4465,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             }
             if finish_change {
                 finish_change_recording(runtime)?;
+            }
+            if is_directory && matches!(previous_mode, InputMode::Insert | InputMode::Replace) {
+                if let Err(error) = apply_directory_edit_queue(runtime, buffer_id) {
+                    record_runtime_error(runtime, "oil.directory", error.clone());
+                    return Err(error);
+                }
             }
             Ok(())
         })
@@ -4783,8 +4893,27 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_OIL_OPEN, "shell.oil-open", |_, runtime| {
+            let root = oil_default_root(runtime)?;
+            open_oil_directory(runtime, root)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_OIL_OPEN_PARENT,
+            "shell.oil-open-parent",
+            |_, runtime| {
+                let root = oil_default_root(runtime)?;
+                open_oil_directory(runtime, root)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
             refresh_git_status_if_active(runtime)?;
+            ensure_directory_buffer(runtime)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -4794,6 +4923,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.buffer-switch",
             |_, runtime| {
                 refresh_git_status_if_active(runtime)?;
+                ensure_directory_buffer(runtime)?;
                 Ok(())
             },
         )
@@ -5073,7 +5203,17 @@ fn vim_count_digit(chord: &str, has_existing_count: bool) -> Option<usize> {
 
 fn active_shell_buffer_id(runtime: &EditorRuntime) -> Result<BufferId, String> {
     if let Some(popup) = active_runtime_popup(runtime)? {
-        return Ok(popup.active_buffer);
+        if let Ok(ui) = shell_ui(runtime) {
+            if let Some(buffer) = ui.buffer(popup.active_buffer) {
+                if !buffer_is_oil_preview(&buffer.kind) {
+                    return Ok(popup.active_buffer);
+                }
+            } else {
+                return Ok(popup.active_buffer);
+            }
+        } else {
+            return Ok(popup.active_buffer);
+        }
     }
 
     shell_ui(runtime)?
@@ -5104,6 +5244,14 @@ fn buffer_is_git_status(kind: &BufferKind) -> bool {
 
 fn buffer_is_git_commit(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND)
+}
+
+fn buffer_is_directory(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Directory)
+}
+
+fn buffer_is_oil_preview(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND)
 }
 
 fn active_shell_buffer_is_git_status(runtime: &EditorRuntime) -> Result<bool, String> {
@@ -7790,6 +7938,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     };
     let is_git_commit = buffer_is_git_commit(&buffer_kind);
     let is_git_status = buffer_is_git_status(&buffer_kind);
+    let is_directory = buffer_is_directory(&buffer_kind);
 
     let previous_buffer = shell_ui(runtime)?.active_buffer_id();
     {
@@ -7802,6 +7951,9 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         }
         if !is_git_status {
             ui.pending_git_prefix = None;
+        }
+        if !is_directory {
+            ui.pending_directory_prefix = None;
         }
     }
     if previous_buffer != Some(buffer_id) {
@@ -7956,6 +8108,732 @@ fn find_shell_buffer_by_kind(ui: &ShellUiState, kind: &str) -> Option<BufferId> 
             None
         }
     })
+}
+
+fn find_oil_buffer(ui: &ShellUiState) -> Option<BufferId> {
+    ui.buffers.iter().find_map(|buffer| {
+        if matches!(&buffer.kind, BufferKind::Directory) && buffer.display_name() == OIL_BUFFER_NAME
+        {
+            Some(buffer.id())
+        } else {
+            None
+        }
+    })
+}
+
+fn active_shell_buffer_path(runtime: &EditorRuntime) -> Result<Option<PathBuf>, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(shell_buffer(runtime, buffer_id)?
+        .path()
+        .map(Path::to_path_buf))
+}
+
+fn active_directory_root(runtime: &EditorRuntime) -> Result<Option<PathBuf>, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    Ok(buffer.directory_state().map(|state| state.root.clone()))
+}
+
+fn oil_workspace_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_workspace_root(runtime)? {
+        return Ok(root);
+    }
+    env::current_dir().map_err(|error| format!("oil requires a workspace root: {error}"))
+}
+
+fn oil_default_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_directory_root(runtime)? {
+        return Ok(root);
+    }
+    if let Some(path) = active_shell_buffer_path(runtime)? {
+        if let Some(parent) = path.parent() {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    oil_workspace_root(runtime)
+}
+
+fn oil_parent_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_directory_root(runtime)? {
+        return Ok(root.parent().unwrap_or(root.as_path()).to_path_buf());
+    }
+    let root = oil_default_root(runtime)?;
+    Ok(root.parent().unwrap_or(root.as_path()).to_path_buf())
+}
+
+fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let existing = shell_ui(runtime).ok().and_then(find_oil_buffer);
+    let buffer_id = if let Some(existing) = existing {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        existing
+    } else {
+        runtime
+            .model_mut()
+            .create_buffer(workspace_id, OIL_BUFFER_NAME, BufferKind::Directory, None)
+            .map_err(|error| error.to_string())?
+    };
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory);
+        ui.focus_buffer_in_active_pane(buffer_id);
+        ui.enter_normal_mode();
+    }
+    set_directory_root(runtime, buffer_id, root)?;
+    Ok(())
+}
+
+fn ensure_directory_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_directory(&buffer.kind) || buffer.directory_state().is_some() {
+        return Ok(());
+    }
+    let root = oil_default_root(runtime)?;
+    set_directory_root(runtime, buffer_id, root)
+}
+
+fn refresh_directory_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let (root, show_hidden, sort_mode, trash_enabled) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(state) = buffer.directory_state() else {
+            let root = oil_default_root(runtime)?;
+            return set_directory_root(runtime, buffer_id, root);
+        };
+        (
+            state.root.clone(),
+            state.show_hidden,
+            state.sort_mode,
+            state.trash_enabled,
+        )
+    };
+    let entries = match DirectoryBuffer::read(&root) {
+        Ok(buffer) => buffer.entries().to_vec(),
+        Err(error) => {
+            let message = format!("failed to read `{}`: {error}", root.display());
+            set_directory_error(runtime, buffer_id, &message)?;
+            return Err(message);
+        }
+    };
+    let mut state = DirectoryViewState::new(root, entries);
+    state.show_hidden = show_hidden;
+    state.sort_mode = sort_mode;
+    state.trash_enabled = trash_enabled;
+    apply_directory_state(runtime, buffer_id, state)
+}
+
+fn set_directory_root(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    root: PathBuf,
+) -> Result<(), String> {
+    let (show_hidden, sort_mode, trash_enabled, previous_root) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let state = buffer.directory_state();
+        (
+            state.map(|state| state.show_hidden).unwrap_or(false),
+            state
+                .map(|state| state.sort_mode)
+                .unwrap_or(DirectorySortMode::TypeThenName),
+            state.map(|state| state.trash_enabled).unwrap_or(false),
+            state.map(|state| state.root.clone()),
+        )
+    };
+    let root_for_compare = root.clone();
+    let entries = match DirectoryBuffer::read(&root) {
+        Ok(buffer) => buffer.entries().to_vec(),
+        Err(error) => {
+            let message = format!("failed to read `{}`: {error}", root.display());
+            set_directory_error(runtime, buffer_id, &message)?;
+            return Err(message);
+        }
+    };
+    let mut state = DirectoryViewState::new(root, entries);
+    state.show_hidden = show_hidden;
+    state.sort_mode = sort_mode;
+    state.trash_enabled = trash_enabled;
+    apply_directory_state(runtime, buffer_id, state)?;
+    if previous_root
+        .as_ref()
+        .map_or(true, |prev| prev != &root_for_compare)
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let target_line = if buffer.line_count() > 1 { 1 } else { 0 };
+        buffer.goto_line(target_line);
+        buffer.scroll_row = 0;
+    }
+    Ok(())
+}
+
+fn set_directory_error(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    message: &str,
+) -> Result<(), String> {
+    record_runtime_error(runtime, "oil.directory", message.to_owned());
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.clear_directory_state();
+    buffer.section_state = None;
+    buffer.replace_with_lines(vec![
+        "Directory view unavailable.".to_owned(),
+        message.to_owned(),
+    ]);
+    Ok(())
+}
+
+fn directory_entry_label(entry: &DirectoryEntry) -> String {
+    match entry.kind() {
+        DirectoryEntryKind::Directory => format!("{}/", entry.name()),
+        DirectoryEntryKind::File => entry.name().to_owned(),
+    }
+}
+
+fn apply_directory_state(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    state: DirectoryViewState,
+) -> Result<(), String> {
+    let entries = directory_visible_entries(&state);
+    let labels = entries
+        .iter()
+        .map(directory_entry_label)
+        .collect::<Vec<_>>();
+    let collapsed = shell_buffer(runtime, buffer_id)?
+        .section_state()
+        .map(|state| state.collapsed.clone())
+        .unwrap_or_default();
+    let lines = user::oil::directory_sections(
+        &state.root,
+        &entries,
+        state.show_hidden,
+        state.sort_mode.label(),
+        state.trash_enabled,
+    )
+    .render_lines(&collapsed);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    {
+        let section_state = buffer.ensure_section_state();
+        section_state.collapsed = collapsed;
+    }
+    let mut state = state;
+    state.edit_snapshot = labels;
+    buffer.set_directory_state(state);
+    buffer.set_section_lines(lines);
+    Ok(())
+}
+
+fn directory_visible_entries(state: &DirectoryViewState) -> Vec<DirectoryEntry> {
+    let mut entries = state.entries.clone();
+    if !state.show_hidden {
+        entries.retain(|entry| !entry.name().starts_with('.'));
+    }
+    sort_directory_entries(&mut entries, state.sort_mode);
+    entries
+}
+
+fn sort_directory_entries(entries: &mut [DirectoryEntry], sort_mode: DirectorySortMode) {
+    match sort_mode {
+        DirectorySortMode::TypeThenName => {
+            entries.sort_by(|left, right| {
+                let left_is_file = matches!(left.kind(), DirectoryEntryKind::File);
+                let right_is_file = matches!(right.kind(), DirectoryEntryKind::File);
+                left_is_file.cmp(&right_is_file).then_with(|| {
+                    left.name()
+                        .to_ascii_lowercase()
+                        .cmp(&right.name().to_ascii_lowercase())
+                })
+            });
+        }
+        DirectorySortMode::TypeThenNameDesc => {
+            entries.sort_by(|left, right| {
+                let left_is_file = matches!(left.kind(), DirectoryEntryKind::File);
+                let right_is_file = matches!(right.kind(), DirectoryEntryKind::File);
+                left_is_file.cmp(&right_is_file).then_with(|| {
+                    right
+                        .name()
+                        .to_ascii_lowercase()
+                        .cmp(&left.name().to_ascii_lowercase())
+                })
+            });
+        }
+    }
+}
+
+fn directory_entry_at_cursor(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<DirectoryEntry, String> {
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    let state = buffer
+        .directory_state()
+        .ok_or_else(|| "directory state is missing".to_owned())?;
+    let line = buffer.cursor_point().line;
+    let meta = buffer
+        .section_line_meta(line)
+        .and_then(|meta| meta.action.as_ref())
+        .ok_or_else(|| "no directory entry selected".to_owned())?;
+    if meta.id() != user::oil::ACTION_OIL_ENTRY {
+        return Err("no directory entry selected".to_owned());
+    }
+    let detail = meta
+        .detail()
+        .ok_or_else(|| "directory entry detail missing".to_owned())?;
+    let path = Path::new(detail);
+    state
+        .entries
+        .iter()
+        .find(|entry| entry.path() == path)
+        .cloned()
+        .ok_or_else(|| "directory entry not found".to_owned())
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryLine {
+    label: String,
+    rel_path: PathBuf,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+enum DirectoryEditAction {
+    CreateFile(PathBuf),
+    CreateDir(PathBuf),
+    Delete { path: PathBuf, is_dir: bool },
+    Rename { from: PathBuf, to: PathBuf },
+}
+
+fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line_index in 0..buffer.line_count() {
+        let raw = buffer.text.line(line_index).unwrap_or_default();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if line_index == 0 && trimmed.starts_with("Directory ") {
+            continue;
+        }
+        lines.push(trimmed.to_owned());
+    }
+    lines
+}
+
+fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
+    let trimmed = line.trim();
+    let is_dir = trimmed.ends_with('/');
+    let raw = trimmed.trim_end_matches('/');
+    if raw.is_empty() {
+        return Err("directory entry is empty".to_owned());
+    }
+    let rel_path = PathBuf::from(raw);
+    if rel_path.is_absolute() {
+        return Err(format!("absolute paths are not supported: {raw}"));
+    }
+    if rel_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!("parent directory segments are not allowed: {raw}"));
+    }
+    Ok(DirectoryLine {
+        label: trimmed.to_owned(),
+        rel_path,
+        is_dir,
+    })
+}
+
+fn parse_directory_lines(lines: &[String]) -> Result<Vec<DirectoryLine>, String> {
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(lines.len());
+    for line in lines {
+        let entry = parse_directory_line(line)?;
+        if !seen.insert(entry.rel_path.clone()) {
+            return Err(format!("duplicate entry `{}`", entry.label));
+        }
+        parsed.push(entry);
+    }
+    Ok(parsed)
+}
+
+fn diff_directory_lines(before: &[String], after: &[String]) -> (Vec<usize>, Vec<usize>) {
+    let before_set = before.iter().collect::<BTreeSet<_>>();
+    let after_set = after.iter().collect::<BTreeSet<_>>();
+    let removed = before
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !after_set.contains(line))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let added = after
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !before_set.contains(line))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    (removed, added)
+}
+
+fn directory_edit_actions(
+    root: &Path,
+    before: &[String],
+    after: &[String],
+) -> Result<Vec<DirectoryEditAction>, String> {
+    if before == after {
+        return Ok(Vec::new());
+    }
+    let before_parsed = parse_directory_lines(before)?;
+    let after_parsed = parse_directory_lines(after)?;
+    let (removed_indices, added_indices) = diff_directory_lines(before, after);
+    let removed = removed_indices
+        .iter()
+        .map(|index| &before_parsed[*index])
+        .collect::<Vec<_>>();
+    let added = added_indices
+        .iter()
+        .map(|index| &after_parsed[*index])
+        .collect::<Vec<_>>();
+    let mut actions = Vec::new();
+    let rename_count = if !removed.is_empty() && removed.len() == added.len() {
+        removed.len()
+    } else {
+        0
+    };
+    for index in 0..rename_count {
+        let src = removed[index];
+        let dst = added[index];
+        if !src.is_dir && dst.is_dir {
+            return Err(format!(
+                "cannot move file `{}` to directory path `{}`",
+                src.label, dst.label
+            ));
+        }
+        actions.push(DirectoryEditAction::Rename {
+            from: root.join(&src.rel_path),
+            to: root.join(&dst.rel_path),
+        });
+    }
+    for src in removed.iter().skip(rename_count) {
+        actions.push(DirectoryEditAction::Delete {
+            path: root.join(&src.rel_path),
+            is_dir: src.is_dir,
+        });
+    }
+    for dst in added.iter().skip(rename_count) {
+        let path = root.join(&dst.rel_path);
+        if dst.is_dir {
+            actions.push(DirectoryEditAction::CreateDir(path));
+        } else {
+            actions.push(DirectoryEditAction::CreateFile(path));
+        }
+    }
+    Ok(actions)
+}
+
+fn apply_directory_edit_actions(actions: &[DirectoryEditAction]) -> Result<(), String> {
+    for action in actions {
+        match action {
+            DirectoryEditAction::Rename { from, to } => {
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("failed to create `{}`: {error}", parent.display())
+                    })?;
+                }
+                fs::rename(from, to)
+                    .map_err(|error| format!("failed to move `{}`: {error}", from.display()))?;
+            }
+            DirectoryEditAction::Delete { path, is_dir } => {
+                if *is_dir {
+                    fs::remove_dir_all(path).map_err(|error| {
+                        format!("failed to remove `{}`: {error}", path.display())
+                    })?;
+                } else {
+                    fs::remove_file(path).map_err(|error| {
+                        format!("failed to remove `{}`: {error}", path.display())
+                    })?;
+                }
+            }
+            DirectoryEditAction::CreateDir(path) => {
+                fs::create_dir_all(path)
+                    .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
+            }
+            DirectoryEditAction::CreateFile(path) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("failed to create `{}`: {error}", parent.display())
+                    })?;
+                }
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_directory_edit_queue(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let (root, before) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(state) = buffer.directory_state() else {
+            return Ok(());
+        };
+        let snapshot = if state.edit_snapshot.is_empty() {
+            directory_visible_entries(state)
+                .iter()
+                .map(directory_entry_label)
+                .collect()
+        } else {
+            state.edit_snapshot.clone()
+        };
+        (state.root.clone(), snapshot)
+    };
+    let after = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        directory_edit_lines(buffer)
+    };
+    let actions = directory_edit_actions(&root, &before, &after)?;
+    if actions.is_empty() {
+        return Ok(());
+    }
+    apply_directory_edit_actions(&actions)?;
+    refresh_directory_buffer(runtime, buffer_id)?;
+    Ok(())
+}
+
+fn update_directory_state(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    update: impl FnOnce(&mut DirectoryViewState),
+) -> Result<(), String> {
+    let state = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer
+            .directory_state()
+            .cloned()
+            .ok_or_else(|| "directory state is missing".to_owned())?
+    };
+    let mut state = state;
+    update(&mut state);
+    apply_directory_state(runtime, buffer_id, state)
+}
+
+fn directory_root_for_entry(entry: &DirectoryEntry) -> Result<PathBuf, String> {
+    match entry.kind() {
+        DirectoryEntryKind::Directory => Ok(entry.path().to_path_buf()),
+        DirectoryEntryKind::File => entry
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "entry has no parent directory".to_owned()),
+    }
+}
+
+fn directory_cd_from_cursor(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+    let root = directory_root_for_entry(&entry)?;
+    set_directory_root(runtime, buffer_id, root)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DirectoryOpenMode {
+    Current,
+    SplitHorizontal,
+    SplitVertical,
+    NewPane,
+    Preview,
+}
+
+fn open_directory_entry(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    entry: DirectoryEntry,
+    mode: DirectoryOpenMode,
+) -> Result<(), String> {
+    match entry.kind() {
+        DirectoryEntryKind::Directory => {
+            set_directory_root(runtime, buffer_id, entry.path().to_path_buf())
+        }
+        DirectoryEntryKind::File => match mode {
+            DirectoryOpenMode::Current => {
+                open_workspace_file(runtime, entry.path())?;
+                Ok(())
+            }
+            DirectoryOpenMode::SplitHorizontal => {
+                open_file_in_split(runtime, entry.path(), PaneSplitDirection::Horizontal, true)
+            }
+            DirectoryOpenMode::SplitVertical => {
+                open_file_in_split(runtime, entry.path(), PaneSplitDirection::Vertical, true)
+            }
+            DirectoryOpenMode::NewPane => {
+                open_file_in_split(runtime, entry.path(), PaneSplitDirection::Vertical, true)
+            }
+            DirectoryOpenMode::Preview => open_oil_preview_popup(runtime, entry.path()),
+        },
+    }
+}
+
+fn open_file_in_split(
+    runtime: &mut EditorRuntime,
+    path: &Path,
+    direction: PaneSplitDirection,
+    focus: bool,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let original_pane_id = shell_ui(runtime)?
+        .active_pane_id()
+        .ok_or_else(|| "active pane is missing".to_owned())?;
+    if shell_ui(runtime)?.pane_count() < 2 {
+        split_runtime_pane(runtime, direction)?;
+    }
+    let target_pane_id = shell_ui(runtime)?
+        .panes()
+        .and_then(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.pane_id != original_pane_id)
+                .map(|pane| pane.pane_id)
+        })
+        .ok_or_else(|| "split pane is missing".to_owned())?;
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, target_pane_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_pane(target_pane_id);
+    open_workspace_file(runtime, path)?;
+    if !focus {
+        runtime
+            .model_mut()
+            .focus_pane(workspace_id, original_pane_id)
+            .map_err(|error| error.to_string())?;
+        shell_ui_mut(runtime)?.focus_pane(original_pane_id);
+    }
+    Ok(())
+}
+
+fn open_oil_preview_popup(runtime: &mut EditorRuntime, path: &Path) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let existing = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| find_shell_buffer_by_kind(ui, OIL_PREVIEW_KIND));
+    let buffer_id = if let Some(existing) = existing {
+        existing
+    } else {
+        runtime
+            .model_mut()
+            .create_popup_buffer(
+                workspace_id,
+                OIL_PREVIEW_BUFFER_NAME,
+                BufferKind::Plugin(OIL_PREVIEW_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?
+    };
+    runtime
+        .model_mut()
+        .open_popup_buffer(workspace_id, "Preview", buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let text = TextBuffer::load_from_path(path)
+        .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
+    shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
+    refresh_buffer_syntax(runtime, buffer_id)?;
+    Ok(())
+}
+
+fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let existing = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| find_shell_buffer_by_kind(ui, OIL_HELP_KIND));
+    let buffer_id = if let Some(existing) = existing {
+        existing
+    } else {
+        runtime
+            .model_mut()
+            .create_popup_buffer(
+                workspace_id,
+                OIL_HELP_BUFFER_NAME,
+                BufferKind::Plugin(OIL_HELP_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?
+    };
+    runtime
+        .model_mut()
+        .open_popup_buffer(workspace_id, "Oil Help", buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, user::oil::help_lines());
+    shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
+    Ok(())
+}
+
+fn open_external_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("path does not exist: {}", path.display()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -9228,6 +10106,24 @@ fn set_git_prefix(runtime: &mut EditorRuntime, prefix: GitPrefix) -> Result<(), 
     Ok(())
 }
 
+fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    const PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
+    let now = Instant::now();
+    let ui = shell_ui_mut(runtime)?;
+    let pending = matches!(
+        ui.pending_directory_prefix.take(),
+        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT
+    );
+    Ok(pending)
+}
+
+fn set_directory_prefix(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.pending_directory_prefix = Some(DirectoryPrefixState {
+        started_at: Instant::now(),
+    });
+    Ok(())
+}
+
 fn take_key_sequence(runtime: &mut EditorRuntime) -> Result<Option<Vec<String>>, String> {
     const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
@@ -9848,6 +10744,132 @@ fn handle_git_view_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<boo
     };
     apply_git_view(runtime, buffer_id, view)?;
     Ok(true)
+}
+
+fn handle_directory_keydown_chord(
+    runtime: &mut EditorRuntime,
+    chord: &str,
+) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_directory(&buffer.kind) {
+        return Ok(false);
+    }
+    shell_ui_mut(runtime)?.pending_directory_prefix = None;
+    match chord {
+        "Enter" => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
+            Ok(true)
+        }
+        "Ctrl+s" => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
+            Ok(true)
+        }
+        "Ctrl+h" => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(
+                runtime,
+                buffer_id,
+                entry,
+                DirectoryOpenMode::SplitHorizontal,
+            )?;
+            Ok(true)
+        }
+        "Ctrl+t" => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
+            Ok(true)
+        }
+        "Ctrl+p" => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
+            Ok(true)
+        }
+        "Ctrl+l" => {
+            refresh_directory_buffer(runtime, buffer_id)?;
+            Ok(true)
+        }
+        "Ctrl+c" => {
+            close_buffer_discard(runtime, buffer_id)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_directory(&buffer.kind) {
+        return Ok(false);
+    }
+    if take_directory_prefix(runtime)? {
+        match chord {
+            "?" => {
+                open_oil_help_popup(runtime)?;
+                Ok(true)
+            }
+            "." => {
+                update_directory_state(runtime, buffer_id, |state| {
+                    state.show_hidden = !state.show_hidden;
+                })?;
+                Ok(true)
+            }
+            "\\" => {
+                update_directory_state(runtime, buffer_id, |state| {
+                    state.trash_enabled = !state.trash_enabled;
+                })?;
+                Ok(true)
+            }
+            "s" => {
+                update_directory_state(runtime, buffer_id, |state| {
+                    state.sort_mode = state.sort_mode.cycle();
+                })?;
+                Ok(true)
+            }
+            "x" => {
+                let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+                open_external_path(entry.path())?;
+                Ok(true)
+            }
+            "~" => {
+                directory_cd_from_cursor(runtime, buffer_id)?;
+                Ok(true)
+            }
+            _ => {
+                record_runtime_error(
+                    runtime,
+                    "oil.directory",
+                    format!("unknown oil g action `{chord}`"),
+                );
+                Ok(true)
+            }
+        }
+    } else {
+        match chord {
+            "g" => {
+                set_directory_prefix(runtime)?;
+                Ok(true)
+            }
+            "-" => {
+                let root = oil_parent_root(runtime)?;
+                set_directory_root(runtime, buffer_id, root)?;
+                Ok(true)
+            }
+            "_" => {
+                let root = oil_workspace_root(runtime)?;
+                set_directory_root(runtime, buffer_id, root)?;
+                Ok(true)
+            }
+            "`" => {
+                directory_cd_from_cursor(runtime, buffer_id)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }
 
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -10753,6 +11775,7 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         "GitView",
         GIT_VIEW_KEYBINDINGS,
     ));
+    entries.extend(contextual_keybinding_entries("Oil", OIL_KEYBINDINGS));
 
     PickerOverlay::from_entries("Keybindings", entries)
 }
@@ -11143,6 +12166,89 @@ const GIT_VIEW_KEYBINDINGS: &[ContextKeybinding] = &[ContextKeybinding {
     description: "Refreshes git diff/log/stash buffers.",
 }];
 
+const OIL_KEYBINDINGS: &[ContextKeybinding] = &[
+    ContextKeybinding {
+        chord: "Enter",
+        action: "open",
+        description: "Opens the file or enters the selected directory.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+s",
+        action: "open vertical split",
+        description: "Opens the selection in a vertical split.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+h",
+        action: "open horizontal split",
+        description: "Opens the selection in a horizontal split.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+t",
+        action: "open new pane",
+        description: "Opens the selection in a new pane.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+p",
+        action: "preview",
+        description: "Previews the selected file.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+l",
+        action: "refresh",
+        description: "Refreshes the directory listing.",
+    },
+    ContextKeybinding {
+        chord: "Ctrl+c",
+        action: "close",
+        description: "Closes the directory buffer.",
+    },
+    ContextKeybinding {
+        chord: "-",
+        action: "parent directory",
+        description: "Navigates to the parent directory.",
+    },
+    ContextKeybinding {
+        chord: "_",
+        action: "workspace root",
+        description: "Navigates to the workspace root.",
+    },
+    ContextKeybinding {
+        chord: "`",
+        action: "set root",
+        description: "Sets the directory root to the selection.",
+    },
+    ContextKeybinding {
+        chord: "g~",
+        action: "set root (tab)",
+        description: "Sets the directory root to the selection (tab-local).",
+    },
+    ContextKeybinding {
+        chord: "gs",
+        action: "change sort",
+        description: "Cycles the directory sort order.",
+    },
+    ContextKeybinding {
+        chord: "g.",
+        action: "toggle hidden",
+        description: "Toggles hidden file visibility.",
+    },
+    ContextKeybinding {
+        chord: "g\\",
+        action: "toggle trash",
+        description: "Toggles trash usage for deletions.",
+    },
+    ContextKeybinding {
+        chord: "gx",
+        action: "open external",
+        description: "Opens the selection externally.",
+    },
+    ContextKeybinding {
+        chord: "g?",
+        action: "help",
+        description: "Shows the oil help popup.",
+    },
+];
+
 fn contextual_keybinding_entries(scope: &str, bindings: &[ContextKeybinding]) -> Vec<PickerEntry> {
     bindings
         .iter()
@@ -11479,13 +12585,17 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
     if keymod.intersects(ctrl_mod()) {
         return match keycode {
             Keycode::B => Some("Ctrl+b".to_owned()),
+            Keycode::C => Some("Ctrl+c".to_owned()),
             Keycode::D => Some("Ctrl+d".to_owned()),
             Keycode::E => Some("Ctrl+e".to_owned()),
             Keycode::F => Some("Ctrl+f".to_owned()),
+            Keycode::H => Some("Ctrl+h".to_owned()),
             Keycode::L => Some("Ctrl+l".to_owned()),
             Keycode::N => Some("Ctrl+n".to_owned()),
             Keycode::P => Some("Ctrl+p".to_owned()),
             Keycode::R => Some("Ctrl+r".to_owned()),
+            Keycode::S => Some("Ctrl+s".to_owned()),
+            Keycode::T => Some("Ctrl+t".to_owned()),
             Keycode::U => Some("Ctrl+u".to_owned()),
             Keycode::V => Some("Ctrl+v".to_owned()),
             Keycode::Y => Some("Ctrl+y".to_owned()),
@@ -11784,6 +12894,9 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),
+        BufferKind::Directory => (false, None),
         _ => (false, None),
     }
 }
