@@ -579,6 +579,24 @@ fn wrap_line_segments(
     segments
 }
 
+fn wrap_line_segments_for_line(
+    line: &str,
+    wrap_cols: usize,
+    indent_size: usize,
+) -> Vec<LineWrapSegment> {
+    let char_map = LineCharMap::new(line);
+    let (leading_indent_cols, _) = leading_whitespace_info(line, indent_size);
+    let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
+    let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
+    wrap_line_segments(&char_map, wrap_cols, continuation_cols)
+}
+
+fn line_wrap_row_count(line: &str, wrap_cols: usize, indent_size: usize) -> usize {
+    wrap_line_segments_for_line(line, wrap_cols, indent_size)
+        .len()
+        .max(1)
+}
+
 fn segment_index_for_column(segments: &[LineWrapSegment], column: usize) -> usize {
     if segments.is_empty() {
         return 0;
@@ -886,10 +904,49 @@ pub(crate) struct ShellBuffer {
     language_id: Option<String>,
     pub(crate) scroll_row: usize,
     viewport_lines: usize,
+    wrap_cache: Option<WrapRowCache>,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
     last_edit_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct WrapRowCache {
+    wrap_cols: usize,
+    indent_size: usize,
+    line_count: usize,
+    prefix_rows: Vec<usize>,
+}
+
+impl WrapRowCache {
+    fn build(buffer: &ShellBuffer, wrap_cols: usize, indent_size: usize) -> Self {
+        let line_count = buffer.line_count();
+        let mut prefix_rows: Vec<usize> = Vec::with_capacity(line_count + 1);
+        prefix_rows.push(0);
+        for line_index in 0..line_count {
+            let line = buffer.text.line(line_index).unwrap_or_default();
+            let rows = line_wrap_row_count(&line, wrap_cols, indent_size);
+            let next = prefix_rows
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(rows);
+            prefix_rows.push(next);
+        }
+        Self {
+            wrap_cols,
+            indent_size,
+            line_count,
+            prefix_rows,
+        }
+    }
+
+    fn matches(&self, wrap_cols: usize, indent_size: usize, line_count: usize) -> bool {
+        self.wrap_cols == wrap_cols
+            && self.indent_size == indent_size
+            && self.line_count == line_count
+    }
 }
 
 impl ShellBuffer {
@@ -916,6 +973,7 @@ impl ShellBuffer {
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
+            wrap_cache: None,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -940,6 +998,7 @@ impl ShellBuffer {
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
+            wrap_cache: None,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -971,6 +1030,7 @@ impl ShellBuffer {
             language_id: None,
             scroll_row: 0,
             viewport_lines: 1,
+            wrap_cache: None,
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -1080,6 +1140,7 @@ impl ShellBuffer {
         self.syntax_lines.clear();
         self.syntax_dirty = false;
         self.last_edit_at = None;
+        self.invalidate_wrap_cache();
     }
 
     fn language_id(&self) -> Option<&str> {
@@ -1132,6 +1193,10 @@ impl ShellBuffer {
         self.language_id = language_id;
     }
 
+    fn invalidate_wrap_cache(&mut self) {
+        self.wrap_cache = None;
+    }
+
     fn set_syntax_error(&mut self, error: Option<String>) {
         self.syntax_error = error;
     }
@@ -1149,6 +1214,7 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.last_edit_at = None;
         self.scroll_row = 0;
+        self.invalidate_wrap_cache();
     }
 
     fn replace_with_lines_preserve_view(&mut self, lines: Vec<String>) {
@@ -1177,10 +1243,11 @@ impl ShellBuffer {
         self.text.set_cursor(TextPoint::new(line, column));
         let max_scroll = line_count.saturating_sub(1);
         self.scroll_row = scroll_row.min(max_scroll);
+        self.invalidate_wrap_cache();
     }
 
     fn mark_syntax_dirty(&mut self) {
-        if self.kind == BufferKind::File {
+        if self.kind == BufferKind::File || self.language_id.is_some() {
             self.syntax_dirty = true;
             self.last_edit_at = Some(Instant::now());
         }
@@ -1201,37 +1268,48 @@ impl ShellBuffer {
 
     fn insert_text(&mut self, text: &str) {
         self.text.insert_text(text);
+        self.invalidate_wrap_cache();
     }
 
     fn replace_mode_text(&mut self, text: &str) {
+        let mut changed = false;
         for character in text.chars() {
             if character == '\n' {
                 self.text.insert_newline();
+                changed = true;
                 continue;
             }
 
             let point = self.cursor_point();
             let Some(next) = self.point_after(point) else {
                 self.text.insert_text(&character.to_string());
+                changed = true;
                 continue;
             };
 
             let current = self.slice(TextRange::new(point, next));
             if current == "\n" {
                 self.text.insert_text(&character.to_string());
+                changed = true;
             } else {
                 self.text
                     .replace(TextRange::new(point, next), &character.to_string());
+                changed = true;
             }
+        }
+        if changed {
+            self.invalidate_wrap_cache();
         }
     }
 
     fn backspace(&mut self) {
         let _ = self.text.backspace();
+        self.invalidate_wrap_cache();
     }
 
     fn delete_forward(&mut self) {
         let _ = self.text.delete_forward();
+        self.invalidate_wrap_cache();
     }
 
     fn move_left(&mut self) -> bool {
@@ -1402,6 +1480,7 @@ impl ShellBuffer {
         self.text
             .set_cursor(editor_buffer::TextPoint::new(line, column));
         self.text.insert_newline();
+        self.invalidate_wrap_cache();
     }
 
     fn open_line_above(&mut self) {
@@ -1409,6 +1488,7 @@ impl ShellBuffer {
         self.text.set_cursor(editor_buffer::TextPoint::new(line, 0));
         self.text.insert_newline();
         let _ = self.text.move_up();
+        self.invalidate_wrap_cache();
     }
 
     fn undo(&mut self) {
@@ -1453,10 +1533,12 @@ impl ShellBuffer {
 
     fn delete_range(&mut self, range: TextRange) {
         self.text.delete(range);
+        self.invalidate_wrap_cache();
     }
 
     fn replace_range(&mut self, range: TextRange, text: &str) {
         self.text.replace(range, text);
+        self.invalidate_wrap_cache();
     }
 
     fn replace_chars_at_cursor(&mut self, character: char, count: usize) -> bool {
@@ -1579,6 +1661,7 @@ impl ShellBuffer {
     fn insert_at(&mut self, point: TextPoint, text: &str) {
         self.text.set_cursor(point);
         self.text.insert_text(text);
+        self.invalidate_wrap_cache();
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -1613,33 +1696,6 @@ impl ShellBuffer {
         self.move_to_viewport_offset(middle)
     }
 
-    fn cursor_visual_row_offset(&self, wrap_cols: usize, indent_size: usize) -> Option<usize> {
-        let wrap_cols = wrap_cols.max(1);
-        let cursor_row = self.cursor_row();
-        let cursor_col = self.cursor_col();
-        if cursor_row < self.scroll_row {
-            return Some(0);
-        }
-
-        let mut row_offset = 0usize;
-        for line_index in self.scroll_row..=cursor_row {
-            let line = self.text.line(line_index).unwrap_or_default();
-            let map = LineCharMap::new(&line);
-            let (leading_indent_cols, _) = leading_whitespace_info(&line, indent_size);
-            let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
-            let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
-            let segments = wrap_line_segments(&map, wrap_cols, continuation_cols);
-            if line_index == cursor_row {
-                let segment_index = segment_index_for_column(&segments, cursor_col);
-                row_offset = row_offset.saturating_add(segment_index);
-                return Some(row_offset);
-            }
-            row_offset = row_offset.saturating_add(segments.len());
-        }
-
-        None
-    }
-
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
         let visible_rows = visible_rows.max(1);
         let cursor_row = self.cursor_row();
@@ -1647,19 +1703,81 @@ impl ShellBuffer {
             self.scroll_row = cursor_row;
             return;
         }
-
-        loop {
-            let Some(cursor_offset) = self.cursor_visual_row_offset(wrap_cols, indent_size) else {
-                break;
-            };
-            if cursor_offset < visible_rows {
-                break;
-            }
-            if self.scroll_row >= cursor_row {
-                break;
-            }
-            self.scroll_row = self.scroll_row.saturating_add(1);
+        if self.line_count() == 0 {
+            self.scroll_row = 0;
+            return;
         }
+
+        let cursor_col = self.cursor_col();
+        let cursor_line = self.text.line(cursor_row).unwrap_or_default();
+        let cursor_segments = wrap_line_segments_for_line(&cursor_line, wrap_cols, indent_size);
+        let cursor_segment_index = segment_index_for_column(&cursor_segments, cursor_col);
+
+        let line_count = self.line_count();
+        let distance = cursor_row.saturating_sub(self.scroll_row);
+        let threshold = visible_rows.saturating_mul(4).max(256);
+        let cache_valid = match self.wrap_cache.as_ref() {
+            Some(cache) => cache.matches(wrap_cols, indent_size, line_count),
+            None => false,
+        };
+        if !cache_valid {
+            self.wrap_cache = None;
+        }
+        if self.wrap_cache.is_none() && distance >= threshold {
+            self.wrap_cache = Some(WrapRowCache::build(self, wrap_cols, indent_size));
+        }
+
+        if let Some(cache) = self.wrap_cache.as_ref() {
+            let base = cache
+                .prefix_rows
+                .get(cursor_row)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(cursor_segment_index);
+            let current_offset =
+                base.saturating_sub(cache.prefix_rows.get(self.scroll_row).copied().unwrap_or(0));
+            if current_offset < visible_rows {
+                return;
+            }
+            let threshold = base.saturating_sub(visible_rows);
+            let mut target = cache
+                .prefix_rows
+                .partition_point(|&value| value <= threshold);
+            if target > cursor_row {
+                target = cursor_row;
+            }
+            if target < self.scroll_row {
+                target = self.scroll_row;
+            }
+            self.scroll_row = target;
+            return;
+        }
+
+        let mut row_offset = 0usize;
+        let mut row_counts = Vec::with_capacity(distance);
+        for line_index in self.scroll_row..cursor_row {
+            let line = self.text.line(line_index).unwrap_or_default();
+            let row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+            row_offset = row_offset.saturating_add(row_count);
+            row_counts.push(row_count);
+        }
+        row_offset = row_offset.saturating_add(cursor_segment_index);
+        if row_offset < visible_rows {
+            return;
+        }
+        let mut offset = row_offset;
+        let mut new_scroll = self.scroll_row;
+        for row_count in row_counts {
+            if offset < visible_rows || new_scroll >= cursor_row {
+                break;
+            }
+            offset = offset.saturating_sub(row_count);
+            new_scroll = new_scroll.saturating_add(1);
+        }
+        if new_scroll > cursor_row {
+            new_scroll = cursor_row;
+        }
+        self.scroll_row = new_scroll;
     }
 }
 
@@ -7849,14 +7967,15 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let template = user::git::commit_buffer_template();
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
+    shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
         let ui = shell_ui_mut(runtime)?;
         ui.insert_buffer(shell_buffer);
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_insert_mode();
     }
-    Ok(())
+    refresh_buffer_syntax(runtime, buffer_id)
 }
 
 fn git_commit_temp_path() -> PathBuf {
@@ -9968,51 +10087,79 @@ fn refresh_workspace_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
-    let Some((path, text)) = shell_ui(runtime)?.buffer(buffer_id).and_then(|buffer| {
-        buffer
-            .path()
-            .map(|path| (path.to_path_buf(), buffer.text.clone()))
-    }) else {
+    let (path, text, buffer_language_id) = {
+        let Some(buffer) = shell_ui(runtime)?.buffer(buffer_id) else {
+            return Ok(());
+        };
+        (
+            buffer.path().map(|path| path.to_path_buf()),
+            buffer.text.clone(),
+            buffer
+                .language_id()
+                .map(|language_id| language_id.to_owned()),
+        )
+    };
+
+    if path.is_none() && buffer_language_id.is_none() {
         if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id) {
             buffer.set_syntax_snapshot(None);
             buffer.set_syntax_error(None);
             buffer.set_language_id(None);
         }
         return Ok(());
-    };
+    }
 
     let (language_id, syntax_result) = {
         let registry = syntax_registry_mut(runtime)?;
-        let language_id = registry
-            .language_for_path(&path)
-            .map(|language| language.id().to_owned());
-        let syntax_result = match registry.highlight_buffer_for_path(&path, &text) {
-            Ok(snapshot) => Ok(snapshot),
-            Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
-                if let Err(error) = registry.install_language(&language_id) {
-                    Err(error)
-                } else {
-                    registry.highlight_buffer_for_path(&path, &text)
+        if let Some(path) = path.as_ref() {
+            let language_id = registry
+                .language_for_path(path)
+                .map(|language| language.id().to_owned());
+            let syntax_result = match registry.highlight_buffer_for_path(path, &text) {
+                Ok(snapshot) => Ok(snapshot),
+                Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
+                    if let Err(error) = registry.install_language(&language_id) {
+                        Err(error)
+                    } else {
+                        registry.highlight_buffer_for_path(path, &text)
+                    }
                 }
-            }
-            Err(error) => Err(error),
-        };
-        (language_id, syntax_result)
+                Err(error) => Err(error),
+            };
+            (language_id, syntax_result)
+        } else if let Some(language_id) = buffer_language_id.clone() {
+            let syntax_result = match registry.highlight_buffer_for_language(&language_id, &text) {
+                Ok(snapshot) => Ok(snapshot),
+                Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
+                    if let Err(error) = registry.install_language(&language_id) {
+                        Err(error)
+                    } else {
+                        registry.highlight_buffer_for_language(&language_id, &text)
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            (Some(language_id), syntax_result)
+        } else {
+            return Ok(());
+        }
     };
 
     let ui = shell_ui_mut(runtime)?;
     if let Some(buffer) = ui.buffer_mut(buffer_id) {
-        buffer.set_language_id(language_id);
+        buffer.set_language_id(language_id.clone());
         match syntax_result {
             Ok(snapshot) => {
                 buffer.set_syntax_snapshot(Some(snapshot));
                 buffer.set_syntax_error(None);
             }
             Err(error) => {
-                eprintln!(
-                    "tree-sitter syntax refresh failed for `{}`: {error}",
-                    path.display()
-                );
+                let error_label = path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| language_id.clone())
+                    .unwrap_or_else(|| "buffer".to_owned());
+                eprintln!("tree-sitter syntax refresh failed for `{error_label}`: {error}");
                 buffer.set_syntax_snapshot(None);
                 buffer.set_syntax_error(Some(error.to_string()));
             }

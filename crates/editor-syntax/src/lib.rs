@@ -729,6 +729,16 @@ impl SyntaxRegistry {
             .get(&extension)
             .cloned()
             .ok_or_else(|| SyntaxError::UnknownExtension(extension.clone()))?;
+        self.highlight_buffer_for_language(&language_id, buffer)
+    }
+
+    /// Parses and highlights a buffer using a registered language identifier.
+    pub fn highlight_buffer_for_language(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        let language_id = language_id.to_owned();
         let config = self
             .languages
             .get(&language_id)

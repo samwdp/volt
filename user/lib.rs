@@ -110,12 +110,13 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 3);
+        assert!(languages.len() >= 4);
         let ids = languages
             .iter()
             .map(|language| language.id())
             .collect::<Vec<_>>();
         assert!(ids.contains(&"rust"));
+        assert!(ids.contains(&"gitcommit"));
         assert!(ids.contains(&"markdown"));
         assert!(ids.contains(&"markdown-inline"));
         let rust = languages.iter().find(|language| language.id() == "rust");

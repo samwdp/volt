@@ -877,12 +877,7 @@ impl TextBuffer {
 
     /// Moves the cursor to the start of the next paragraph.
     pub fn move_paragraph_forward(&mut self) -> bool {
-        let boundaries = self.paragraph_boundary_lines();
-        if let Some(target) = boundaries
-            .iter()
-            .copied()
-            .find(|line| *line > self.cursor.line)
-        {
+        if let Some(target) = self.next_paragraph_boundary_after(self.cursor.line) {
             self.cursor = TextPoint::new(target, 0);
             return true;
         }
@@ -902,7 +897,6 @@ impl TextBuffer {
 
     /// Moves the cursor to the start of the current or previous paragraph.
     pub fn move_paragraph_backward(&mut self) -> bool {
-        let boundaries = self.paragraph_boundary_lines();
         let search_line = if self.line_is_blank(self.cursor.line) {
             let mut run_start = self.cursor.line;
             while run_start > 0 && self.line_is_blank(run_start - 1) {
@@ -912,7 +906,7 @@ impl TextBuffer {
         } else {
             self.cursor.line
         };
-        let Some(target) = boundaries.iter().copied().rfind(|line| *line < search_line) else {
+        let Some(target) = self.previous_paragraph_boundary_before(search_line) else {
             let target = TextPoint::new(0, 0);
             if target == self.cursor {
                 return false;
@@ -1315,30 +1309,67 @@ impl TextBuffer {
         ranges
     }
 
-    fn paragraph_boundary_lines(&self) -> Vec<usize> {
-        let mut boundaries = Vec::new();
-        let mut line = 0;
-        while line < self.line_count() {
+    fn next_paragraph_boundary_after(&self, line_index: usize) -> Option<usize> {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return None;
+        }
+        let mut line = line_index.saturating_add(1);
+        while line < line_count {
             if !self.line_is_blank(line) {
                 line += 1;
                 continue;
             }
 
             let run_start = line;
-            while line + 1 < self.line_count() && self.line_is_blank(line + 1) {
+            while line + 1 < line_count && self.line_is_blank(line + 1) {
                 line += 1;
             }
             let run_end = line;
             let separated_blocks = run_start > 0
-                && run_end + 1 < self.line_count()
+                && run_end + 1 < line_count
                 && !self.line_is_blank(run_start - 1)
                 && !self.line_is_blank(run_end + 1);
             if separated_blocks {
-                boundaries.push(run_start);
+                return Some(run_start);
             }
-            line += 1;
+            line = line.saturating_add(1);
         }
-        boundaries
+        None
+    }
+
+    fn previous_paragraph_boundary_before(&self, line_index: usize) -> Option<usize> {
+        let line_count = self.line_count();
+        if line_index == 0 || line_count == 0 {
+            return None;
+        }
+        let mut line = line_index.saturating_sub(1);
+        loop {
+            if self.line_is_blank(line) {
+                let run_end = line;
+                let mut run_start = run_end;
+                while run_start > 0 && self.line_is_blank(run_start - 1) {
+                    run_start -= 1;
+                }
+                let separated_blocks = run_start > 0
+                    && run_end + 1 < line_count
+                    && !self.line_is_blank(run_start - 1)
+                    && !self.line_is_blank(run_end + 1);
+                if separated_blocks {
+                    return Some(run_start);
+                }
+                if run_start == 0 {
+                    break;
+                }
+                line = run_start.saturating_sub(1);
+                continue;
+            }
+            if line == 0 {
+                break;
+            }
+            line = line.saturating_sub(1);
+        }
+        None
     }
 
     fn is_blank_line_gap(&self, char_index: usize) -> bool {
