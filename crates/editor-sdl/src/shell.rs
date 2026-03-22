@@ -25,7 +25,7 @@ use editor_core::{
 };
 use editor_fs::discover_projects;
 use editor_git::{
-    GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
+    GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
     parse_stash_list, parse_status,
 };
 use editor_jobs::{JobManager, JobSpec};
@@ -1682,6 +1682,20 @@ enum GitBranchActionKind {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum GitCommitActionKind {
+    CherryPick,
+    CherryPickNoCommit,
+    Revert,
+    RevertNoCommit,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GitSequenceKind {
+    CherryPick,
+    Revert,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct ShellPane {
     pane_id: PaneId,
     buffer_id: BufferId,
@@ -1721,6 +1735,10 @@ enum PickerAction {
     GitBranchAction {
         action: GitBranchActionKind,
         branch: String,
+    },
+    GitCommitAction {
+        action: GitCommitActionKind,
+        commit: String,
     },
 }
 
@@ -1874,6 +1892,8 @@ enum GitPrefix {
     Stash,
     Merge,
     Rebase,
+    CherryPick,
+    Revert,
 }
 
 #[derive(Debug, Clone)]
@@ -4748,6 +4768,20 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     }
                     GitBranchActionKind::RebaseInteractive => {
                         rebase_git_interactive_onto(runtime, &branch)?;
+                    }
+                },
+                PickerAction::GitCommitAction { action, commit } => match action {
+                    GitCommitActionKind::CherryPick => {
+                        cherry_pick_git_commit(runtime, &commit)?;
+                    }
+                    GitCommitActionKind::CherryPickNoCommit => {
+                        cherry_pick_git_commit_no_commit(runtime, &commit)?;
+                    }
+                    GitCommitActionKind::Revert => {
+                        revert_git_commit(runtime, &commit)?;
+                    }
+                    GitCommitActionKind::RevertNoCommit => {
+                        revert_git_commit_no_commit(runtime, &commit)?;
                     }
                 },
             }
@@ -8281,6 +8315,177 @@ fn git_rebase_in_progress(runtime: &mut EditorRuntime) -> Result<bool, String> {
     Ok(git_dir.join("rebase-apply").is_dir() || git_dir.join("rebase-merge").is_dir())
 }
 
+fn git_sequence_in_progress(
+    runtime: &mut EditorRuntime,
+) -> Result<Option<GitSequenceKind>, String> {
+    let root = git_root(runtime)?;
+    let Some(git_dir) = git_dir_path(runtime, &root) else {
+        return Ok(None);
+    };
+    if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+        return Ok(Some(GitSequenceKind::CherryPick));
+    }
+    if git_dir.join("REVERT_HEAD").is_file() {
+        return Ok(Some(GitSequenceKind::Revert));
+    }
+    Ok(None)
+}
+
+fn sequence_git_continue(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    match kind {
+        GitSequenceKind::CherryPick => {
+            git_command_output(
+                runtime,
+                &root,
+                "cherry-pick --continue",
+                &["cherry-pick", "--continue"],
+            )?;
+        }
+        GitSequenceKind::Revert => {
+            git_command_output(
+                runtime,
+                &root,
+                "revert --continue",
+                &["revert", "--continue"],
+            )?;
+        }
+    }
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn sequence_git_skip(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    match kind {
+        GitSequenceKind::CherryPick => {
+            git_command_output(
+                runtime,
+                &root,
+                "cherry-pick --skip",
+                &["cherry-pick", "--skip"],
+            )?;
+        }
+        GitSequenceKind::Revert => {
+            git_command_output(runtime, &root, "revert --skip", &["revert", "--skip"])?;
+        }
+    }
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn sequence_git_abort(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    match kind {
+        GitSequenceKind::CherryPick => {
+            git_command_output(
+                runtime,
+                &root,
+                "cherry-pick --abort",
+                &["cherry-pick", "--abort"],
+            )?;
+        }
+        GitSequenceKind::Revert => {
+            git_command_output(runtime, &root, "revert --abort", &["revert", "--abort"])?;
+        }
+    }
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn git_commit_at_point(meta: Option<&SectionLineMeta>) -> Option<String> {
+    git_action_detail(meta, GIT_ACTION_SHOW_COMMIT)
+}
+
+fn cherry_pick_git_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "cherry-pick", &["cherry-pick", commit])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn cherry_pick_git_commit_no_commit(
+    runtime: &mut EditorRuntime,
+    commit: &str,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "cherry-pick --no-commit",
+        &["cherry-pick", "--no-commit", commit],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn revert_git_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "revert", &["revert", commit])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn revert_git_commit_no_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(
+        runtime,
+        &root,
+        "revert --no-commit",
+        &["revert", "--no-commit", commit],
+    )?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn cherry_pick_commit_at_point_or_picker(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    if let Some(commit) = git_commit_at_point(meta) {
+        return cherry_pick_git_commit(runtime, &commit);
+    }
+    open_git_commit_picker_with_action(runtime, "Git Cherry-Pick", GitCommitActionKind::CherryPick)
+}
+
+fn cherry_pick_apply_at_point_or_picker(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    if let Some(commit) = git_commit_at_point(meta) {
+        return cherry_pick_git_commit_no_commit(runtime, &commit);
+    }
+    open_git_commit_picker_with_action(
+        runtime,
+        "Git Cherry-Pick (Apply)",
+        GitCommitActionKind::CherryPickNoCommit,
+    )
+}
+
+fn revert_commit_at_point_or_picker(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    if let Some(commit) = git_commit_at_point(meta) {
+        return revert_git_commit(runtime, &commit);
+    }
+    open_git_commit_picker_with_action(runtime, "Git Revert", GitCommitActionKind::Revert)
+}
+
+fn revert_no_commit_at_point_or_picker(
+    runtime: &mut EditorRuntime,
+    meta: Option<&SectionLineMeta>,
+) -> Result<(), String> {
+    if let Some(commit) = git_commit_at_point(meta) {
+        return revert_git_commit_no_commit(runtime, &commit);
+    }
+    open_git_commit_picker_with_action(
+        runtime,
+        "Git Revert (No Commit)",
+        GitCommitActionKind::RevertNoCommit,
+    )
+}
+
 fn merge_git_plain(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "merge", &["merge", branch])?;
@@ -8601,6 +8806,50 @@ fn git_branch_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<Strin
     branches.sort();
     branches.dedup();
     Ok(branches)
+}
+
+fn git_commit_list(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    limit: usize,
+) -> Result<Vec<GitLogEntry>, String> {
+    let output = git_command_output(
+        runtime,
+        root,
+        "log --oneline",
+        &["log", "-n", &limit.to_string(), "--oneline"],
+    )?;
+    Ok(parse_log_oneline(&output))
+}
+
+fn open_git_commit_picker_with_action(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    action: GitCommitActionKind,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let commits = git_commit_list(runtime, &root, GIT_LOG_VIEW_LIMIT)?;
+    if commits.is_empty() {
+        return Err("no commits found".to_owned());
+    }
+    let entries = commits
+        .into_iter()
+        .map(|commit| {
+            let label = format!("{} {}", commit.hash(), commit.summary());
+            let item_id = format!("git-commit:{}", commit.hash());
+            let action = PickerAction::GitCommitAction {
+                action,
+                commit: commit.hash().to_owned(),
+            };
+            PickerEntry {
+                item: PickerItem::new(item_id, label, "commit", None::<String>),
+                action,
+            }
+        })
+        .collect();
+    let picker = PickerOverlay::from_entries(title, entries);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
 }
 
 fn open_git_branch_picker_with_action(
@@ -9026,6 +9275,59 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
                 open_git_stash_list_buffer(runtime)?;
                 return Ok(true);
             }
+            GitPrefix::CherryPick if chord == "A" => {
+                if let Some(kind) = git_sequence_in_progress(runtime)? {
+                    sequence_git_continue(runtime, kind)?;
+                } else {
+                    cherry_pick_commit_at_point_or_picker(runtime, meta.as_ref())?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::CherryPick if chord == "a" => {
+                if let Some(kind) = git_sequence_in_progress(runtime)? {
+                    sequence_git_abort(runtime, kind)?;
+                } else {
+                    cherry_pick_apply_at_point_or_picker(runtime, meta.as_ref())?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::CherryPick if chord == "s" => {
+                let Some(kind) = git_sequence_in_progress(runtime)? else {
+                    return Err("cherry-pick move commands are not supported yet".to_owned());
+                };
+                sequence_git_skip(runtime, kind)?;
+                return Ok(true);
+            }
+            GitPrefix::Revert if chord == "V" => {
+                if let Some(kind) = git_sequence_in_progress(runtime)? {
+                    sequence_git_continue(runtime, kind)?;
+                } else {
+                    revert_commit_at_point_or_picker(runtime, meta.as_ref())?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::Revert if chord == "v" => {
+                if let Some(kind) = git_sequence_in_progress(runtime)? {
+                    sequence_git_abort(runtime, kind)?;
+                } else {
+                    revert_no_commit_at_point_or_picker(runtime, meta.as_ref())?;
+                }
+                return Ok(true);
+            }
+            GitPrefix::Revert if chord == "s" => {
+                let Some(kind) = git_sequence_in_progress(runtime)? else {
+                    return Err("no cherry-pick or revert in progress".to_owned());
+                };
+                sequence_git_skip(runtime, kind)?;
+                return Ok(true);
+            }
+            GitPrefix::Revert if chord == "a" => {
+                let Some(kind) = git_sequence_in_progress(runtime)? else {
+                    return Err("no cherry-pick or revert in progress".to_owned());
+                };
+                sequence_git_abort(runtime, kind)?;
+                return Ok(true);
+            }
             _ => {}
         }
     }
@@ -9048,6 +9350,9 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
             | "m"
             | "r"
             | "Y"
+            | "A"
+            | "V"
+            | "a"
     ) {
         return Ok(false);
     }
@@ -9139,6 +9444,18 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         }
         "Y" => {
             open_git_cherry_buffer(runtime, buffer_id)?;
+            Ok(true)
+        }
+        "A" => {
+            set_git_prefix(runtime, GitPrefix::CherryPick)?;
+            Ok(true)
+        }
+        "V" => {
+            set_git_prefix(runtime, GitPrefix::Revert)?;
+            Ok(true)
+        }
+        "a" => {
+            cherry_pick_apply_at_point_or_picker(runtime, meta.as_ref())?;
             Ok(true)
         }
         _ => Ok(false),
