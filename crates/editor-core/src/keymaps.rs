@@ -205,6 +205,34 @@ impl KeymapRegistry {
         self.get_for_mode(scope, vim_mode, chord).is_some()
     }
 
+    /// Returns whether any binding has a multi-token prefix matching the provided tokens.
+    pub fn has_sequence_prefix_for_mode(
+        &self,
+        scope: &KeymapScope,
+        vim_mode: KeymapVimMode,
+        tokens: &[String],
+    ) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+        self.bindings.keys().any(|key| {
+            if &key.scope != scope {
+                return false;
+            }
+            if key.vim_mode != vim_mode && key.vim_mode != KeymapVimMode::Any {
+                return false;
+            }
+            let mut iter = key.chord.split_whitespace();
+            for token in tokens {
+                match iter.next() {
+                    Some(part) if part == token => {}
+                    _ => return false,
+                }
+            }
+            iter.next().is_some()
+        })
+    }
+
     /// Returns a binding by scope, Vim mode, and chord.
     pub fn get_for_mode(
         &self,
