@@ -20,10 +20,14 @@ use crate::state::{
 use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
-    KeymapVimMode, PaneId, WorkspaceId, builtins,
+    KeymapVimMode, PaneId, SectionAction, SectionCollapseState, SectionRenderLine,
+    SectionRenderLineKind, WorkspaceId, builtins,
 };
 use editor_fs::discover_projects;
-use editor_git::list_repository_files;
+use editor_git::{
+    GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
+    parse_stash_list, parse_status,
+};
 use editor_jobs::{JobManager, JobSpec};
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
@@ -93,6 +97,14 @@ const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
+const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
+const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
+const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
+const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
+const GIT_ACTION_COMMIT_OPEN: &str = user::git::ACTION_COMMIT_OPEN;
+const GIT_ACTION_PUSH: &str = user::git::ACTION_PUSH;
+const GIT_SECTION_COMMIT: &str = user::git::SECTION_COMMIT;
+const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
 const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
@@ -101,6 +113,7 @@ const OPTION_FONT_SIZE: &str = "font_size";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
+const GIT_LOG_LIMIT: usize = 10;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
@@ -808,12 +821,37 @@ impl InputField {
 }
 
 #[derive(Debug, Clone)]
+struct SectionLineMeta {
+    section_id: String,
+    action: Option<SectionAction>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SectionedBufferState {
+    collapsed: SectionCollapseState,
+    lines: Vec<SectionLineMeta>,
+}
+
+fn format_section_line(line: &SectionRenderLine) -> String {
+    let indent = "  ".repeat(line.depth);
+    match &line.kind {
+        SectionRenderLineKind::Header { collapsed, .. } => {
+            let marker = if *collapsed { "+ " } else { "- " };
+            format!("{indent}{marker}{}", line.text)
+        }
+        SectionRenderLineKind::Item => format!("{indent}{}", line.text),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
     name: String,
     pub(crate) kind: BufferKind,
     read_only: bool,
     input: Option<InputField>,
+    section_state: Option<SectionedBufferState>,
+    git_snapshot: Option<GitStatusSnapshot>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -841,6 +879,8 @@ impl ShellBuffer {
             kind: buffer.kind().clone(),
             read_only,
             input,
+            section_state: None,
+            git_snapshot: None,
             text,
             undo_tree,
             language_id: None,
@@ -862,6 +902,8 @@ impl ShellBuffer {
             kind: buffer.kind().clone(),
             read_only,
             input,
+            section_state: None,
+            git_snapshot: None,
             text,
             undo_tree,
             language_id: None,
@@ -890,6 +932,8 @@ impl ShellBuffer {
             kind,
             read_only,
             input,
+            section_state: None,
+            git_snapshot: None,
             text,
             undo_tree,
             language_id: None,
@@ -932,6 +976,44 @@ impl ShellBuffer {
             return true;
         }
         false
+    }
+
+    fn section_state(&self) -> Option<&SectionedBufferState> {
+        self.section_state.as_ref()
+    }
+
+    fn ensure_section_state(&mut self) -> &mut SectionedBufferState {
+        self.section_state
+            .get_or_insert_with(SectionedBufferState::default)
+    }
+
+    fn section_line_meta(&self, line_index: usize) -> Option<&SectionLineMeta> {
+        self.section_state
+            .as_ref()
+            .and_then(|state| state.lines.get(line_index))
+    }
+
+    fn git_snapshot(&self) -> Option<&GitStatusSnapshot> {
+        self.git_snapshot.as_ref()
+    }
+
+    fn set_git_snapshot(&mut self, snapshot: GitStatusSnapshot) {
+        self.git_snapshot = Some(snapshot);
+    }
+
+    fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
+        let mut text_lines = Vec::with_capacity(lines.len());
+        let mut meta = Vec::with_capacity(lines.len());
+        for line in lines {
+            text_lines.push(format_section_line(&line));
+            meta.push(SectionLineMeta {
+                section_id: line.section_id,
+                action: line.action,
+            });
+        }
+        let state = self.ensure_section_state();
+        state.lines = meta;
+        self.replace_with_lines_preserve_view(text_lines);
     }
 
     fn append_output_lines(&mut self, lines: &[String]) {
@@ -1027,6 +1109,34 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.last_edit_at = None;
         self.scroll_row = 0;
+    }
+
+    fn replace_with_lines_preserve_view(&mut self, lines: Vec<String>) {
+        let cursor = self.cursor_point();
+        let scroll_row = self.scroll_row;
+        let text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text = text;
+        self.text.mark_clean();
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.syntax_dirty = false;
+        self.last_edit_at = None;
+        let line_count = self.line_count();
+        if line_count == 0 {
+            self.text.set_cursor(TextPoint::default());
+            self.scroll_row = 0;
+            return;
+        }
+        let line = cursor.line.min(line_count.saturating_sub(1));
+        let column = cursor.column.min(self.line_len_chars(line));
+        self.text.set_cursor(TextPoint::new(line, column));
+        let max_scroll = line_count.saturating_sub(1);
+        self.scroll_row = scroll_row.min(max_scroll);
     }
 
     fn mark_syntax_dirty(&mut self) {
@@ -1554,6 +1664,7 @@ enum PickerAction {
     },
     SwitchWorkspace(WorkspaceId),
     DeleteWorkspace(WorkspaceId),
+    GitPushRemote(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1704,6 +1815,7 @@ pub(crate) struct ShellUiState {
     default_workspace: WorkspaceId,
     input_mode: InputMode,
     vim: VimState,
+    pending_ctrl_c: Option<Instant>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
     yank_flash: Option<YankFlash>,
@@ -1737,6 +1849,7 @@ impl ShellUiState {
             default_workspace,
             input_mode: InputMode::Normal,
             vim: VimState::default(),
+            pending_ctrl_c: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
             yank_flash: None,
@@ -2296,6 +2409,38 @@ impl ShellState {
                 ..
             } => {
                 if repeat && !matches!(keycode, Keycode::Backspace | Keycode::Delete) {
+                    return Ok(false);
+                }
+                let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
+                if !is_ctrl_c && let Ok(ui) = self.ui_mut() {
+                    ui.pending_ctrl_c = None;
+                }
+                if is_ctrl_c
+                    && active_shell_buffer_is_git_commit(&self.runtime)
+                        .map_err(ShellError::Runtime)?
+                {
+                    let now = Instant::now();
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+                    let should_commit = {
+                        let ui = self.ui_mut()?;
+                        match ui.pending_ctrl_c {
+                            Some(previous)
+                                if now.duration_since(previous) <= Duration::from_millis(800) =>
+                            {
+                                ui.pending_ctrl_c = None;
+                                true
+                            }
+                            _ => {
+                                ui.pending_ctrl_c = Some(now);
+                                false
+                            }
+                        }
+                    };
+                    if should_commit {
+                        commit_git_buffer(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                    }
                     return Ok(false);
                 }
                 if self.try_runtime_keybinding(keycode, keymod)? {
@@ -2951,6 +3096,15 @@ impl ShellState {
         }
 
         if let Some(chord) = text_chord(text) {
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && handle_git_status_chord(&mut self.runtime, &chord)
+                    .map_err(ShellError::Runtime)?
+            {
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -3544,6 +3698,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_PANE_SPLIT_VERTICAL,
         "Splits the active workspace vertically.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_GIT_STATUS_OPEN_POPUP,
+        "Opens the git status buffer in the popup window.",
     )?;
     register_hook(
         runtime,
@@ -4238,6 +4397,32 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_GIT_STATUS_OPEN_POPUP,
+            "shell.git-status-open-popup",
+            |_, runtime| {
+                open_git_status_popup(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
+            refresh_git_status_if_active(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            builtins::BUFFER_SWITCH,
+            "shell.buffer-switch",
+            |_, runtime| {
+                refresh_git_status_if_active(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_INPUT_SUBMIT, "shell.input-submit", |_, runtime| {
             submit_input_buffer(runtime)?;
             Ok(())
@@ -4334,6 +4519,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::DeleteWorkspace(workspace_id) => {
                     delete_runtime_workspace(runtime, workspace_id)?;
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::GitPushRemote(remote) => {
+                    push_git_remote(runtime, &remote)?;
                 }
             }
 
@@ -4477,6 +4665,21 @@ fn active_shell_buffer_read_only(runtime: &EditorRuntime) -> Result<bool, String
 fn active_shell_buffer_has_input(runtime: &EditorRuntime) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     Ok(shell_buffer(runtime, buffer_id)?.has_input_field())
+}
+
+fn buffer_is_git_status(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND)
+}
+
+fn buffer_is_git_commit(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND)
+}
+
+fn active_shell_buffer_is_git_commit(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(buffer_is_git_commit(
+        &shell_buffer(runtime, buffer_id)?.kind,
+    ))
 }
 
 fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
@@ -7147,12 +7350,34 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     else {
         return Ok(());
     };
+    let is_git_commit = buffer_is_git_commit(&buffer_kind);
 
+    let previous_buffer = shell_ui(runtime)?.active_buffer_id();
     {
         let ui = shell_ui_mut(runtime)?;
         ui.focus_pane(pane_id);
         ui.ensure_buffer(buffer_id, &buffer_name, buffer_kind);
         ui.focus_buffer_in_active_pane(buffer_id);
+        if !is_git_commit {
+            ui.pending_ctrl_c = None;
+        }
+    }
+    if previous_buffer != Some(buffer_id) {
+        let workspace_id = runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let window_id = active_window_id(runtime)?;
+        runtime
+            .emit_hook(
+                builtins::BUFFER_SWITCH,
+                HookEvent::new()
+                    .with_window(window_id)
+                    .with_workspace(workspace_id)
+                    .with_pane(pane_id)
+                    .with_buffer(buffer_id),
+            )
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -7174,6 +7399,320 @@ fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resu
     };
     shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind);
     Ok(())
+}
+
+fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_git_status(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    refresh_git_status_buffer(runtime, buffer_id)
+}
+
+fn refresh_git_status_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git status requires an active workspace root".to_owned())?;
+    let snapshot = git_status_snapshot(runtime, &root)?;
+    apply_git_status_snapshot(runtime, buffer_id, snapshot)
+}
+
+fn apply_git_status_snapshot(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    snapshot: GitStatusSnapshot,
+) -> Result<(), String> {
+    let sections = user::git::status_sections(&snapshot);
+    let collapsed = shell_buffer(runtime, buffer_id)?
+        .section_state()
+        .map(|state| state.collapsed.clone())
+        .unwrap_or_default();
+    let lines = sections.render_lines(&collapsed);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    {
+        let state = buffer.ensure_section_state();
+        state.collapsed = collapsed;
+    }
+    buffer.set_git_snapshot(snapshot);
+    buffer.set_section_lines(lines);
+    Ok(())
+}
+
+fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = runtime
+        .model_mut()
+        .create_popup_buffer(
+            workspace_id,
+            "*git-status*",
+            BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .open_popup(workspace_id, "Git Status", vec![buffer_id], buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.ensure_popup_buffer(
+        buffer_id,
+        "*git-status*",
+        BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+    );
+    refresh_git_status_buffer(runtime, buffer_id)
+}
+
+fn find_shell_buffer_by_kind(ui: &ShellUiState, kind: &str) -> Option<BufferId> {
+    ui.buffers.iter().find_map(|buffer| {
+        if matches!(&buffer.kind, BufferKind::Plugin(plugin_kind) if plugin_kind == kind) {
+            Some(buffer.id())
+        } else {
+            None
+        }
+    })
+}
+
+fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let existing = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| find_shell_buffer_by_kind(ui, GIT_COMMIT_KIND));
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    if let Some(existing) = existing {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        ui.focus_buffer_in_active_pane(existing);
+        ui.enter_insert_mode();
+        return Ok(());
+    }
+    let buffer_id = {
+        runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                "*git-commit*",
+                BufferKind::Plugin(GIT_COMMIT_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?
+    };
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let template = user::git::commit_buffer_template();
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buffer);
+        ui.focus_buffer_in_active_pane(buffer_id);
+        ui.enter_insert_mode();
+    }
+    Ok(())
+}
+
+fn git_commit_temp_path() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_nanos();
+    env::temp_dir().join(format!(
+        "volt-git-commit-{}-{unique}.txt",
+        std::process::id()
+    ))
+}
+
+fn git_commit_message(buffer: &ShellBuffer) -> String {
+    let raw = buffer.text.text();
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim_start().starts_with('#') {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+    lines.join("\n").trim().to_owned()
+}
+
+fn commit_git_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git commit requires an active workspace root".to_owned())?;
+    let message = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        git_commit_message(buffer)
+    };
+    if message.trim().is_empty() {
+        return Err("commit message is empty".to_owned());
+    }
+    let temp_path = git_commit_temp_path();
+    fs::write(&temp_path, &message)
+        .map_err(|error| format!("failed to write commit message: {error}"))?;
+    let result = git_command_output(
+        runtime,
+        &root,
+        "commit",
+        &["commit", "-F", &temp_path.to_string_lossy()],
+    );
+    fs::remove_file(&temp_path).ok();
+    result?;
+    close_buffer_discard(runtime, buffer_id)?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn stage_git_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git stage requires an active workspace root".to_owned())?;
+    git_command_output(runtime, &root, "add", &["add", "--", path])?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git stage requires an active workspace root".to_owned())?;
+    git_command_output(runtime, &root, "add -A", &["add", "-A"])?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git push requires an active workspace root".to_owned())?;
+    let branch = {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        shell_buffer(runtime, buffer_id)?
+            .git_snapshot()
+            .and_then(|snapshot| snapshot.branch())
+            .map(str::to_owned)
+            .ok_or_else(|| "git push requires a current branch".to_owned())?
+    };
+    git_command_output(
+        runtime,
+        &root,
+        "push",
+        &["push", "--set-upstream", remote, branch.as_str()],
+    )?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = active_workspace_root(runtime)?
+        .ok_or_else(|| "git push requires an active workspace root".to_owned())?;
+    let remotes = git_remote_list(runtime, &root)?;
+    if remotes.is_empty() {
+        return Err("no git remotes found".to_owned());
+    }
+    let entries = remotes
+        .into_iter()
+        .map(|remote| {
+            let item_id = format!("git-remote:{remote}");
+            let action = PickerAction::GitPushRemote(remote.clone());
+            PickerEntry {
+                item: PickerItem::new(item_id, remote.clone(), "remote", None::<String>),
+                action,
+            }
+        })
+        .collect();
+    let picker = PickerOverlay::from_entries("Git Push", entries);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
+    if !matches!(chord, "s" | "S" | "c" | "p") {
+        return Ok(false);
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (meta, staged_empty, has_stage_candidates) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer_is_git_status(&buffer.kind) {
+            return Ok(false);
+        }
+        let meta = buffer
+            .section_line_meta(buffer.cursor_point().line)
+            .cloned();
+        let snapshot = buffer.git_snapshot();
+        let staged_empty = snapshot
+            .map(|snapshot| snapshot.staged().is_empty())
+            .unwrap_or(true);
+        let has_stage_candidates = snapshot
+            .map(|snapshot| !(snapshot.unstaged().is_empty() && snapshot.untracked().is_empty()))
+            .unwrap_or(false);
+        (meta, staged_empty, has_stage_candidates)
+    };
+
+    match chord {
+        "S" => {
+            stage_git_all(runtime)?;
+            Ok(true)
+        }
+        "s" => {
+            if let Some(action) = meta.as_ref().and_then(|meta| meta.action.as_ref())
+                && action.id() == GIT_ACTION_STAGE_FILE
+            {
+                let path = action
+                    .detail()
+                    .ok_or_else(|| "git stage action missing path".to_owned())?;
+                stage_git_file(runtime, path)?;
+                return Ok(true);
+            }
+            if !has_stage_candidates {
+                return Err("no unstaged changes to stage".to_owned());
+            }
+            stage_git_all(runtime)?;
+            Ok(true)
+        }
+        "c" => {
+            let in_commit_section = meta
+                .as_ref()
+                .map(|meta| meta.section_id == GIT_SECTION_COMMIT)
+                .unwrap_or(false);
+            let has_commit_action = meta
+                .as_ref()
+                .and_then(|meta| meta.action.as_ref())
+                .map(|action| action.id() == GIT_ACTION_COMMIT_OPEN)
+                .unwrap_or(false);
+            if !in_commit_section && !has_commit_action {
+                return Ok(false);
+            }
+            if staged_empty {
+                return Err("no staged changes to commit".to_owned());
+            }
+            open_git_commit_buffer(runtime)?;
+            Ok(true)
+        }
+        "p" => {
+            let is_unpushed = meta
+                .as_ref()
+                .map(|meta| meta.section_id == GIT_SECTION_UNPUSHED)
+                .unwrap_or(false);
+            let is_push_action = meta
+                .as_ref()
+                .and_then(|meta| meta.action.as_ref())
+                .map(|action| action.id() == GIT_ACTION_PUSH)
+                .unwrap_or(false);
+            if is_unpushed || is_push_action {
+                open_git_remote_picker(runtime)?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -7491,7 +8030,25 @@ fn cycle_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .model_mut()
         .focus_pane(workspace_id, pane_id)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let window_id = active_window_id(runtime)?;
+    let buffer_id = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .pane(pane_id)
+        .and_then(|pane| pane.active_buffer());
+    let mut event = HookEvent::new()
+        .with_window(window_id)
+        .with_workspace(workspace_id)
+        .with_pane(pane_id);
+    if let Some(buffer_id) = buffer_id {
+        event = event.with_buffer(buffer_id);
+    }
+    runtime
+        .emit_hook(builtins::PANE_SWITCH, event)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn active_runtime_buffer(
@@ -8150,6 +8707,161 @@ fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {
         .to_string()
 }
 
+fn git_command_output(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    label: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    let spec = JobSpec::command(
+        label,
+        "git",
+        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+    )
+    .with_cwd(root.to_path_buf());
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
+    drop(manager);
+    let result = handle.wait().map_err(|error| error.to_string())?;
+    if !result.succeeded() {
+        return Err(format!("git {label} failed: {}", result.transcript()));
+    }
+    Ok(result.stdout().to_owned())
+}
+
+fn git_command_output_optional(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    label: &str,
+    args: &[&str],
+) -> Option<String> {
+    git_command_output(runtime, root, label, args).ok()
+}
+
+fn git_dir_path(runtime: &mut EditorRuntime, root: &Path) -> Option<PathBuf> {
+    let output = git_command_output_optional(
+        runtime,
+        root,
+        "rev-parse --git-dir",
+        &["rev-parse", "--git-dir"],
+    )?;
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(root.join(path))
+    }
+}
+
+fn git_status_snapshot(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+) -> Result<GitStatusSnapshot, String> {
+    let status_output = git_command_output(
+        runtime,
+        root,
+        "status --short --branch",
+        &["status", "--short", "--branch"],
+    )?;
+    let status = parse_status(&status_output).map_err(|error| error.to_string())?;
+
+    let head_output = git_command_output(
+        runtime,
+        root,
+        "log -1 --oneline",
+        &["log", "-1", "--oneline"],
+    )?;
+    let head = parse_log_oneline(&head_output).into_iter().next();
+
+    let upstream = git_command_output_optional(
+        runtime,
+        root,
+        "rev-parse --abbrev-ref @{upstream}",
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty());
+    let push_remote = git_command_output_optional(
+        runtime,
+        root,
+        "rev-parse --abbrev-ref @{push}",
+        &["rev-parse", "--abbrev-ref", "@{push}"],
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty());
+
+    let stash_output = git_command_output_optional(runtime, root, "stash list", &["stash", "list"])
+        .unwrap_or_default();
+    let stashes = parse_stash_list(&stash_output);
+
+    let unpulled = if upstream.is_some() {
+        let output = git_command_output(
+            runtime,
+            root,
+            "log --oneline ..@{upstream}",
+            &["log", "--oneline", "..@{upstream}"],
+        )?;
+        parse_log_oneline(&output)
+    } else {
+        Vec::new()
+    };
+    let unpushed = if upstream.is_some() {
+        let output = git_command_output(
+            runtime,
+            root,
+            "log --oneline @{upstream}..",
+            &["log", "--oneline", "@{upstream}.."],
+        )?;
+        parse_log_oneline(&output)
+    } else {
+        Vec::new()
+    };
+    let recent_output = git_command_output(
+        runtime,
+        root,
+        "log --oneline",
+        &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
+    )?;
+    let recent = parse_log_oneline(&recent_output);
+
+    let in_progress = git_dir_path(runtime, root)
+        .map(detect_in_progress)
+        .unwrap_or_default();
+
+    Ok(GitStatusSnapshot::default()
+        .with_status(status)
+        .with_head(head)
+        .with_upstreams(upstream, push_remote)
+        .with_stashes(stashes)
+        .with_unpulled(unpulled)
+        .with_unpushed(unpushed)
+        .with_recent(recent)
+        .with_in_progress(in_progress))
+}
+
+fn git_remote_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<String>, String> {
+    let output = git_command_output(runtime, root, "remote", &["remote"])?;
+    let mut remotes = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_owned())
+        .collect::<Vec<_>>();
+    remotes.sort();
+    remotes.dedup();
+    Ok(remotes)
+}
+
 fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
     if keymod.intersects(ctrl_mod()) {
         return match keycode {
@@ -8446,6 +9158,8 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
         }
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
         _ => (false, None),
     }
 }
@@ -8494,6 +9208,14 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Type into the prompt to submit commands or text.".to_owned(),
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => vec![
+                format!("{name} is a git status buffer."),
+                "Sections refresh when the pane switches or git actions run.".to_owned(),
+                "Use s to stage a file, S to stage all, and c to commit.".to_owned(),
+            ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
+                user::git::commit_buffer_template()
+            }
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),
                 "File loading is not yet wired into the SDL shell event loop.".to_owned(),

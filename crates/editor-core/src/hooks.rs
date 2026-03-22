@@ -24,6 +24,8 @@ pub mod builtins {
     pub const PANE_SPLIT_HORIZONTAL: &str = "pane.split-horizontal";
     /// Fires after a vertical pane split.
     pub const PANE_SPLIT_VERTICAL: &str = "pane.split-vertical";
+    /// Fires when the active pane changes.
+    pub const PANE_SWITCH: &str = "pane.switch";
     /// Fires when a popup opens.
     pub const POPUP_OPEN: &str = "popup.open";
     /// Fires when a popup closes.
@@ -33,7 +35,7 @@ pub mod builtins {
     /// Fires when a terminal session exits.
     pub const TERMINAL_EXIT: &str = "terminal.exit";
 
-    pub(super) const DEFINITIONS: [(&str, &str); 13] = [
+    pub(super) const DEFINITIONS: [(&str, &str); 14] = [
         (STARTUP, "Runs during editor startup."),
         (FILE_OPEN, "Runs after a file-backed buffer is opened."),
         (BEFORE_SAVE, "Runs immediately before a buffer is saved."),
@@ -49,6 +51,7 @@ pub mod builtins {
             PANE_SPLIT_VERTICAL,
             "Runs after a vertical pane split completes.",
         ),
+        (PANE_SWITCH, "Runs when the active pane changes."),
         (POPUP_OPEN, "Runs when a popup is opened."),
         (POPUP_CLOSE, "Runs when a popup is closed."),
         (

@@ -14,8 +14,10 @@ crate-type = ["cdylib", "rlib"]
 workspace = true
 
 [dependencies]
+editor-core = { path = "../crates/editor-core" }
 editor-fs = { path = "../crates/editor-fs" }
 editor-dap = { path = "../crates/editor-dap" }
+editor-git = { path = "../crates/editor-git" }
 editor-lsp = { path = "../crates/editor-lsp" }
 editor-plugin-api = { path = "../crates/editor-plugin-api" }
 editor-syntax = { path = "../crates/editor-syntax" }

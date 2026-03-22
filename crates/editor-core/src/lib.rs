@@ -4,6 +4,7 @@ mod commands;
 mod hooks;
 mod keymaps;
 mod model;
+mod sections;
 mod services;
 
 pub use commands::{CommandDefinition, CommandError, CommandRegistry, CommandSource};
@@ -12,6 +13,10 @@ pub use keymaps::{KeyBinding, KeymapError, KeymapRegistry, KeymapScope, KeymapVi
 pub use model::{
     Buffer, BufferId, BufferKind, EditorModel, ModelError, Pane, PaneId, Popup, PopupId, Window,
     WindowId, Workspace, WorkspaceId,
+};
+pub use sections::{
+    Section, SectionAction, SectionCollapseState, SectionItem, SectionRenderLine,
+    SectionRenderLineKind, SectionTree,
 };
 pub use services::ServiceRegistry;
 

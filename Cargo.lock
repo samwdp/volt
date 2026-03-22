@@ -894,8 +894,10 @@ dependencies = [
 name = "volt-user"
 version = "0.1.0"
 dependencies = [
+ "editor-core",
  "editor-dap",
  "editor-fs",
+ "editor-git",
  "editor-lsp",
  "editor-plugin-api",
  "editor-syntax",
