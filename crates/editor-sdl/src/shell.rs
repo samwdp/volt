@@ -2649,36 +2649,55 @@ impl ShellState {
                     return Ok(false);
                 }
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
-                if !is_ctrl_c && let Ok(ui) = self.ui_mut() {
-                    ui.pending_ctrl_c = None;
-                }
-                if is_ctrl_c
-                    && active_shell_buffer_is_git_commit(&self.runtime)
-                        .map_err(ShellError::Runtime)?
-                {
-                    let now = Instant::now();
-                    let buffer_id =
-                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-                    let should_commit = {
+                let is_ctrl_k = keymod.intersects(ctrl_mod()) && keycode == Keycode::K;
+                let is_ctrl_key = matches!(keycode, Keycode::LCtrl | Keycode::RCtrl);
+                if active_shell_buffer_is_git_commit(&self.runtime).map_err(ShellError::Runtime)? {
+                    let mut should_commit = false;
+                    let mut should_cancel = false;
+                    let mut consume = false;
+                    {
                         let ui = self.ui_mut()?;
-                        match ui.pending_ctrl_c {
-                            Some(previous)
-                                if now.duration_since(previous) <= Duration::from_millis(800) =>
-                            {
+                        if ui.pending_ctrl_c.is_some() {
+                            if is_ctrl_c {
                                 ui.pending_ctrl_c = None;
-                                true
+                                should_commit = true;
+                                consume = true;
+                            } else if is_ctrl_k {
+                                ui.pending_ctrl_c = None;
+                                should_cancel = true;
+                                consume = true;
+                            } else if is_ctrl_key {
+                                consume = true;
+                            } else {
+                                ui.pending_ctrl_c = None;
                             }
-                            _ => {
-                                ui.pending_ctrl_c = Some(now);
-                                false
-                            }
+                        } else if is_ctrl_c {
+                            ui.pending_ctrl_c = Some(Instant::now());
+                            consume = true;
                         }
-                    };
-                    if should_commit {
-                        commit_git_buffer(&mut self.runtime, buffer_id)
-                            .map_err(ShellError::Runtime)?;
                     }
-                    return Ok(false);
+                    if should_commit || should_cancel {
+                        let buffer_id =
+                            active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+                        if should_commit {
+                            commit_git_buffer(&mut self.runtime, buffer_id)
+                                .map_err(ShellError::Runtime)?;
+                        } else {
+                            cancel_git_commit_buffer(&mut self.runtime, buffer_id)
+                                .map_err(ShellError::Runtime)?;
+                        }
+                        return Ok(false);
+                    }
+                    if consume {
+                        return Ok(false);
+                    }
+                }
+                if !is_ctrl_c
+                    && !is_ctrl_k
+                    && !is_ctrl_key
+                    && let Ok(ui) = self.ui_mut()
+                {
+                    ui.pending_ctrl_c = None;
                 }
                 if self.try_runtime_keybinding(keycode, keymod)? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
@@ -2691,6 +2710,14 @@ impl ShellState {
                 }
 
                 if self.picker_visible()? {
+                    if matches!(keycode, Keycode::Return | Keycode::KpEnter) {
+                        self.runtime
+                            .execute_command("picker.submit")
+                            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+                        self.sync_active_buffer().map_err(ShellError::Runtime)?;
+                        self.ensure_visible(visible_rows, wrap_cols)?;
+                        return Ok(false);
+                    }
                     if keycode == Keycode::Backspace
                         && let Some(picker) = self.ui_mut()?.picker_mut()
                     {
@@ -7946,7 +7973,7 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let ui = shell_ui_mut(runtime)?;
         ui.focus_buffer_in_active_pane(existing);
-        ui.enter_insert_mode();
+        ui.enter_normal_mode();
         return Ok(());
     }
     let buffer_id = {
@@ -7973,7 +8000,7 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         let ui = shell_ui_mut(runtime)?;
         ui.insert_buffer(shell_buffer);
         ui.focus_buffer_in_active_pane(buffer_id);
-        ui.enter_insert_mode();
+        ui.enter_normal_mode();
     }
     refresh_buffer_syntax(runtime, buffer_id)
 }
@@ -8022,6 +8049,15 @@ fn commit_git_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result
     );
     fs::remove_file(&temp_path).ok();
     result?;
+    close_buffer_discard(runtime, buffer_id)?;
+    refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+fn cancel_git_commit_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     close_buffer_discard(runtime, buffer_id)?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
