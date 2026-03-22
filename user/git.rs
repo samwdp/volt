@@ -108,14 +108,24 @@ pub fn status_sections(snapshot: &GitStatusSnapshot) -> SectionTree {
     if !snapshot.in_progress().is_empty() {
         sections.push(in_progress_section(snapshot));
     }
-    sections.push(staged_section(snapshot));
-    sections.push(unstaged_section(snapshot));
-    sections.push(untracked_section(snapshot));
+    if let Some(section) = staged_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = unstaged_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = untracked_section(snapshot) {
+        sections.push(section);
+    }
     if !snapshot.stashes().is_empty() {
         sections.push(stashes_section(snapshot));
     }
-    sections.push(unpulled_section(snapshot));
-    sections.push(unpushed_section(snapshot));
+    if let Some(section) = unpulled_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = unpushed_section(snapshot) {
+        sections.push(section);
+    }
     sections.push(commit_section(snapshot));
     SectionTree::new(sections)
 }
@@ -160,7 +170,7 @@ fn in_progress_section(snapshot: &GitStatusSnapshot) -> Section {
     Section::new(SECTION_IN_PROGRESS, "In progress").with_items(items)
 }
 
-fn staged_section(snapshot: &GitStatusSnapshot) -> Section {
+fn staged_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
     let items = snapshot
         .staged()
         .iter()
@@ -176,7 +186,7 @@ fn staged_section(snapshot: &GitStatusSnapshot) -> Section {
     )
 }
 
-fn unstaged_section(snapshot: &GitStatusSnapshot) -> Section {
+fn unstaged_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
     let items = snapshot
         .unstaged()
         .iter()
@@ -192,7 +202,7 @@ fn unstaged_section(snapshot: &GitStatusSnapshot) -> Section {
     )
 }
 
-fn untracked_section(snapshot: &GitStatusSnapshot) -> Section {
+fn untracked_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
     let items = snapshot
         .untracked()
         .iter()
@@ -224,7 +234,7 @@ fn stashes_section(snapshot: &GitStatusSnapshot) -> Section {
     .with_items(items)
 }
 
-fn unpulled_section(snapshot: &GitStatusSnapshot) -> Section {
+fn unpulled_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
     let (title, entries) = if snapshot.upstream().is_some() {
         (
             format!(
@@ -250,7 +260,7 @@ fn unpulled_section(snapshot: &GitStatusSnapshot) -> Section {
     section_with_placeholder(SECTION_UNPULLED, title, items)
 }
 
-fn unpushed_section(snapshot: &GitStatusSnapshot) -> Section {
+fn unpushed_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
     let (title, entries) = if snapshot.upstream().is_some() {
         (
             format!(
@@ -304,11 +314,10 @@ fn status_entry_label(entry: &StatusEntry, staged: bool) -> String {
     format!("{label} {}", entry.path())
 }
 
-fn section_with_placeholder(id: &str, title: String, items: Vec<SectionItem>) -> Section {
-    let items = if items.is_empty() {
-        vec![SectionItem::new("(none)")]
+fn section_with_placeholder(id: &str, title: String, items: Vec<SectionItem>) -> Option<Section> {
+    if items.is_empty() {
+        None
     } else {
-        items
-    };
-    Section::new(id, title).with_items(items)
+        Some(Section::new(id, title).with_items(items))
+    }
 }

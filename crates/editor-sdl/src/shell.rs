@@ -113,6 +113,37 @@ const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = user::git::ACTION_SHOW_COMMIT;
 const GIT_ACTION_SHOW_STASH: &str = user::git::ACTION_SHOW_STASH;
+const GIT_SECTION_HEADERS: &str = user::git::SECTION_HEADERS;
+const GIT_SECTION_IN_PROGRESS: &str = user::git::SECTION_IN_PROGRESS;
+const GIT_SECTION_STAGED: &str = user::git::SECTION_STAGED;
+const GIT_SECTION_UNSTAGED: &str = user::git::SECTION_UNSTAGED;
+const GIT_SECTION_UNTRACKED: &str = user::git::SECTION_UNTRACKED;
+const GIT_SECTION_STASHES: &str = user::git::SECTION_STASHES;
+const GIT_SECTION_UNPULLED: &str = user::git::SECTION_UNPULLED;
+const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
+const GIT_SECTION_COMMIT: &str = user::git::SECTION_COMMIT;
+const TOKEN_GIT_STATUS_SECTION_HEADER: &str = "git.status.section.header";
+const TOKEN_GIT_STATUS_SECTION_COUNT: &str = "git.status.section.count";
+const TOKEN_GIT_STATUS_HEADER_LABEL: &str = "git.status.header.label";
+const TOKEN_GIT_STATUS_HEADER_VALUE: &str = "git.status.header.value";
+const TOKEN_GIT_STATUS_HEADER_HASH: &str = "git.status.header.hash";
+const TOKEN_GIT_STATUS_HEADER_SUMMARY: &str = "git.status.header.summary";
+const TOKEN_GIT_STATUS_IN_PROGRESS: &str = "git.status.in-progress";
+const TOKEN_GIT_STATUS_ENTRY_ADDED: &str = "git.status.entry.added";
+const TOKEN_GIT_STATUS_ENTRY_MODIFIED: &str = "git.status.entry.modified";
+const TOKEN_GIT_STATUS_ENTRY_DELETED: &str = "git.status.entry.deleted";
+const TOKEN_GIT_STATUS_ENTRY_RENAMED: &str = "git.status.entry.renamed";
+const TOKEN_GIT_STATUS_ENTRY_COPIED: &str = "git.status.entry.copied";
+const TOKEN_GIT_STATUS_ENTRY_UPDATED: &str = "git.status.entry.updated";
+const TOKEN_GIT_STATUS_ENTRY_CHANGED: &str = "git.status.entry.changed";
+const TOKEN_GIT_STATUS_ENTRY_UNTRACKED: &str = "git.status.entry.untracked";
+const TOKEN_GIT_STATUS_ENTRY_PATH: &str = "git.status.entry.path";
+const TOKEN_GIT_STATUS_COMMIT_HASH: &str = "git.status.commit.hash";
+const TOKEN_GIT_STATUS_COMMIT_SUMMARY: &str = "git.status.commit.summary";
+const TOKEN_GIT_STATUS_STASH_NAME: &str = "git.status.stash.name";
+const TOKEN_GIT_STATUS_STASH_SUMMARY: &str = "git.status.stash.summary";
+const TOKEN_GIT_STATUS_COMMAND: &str = "git.status.command";
+const TOKEN_GIT_STATUS_MESSAGE: &str = "git.status.message";
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
@@ -942,6 +973,421 @@ fn format_section_line(line: &SectionRenderLine) -> String {
     }
 }
 
+fn git_status_line_spans(line: &SectionRenderLine, formatted_line: &str) -> Vec<LineSyntaxSpan> {
+    let mut spans = Vec::new();
+    let indent_bytes = leading_indent_bytes(formatted_line);
+    let trimmed = &formatted_line[indent_bytes..];
+    if trimmed.is_empty() {
+        return spans;
+    }
+    match &line.kind {
+        SectionRenderLineKind::Header { .. } => {
+            push_span_bytes(
+                &mut spans,
+                formatted_line,
+                indent_bytes,
+                indent_bytes + trimmed.len(),
+                TOKEN_GIT_STATUS_SECTION_HEADER,
+            );
+            if let Some((start, end)) = find_paren_number_range(trimmed) {
+                push_span_bytes(
+                    &mut spans,
+                    formatted_line,
+                    indent_bytes + start,
+                    indent_bytes + end,
+                    TOKEN_GIT_STATUS_SECTION_COUNT,
+                );
+            }
+        }
+        SectionRenderLineKind::Item => match line.section_id.as_str() {
+            GIT_SECTION_HEADERS => {
+                git_status_header_item_spans(formatted_line, indent_bytes, trimmed, &mut spans);
+            }
+            GIT_SECTION_IN_PROGRESS => {
+                push_span_bytes(
+                    &mut spans,
+                    formatted_line,
+                    indent_bytes,
+                    indent_bytes + trimmed.len(),
+                    TOKEN_GIT_STATUS_IN_PROGRESS,
+                );
+            }
+            GIT_SECTION_STAGED | GIT_SECTION_UNSTAGED | GIT_SECTION_UNTRACKED => {
+                git_status_entry_item_spans(formatted_line, indent_bytes, trimmed, &mut spans);
+            }
+            GIT_SECTION_STASHES => {
+                git_status_stash_item_spans(formatted_line, indent_bytes, trimmed, &mut spans);
+            }
+            GIT_SECTION_UNPULLED | GIT_SECTION_UNPUSHED => {
+                git_status_commit_item_spans(formatted_line, indent_bytes, trimmed, &mut spans);
+            }
+            GIT_SECTION_COMMIT => {
+                git_status_commit_message_spans(formatted_line, indent_bytes, trimmed, &mut spans);
+            }
+            _ => {}
+        },
+        SectionRenderLineKind::Spacer => {}
+    }
+    spans
+}
+
+fn git_status_header_item_spans(
+    line: &str,
+    indent_bytes: usize,
+    trimmed: &str,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let Some(colon_index) = trimmed.find(':') else {
+        return;
+    };
+    let label_end = colon_index + 1;
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes,
+        indent_bytes + label_end,
+        TOKEN_GIT_STATUS_HEADER_LABEL,
+    );
+    let rest_start = skip_whitespace_bytes(trimmed, label_end);
+    if rest_start >= trimmed.len() {
+        return;
+    }
+    let label = trimmed[..colon_index].trim();
+    let rest = &trimmed[rest_start..];
+    let rest_offset = indent_bytes + rest_start;
+    match label {
+        "Head" => git_status_head_spans(line, rest, rest_offset, spans),
+        "Upstream" => git_status_upstream_spans(line, rest, rest_offset, spans),
+        _ => {
+            push_span_bytes(
+                spans,
+                line,
+                rest_offset,
+                rest_offset + rest.len(),
+                TOKEN_GIT_STATUS_HEADER_VALUE,
+            );
+        }
+    }
+}
+
+fn git_status_head_spans(
+    line: &str,
+    rest: &str,
+    rest_offset: usize,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let Some((first_start, first_end)) = next_word_bounds(rest, 0) else {
+        return;
+    };
+    let first = &rest[first_start..first_end];
+    let summary_start = if is_git_hash(first) {
+        push_span_bytes(
+            spans,
+            line,
+            rest_offset + first_start,
+            rest_offset + first_end,
+            TOKEN_GIT_STATUS_HEADER_HASH,
+        );
+        Some(first_end)
+    } else {
+        push_span_bytes(
+            spans,
+            line,
+            rest_offset + first_start,
+            rest_offset + first_end,
+            TOKEN_GIT_STATUS_HEADER_VALUE,
+        );
+        let Some((second_start, second_end)) = next_word_bounds(rest, first_end) else {
+            return;
+        };
+        let second = &rest[second_start..second_end];
+        if is_git_hash(second) {
+            push_span_bytes(
+                spans,
+                line,
+                rest_offset + second_start,
+                rest_offset + second_end,
+                TOKEN_GIT_STATUS_HEADER_HASH,
+            );
+            Some(second_end)
+        } else {
+            Some(second_start)
+        }
+    };
+    if let Some(summary_start) = summary_start {
+        let summary_start = skip_whitespace_bytes(rest, summary_start);
+        if summary_start < rest.len() {
+            push_span_bytes(
+                spans,
+                line,
+                rest_offset + summary_start,
+                rest_offset + rest.len(),
+                TOKEN_GIT_STATUS_HEADER_SUMMARY,
+            );
+        }
+    }
+}
+
+fn git_status_upstream_spans(
+    line: &str,
+    rest: &str,
+    rest_offset: usize,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let value_end = rest.find('(').unwrap_or(rest.len());
+    let value_end = rest[..value_end].trim_end().len();
+    if value_end > 0 {
+        push_span_bytes(
+            spans,
+            line,
+            rest_offset,
+            rest_offset + value_end,
+            TOKEN_GIT_STATUS_HEADER_VALUE,
+        );
+    }
+    push_number_after_keyword(
+        spans,
+        line,
+        rest_offset,
+        rest,
+        "ahead",
+        TOKEN_GIT_STATUS_SECTION_COUNT,
+    );
+    push_number_after_keyword(
+        spans,
+        line,
+        rest_offset,
+        rest,
+        "behind",
+        TOKEN_GIT_STATUS_SECTION_COUNT,
+    );
+}
+
+fn git_status_entry_item_spans(
+    line: &str,
+    indent_bytes: usize,
+    trimmed: &str,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let Some((status_start, status_end)) = next_word_bounds(trimmed, 0) else {
+        return;
+    };
+    let status = &trimmed[status_start..status_end];
+    let token = git_status_entry_token(status);
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + status_start,
+        indent_bytes + status_end,
+        token,
+    );
+    let path_start = skip_whitespace_bytes(trimmed, status_end);
+    if path_start < trimmed.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + path_start,
+            indent_bytes + trimmed.len(),
+            TOKEN_GIT_STATUS_ENTRY_PATH,
+        );
+    }
+}
+
+fn git_status_entry_token(label: &str) -> &'static str {
+    match label {
+        "added" => TOKEN_GIT_STATUS_ENTRY_ADDED,
+        "modified" => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
+        "deleted" => TOKEN_GIT_STATUS_ENTRY_DELETED,
+        "renamed" => TOKEN_GIT_STATUS_ENTRY_RENAMED,
+        "copied" => TOKEN_GIT_STATUS_ENTRY_COPIED,
+        "updated" => TOKEN_GIT_STATUS_ENTRY_UPDATED,
+        "untracked" => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
+        "changed" => TOKEN_GIT_STATUS_ENTRY_CHANGED,
+        _ => TOKEN_GIT_STATUS_ENTRY_CHANGED,
+    }
+}
+
+fn git_status_stash_item_spans(
+    line: &str,
+    indent_bytes: usize,
+    trimmed: &str,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let Some((name_start, name_end)) = next_word_bounds(trimmed, 0) else {
+        return;
+    };
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + name_start,
+        indent_bytes + name_end,
+        TOKEN_GIT_STATUS_STASH_NAME,
+    );
+    let summary_start = skip_whitespace_bytes(trimmed, name_end);
+    if summary_start < trimmed.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + summary_start,
+            indent_bytes + trimmed.len(),
+            TOKEN_GIT_STATUS_STASH_SUMMARY,
+        );
+    }
+}
+
+fn git_status_commit_item_spans(
+    line: &str,
+    indent_bytes: usize,
+    trimmed: &str,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let Some((hash_start, hash_end)) = next_word_bounds(trimmed, 0) else {
+        return;
+    };
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + hash_start,
+        indent_bytes + hash_end,
+        TOKEN_GIT_STATUS_COMMIT_HASH,
+    );
+    let summary_start = skip_whitespace_bytes(trimmed, hash_end);
+    if summary_start < trimmed.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + summary_start,
+            indent_bytes + trimmed.len(),
+            TOKEN_GIT_STATUS_COMMIT_SUMMARY,
+        );
+    }
+}
+
+fn git_status_commit_message_spans(
+    line: &str,
+    indent_bytes: usize,
+    trimmed: &str,
+    spans: &mut Vec<LineSyntaxSpan>,
+) {
+    let token = if trimmed.starts_with("Press ") {
+        TOKEN_GIT_STATUS_COMMAND
+    } else {
+        TOKEN_GIT_STATUS_MESSAGE
+    };
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes,
+        indent_bytes + trimmed.len(),
+        token,
+    );
+}
+
+fn leading_indent_bytes(line: &str) -> usize {
+    line.char_indices()
+        .find(|(_, character)| *character != ' ')
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| line.len())
+}
+
+fn push_span_bytes(
+    spans: &mut Vec<LineSyntaxSpan>,
+    line: &str,
+    start_byte: usize,
+    end_byte: usize,
+    token: &str,
+) {
+    if start_byte >= end_byte {
+        return;
+    }
+    let start = clamp_to_char_boundary(line, start_byte);
+    let end = clamp_to_char_boundary(line, end_byte.min(line.len()));
+    if start >= end {
+        return;
+    }
+    let start_col = line[..start].chars().count();
+    let end_col = line[..end].chars().count();
+    if start_col < end_col {
+        spans.push(LineSyntaxSpan {
+            start: start_col,
+            end: end_col,
+            theme_token: token.to_owned(),
+        });
+    }
+}
+
+fn next_word_bounds(text: &str, start: usize) -> Option<(usize, usize)> {
+    let start = skip_whitespace_bytes(text, start);
+    if start >= text.len() {
+        return None;
+    }
+    let mut end = text.len();
+    for (offset, character) in text[start..].char_indices() {
+        if character.is_whitespace() {
+            end = start + offset;
+            break;
+        }
+    }
+    Some((start, end))
+}
+
+fn skip_whitespace_bytes(text: &str, start: usize) -> usize {
+    let start = start.min(text.len());
+    for (offset, character) in text[start..].char_indices() {
+        if !character.is_whitespace() {
+            return start + offset;
+        }
+    }
+    text.len()
+}
+
+fn is_git_hash(text: &str) -> bool {
+    (7..=40).contains(&text.len()) && text.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn find_paren_number_range(text: &str) -> Option<(usize, usize)> {
+    let open = text.rfind('(')?;
+    let close = text[open..].find(')')? + open;
+    let inner = &text[open + 1..close];
+    let digit_offset = inner.find(|character: char| character.is_ascii_digit())?;
+    let digit_start = open + 1 + digit_offset;
+    let digit_end = inner[digit_offset..]
+        .find(|character: char| !character.is_ascii_digit())
+        .map(|index| digit_start + index)
+        .unwrap_or(close);
+    (digit_start < digit_end).then_some((digit_start, digit_end))
+}
+
+fn push_number_after_keyword(
+    spans: &mut Vec<LineSyntaxSpan>,
+    line: &str,
+    base_offset: usize,
+    text: &str,
+    keyword: &str,
+    token: &str,
+) {
+    let Some(keyword_index) = text.find(keyword) else {
+        return;
+    };
+    let number_start = skip_whitespace_bytes(text, keyword_index + keyword.len());
+    if number_start >= text.len() {
+        return;
+    }
+    let number_end = text[number_start..]
+        .find(|character: char| !character.is_ascii_digit())
+        .map(|index| number_start + index)
+        .unwrap_or(text.len());
+    if number_start < number_end {
+        push_span_bytes(
+            spans,
+            line,
+            base_offset + number_start,
+            base_offset + number_end,
+            token,
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
@@ -1171,10 +1617,19 @@ impl ShellBuffer {
     }
 
     fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
+        let is_git_status = buffer_is_git_status(&self.kind);
         let mut text_lines = Vec::with_capacity(lines.len());
         let mut meta = Vec::with_capacity(lines.len());
-        for line in lines {
-            text_lines.push(format_section_line(&line));
+        let mut syntax_lines = BTreeMap::new();
+        for (line_index, line) in lines.into_iter().enumerate() {
+            let formatted_line = format_section_line(&line);
+            if is_git_status {
+                let spans = git_status_line_spans(&line, &formatted_line);
+                if !spans.is_empty() {
+                    syntax_lines.insert(line_index, spans);
+                }
+            }
+            text_lines.push(formatted_line);
             meta.push(SectionLineMeta {
                 kind: line.kind,
                 action: line.action,
@@ -1183,6 +1638,11 @@ impl ShellBuffer {
         let state = self.ensure_section_state();
         state.lines = meta;
         self.replace_with_lines_preserve_view(text_lines);
+        if is_git_status {
+            self.syntax_lines = syntax_lines;
+            self.syntax_dirty = false;
+            self.last_edit_at = None;
+        }
     }
 
     fn append_output_lines(&mut self, lines: &[String]) {
