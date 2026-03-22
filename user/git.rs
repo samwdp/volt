@@ -23,7 +23,7 @@ pub const SECTION_COMMIT: &str = "git.status.commit";
 pub fn package() -> PluginPackage {
     PluginPackage::new(
         "git",
-        false,
+        true,
         "Magit-style git workflows surfaced as buffers.",
     )
     .with_commands(vec![
