@@ -2,6 +2,9 @@ use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
 };
 
+// Change this to customize the leader key for Vim bindings.
+const LEADER_KEY: &str = "Space";
+
 /// Returns the metadata for the Vim bindings package.
 pub fn package() -> PluginPackage {
     let commands = vec![
@@ -713,17 +716,14 @@ pub fn package() -> PluginPackage {
             "vim.scroll-line-down",
             PluginKeymapScope::Workspace,
         ),
-        normal_binding(
-            "Ctrl+f",
-            "vim.scroll-page-down",
-            PluginKeymapScope::Workspace,
-        ),
+        normal_binding("Ctrl+f", "workspace.new", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
         // Insert mode keys
         PluginKeyBinding::new("Escape", "vim.enter-normal-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
         // Command-line editing
         normal_binding(":", "vim.command-line", PluginKeymapScope::Workspace),
+        normal_binding("Ctrl+.", "workspace.list-files", PluginKeymapScope::Global),
         // Visual mode
         visual_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
         visual_binding(
@@ -869,6 +869,25 @@ pub fn package() -> PluginPackage {
             "vim.start-visual-around-text-object",
             PluginKeymapScope::Workspace,
         ),
+        // Leader bindings
+        leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
+        leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
+        // Git
+        leader_binding("g s", "git.status-open", PluginKeymapScope::Workspace),
+        leader_binding(
+            "f n",
+            "picker.open-nerd-fonts",
+            PluginKeymapScope::Workspace,
+        ),
+        // Workspace
+        leader_binding("p s", "workspace.switch", PluginKeymapScope::Workspace),
+        // Open
+        leader_binding(
+            "o p",
+            "picker.toggle-popup-window",
+            PluginKeymapScope::Workspace,
+        ),
+        leader_binding("o t", "terminal.popup", PluginKeymapScope::Workspace),
     ];
 
     PluginPackage::new(
@@ -890,6 +909,11 @@ fn hook_command(name: &str, description: &str, hook_name: &str, detail: &str) ->
 
 fn normal_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
     PluginKeyBinding::new(chord, command_name, scope).with_vim_mode(PluginVimMode::Normal)
+}
+
+fn leader_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
+    PluginKeyBinding::new(format!("{LEADER_KEY} {chord}"), command_name, scope)
+        .with_vim_mode(PluginVimMode::Normal)
 }
 
 fn visual_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {

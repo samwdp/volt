@@ -1,6 +1,11 @@
+use std::{fs, path::Path};
+
 fn main() {
-    if let Err(error) = copy_user_themes() {
-        panic!("failed to copy user themes: {error}");
+    if let Err(error) = copy_user_directory() {
+        panic!("failed to copy user directory: {error}");
+    }
+    if let Err(error) = copy_assets_directory() {
+        panic!("failed to copy assets directory: {error}");
     }
     #[cfg(target_os = "windows")]
     {
@@ -10,43 +15,85 @@ fn main() {
     }
 }
 
-fn copy_user_themes() -> Result<(), Box<dyn std::error::Error>> {
-    use std::{env, fs, path::PathBuf};
+fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{env, path::PathBuf};
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let workspace_root = manifest_dir
         .parent()
         .and_then(|path| path.parent())
         .ok_or("unable to locate workspace root")?;
-    let themes_dir = workspace_root.join("user").join("themes");
-    if !themes_dir.is_dir() {
+    let user_dir = workspace_root.join("user");
+    if !user_dir.is_dir() {
         return Ok(());
     }
-    println!("cargo:rerun-if-changed={}", themes_dir.display());
+    let target_profile_dir = target_profile_dir()?;
+    let destination = target_profile_dir.join("user");
+    if destination.exists() {
+        fs::remove_dir_all(&destination)?;
+    }
+    copy_dir_recursive(&user_dir, &destination)?;
 
-    let profile = env::var("PROFILE")?;
-    let target_dir = env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_root.join("target"))
-        .join(profile);
-    let destination = target_dir.join("user").join("themes");
-    fs::create_dir_all(&destination)?;
+    Ok(())
+}
 
-    for entry in fs::read_dir(&themes_dir)? {
+fn copy_assets_directory() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{env, path::PathBuf};
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let assets_dir = manifest_dir.join("assets");
+    if !assets_dir.is_dir() {
+        return Ok(());
+    }
+    let target_profile_dir = target_profile_dir()?;
+    let destination = target_profile_dir.join("assets");
+    if destination.exists() {
+        fs::remove_dir_all(&destination)?;
+    }
+    copy_dir_recursive(&assets_dir, &destination)?;
+
+    Ok(())
+}
+
+fn target_profile_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::{env, ffi::OsStr, path::PathBuf};
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let build_dir = out_dir
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new("build")))
+        .ok_or("unable to locate build directory in OUT_DIR")?;
+    let profile_dir = build_dir
+        .parent()
+        .ok_or("unable to locate target profile directory")?;
+    Ok(profile_dir.to_path_buf())
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed={}", source.display());
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
-        if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
-        {
-            let target = destination.join(entry.file_name());
+        let target = destination.join(entry.file_name());
+        if path.is_dir() {
+            if should_skip_dir(&path) {
+                continue;
+            }
+            copy_dir_recursive(&path, &target)?;
+        } else if path.is_file() {
             fs::copy(&path, &target)?;
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-
     Ok(())
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "target")
+    )
 }
 
 #[cfg(target_os = "windows")]

@@ -91,20 +91,8 @@ pub fn package() -> PluginPackage {
             "picker.toggle-popup-window",
             PluginKeymapScope::Global,
         ),
-        PluginKeyBinding::new(
-            "Space p p",
-            "picker.toggle-popup-window",
-            PluginKeymapScope::Workspace,
-        )
-        .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("F6", "picker.open-keybindings", PluginKeymapScope::Global),
         PluginKeyBinding::new("F7", "picker.open-themes", PluginKeymapScope::Global),
-        PluginKeyBinding::new(
-            "Space f n",
-            "picker.open-nerd-fonts",
-            PluginKeymapScope::Workspace,
-        )
-        .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+p", "popup.previous", PluginKeymapScope::Global)

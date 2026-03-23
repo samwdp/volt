@@ -32,6 +32,10 @@ name = "Volt Dark"
 "git.status.stash.summary" = "#d7dde8"
 "git.status.command" = "#61afef"
 "git.status.message" = "#5c6370"
+# Git fringe
+"git.fringe.added" = "#98c379"
+"git.fringe.modified" = "#d19a66"
+"git.fringe.removed" = "#e06c75"
 "syntax.attribute" = "#61afef"
 "syntax.comment" = "#5c6370"
 "syntax.constant" = "#d19a66"
@@ -62,7 +66,7 @@ picker_roundness = 16
 
 [langs.rust]
 indent = 4
-format_on_save = true
+format_on_save = false
 use_tabs = false
 
 [langs.markdown]

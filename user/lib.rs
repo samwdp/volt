@@ -10,6 +10,8 @@ pub mod buffer;
 pub mod dap;
 /// Git workflows and repository-oriented commands.
 pub mod git;
+/// Git fringe configuration.
+pub mod gitfringe;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
 /// Language-specific registrations.
@@ -56,7 +58,6 @@ pub fn packages() -> Vec<PluginPackage> {
         lsp::package(),
         dap::package(),
         oil::package(),
-        vim::package(),
         multicursor::package(),
         picker::package(),
         treesitter::package(),
@@ -64,6 +65,7 @@ pub fn packages() -> Vec<PluginPackage> {
         workspace::package(),
         git::package(),
         terminal::package(),
+        vim::package(),
         lang::rust::package(),
         lang::markdown::package(),
     ]

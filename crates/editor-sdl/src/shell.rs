@@ -7,7 +7,10 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -599,7 +602,8 @@ fn dedent_block_end(buffer: &mut ShellBuffer, indent_size: usize) -> bool {
 fn wrap_columns_for_width(width: u32, cell_width: i32) -> usize {
     let cell_width = cell_width.max(1) as u32;
     let line_number_width = cell_width.saturating_mul(5);
-    let padding = 12u32 + line_number_width;
+    let fringe_width = cell_width;
+    let padding = 12u32 + line_number_width + fringe_width;
     let available = width.saturating_sub(padding).max(cell_width);
     (available / cell_width).max(1) as usize
 }
@@ -935,6 +939,116 @@ struct SectionLineMeta {
 struct SectionedBufferState {
     collapsed: SectionCollapseState,
     lines: Vec<SectionLineMeta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitFringeKind {
+    Added,
+    Modified,
+    Removed,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GitFringeSnapshot {
+    lines: BTreeMap<usize, GitFringeKind>,
+}
+
+impl GitFringeSnapshot {
+    fn line_kind(&self, line_index: usize) -> Option<GitFringeKind> {
+        self.lines.get(&line_index).copied()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GitFringeState {
+    snapshot: Arc<Mutex<GitFringeSnapshot>>,
+    inflight: Arc<AtomicBool>,
+}
+
+impl GitFringeState {
+    fn new() -> Self {
+        Self {
+            snapshot: Arc::new(Mutex::new(GitFringeSnapshot::default())),
+            inflight: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn try_begin_refresh(&self) -> bool {
+        self.inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_refresh(&self) {
+        self.inflight.store(false, Ordering::Release);
+    }
+
+    fn try_line_kind(&self, line_index: usize) -> Option<GitFringeKind> {
+        let guard = self.snapshot.try_lock().ok()?;
+        guard.line_kind(line_index)
+    }
+
+    fn update_snapshot(&self, snapshot: GitFringeSnapshot) {
+        if let Ok(mut guard) = self.snapshot.lock() {
+            *guard = snapshot;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GitSummarySnapshot {
+    branch: Option<String>,
+    added: usize,
+    removed: usize,
+}
+
+#[derive(Debug, Clone)]
+struct GitSummaryState {
+    snapshot: Arc<Mutex<Option<GitSummarySnapshot>>>,
+    inflight: Arc<AtomicBool>,
+    last_refresh_at: Option<Instant>,
+}
+
+impl GitSummaryState {
+    fn new() -> Self {
+        Self {
+            snapshot: Arc::new(Mutex::new(None)),
+            inflight: Arc::new(AtomicBool::new(false)),
+            last_refresh_at: None,
+        }
+    }
+
+    fn snapshot(&self) -> Option<GitSummarySnapshot> {
+        let guard = self.snapshot.lock().ok()?;
+        guard.clone()
+    }
+
+    fn set_snapshot(&self, snapshot: Option<GitSummarySnapshot>) {
+        if let Ok(mut guard) = self.snapshot.lock() {
+            *guard = snapshot;
+        }
+    }
+
+    fn refresh_due(&self, now: Instant) -> bool {
+        const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+        self.last_refresh_at
+            .map(|last| now.duration_since(last) >= SUMMARY_REFRESH_INTERVAL)
+            .unwrap_or(true)
+    }
+
+    fn mark_refreshed(&mut self, now: Instant) {
+        self.last_refresh_at = Some(now);
+    }
+
+    fn try_begin_refresh(&self) -> bool {
+        self.inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_refresh(&self) {
+        self.inflight.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1440,6 +1554,9 @@ pub(crate) struct ShellBuffer {
     section_state: Option<SectionedBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
+    git_fringe: Option<GitFringeState>,
+    git_fringe_dirty: bool,
+    git_fringe_last_edit_at: Option<Instant>,
     directory_state: Option<DirectoryViewState>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
@@ -1510,6 +1627,9 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            git_fringe: None,
+            git_fringe_dirty: false,
+            git_fringe_last_edit_at: None,
             directory_state: None,
             text,
             undo_tree,
@@ -1527,6 +1647,13 @@ impl ShellBuffer {
     fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind());
+        let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
+            Some(GitFringeState::new())
+        } else {
+            None
+        };
+        let git_fringe_dirty = git_fringe.is_some();
+        let git_fringe_last_edit_at = git_fringe_dirty.then(Instant::now);
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
@@ -1536,6 +1663,9 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            git_fringe,
+            git_fringe_dirty,
+            git_fringe_last_edit_at,
             directory_state: None,
             text,
             undo_tree,
@@ -1569,6 +1699,9 @@ impl ShellBuffer {
             section_state: None,
             git_snapshot: None,
             git_view: None,
+            git_fringe: None,
+            git_fringe_dirty: false,
+            git_fringe_last_edit_at: None,
             directory_state: None,
             text,
             undo_tree,
@@ -1644,6 +1777,35 @@ impl ShellBuffer {
 
     fn set_git_view(&mut self, view: GitViewState) {
         self.git_view = Some(view);
+    }
+
+    fn git_fringe_state(&self) -> Option<&GitFringeState> {
+        self.git_fringe.as_ref()
+    }
+
+    fn git_fringe_kind(&self, line_index: usize) -> Option<GitFringeKind> {
+        self.git_fringe_state()
+            .and_then(|state| state.try_line_kind(line_index))
+    }
+
+    fn mark_git_fringe_dirty(&mut self) {
+        if matches!(self.kind, BufferKind::File) && self.git_fringe.is_some() {
+            self.git_fringe_dirty = true;
+            self.git_fringe_last_edit_at = Some(Instant::now());
+        }
+    }
+
+    fn git_fringe_refresh_due(&self, now: Instant) -> bool {
+        const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+        self.git_fringe_dirty
+            && self
+                .git_fringe_last_edit_at
+                .map(|last| now.duration_since(last) >= GIT_FRINGE_REFRESH_DEBOUNCE)
+                .unwrap_or(true)
+    }
+
+    fn clear_git_fringe_dirty(&mut self) {
+        self.git_fringe_dirty = false;
     }
 
     fn directory_state(&self) -> Option<&DirectoryViewState> {
@@ -1821,6 +1983,7 @@ impl ShellBuffer {
         if self.kind == BufferKind::File || self.language_id.is_some() {
             self.syntax_dirty = true;
             self.last_edit_at = Some(Instant::now());
+            self.mark_git_fringe_dirty();
         }
     }
 
@@ -2632,6 +2795,7 @@ pub(crate) struct ShellUiState {
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
     yank_flash: Option<YankFlash>,
+    git_summary: GitSummaryState,
 }
 
 impl ShellUiState {
@@ -2669,6 +2833,7 @@ impl ShellUiState {
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
             yank_flash: None,
+            git_summary: GitSummaryState::new(),
         }
     }
 
@@ -2680,6 +2845,26 @@ impl ShellUiState {
 
     fn picker_visible(&self) -> bool {
         self.picker.is_some()
+    }
+
+    fn git_summary(&self) -> Option<GitSummarySnapshot> {
+        self.git_summary.snapshot()
+    }
+
+    fn git_summary_refresh_due(&self, now: Instant) -> bool {
+        self.git_summary.refresh_due(now)
+    }
+
+    fn git_summary_state(&self) -> GitSummaryState {
+        self.git_summary.clone()
+    }
+
+    fn mark_git_summary_refreshed(&mut self, now: Instant) {
+        self.git_summary.mark_refreshed(now);
+    }
+
+    fn clear_git_summary(&self) {
+        self.git_summary.set_snapshot(None);
     }
 
     fn input_mode(&self) -> InputMode {
@@ -4184,6 +4369,10 @@ impl ShellState {
     fn refresh_pending_syntax(&mut self) -> Result<(), ShellError> {
         refresh_pending_syntax(&mut self.runtime).map_err(ShellError::Runtime)
     }
+
+    fn refresh_pending_git(&mut self) -> Result<(), ShellError> {
+        refresh_pending_git(&mut self.runtime).map_err(ShellError::Runtime)
+    }
 }
 
 /// Runs the SDL3 + SDL_ttf demo shell.
@@ -4297,6 +4486,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
                 if let Err(error) = state.refresh_pending_syntax() {
                     state.record_shell_error("shell.syntax-refresh", error);
+                }
+                if let Err(error) = state.refresh_pending_git() {
+                    state.record_shell_error("shell.git-refresh", error);
                 }
 
                 let mut scene = Vec::new();
@@ -6912,7 +7104,7 @@ fn apply_operator_to_range(
         } else {
             YankRegister::Character(removed.clone())
         };
-        store_yank_register(runtime, yank, operator == VimOperator::Yank)?;
+        store_yank_register(runtime, yank, true)?;
     }
 
     match operator {
@@ -6982,11 +7174,7 @@ fn apply_block_operator(
         operator,
         VimOperator::Delete | VimOperator::Change | VimOperator::Yank
     ) {
-        store_yank_register(
-            runtime,
-            YankRegister::Block(yanked),
-            operator == VimOperator::Yank,
-        )?;
+        store_yank_register(runtime, YankRegister::Block(yanked), true)?;
     }
     let target_cursor = ranges[0].start();
 
@@ -11429,6 +11617,297 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn refresh_pending_git(runtime: &mut EditorRuntime) -> Result<(), String> {
+    refresh_pending_git_fringe(runtime)?;
+    refresh_pending_git_summary(runtime)?;
+    Ok(())
+}
+
+fn refresh_pending_git_fringe(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let now = Instant::now();
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .filter(|buffer| buffer.git_fringe_refresh_due(now))
+            .map(ShellBuffer::id)
+            .collect::<Vec<_>>()
+    };
+
+    for buffer_id in buffer_ids {
+        refresh_git_fringe(runtime, buffer_id)?;
+    }
+
+    Ok(())
+}
+
+fn refresh_pending_git_summary(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let now = Instant::now();
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(_) => {
+            if let Ok(ui) = shell_ui(runtime) {
+                ui.clear_git_summary();
+            }
+            return Ok(());
+        }
+    };
+    if !git_repository_present(&root) {
+        if let Ok(ui) = shell_ui(runtime) {
+            ui.clear_git_summary();
+        }
+        return Ok(());
+    }
+    let summary_state = {
+        let ui = shell_ui_mut(runtime)?;
+        if !ui.git_summary_refresh_due(now) {
+            return Ok(());
+        }
+        let summary_state = ui.git_summary_state();
+        if !summary_state.try_begin_refresh() {
+            return Ok(());
+        }
+        ui.mark_git_summary_refreshed(now);
+        summary_state
+    };
+
+    std::thread::spawn(move || {
+        let snapshot = build_git_summary_snapshot(&root);
+        summary_state.set_snapshot(snapshot);
+        summary_state.finish_refresh();
+    });
+
+    Ok(())
+}
+
+fn refresh_git_fringe(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(_) => {
+            if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                buffer.clear_git_fringe_dirty();
+            }
+            return Ok(());
+        }
+    };
+    let (path, line_count, fringe_state) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(path) = buffer.path() else {
+            return Ok(());
+        };
+        let Some(fringe_state) = buffer.git_fringe_state().cloned() else {
+            return Ok(());
+        };
+        (path.to_path_buf(), buffer.line_count(), fringe_state)
+    };
+    if !git_repository_present(&root) {
+        fringe_state.update_snapshot(GitFringeSnapshot::default());
+        if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+            buffer.clear_git_fringe_dirty();
+        }
+        return Ok(());
+    }
+    let buffer_text = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer.text.text()
+    };
+    let relative_path = match path.strip_prefix(&root) {
+        Ok(relative) => relative.to_path_buf(),
+        Err(_) => {
+            fringe_state.update_snapshot(GitFringeSnapshot::default());
+            if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                buffer.clear_git_fringe_dirty();
+            }
+            return Ok(());
+        }
+    };
+    if !fringe_state.try_begin_refresh() {
+        return Ok(());
+    }
+    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+        buffer.clear_git_fringe_dirty();
+    }
+
+    std::thread::spawn(move || {
+        let snapshot = build_git_fringe_snapshot(&root, &relative_path, &buffer_text, line_count);
+        fringe_state.update_snapshot(snapshot);
+        fringe_state.finish_refresh();
+    });
+
+    Ok(())
+}
+
+fn build_git_fringe_snapshot(
+    root: &Path,
+    relative_path: &Path,
+    buffer_text: &str,
+    line_count: usize,
+) -> GitFringeSnapshot {
+    if line_count == 0 {
+        return GitFringeSnapshot::default();
+    }
+    let relative_spec = relative_path.to_string_lossy().replace('\\', "/");
+    let head_spec = format!("HEAD:{relative_spec}");
+    let head_text = git_command_output_background(root, &["show", &head_spec], &[0]);
+    let Some(head_text) = head_text else {
+        let mut snapshot = GitFringeSnapshot::default();
+        for line_index in 0..line_count {
+            snapshot.lines.insert(line_index, GitFringeKind::Added);
+        }
+        return snapshot;
+    };
+    let head_path = git_fringe_temp_path("head");
+    let buffer_path = git_fringe_temp_path("buffer");
+    if fs::write(&head_path, head_text).is_err() || fs::write(&buffer_path, buffer_text).is_err() {
+        let _ = fs::remove_file(&head_path);
+        let _ = fs::remove_file(&buffer_path);
+        return GitFringeSnapshot::default();
+    }
+    let head_path_str = head_path.to_string_lossy().to_string();
+    let buffer_path_str = buffer_path.to_string_lossy().to_string();
+    let diff_output = git_command_output_background(
+        root,
+        &[
+            "diff",
+            "--no-index",
+            "--unified=0",
+            "--no-color",
+            head_path_str.as_str(),
+            buffer_path_str.as_str(),
+        ],
+        &[0, 1],
+    )
+    .unwrap_or_default();
+    let _ = fs::remove_file(&head_path);
+    let _ = fs::remove_file(&buffer_path);
+    parse_git_fringe_diff(&diff_output, line_count)
+}
+
+fn parse_git_fringe_diff(diff_output: &str, line_count: usize) -> GitFringeSnapshot {
+    let mut snapshot = GitFringeSnapshot::default();
+    if line_count == 0 {
+        return snapshot;
+    }
+    for line in diff_output.lines() {
+        let Some((_old_start, old_count, new_start, new_count)) = parse_diff_hunk_header(line)
+        else {
+            continue;
+        };
+        apply_git_fringe_hunk(&mut snapshot, line_count, old_count, new_start, new_count);
+    }
+    snapshot
+}
+
+fn apply_git_fringe_hunk(
+    snapshot: &mut GitFringeSnapshot,
+    line_count: usize,
+    old_count: usize,
+    new_start: usize,
+    new_count: usize,
+) {
+    if line_count == 0 {
+        return;
+    }
+    let start_index = new_start.saturating_sub(1);
+    if old_count == 0 {
+        let end = start_index.saturating_add(new_count).min(line_count);
+        for line_index in start_index..end {
+            snapshot.lines.insert(line_index, GitFringeKind::Added);
+        }
+    } else if new_count == 0 {
+        let line_index = start_index.min(line_count.saturating_sub(1));
+        snapshot.lines.insert(line_index, GitFringeKind::Removed);
+    } else {
+        let end = start_index.saturating_add(new_count).min(line_count);
+        for line_index in start_index..end {
+            snapshot.lines.insert(line_index, GitFringeKind::Modified);
+        }
+    }
+}
+
+fn parse_diff_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
+    let trimmed = line.strip_prefix("@@")?.trim();
+    let mut parts = trimmed.split_whitespace();
+    let old_part = parts.next()?;
+    let new_part = parts.next()?;
+    let (old_start, old_count) = parse_hunk_range(old_part)?;
+    let (new_start, new_count) = parse_hunk_range(new_part)?;
+    Some((old_start, old_count, new_start, new_count))
+}
+
+fn parse_hunk_range(part: &str) -> Option<(usize, usize)> {
+    let part = part.strip_prefix('-').or_else(|| part.strip_prefix('+'))?;
+    let mut pieces = part.split(',');
+    let start = pieces.next()?.parse::<usize>().ok()?;
+    let count = match pieces.next() {
+        Some(raw) => raw.parse::<usize>().ok()?,
+        None => 1,
+    };
+    Some((start, count))
+}
+
+fn build_git_summary_snapshot(root: &Path) -> Option<GitSummarySnapshot> {
+    let branch_output =
+        git_command_output_background(root, &["rev-parse", "--abbrev-ref", "HEAD"], &[0])?;
+    let branch = branch_output.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    let diff_output = git_command_output_background(root, &["diff", "--numstat", "HEAD"], &[0, 1])
+        .unwrap_or_default();
+    let (added, removed) = parse_git_numstat(&diff_output);
+    Some(GitSummarySnapshot {
+        branch: Some(branch.to_owned()),
+        added,
+        removed,
+    })
+}
+
+fn parse_git_numstat(output: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in output.lines() {
+        let mut parts = line.split('\t');
+        let add_raw = parts.next().unwrap_or_default();
+        let remove_raw = parts.next().unwrap_or_default();
+        added = added.saturating_add(add_raw.parse::<usize>().unwrap_or(0));
+        removed = removed.saturating_add(remove_raw.parse::<usize>().unwrap_or(0));
+    }
+    (added, removed)
+}
+
+fn git_command_output_background(
+    root: &Path,
+    args: &[&str],
+    allowed_exit_codes: &[i32],
+) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    let exit_code = output.status.code()?;
+    if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_repository_present(root: &Path) -> bool {
+    git_command_output_background(root, &["rev-parse", "--git-dir"], &[0]).is_some()
+}
+
+fn git_fringe_temp_path(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_nanos();
+    env::temp_dir().join(format!(
+        "volt-git-fringe-{label}-{}-{unique}.tmp",
+        std::process::id()
+    ))
+}
+
 fn active_window_id(runtime: &EditorRuntime) -> Result<editor_core::WindowId, String> {
     runtime
         .model()
@@ -13155,6 +13634,7 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::V => Some("Ctrl+v".to_owned()),
             Keycode::Y => Some("Ctrl+y".to_owned()),
             Keycode::Grave => Some("Ctrl+`".to_owned()),
+            Keycode::Period | Keycode::KpPeriod => Some("Ctrl+.".to_owned()),
             Keycode::Return | Keycode::KpEnter => Some("Ctrl+Enter".to_owned()),
             _ => None,
         };
@@ -13550,7 +14030,7 @@ fn popup_window_height(content_height: u32, line_height: i32) -> u32 {
         return content_height;
     }
 
-    let desired = (content_height / 5).max(row_height * 4);
+    let desired = (content_height.saturating_mul(2) / 5).max(row_height * 4);
     let max_height = content_height.saturating_sub(row_height).max(row_height);
     let clamped = desired.min(max_height);
     (clamped / row_height).max(1) * row_height
@@ -13589,6 +14069,7 @@ fn render_shell_state(
     let pane_active_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
     let pane_inactive_background = adjust_color(base_background, if is_dark { -6 } else { 6 });
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
+    let git_summary = state.git_summary();
 
     target.clear(base_background);
 
@@ -13634,6 +14115,7 @@ fn render_shell_state(
                 state.vim().recording_macro,
                 workspace_name,
                 lsp_server,
+                git_summary.as_ref(),
                 theme_registry,
                 cell_width,
                 line_height,
@@ -13853,6 +14335,7 @@ fn render_runtime_popup_overlay(
     let is_dark = is_dark_color(base_background);
     let popup_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
+    let git_summary = state.git_summary();
     fill_rect(target, popup_rect, popup_background)?;
     fill_rect(
         target,
@@ -13881,6 +14364,7 @@ fn render_runtime_popup_overlay(
             state.vim().recording_macro,
             workspace_name,
             lsp_server,
+            git_summary.as_ref(),
             theme_registry,
             cell_width,
             line_height,
@@ -13950,6 +14434,7 @@ fn render_buffer(
     recording_macro: Option<char>,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    git_summary: Option<&GitSummarySnapshot>,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -13989,7 +14474,47 @@ fn render_buffer(
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
         .unwrap_or(Color::RGBA(112, 196, 255, 120));
+    let git_added_fallback = theme_color(
+        theme_registry,
+        "git.status.entry.added",
+        Color::RGB(108, 193, 118),
+    );
+    let git_modified_fallback = theme_color(
+        theme_registry,
+        "git.status.entry.modified",
+        Color::RGB(209, 154, 102),
+    );
+    let git_removed_fallback = theme_color(
+        theme_registry,
+        "git.status.entry.deleted",
+        Color::RGB(224, 107, 117),
+    );
+    let git_fringe_added = theme_color(
+        theme_registry,
+        user::gitfringe::TOKEN_ADDED,
+        git_added_fallback,
+    );
+    let git_fringe_modified = theme_color(
+        theme_registry,
+        user::gitfringe::TOKEN_MODIFIED,
+        git_modified_fallback,
+    );
+    let git_fringe_removed = theme_color(
+        theme_registry,
+        user::gitfringe::TOKEN_REMOVED,
+        git_removed_fallback,
+    );
     let cell_width = cell_width.max(1);
+    let git_info = git_summary.and_then(|summary| {
+        summary
+            .branch
+            .as_deref()
+            .map(|branch| user::statusline::GitStatuslineInfo {
+                branch,
+                added: summary.added,
+                removed: summary.removed,
+            })
+    });
     let statusline = truncate_text_to_width(
         fonts,
         &user::statusline::compose(&user::statusline::StatuslineContext {
@@ -13997,9 +14522,12 @@ fn render_buffer(
             recording_macro,
             workspace_name,
             buffer_name: buffer.display_name(),
+            buffer_modified: buffer.is_dirty(),
+            language_id: buffer.language_id(),
             line: buffer.cursor_row() + 1,
             column: buffer.cursor_col() + 1,
             lsp_server,
+            git: git_info,
         }),
         rect.width().saturating_sub(24),
     )?;
@@ -14014,6 +14542,7 @@ fn render_buffer(
     let input_y = statusline_y - input_reserved;
     let visible_body_height = (input_y - body_y - 10).max(line_height);
     let visible_rows = (visible_body_height / line_height.max(1)).max(1) as usize;
+    let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
     let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
@@ -14066,6 +14595,7 @@ fn render_buffer(
             PixelRectToRect::rect(
                 rect.x()
                     + 12
+                    + fringe_width
                     + line_number_width
                     + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
                 body_y + cursor_row_on_screen as i32 * line_height,
@@ -14077,7 +14607,10 @@ fn render_buffer(
         )?;
     }
 
-    let text_x = rect.x() + 12 + line_number_width;
+    let gutter_x = rect.x() + 12;
+    let fringe_x = gutter_x;
+    let line_number_x = gutter_x + fringe_width;
+    let text_x = line_number_x + line_number_width;
     let mut visual_row = 0usize;
     for wrapped in wrapped_lines {
         let line_index = wrapped.line_index;
@@ -14134,6 +14667,14 @@ fn render_buffer(
                 }
             }
             if segment_index == 0 {
+                if let Some(kind) = buffer.git_fringe_kind(line_index) {
+                    let color = match kind {
+                        GitFringeKind::Added => git_fringe_added,
+                        GitFringeKind::Modified => git_fringe_modified,
+                        GitFringeKind::Removed => git_fringe_removed,
+                    };
+                    draw_text(target, fringe_x, y, user::gitfringe::SYMBOL, color)?;
+                }
                 let line_number = if relative_line_numbers {
                     if line_index == cursor_row {
                         0
@@ -14145,7 +14686,7 @@ fn render_buffer(
                 };
                 draw_text(
                     target,
-                    rect.x() + 12,
+                    line_number_x,
                     y,
                     &format!("{:>4}", line_number),
                     muted,
@@ -14187,7 +14728,7 @@ fn render_buffer(
             ),
             input_background,
         )?;
-        let input_x = rect.x() + 12 + line_number_width;
+        let input_x = text_x;
         let input_text = format!("{}{}", input.prompt(), input.text());
         draw_text(target, input_x, input_y, &input_text, input_foreground)?;
         if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
