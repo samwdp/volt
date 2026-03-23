@@ -29,6 +29,11 @@ pub fn package() -> PluginPackage {
             "Lists the current workspace files that are visible to Git.",
             "workspace.files",
         ),
+        picker_command(
+            "workspace.search",
+            "Searches text across files in the active workspace.",
+            "workspace.search",
+        ),
         PluginCommand::new(
             "workspace.save",
             "Saves all modified file buffers in the active workspace.",

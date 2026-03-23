@@ -43,6 +43,7 @@ pub(super) fn picker_overlay(
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
         "workspace.delete" => workspace_delete_picker_overlay(runtime),
         "workspace.files" => workspace_file_picker_overlay(runtime),
+        "workspace.search" => workspace_search_picker_overlay(runtime),
         "undo-tree" => undo_tree_picker_overlay(runtime),
         "themes" => theme_picker_overlay(runtime),
         "nerd-fonts" => Ok(nerd_font_picker_overlay()),
@@ -311,6 +312,22 @@ fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverla
         root: root.to_path_buf(),
     });
     Ok(overlay)
+}
+
+fn workspace_search_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
+    let Some(root) = active_workspace_root(runtime)? else {
+        return Ok(message_picker_overlay(
+            "Workspace Search",
+            "Workspace has no project root",
+            "Open a project-backed workspace before searching across files.",
+            Some(
+                "workspace.search works from a project workspace created by workspace.new."
+                    .to_owned(),
+            ),
+        ));
+    };
+
+    Ok(PickerOverlay::workspace_search("Workspace Search", root))
 }
 
 fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
@@ -924,6 +941,7 @@ fn undo_tree_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, St
         session,
         actions,
         submit_action: None,
+        mode: PickerMode::Static,
     })
 }
 

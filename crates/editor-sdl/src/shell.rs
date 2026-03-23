@@ -13,6 +13,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Sender},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -42,7 +43,7 @@ use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
     find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
 };
-use editor_syntax::{SyntaxError, SyntaxRegistry, SyntaxSnapshot};
+use editor_syntax::{LanguageConfiguration, SyntaxError, SyntaxRegistry, SyntaxSnapshot};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
 use sdl3::{
     event::Event,
@@ -104,6 +105,7 @@ const HOOK_ACP_DISCONNECT: &str = "ui.acp.disconnect";
 const HOOK_ACP_PERMISSION_APPROVE: &str = "ui.acp.permission-approve";
 const HOOK_ACP_PERMISSION_DENY: &str = "ui.acp.permission-deny";
 const HOOK_ACP_PICK_SESSION: &str = "ui.acp.pick-session";
+const HOOK_ACP_NEW_SESSION: &str = "ui.acp.new-session";
 const HOOK_ACP_PICK_MODE: &str = "ui.acp.pick-mode";
 const HOOK_ACP_PICK_MODEL: &str = "ui.acp.pick-model";
 const HOOK_ACP_CYCLE_MODE: &str = "ui.acp.cycle-mode";
@@ -621,7 +623,8 @@ fn wrap_columns_for_width(width: u32, cell_width: i32) -> usize {
     let cell_width = cell_width.max(1) as u32;
     let line_number_width = cell_width.saturating_mul(5);
     let fringe_width = cell_width;
-    let padding = 12u32 + line_number_width + fringe_width;
+    let right_padding = cell_width;
+    let padding = 12u32 + line_number_width + fringe_width + right_padding;
     let available = width.saturating_sub(padding).max(cell_width);
     (available / cell_width).max(1) as usize
 }
@@ -1749,6 +1752,7 @@ pub(crate) struct ShellBuffer {
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
+    syntax_requested_revision: Option<u64>,
     last_edit_at: Option<Instant>,
 }
 
@@ -1822,6 +1826,7 @@ impl ShellBuffer {
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
+            syntax_requested_revision: None,
             last_edit_at: None,
         }
     }
@@ -1858,6 +1863,7 @@ impl ShellBuffer {
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
+            syntax_requested_revision: None,
             last_edit_at: None,
         }
     }
@@ -1894,6 +1900,7 @@ impl ShellBuffer {
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
+            syntax_requested_revision: None,
             last_edit_at: None,
         }
     }
@@ -2053,8 +2060,12 @@ impl ShellBuffer {
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
         self.syntax_lines.clear();
-        self.syntax_dirty = false;
-        self.last_edit_at = None;
+        if self.language_id.is_some() {
+            self.mark_syntax_dirty();
+        } else {
+            self.syntax_dirty = false;
+            self.last_edit_at = None;
+        }
         self.invalidate_wrap_cache();
     }
 
@@ -2079,8 +2090,12 @@ impl ShellBuffer {
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
         self.syntax_lines.clear();
-        self.syntax_dirty = false;
-        self.last_edit_at = None;
+        if self.language_id.is_some() {
+            self.mark_syntax_dirty();
+        } else {
+            self.syntax_dirty = false;
+            self.last_edit_at = None;
+        }
         self.invalidate_wrap_cache();
     }
 
@@ -2127,6 +2142,7 @@ impl ShellBuffer {
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
         self.syntax_lines = syntax.as_ref().map(index_syntax_lines).unwrap_or_default();
         self.syntax_dirty = false;
+        self.syntax_requested_revision = Some(self.text.revision());
         self.last_edit_at = None;
     }
 
@@ -2153,6 +2169,7 @@ impl ShellBuffer {
         self.syntax_error = None;
         self.syntax_lines.clear();
         self.syntax_dirty = false;
+        self.syntax_requested_revision = None;
         self.last_edit_at = None;
         self.scroll_row = 0;
         self.invalidate_wrap_cache();
@@ -2172,6 +2189,7 @@ impl ShellBuffer {
         self.syntax_error = None;
         self.syntax_lines.clear();
         self.syntax_dirty = false;
+        self.syntax_requested_revision = None;
         self.last_edit_at = None;
         let line_count = self.line_count();
         if line_count == 0 {
@@ -2195,9 +2213,22 @@ impl ShellBuffer {
         }
     }
 
+    fn force_syntax_refresh(&mut self) {
+        if self.kind == BufferKind::File || self.language_id.is_some() {
+            self.syntax_dirty = true;
+            self.syntax_requested_revision = None;
+            self.last_edit_at = None;
+        }
+    }
+
+    fn mark_syntax_refresh_requested(&mut self) {
+        self.syntax_requested_revision = Some(self.text.revision());
+    }
+
     fn syntax_refresh_due(&self, now: Instant) -> bool {
         const SYNTAX_REFRESH_DEBOUNCE: Duration = Duration::from_millis(75);
         self.syntax_dirty
+            && self.syntax_requested_revision != Some(self.text.revision())
             && self
                 .last_edit_at
                 .map(|last_edit_at| now.duration_since(last_edit_at) >= SYNTAX_REFRESH_DEBOUNCE)
@@ -2790,6 +2821,10 @@ enum PickerAction {
     CloseBufferSave(BufferId),
     CloseBufferDiscard(BufferId),
     OpenFile(PathBuf),
+    OpenFileLocation {
+        path: PathBuf,
+        target: TextPoint,
+    },
     OpenAcpClient(String),
     CreateWorkspaceFile {
         root: PathBuf,
@@ -2847,10 +2882,18 @@ struct PickerEntry {
 }
 
 #[derive(Debug, Clone)]
+enum PickerMode {
+    Static,
+    VimSearch(VimSearchDirection),
+    WorkspaceSearch { root: PathBuf },
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
     submit_action: Option<PickerAction>,
+    mode: PickerMode,
 }
 
 impl PickerOverlay {
@@ -2869,6 +2912,7 @@ impl PickerOverlay {
             session: PickerSession::new(title, items).with_result_limit(48),
             actions,
             submit_action: None,
+            mode: PickerMode::Static,
         }
     }
 
@@ -2893,6 +2937,18 @@ impl PickerOverlay {
                 .with_preserve_order(),
             actions,
             submit_action: Some(PickerAction::VimSearch(direction)),
+            mode: PickerMode::VimSearch(direction),
+        }
+    }
+
+    fn workspace_search(title: impl Into<String>, root: PathBuf) -> Self {
+        Self {
+            session: PickerSession::new(title.into(), Vec::new())
+                .with_result_limit(48)
+                .with_preserve_order(),
+            actions: BTreeMap::new(),
+            submit_action: Some(PickerAction::NoOp),
+            mode: PickerMode::WorkspaceSearch { root },
         }
     }
 
@@ -2910,8 +2966,15 @@ impl PickerOverlay {
     }
 
     fn vim_search_direction(&self) -> Option<VimSearchDirection> {
-        match self.submit_action.as_ref() {
-            Some(PickerAction::VimSearch(direction)) => Some(*direction),
+        match self.mode {
+            PickerMode::VimSearch(direction) => Some(direction),
+            _ => None,
+        }
+    }
+
+    fn workspace_search_root(&self) -> Option<&Path> {
+        match &self.mode {
+            PickerMode::WorkspaceSearch { root } => Some(root.as_path()),
             _ => None,
         }
     }
@@ -3012,7 +3075,6 @@ struct KeySequenceState {
     started_at: Instant,
 }
 
-#[derive(Debug, Clone)]
 pub(crate) struct ShellUiState {
     buffers: Vec<ShellBuffer>,
     workspace_views: BTreeMap<WorkspaceId, ShellWorkspaceView>,
@@ -3030,6 +3092,9 @@ pub(crate) struct ShellUiState {
     popup_focus: bool,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
+    vim_search_worker: VimSearchWorkerState,
+    workspace_search_worker: WorkspaceSearchWorkerState,
+    syntax_refresh_worker: SyntaxRefreshWorkerState,
 }
 
 impl ShellUiState {
@@ -3069,6 +3134,9 @@ impl ShellUiState {
             popup_focus: false,
             yank_flash: None,
             git_summary: GitSummaryState::new(),
+            vim_search_worker: VimSearchWorkerState::new(),
+            workspace_search_worker: WorkspaceSearchWorkerState::new(),
+            syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
         }
     }
 
@@ -3329,11 +3397,23 @@ impl ShellUiState {
     }
 
     fn set_picker(&mut self, picker: PickerOverlay) {
+        self.vim_search_worker.clear_pending();
+        self.workspace_search_worker.clear_pending();
         self.picker = Some(picker);
     }
 
     fn close_picker(&mut self) {
+        self.vim_search_worker.clear_pending();
+        self.workspace_search_worker.clear_pending();
         self.picker = None;
+    }
+
+    fn configure_syntax_refresh_worker(
+        &mut self,
+        configs: Vec<LanguageConfiguration>,
+        install_root: PathBuf,
+    ) {
+        self.syntax_refresh_worker.configure(configs, install_root);
     }
 
     fn set_yank_flash(&mut self, buffer_id: BufferId, selection: VisualSelection) {
@@ -3621,6 +3701,7 @@ impl ShellState {
             .register_all(user::syntax_languages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime.services_mut().insert(syntax_registry);
+        configure_syntax_refresh_worker(&mut runtime).map_err(ShellError::Runtime)?;
         let mut theme_registry = ThemeRegistry::new();
         theme_registry
             .register_all(user::themes())
@@ -3664,7 +3745,7 @@ impl ShellState {
                 repeat,
                 ..
             } => {
-                if repeat && !matches!(keycode, Keycode::Backspace | Keycode::Delete) {
+                if repeat && !repeated_keydown_allowed(keycode, keymod) {
                     return Ok(false);
                 }
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
@@ -3753,7 +3834,7 @@ impl ShellState {
                         && let Some(picker) = self.ui_mut()?.picker_mut()
                     {
                         picker.backspace_query();
-                        self.refresh_vim_search_picker()?;
+                        self.schedule_picker_search_refresh()?;
                     }
                     self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
@@ -4385,7 +4466,7 @@ impl ShellState {
             if let Some(picker) = self.ui_mut()?.picker_mut() {
                 picker.append_query(text);
             }
-            self.refresh_vim_search_picker()?;
+            self.schedule_picker_search_refresh()?;
             return Ok(());
         }
 
@@ -4554,27 +4635,116 @@ impl ShellState {
         Ok(())
     }
 
-    fn refresh_vim_search_picker(&mut self) -> Result<(), ShellError> {
-        let (direction, query) = {
+    fn schedule_picker_search_refresh(&mut self) -> Result<(), ShellError> {
+        enum DynamicPickerSearch {
+            Vim {
+                buffer: ShellBuffer,
+                direction: VimSearchDirection,
+                query: String,
+            },
+            Workspace {
+                root: PathBuf,
+                query: String,
+            },
+        }
+
+        let pending = {
             let ui = self.ui()?;
             let Some(picker) = ui.picker() else {
                 return Ok(());
             };
-            let Some(direction) = picker.vim_search_direction() else {
-                return Ok(());
-            };
-            (direction, picker.session().query().to_owned())
+            let query = picker.session().query().to_owned();
+            if let Some(direction) = picker.vim_search_direction() {
+                let buffer_id = ui
+                    .active_buffer_id()
+                    .ok_or_else(|| ShellError::Runtime("active buffer is missing".to_owned()))?;
+                let buffer = ui.buffer(buffer_id).cloned().ok_or_else(|| {
+                    ShellError::Runtime("active shell buffer is missing".to_owned())
+                })?;
+                Some(DynamicPickerSearch::Vim {
+                    buffer,
+                    direction,
+                    query,
+                })
+            } else {
+                picker
+                    .workspace_search_root()
+                    .map(|root| DynamicPickerSearch::Workspace {
+                        root: root.to_path_buf(),
+                        query,
+                    })
+            }
         };
 
-        let search_data = {
-            let buffer = self.active_buffer_mut()?;
-            vim_search_entries(buffer, direction, &query)
-        };
+        match pending {
+            Some(DynamicPickerSearch::Vim {
+                buffer,
+                direction,
+                query,
+            }) => {
+                self.ui_mut()?
+                    .vim_search_worker
+                    .schedule(buffer, direction, query);
+            }
+            Some(DynamicPickerSearch::Workspace { root, query }) => {
+                self.ui_mut()?.workspace_search_worker.schedule(root, query);
+            }
+            None => {}
+        }
 
-        if let Some(picker) = self.ui_mut()?.picker_mut()
-            && picker.vim_search_direction().is_some()
+        Ok(())
+    }
+
+    fn refresh_pending_picker_searches(&mut self) -> Result<(), ShellError> {
+        let now = Instant::now();
         {
-            picker.set_entries(search_data.entries, search_data.selected_index);
+            let ui = self.ui_mut()?;
+            ui.vim_search_worker.dispatch_due(now);
+            ui.workspace_search_worker.dispatch_due(now);
+        }
+
+        if let Some(result) = self.ui()?.vim_search_worker.take_latest_result() {
+            let should_apply = {
+                let ui = self.ui()?;
+                if let Some(picker) = ui.picker()
+                    && let Some(buffer) = ui.buffer(result.buffer_id)
+                {
+                    picker.vim_search_direction() == Some(result.direction)
+                        && picker.session().query() == result.query
+                        && ui.active_buffer_id() == Some(result.buffer_id)
+                        && buffer.text.revision() == result.buffer_revision
+                        && result.request_id == ui.vim_search_worker.next_request_id
+                } else {
+                    false
+                }
+            };
+            if should_apply
+                && let Some(picker) = self.ui_mut()?.picker_mut()
+                && picker.vim_search_direction() == Some(result.direction)
+            {
+                picker.set_entries(result.data.entries, result.data.selected_index);
+            }
+        }
+
+        if let Some(result) = self.ui()?.workspace_search_worker.take_latest_result() {
+            let should_apply = {
+                let ui = self.ui()?;
+                if let Some(picker) = ui.picker()
+                    && let Some(root) = picker.workspace_search_root()
+                {
+                    picker.session().query() == result.query
+                        && root == result.root.as_path()
+                        && result.request_id == ui.workspace_search_worker.next_request_id
+                } else {
+                    false
+                }
+            };
+            if should_apply
+                && let Some(picker) = self.ui_mut()?.picker_mut()
+                && picker.workspace_search_root().is_some()
+            {
+                picker.set_entries(result.data.entries, result.data.selected_index);
+            }
         }
 
         Ok(())
@@ -4807,6 +4977,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     }
                 }
 
+                if let Err(error) = state.refresh_pending_picker_searches() {
+                    state.record_shell_error("shell.picker-search-refresh", error);
+                }
                 if let Err(error) = state.refresh_pending_syntax() {
                     state.record_shell_error("shell.syntax-refresh", error);
                 }
@@ -5162,6 +5335,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_ACP_PICK_SESSION,
         "Opens the ACP session picker for the active client.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_NEW_SESSION,
+        "Creates a new ACP session for the active client in a new buffer.",
     )?;
     register_hook(
         runtime,
@@ -6132,6 +6310,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_ACP_NEW_SESSION,
+            "shell.acp-new-session",
+            |_, runtime| {
+                acp::acp_new_session(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_ACP_PICK_MODE, "shell.acp-pick-mode", |_, runtime| {
             acp::acp_pick_mode(runtime)?;
             Ok(())
@@ -6206,6 +6394,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 PickerAction::OpenFile(path) => {
                     open_workspace_file(runtime, &path)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::OpenFileLocation { path, target } => {
+                    open_workspace_file_at(runtime, &path, target)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::OpenAcpClient(client_id) => {
@@ -6902,6 +7094,295 @@ struct VimSearchMatch {
 struct SearchPickerData {
     entries: Vec<PickerEntry>,
     selected_index: usize,
+}
+
+struct PendingVimSearchRequest {
+    due_at: Instant,
+    request: VimSearchWorkerRequest,
+}
+
+struct VimSearchWorkerRequest {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    buffer: ShellBuffer,
+    direction: VimSearchDirection,
+    query: String,
+}
+
+struct VimSearchWorkerResult {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    direction: VimSearchDirection,
+    query: String,
+    data: SearchPickerData,
+}
+
+struct VimSearchWorkerState {
+    pending: Option<PendingVimSearchRequest>,
+    next_request_id: u64,
+    request_tx: Sender<VimSearchWorkerRequest>,
+    results: Arc<Mutex<Vec<VimSearchWorkerResult>>>,
+}
+
+impl VimSearchWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<VimSearchWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(mut request) = request_rx.recv() {
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    request = newer_request;
+                }
+                let data = vim_search_entries(&request.buffer, request.direction, &request.query);
+                if let Ok(mut results) = worker_results.lock() {
+                    results.push(VimSearchWorkerResult {
+                        request_id: request.request_id,
+                        buffer_id: request.buffer_id,
+                        buffer_revision: request.buffer_revision,
+                        direction: request.direction,
+                        query: request.query,
+                        data,
+                    });
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self {
+            pending: None,
+            next_request_id: 0,
+            request_tx,
+            results,
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending = None;
+    }
+
+    fn schedule(&mut self, buffer: ShellBuffer, direction: VimSearchDirection, query: String) {
+        const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(100);
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending = Some(PendingVimSearchRequest {
+            due_at: Instant::now() + SEARCH_REFRESH_DEBOUNCE,
+            request: VimSearchWorkerRequest {
+                request_id: self.next_request_id,
+                buffer_id: buffer.id(),
+                buffer_revision: buffer.text.revision(),
+                buffer,
+                direction,
+                query,
+            },
+        });
+    }
+
+    fn dispatch_due(&mut self, now: Instant) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        let request = self.pending.take().map(|pending| pending.request);
+        if let Some(request) = request {
+            let _ = self.request_tx.send(request);
+        }
+    }
+
+    fn take_latest_result(&self) -> Option<VimSearchWorkerResult> {
+        let mut results = self.results.lock().ok()?;
+        results.drain(..).last()
+    }
+}
+
+struct PendingWorkspaceSearchRequest {
+    due_at: Instant,
+    request: WorkspaceSearchWorkerRequest,
+}
+
+struct WorkspaceSearchWorkerRequest {
+    request_id: u64,
+    root: PathBuf,
+    query: String,
+}
+
+struct WorkspaceSearchWorkerResult {
+    request_id: u64,
+    root: PathBuf,
+    query: String,
+    data: SearchPickerData,
+}
+
+struct WorkspaceSearchWorkerState {
+    pending: Option<PendingWorkspaceSearchRequest>,
+    next_request_id: u64,
+    request_tx: Sender<WorkspaceSearchWorkerRequest>,
+    results: Arc<Mutex<Vec<WorkspaceSearchWorkerResult>>>,
+}
+
+impl WorkspaceSearchWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<WorkspaceSearchWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(mut request) = request_rx.recv() {
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    request = newer_request;
+                }
+                let data = workspace_search_entries(&request.root, &request.query);
+                if let Ok(mut results) = worker_results.lock() {
+                    results.push(WorkspaceSearchWorkerResult {
+                        request_id: request.request_id,
+                        root: request.root,
+                        query: request.query,
+                        data,
+                    });
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self {
+            pending: None,
+            next_request_id: 0,
+            request_tx,
+            results,
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending = None;
+    }
+
+    fn schedule(&mut self, root: PathBuf, query: String) {
+        const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending = Some(PendingWorkspaceSearchRequest {
+            due_at: Instant::now() + SEARCH_REFRESH_DEBOUNCE,
+            request: WorkspaceSearchWorkerRequest {
+                request_id: self.next_request_id,
+                root,
+                query,
+            },
+        });
+    }
+
+    fn dispatch_due(&mut self, now: Instant) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        let request = self.pending.take().map(|pending| pending.request);
+        if let Some(request) = request {
+            let _ = self.request_tx.send(request);
+        }
+    }
+
+    fn take_latest_result(&self) -> Option<WorkspaceSearchWorkerResult> {
+        let mut results = self.results.lock().ok()?;
+        results.drain(..).last()
+    }
+}
+
+struct SyntaxRefreshWorkerRequest {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    path: Option<PathBuf>,
+    buffer_language_id: Option<String>,
+    text: TextBuffer,
+}
+
+struct SyntaxRefreshWorkerResult {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    path: Option<PathBuf>,
+    buffer_language_id: Option<String>,
+    language_id: Option<String>,
+    syntax_result: Option<Result<SyntaxSnapshot, String>>,
+}
+
+struct SyntaxRefreshWorkerState {
+    request_tx: Option<Sender<SyntaxRefreshWorkerRequest>>,
+    results: Arc<Mutex<Vec<SyntaxRefreshWorkerResult>>>,
+}
+
+impl SyntaxRefreshWorkerState {
+    fn disabled() -> Self {
+        Self {
+            request_tx: None,
+            results: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn configure(&mut self, configs: Vec<LanguageConfiguration>, install_root: PathBuf) {
+        let (request_tx, request_rx) = mpsc::channel::<SyntaxRefreshWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            let mut registry = SyntaxRegistry::with_install_root(install_root);
+            if registry.register_all(configs).is_err() {
+                return;
+            }
+
+            while let Ok(request) = request_rx.recv() {
+                let mut latest_by_buffer = BTreeMap::new();
+                latest_by_buffer.insert(request.buffer_id, request);
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    latest_by_buffer.insert(newer_request.buffer_id, newer_request);
+                }
+
+                for request in latest_by_buffer.into_values() {
+                    let (language_id, syntax_result) = compute_buffer_syntax(
+                        &mut registry,
+                        request.path.as_deref(),
+                        &request.text,
+                        request.buffer_language_id.as_deref(),
+                    );
+                    if let Ok(mut results) = worker_results.lock() {
+                        results.push(SyntaxRefreshWorkerResult {
+                            buffer_id: request.buffer_id,
+                            buffer_revision: request.buffer_revision,
+                            path: request.path,
+                            buffer_language_id: request.buffer_language_id,
+                            language_id,
+                            syntax_result: syntax_result
+                                .map(|result| result.map_err(|error| error.to_string())),
+                        });
+                    } else {
+                        return;
+                    }
+                }
+            }
+        });
+
+        self.request_tx = Some(request_tx);
+        self.results = results;
+    }
+
+    fn is_configured(&self) -> bool {
+        self.request_tx.is_some()
+    }
+
+    fn send(&self, request: SyntaxRefreshWorkerRequest) {
+        if let Some(request_tx) = self.request_tx.as_ref() {
+            let _ = request_tx.send(request);
+        }
+    }
+
+    fn take_results(&self) -> Vec<SyntaxRefreshWorkerResult> {
+        let Ok(mut results) = self.results.lock() else {
+            return Vec::new();
+        };
+        results.drain(..).collect()
+    }
 }
 
 fn exact_match_positions_in_chars(
@@ -12116,18 +12597,95 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
 }
 
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let syntax_results = shell_ui(runtime)?.syntax_refresh_worker.take_results();
+    if !syntax_results.is_empty() {
+        let ui = shell_ui_mut(runtime)?;
+        for result in syntax_results {
+            let Some(buffer) = ui.buffer_mut(result.buffer_id) else {
+                continue;
+            };
+            let current_path = buffer.path().map(Path::to_path_buf);
+            let current_language_id = buffer.language_id().map(str::to_owned);
+            if buffer.text.revision() != result.buffer_revision
+                || current_path.as_deref() != result.path.as_deref()
+                || current_language_id.as_deref() != result.buffer_language_id.as_deref()
+            {
+                continue;
+            }
+            buffer.set_language_id(result.language_id.clone());
+            match result.syntax_result {
+                Some(Ok(snapshot)) => {
+                    buffer.set_syntax_snapshot(Some(snapshot));
+                    buffer.set_syntax_error(None);
+                }
+                Some(Err(error)) => {
+                    let error_label = result
+                        .path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .or(result.language_id.clone())
+                        .unwrap_or_else(|| "buffer".to_owned());
+                    eprintln!("tree-sitter syntax refresh failed for `{error_label}`: {error}");
+                    buffer.set_syntax_snapshot(None);
+                    buffer.set_syntax_error(Some(error));
+                }
+                None => {
+                    buffer.set_syntax_snapshot(None);
+                    buffer.set_syntax_error(None);
+                    buffer.set_language_id(None);
+                }
+            }
+        }
+    }
+
+    if !shell_ui(runtime)?.syntax_refresh_worker.is_configured() {
+        let now = Instant::now();
+        let buffer_ids = {
+            let ui = shell_ui(runtime)?;
+            ui.buffers
+                .iter()
+                .filter(|buffer| buffer.syntax_refresh_due(now))
+                .map(ShellBuffer::id)
+                .collect::<Vec<_>>()
+        };
+
+        for buffer_id in buffer_ids {
+            refresh_buffer_syntax(runtime, buffer_id)?;
+        }
+
+        return Ok(());
+    }
+
     let now = Instant::now();
-    let buffer_ids = {
+    let requests = {
         let ui = shell_ui(runtime)?;
         ui.buffers
             .iter()
             .filter(|buffer| buffer.syntax_refresh_due(now))
-            .map(ShellBuffer::id)
+            .map(|buffer| SyntaxRefreshWorkerRequest {
+                buffer_id: buffer.id(),
+                buffer_revision: buffer.text.revision(),
+                path: buffer.path().map(Path::to_path_buf),
+                buffer_language_id: buffer.language_id().map(str::to_owned),
+                text: buffer.text.clone(),
+            })
             .collect::<Vec<_>>()
     };
 
-    for buffer_id in buffer_ids {
-        refresh_buffer_syntax(runtime, buffer_id)?;
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    {
+        let ui = shell_ui_mut(runtime)?;
+        for request in &requests {
+            if let Some(buffer) = ui.buffer_mut(request.buffer_id) {
+                buffer.mark_syntax_refresh_requested();
+            }
+        }
+        for request in requests {
+            ui.syntax_refresh_worker.send(request);
+        }
     }
 
     Ok(())
@@ -12872,10 +13430,15 @@ fn refresh_workspace_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
         .active_workspace_buffer_ids()
         .map(|buffer_ids| buffer_ids.to_vec())
         .unwrap_or_default();
-    for buffer_id in buffer_ids {
-        refresh_buffer_syntax(runtime, buffer_id)?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        for buffer_id in buffer_ids {
+            if let Some(buffer) = ui.buffer_mut(buffer_id) {
+                buffer.force_syntax_refresh();
+            }
+        }
     }
-    Ok(())
+    refresh_pending_syntax(runtime)
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -12892,72 +13455,99 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
         )
     };
 
-    if path.is_none() && buffer_language_id.is_none() {
-        if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id) {
-            buffer.set_syntax_snapshot(None);
-            buffer.set_syntax_error(None);
-            buffer.set_language_id(None);
-        }
-        return Ok(());
-    }
-
-    let (language_id, syntax_result) = {
-        let registry = syntax_registry_mut(runtime)?;
-        if let Some(path) = path.as_ref() {
-            let language_id = registry
-                .language_for_path(path)
-                .map(|language| language.id().to_owned());
-            let syntax_result = match registry.highlight_buffer_for_path(path, &text) {
-                Ok(snapshot) => Ok(snapshot),
-                Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
-                    if let Err(error) = registry.install_language(&language_id) {
-                        Err(error)
-                    } else {
-                        registry.highlight_buffer_for_path(path, &text)
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            (language_id, syntax_result)
-        } else if let Some(language_id) = buffer_language_id.clone() {
-            let syntax_result = match registry.highlight_buffer_for_language(&language_id, &text) {
-                Ok(snapshot) => Ok(snapshot),
-                Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
-                    if let Err(error) = registry.install_language(&language_id) {
-                        Err(error)
-                    } else {
-                        registry.highlight_buffer_for_language(&language_id, &text)
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            (Some(language_id), syntax_result)
-        } else {
-            return Ok(());
-        }
-    };
+    let (language_id, syntax_result) = compute_buffer_syntax(
+        syntax_registry_mut(runtime)?,
+        path.as_deref(),
+        &text,
+        buffer_language_id.as_deref(),
+    );
 
     let ui = shell_ui_mut(runtime)?;
     if let Some(buffer) = ui.buffer_mut(buffer_id) {
-        buffer.set_language_id(language_id.clone());
         match syntax_result {
-            Ok(snapshot) => {
+            Some(Ok(snapshot)) => {
+                buffer.set_language_id(language_id.clone());
                 buffer.set_syntax_snapshot(Some(snapshot));
                 buffer.set_syntax_error(None);
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 let error_label = path
                     .as_ref()
                     .map(|path| path.display().to_string())
-                    .or_else(|| language_id.clone())
+                    .or(language_id.clone())
                     .unwrap_or_else(|| "buffer".to_owned());
                 eprintln!("tree-sitter syntax refresh failed for `{error_label}`: {error}");
+                buffer.set_language_id(language_id.clone());
                 buffer.set_syntax_snapshot(None);
                 buffer.set_syntax_error(Some(error.to_string()));
+            }
+            None => {
+                buffer.set_syntax_snapshot(None);
+                buffer.set_syntax_error(None);
+                buffer.set_language_id(None);
             }
         }
     }
 
+    Ok(())
+}
+
+fn compute_buffer_syntax(
+    registry: &mut SyntaxRegistry,
+    path: Option<&Path>,
+    text: &TextBuffer,
+    buffer_language_id: Option<&str>,
+) -> (Option<String>, Option<Result<SyntaxSnapshot, SyntaxError>>) {
+    if let Some(path) = path {
+        let language_id = registry
+            .language_for_path(path)
+            .map(|language| language.id().to_owned());
+        let syntax_result = match registry.highlight_buffer_for_path(path, text) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
+                if let Err(error) = registry.install_language(&language_id) {
+                    Err(error)
+                } else {
+                    registry.highlight_buffer_for_path(path, text)
+                }
+            }
+            Err(error) => Err(error),
+        };
+        return (language_id, Some(syntax_result));
+    }
+
+    let Some(language_id) = buffer_language_id.map(str::to_owned) else {
+        return (None, None);
+    };
+    let syntax_result = match registry.highlight_buffer_for_language(&language_id, text) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(SyntaxError::GrammarNotInstalled {
+            language_id: missing_language_id,
+            ..
+        }) => {
+            if let Err(error) = registry.install_language(&missing_language_id) {
+                Err(error)
+            } else {
+                registry.highlight_buffer_for_language(&language_id, text)
+            }
+        }
+        Err(error) => Err(error),
+    };
+    (Some(language_id), Some(syntax_result))
+}
+
+fn configure_syntax_refresh_worker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let (install_root, configs) = {
+        let registry = runtime
+            .services()
+            .get::<SyntaxRegistry>()
+            .ok_or_else(|| "syntax registry service missing".to_owned())?;
+        (
+            registry.install_root().to_path_buf(),
+            registry.languages().cloned().collect::<Vec<_>>(),
+        )
+    };
+    shell_ui_mut(runtime)?.configure_syntax_refresh_worker(configs, install_root);
     Ok(())
 }
 
@@ -13033,6 +13623,18 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
     refresh_buffer_syntax(runtime, buffer_id)?;
 
     Ok(buffer_id)
+}
+
+fn open_workspace_file_at(
+    runtime: &mut EditorRuntime,
+    path: &Path,
+    target: TextPoint,
+) -> Result<(), String> {
+    let buffer_id = open_workspace_file(runtime, path)?;
+    if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id) {
+        buffer.set_cursor(target);
+    }
+    Ok(())
 }
 
 fn create_workspace_file_from_query(
@@ -13112,6 +13714,254 @@ fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+fn workspace_search_entries(root: &Path, query: &str) -> SearchPickerData {
+    let query = query.trim();
+    if query.is_empty() {
+        return SearchPickerData {
+            entries: Vec::new(),
+            selected_index: 0,
+        };
+    }
+
+    let entries = match workspace_search_output(root, query) {
+        Ok(output) => {
+            let parsed = parse_workspace_search_entries(root, query, &output);
+            if parsed.is_empty() {
+                vec![workspace_search_status_entry(
+                    query,
+                    "No matches found",
+                    format!("No workspace results for `{query}`."),
+                    Some(root.display().to_string()),
+                )]
+            } else {
+                parsed
+            }
+        }
+        Err(error) => vec![workspace_search_status_entry(
+            query,
+            "Search unavailable",
+            error,
+            Some(root.display().to_string()),
+        )],
+    };
+
+    SearchPickerData {
+        entries,
+        selected_index: 0,
+    }
+}
+
+fn workspace_search_output(root: &Path, query: &str) -> Result<String, String> {
+    match workspace_search_rg_output(root, query) {
+        Ok(output) => Ok(output),
+        Err(rg_error) => workspace_search_grep_output(root, query).map_err(|grep_error| {
+            format!("workspace search requires `rg` or `grep`: {rg_error}; {grep_error}")
+        }),
+    }
+}
+
+fn workspace_search_rg_output(root: &Path, query: &str) -> Result<String, String> {
+    let mut args = vec![
+        "--vimgrep".to_owned(),
+        "--no-heading".to_owned(),
+        "--color".to_owned(),
+        "never".to_owned(),
+        "--fixed-strings".to_owned(),
+    ];
+    if !search_is_case_sensitive(query) {
+        args.push("--ignore-case".to_owned());
+    }
+    args.push("--".to_owned());
+    args.push(query.to_owned());
+    args.push(".".to_owned());
+    run_search_command(root, "rg", &args)
+}
+
+fn workspace_search_grep_output(root: &Path, query: &str) -> Result<String, String> {
+    let mut args = vec![
+        "-R".to_owned(),
+        "-n".to_owned(),
+        "-F".to_owned(),
+        "--binary-files=without-match".to_owned(),
+        "--exclude-dir=.git".to_owned(),
+    ];
+    if !search_is_case_sensitive(query) {
+        args.push("-i".to_owned());
+    }
+    args.push("--".to_owned());
+    args.push(query.to_owned());
+    args.push(".".to_owned());
+    run_search_command(root, "grep", &args)
+}
+
+fn run_search_command(root: &Path, command: &str, args: &[String]) -> Result<String, String> {
+    let output = Command::new(command)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("failed to run `{command}`: {error}"))?;
+    let exit_code = output
+        .status
+        .code()
+        .ok_or_else(|| format!("`{command}` terminated unexpectedly"))?;
+    if exit_code != 0 && exit_code != 1 {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let message = if stderr.is_empty() {
+            format!("`{command}` exited with status {exit_code}")
+        } else {
+            format!("`{command}` exited with status {exit_code}: {stderr}")
+        };
+        return Err(message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_workspace_search_entries(root: &Path, query: &str, output: &str) -> Vec<PickerEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            parse_rg_workspace_search_line(line)
+                .or_else(|| parse_grep_workspace_search_line(line, query))
+                .map(|(relative_path, line_number, column, line_text)| {
+                    workspace_search_match_entry(
+                        root,
+                        &relative_path,
+                        line_number,
+                        column,
+                        &line_text,
+                    )
+                })
+        })
+        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .collect()
+}
+
+fn parse_rg_workspace_search_line(line: &str) -> Option<(String, usize, usize, String)> {
+    let mut parts = line.splitn(4, ':');
+    let relative_path = parts.next()?.to_owned();
+    let line_number = parts.next()?.parse::<usize>().ok()?;
+    let column = parts.next()?.parse::<usize>().ok()?;
+    let line_text = parts.next()?.to_owned();
+    Some((relative_path, line_number, column, line_text))
+}
+
+fn parse_grep_workspace_search_line(
+    line: &str,
+    query: &str,
+) -> Option<(String, usize, usize, String)> {
+    let mut parts = line.splitn(3, ':');
+    let relative_path = parts.next()?.to_owned();
+    let line_number = parts.next()?.parse::<usize>().ok()?;
+    let line_text = parts.next()?.to_owned();
+    let column = workspace_search_grep_column(&line_text, query);
+    Some((relative_path, line_number, column, line_text))
+}
+
+fn workspace_search_grep_column(line_text: &str, query: &str) -> usize {
+    if query.is_empty() {
+        return 1;
+    }
+    let case_sensitive = search_is_case_sensitive(query);
+    if case_sensitive {
+        return line_text.find(query).map(|offset| offset + 1).unwrap_or(1);
+    }
+    let line_lower = line_text.to_lowercase();
+    let query_lower = query.to_lowercase();
+    line_lower
+        .find(&query_lower)
+        .map(|offset| offset + 1)
+        .unwrap_or(1)
+}
+
+fn workspace_search_match_entry(
+    root: &Path,
+    relative_path: &str,
+    line_number: usize,
+    byte_column: usize,
+    line_text: &str,
+) -> PickerEntry {
+    let relative_path = relative_path
+        .strip_prefix(".\\")
+        .or_else(|| relative_path.strip_prefix("./"))
+        .unwrap_or(relative_path);
+    let path = root.join(relative_path);
+    let column = workspace_search_char_column(line_text, byte_column.saturating_sub(1));
+    let target = TextPoint::new(line_number.saturating_sub(1), column);
+    let preview = line_text.trim();
+    let label = if preview.is_empty() {
+        format!("{relative_path}:{}", line_number)
+    } else {
+        preview.to_owned()
+    };
+    let detail = format!("{} | Ln {}, Col {}", relative_path, line_number, column + 1);
+    PickerEntry {
+        item: PickerItem::new(
+            format!("{}:{}:{}", path.display(), line_number, column + 1),
+            label,
+            detail,
+            Some(path.display().to_string()),
+        ),
+        action: PickerAction::OpenFileLocation { path, target },
+    }
+}
+
+fn workspace_search_status_entry(
+    query: &str,
+    title: &str,
+    detail: impl Into<String>,
+    preview: Option<String>,
+) -> PickerEntry {
+    PickerEntry {
+        item: PickerItem::new(
+            format!("workspace-search:{query}"),
+            format!("{title} for {query}"),
+            detail,
+            preview,
+        ),
+        action: PickerAction::NoOp,
+    }
+}
+
+fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
+    let mut byte_offset = byte_offset.min(line.len());
+    while byte_offset > 0 && !line.is_char_boundary(byte_offset) {
+        byte_offset = byte_offset.saturating_sub(1);
+    }
+    line[..byte_offset].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rg_workspace_search_line_extracts_location() {
+        let parsed =
+            parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();").unwrap();
+        assert_eq!(parsed.0, r"src\main.rs");
+        assert_eq!(parsed.1, 12);
+        assert_eq!(parsed.2, 7);
+        assert_eq!(parsed.3, "let answer = compute();");
+    }
+
+    #[test]
+    fn parse_grep_workspace_search_line_finds_case_insensitive_column() {
+        let parsed =
+            parse_grep_workspace_search_line(r"src\lib.rs:3:Hello Workspace", "workspace").unwrap();
+        assert_eq!(parsed.0, r"src\lib.rs");
+        assert_eq!(parsed.1, 3);
+        assert_eq!(parsed.2, 7);
+        assert_eq!(parsed.3, "Hello Workspace");
+    }
+
+    #[test]
+    fn workspace_search_char_column_handles_utf8_offsets() {
+        assert_eq!(workspace_search_char_column("aébc", 0), 0);
+        assert_eq!(workspace_search_char_column("aébc", 1), 1);
+        assert_eq!(workspace_search_char_column("aébc", 3), 2);
+    }
 }
 
 fn git_command_output(
@@ -13347,6 +14197,14 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
         Keycode::Return | Keycode::KpEnter => Some("Enter".to_owned()),
         _ => None,
     }
+}
+
+fn repeated_keydown_allowed(keycode: Keycode, keymod: Mod) -> bool {
+    matches!(keycode, Keycode::Backspace | Keycode::Delete)
+        || matches!(
+            keydown_chord(keycode, keymod).as_deref(),
+            Some("Ctrl+n" | "Ctrl+p")
+        )
 }
 
 fn text_chord(text: &str) -> Option<String> {

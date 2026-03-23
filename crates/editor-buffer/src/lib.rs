@@ -1145,7 +1145,8 @@ impl TextBuffer {
             }
         }
 
-        while char_index < self.char_count() && !matches_word_kind(self.rope.char(char_index), kind)
+        while char_index < self.char_count()
+            && is_object_separator(self.rope.char(char_index), kind)
         {
             char_index += 1;
         }
@@ -1169,10 +1170,10 @@ impl TextBuffer {
         }
 
         let mut char_index = original.saturating_sub(1);
-        while char_index > 0 && !matches_word_kind(self.rope.char(char_index), kind) {
+        while char_index > 0 && is_object_separator(self.rope.char(char_index), kind) {
             char_index -= 1;
         }
-        if !matches_word_kind(self.rope.char(char_index), kind) {
+        if is_object_separator(self.rope.char(char_index), kind) {
             return false;
         }
         while char_index > 0 && matches_word_kind(self.rope.char(char_index - 1), kind) {
@@ -1194,7 +1195,18 @@ impl TextBuffer {
         }
 
         let mut char_index = original;
-        while char_index < self.char_count() && !matches_word_kind(self.rope.char(char_index), kind)
+        if matches_word_kind(self.rope.char(char_index), kind) {
+            while char_index + 1 < self.char_count()
+                && matches_word_kind(self.rope.char(char_index + 1), kind)
+            {
+                char_index += 1;
+            }
+            if char_index == original {
+                char_index += 1;
+            }
+        }
+        while char_index < self.char_count()
+            && is_object_separator(self.rope.char(char_index), kind)
         {
             char_index += 1;
         }
@@ -1573,10 +1585,21 @@ fn is_word_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+fn is_punctuation_char(character: char) -> bool {
+    !character.is_whitespace() && !is_word_char(character)
+}
+
 fn matches_word_kind(character: char, kind: WordKind) -> bool {
     match kind {
         WordKind::Word => is_word_char(character),
         WordKind::BigWord => !character.is_whitespace(),
+    }
+}
+
+fn is_object_separator(character: char, kind: WordKind) -> bool {
+    match kind {
+        WordKind::Word => character.is_whitespace() || is_punctuation_char(character),
+        WordKind::BigWord => character.is_whitespace(),
     }
 }
 
@@ -1849,11 +1872,22 @@ mod tests {
 
         assert!(buffer.move_word_end_forward());
         assert_eq!(buffer.cursor(), TextPoint::new(0, 9));
+
+        assert!(buffer.move_word_end_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 15));
     }
 
     #[test]
     fn big_word_backward_end_and_match_pair_cover_quickref_motion_slice() {
         let mut buffer = TextBuffer::from_text("alpha-beta gamma");
+        buffer.set_cursor(TextPoint::new(0, 0));
+
+        assert!(buffer.move_big_word_end_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 9));
+
+        assert!(buffer.move_big_word_end_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 15));
+
         buffer.set_cursor(TextPoint::new(0, 0));
 
         assert!(buffer.move_big_word_forward());
@@ -1875,6 +1909,17 @@ mod tests {
 
         assert!(buffer.move_matching_delimiter());
         assert_eq!(buffer.cursor(), TextPoint::new(0, 4));
+    }
+
+    #[test]
+    fn word_motions_skip_punctuation_runs() {
+        let mut buffer = TextBuffer::from_text("alpha... beta");
+
+        assert!(buffer.move_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 9));
+
+        assert!(buffer.move_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 0));
     }
 
     #[test]

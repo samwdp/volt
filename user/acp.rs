@@ -65,6 +65,12 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "acp.new-session",
+            "Creates a new ACP session for the active client in a new buffer.",
+            "ui.acp.new-session",
+            None,
+        ),
+        hook_command(
             "acp.pick-mode",
             "Opens the ACP mode picker for the active session.",
             "ui.acp.pick-mode",

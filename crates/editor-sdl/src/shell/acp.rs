@@ -73,30 +73,67 @@ pub(super) fn acp_connected(runtime: &EditorRuntime) -> Result<bool, String> {
 }
 
 pub(super) fn open_acp_client(runtime: &mut EditorRuntime, client_id: &str) -> Result<(), String> {
+    open_acp_client_buffer(runtime, client_id, true, None).map(|_| ())
+}
+
+pub(super) fn acp_new_session(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let client = active_acp_client(runtime)?;
+    open_acp_client_with_config(runtime, client, false, None).map(|_| ())
+}
+
+fn open_acp_client_buffer(
+    runtime: &mut EditorRuntime,
+    client_id: &str,
+    reuse_existing: bool,
+    load_session_id: Option<agent_client_protocol::SessionId>,
+) -> Result<BufferId, String> {
     let client = user::acp::client_by_id(client_id)
         .ok_or_else(|| format!("unknown ACP client `{client_id}`"))?;
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|error| error.to_string())?;
+    open_acp_client_with_config(runtime, client, reuse_existing, load_session_id)
+}
+
+fn open_acp_client_with_config(
+    runtime: &mut EditorRuntime,
+    client: user::acp::AcpClientConfig,
+    reuse_existing: bool,
+    load_session_id: Option<agent_client_protocol::SessionId>,
+) -> Result<BufferId, String> {
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
         .ok_or_else(|| "acp manager service missing".to_owned())?
         .clone();
-    if let Some(buffer_id) = {
-        let manager = manager
-            .lock()
-            .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-        manager.buffer_for_client(&client.id)
-    } {
-        runtime
-            .model_mut()
-            .focus_buffer(workspace_id, buffer_id)
-            .map_err(|error| error.to_string())?;
-        shell_ui_mut(runtime)?.focus_buffer(buffer_id);
-        return Ok(());
+    if reuse_existing
+        && let Some(buffer_id) = {
+            let manager = manager
+                .lock()
+                .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+            manager.buffer_for_client(&client.id)
+        }
+    {
+        focus_acp_buffer(runtime, buffer_id)?;
+        return Ok(buffer_id);
     }
+
+    let buffer_id = create_acp_buffer(runtime, &client)?;
+    let workspace_root = active_workspace_root(runtime)?
+        .or_else(|| env::current_dir().ok())
+        .ok_or_else(|| "ACP requires a workspace root or current directory".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.connect(client, workspace_root, buffer_id, load_session_id)?;
+    Ok(buffer_id)
+}
+
+fn create_acp_buffer(
+    runtime: &mut EditorRuntime,
+    client: &user::acp::AcpClientConfig,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let buffer_name = format!("*acp {}*", client.label);
     let buffer_id = runtime
         .model_mut()
@@ -119,16 +156,41 @@ pub(super) fn open_acp_client(runtime: &mut EditorRuntime, client_id: &str) -> R
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new());
     shell_buffer.clear_input();
+    shell_buffer.set_language_id(Some("markdown".to_owned()));
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
 
-    let workspace_root = active_workspace_root(runtime)?
-        .or_else(|| env::current_dir().ok())
-        .ok_or_else(|| "ACP requires a workspace root or current directory".to_owned())?;
-    let mut manager = manager
-        .lock()
-        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.connect(client, workspace_root, buffer_id)
+fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer(buffer_id);
+    Ok(())
+}
+
+fn active_acp_client(runtime: &EditorRuntime) -> Result<user::acp::AcpClientConfig, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let client_id = {
+        let manager = manager
+            .lock()
+            .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+        manager
+            .client_id_for_buffer(buffer_id)
+            .ok_or_else(|| "acp.new-session requires an active ACP buffer".to_owned())?
+    };
+    user::acp::client_by_id(&client_id).ok_or_else(|| format!("unknown ACP client `{client_id}`"))
 }
 
 pub(super) fn submit_acp_prompt(
@@ -394,34 +456,31 @@ pub(super) fn acp_load_session(
     buffer_id: BufferId,
     session_id: &str,
 ) -> Result<(), String> {
+    let target_session_id = agent_client_protocol::SessionId::new(session_id);
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
         .ok_or_else(|| "acp manager service missing".to_owned())?
         .clone();
-    let current_session_id = {
+    let session_data = {
         let manager = manager
             .lock()
             .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-        manager.session_for_buffer(buffer_id)
+        (
+            manager.buffer_for_session(&target_session_id),
+            manager.client_id_for_buffer(buffer_id),
+        )
     };
-    let Some(current_session_id) = current_session_id else {
+    if let Some(existing_buffer_id) = session_data.0 {
+        focus_acp_buffer(runtime, existing_buffer_id)?;
+        return Ok(());
+    }
+    let Some(client_id) = session_data.1 else {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&["ACP session is not connected.".to_owned()]);
         return Ok(());
     };
-    let workspace_root = active_workspace_root(runtime)?
-        .or_else(|| env::current_dir().ok())
-        .ok_or_else(|| "ACP requires a workspace root or current directory".to_owned())?;
-    let mut manager = manager
-        .lock()
-        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.load_session(
-        current_session_id,
-        buffer_id,
-        agent_client_protocol::SessionId::new(session_id),
-        workspace_root,
-    )
+    open_acp_client_buffer(runtime, &client_id, false, Some(target_session_id)).map(|_| ())
 }
 
 pub(super) fn acp_pick_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -832,7 +891,7 @@ struct AcpManager {
     events: mpsc::Receiver<AcpEvent>,
     sessions: HashMap<agent_client_protocol::SessionId, AcpSessionInfo>,
     buffers: HashMap<BufferId, agent_client_protocol::SessionId>,
-    pending_clients: HashMap<String, PendingAcpClient>,
+    pending_clients: HashMap<BufferId, PendingAcpClient>,
     pending_slash: HashMap<BufferId, PendingSlashTrigger>,
     pending_ui_actions: Vec<AcpUiAction>,
 }
@@ -859,13 +918,35 @@ impl AcpManager {
             .map(|session| session.buffer_id)
             .or_else(|| {
                 self.pending_clients
-                    .get(client_id)
+                    .values()
+                    .find(|pending| pending.client_id == client_id)
                     .map(|pending| pending.buffer_id)
             })
     }
 
+    fn buffer_for_session(
+        &self,
+        session_id: &agent_client_protocol::SessionId,
+    ) -> Option<BufferId> {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.buffer_id)
+    }
+
     fn session_for_buffer(&self, buffer_id: BufferId) -> Option<agent_client_protocol::SessionId> {
         self.buffers.get(&buffer_id).cloned()
+    }
+
+    fn client_id_for_buffer(&self, buffer_id: BufferId) -> Option<String> {
+        let session_id = self.session_for_buffer(buffer_id)?;
+        self.sessions
+            .get(&session_id)
+            .map(|session| session.client_id.clone())
+            .or_else(|| {
+                self.pending_clients
+                    .get(&buffer_id)
+                    .map(|pending| pending.client_id.clone())
+            })
     }
 
     fn available_commands_for_buffer(&self, buffer_id: BufferId) -> Option<Vec<AvailableCommand>> {
@@ -906,19 +987,21 @@ impl AcpManager {
         client: user::acp::AcpClientConfig,
         workspace_root: PathBuf,
         buffer_id: BufferId,
+        load_session_id: Option<agent_client_protocol::SessionId>,
     ) -> Result<(), String> {
-        if self
-            .sessions
-            .values()
-            .any(|session| session.client_id == client.id)
-        {
-            return Ok(());
-        }
-        self.pending_clients
-            .insert(client.id.clone(), PendingAcpClient { buffer_id });
+        self.pending_clients.insert(
+            buffer_id,
+            PendingAcpClient {
+                client_id: client.id.clone(),
+                buffer_id,
+                load_session_id,
+                workspace_root: workspace_root.clone(),
+            },
+        );
         self.runtime.send(AcpCommand::Connect {
             config: client,
             workspace_root,
+            buffer_id,
         })
     }
 
@@ -1028,20 +1111,21 @@ impl AcpManager {
     fn handle_event(&mut self, runtime: &mut EditorRuntime, event: AcpEvent) -> Result<(), String> {
         match event {
             AcpEvent::Connected {
+                buffer_id,
                 client_id,
                 session_id,
                 modes,
                 models,
             } => {
-                let Some(pending) = self.pending_clients.remove(&client_id) else {
+                let Some(pending) = self.pending_clients.remove(&buffer_id) else {
                     return Ok(());
                 };
-                self.buffers.insert(pending.buffer_id, session_id.clone());
+                self.buffers.insert(buffer_id, session_id.clone());
                 self.sessions.insert(
                     session_id.clone(),
                     AcpSessionInfo {
                         client_id,
-                        buffer_id: pending.buffer_id,
+                        buffer_id,
                         available_commands: Vec::new(),
                         mode_state: modes,
                         model_state: models,
@@ -1066,25 +1150,25 @@ impl AcpManager {
                         )
                     })
                     .unwrap_or((None, None));
-                update_acp_input_hint(runtime, pending.buffer_id, mode_id, model_id);
-            }
-            AcpEvent::ClientFailed { client_id, message } => {
-                if let Some(pending) = self.pending_clients.remove(&client_id) {
-                    if let Ok(buffer) = shell_buffer_mut(runtime, pending.buffer_id) {
-                        buffer.append_output_lines(&[message]);
-                    }
+                update_acp_input_hint(runtime, buffer_id, mode_id, model_id);
+                if let Some(target_session_id) = pending.load_session_id {
+                    self.load_session(
+                        session_id,
+                        buffer_id,
+                        target_session_id,
+                        pending.workspace_root,
+                    )?;
                 }
             }
-            AcpEvent::ClientLog { client_id, message } => {
-                if let Some(buffer_id) = self
-                    .pending_clients
-                    .get(&client_id)
-                    .map(|pending| pending.buffer_id)
-                    .or_else(|| self.buffer_for_client(&client_id))
-                {
-                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.append_output_lines(&[message]);
-                    }
+            AcpEvent::ClientFailed { buffer_id, message } => {
+                self.pending_clients.remove(&buffer_id);
+                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                    buffer.append_output_lines(&[message]);
+                }
+            }
+            AcpEvent::ClientLog { buffer_id, message } => {
+                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                    buffer.append_output_lines(&[message]);
                 }
             }
             AcpEvent::SessionText { session_id, text } => {
@@ -1371,7 +1455,10 @@ impl AcpManager {
 }
 
 struct PendingAcpClient {
+    client_id: String,
     buffer_id: BufferId,
+    load_session_id: Option<agent_client_protocol::SessionId>,
+    workspace_root: PathBuf,
 }
 
 struct AcpSessionInfo {
@@ -1387,17 +1474,18 @@ struct AcpSessionInfo {
 
 enum AcpEvent {
     Connected {
+        buffer_id: BufferId,
         client_id: String,
         session_id: agent_client_protocol::SessionId,
         modes: Option<SessionModeState>,
         models: Option<SessionModelState>,
     },
     ClientFailed {
-        client_id: String,
+        buffer_id: BufferId,
         message: String,
     },
     ClientLog {
-        client_id: String,
+        buffer_id: BufferId,
         message: String,
     },
     SessionText {
@@ -1454,6 +1542,7 @@ enum AcpCommand {
     Connect {
         config: user::acp::AcpClientConfig,
         workspace_root: PathBuf,
+        buffer_id: BufferId,
     },
     Prompt {
         session_id: agent_client_protocol::SessionId,
@@ -1543,14 +1632,14 @@ async fn acp_runtime_loop(
             AcpCommand::Connect {
                 config,
                 workspace_root,
+                buffer_id,
             } => {
                 let state = state.clone();
                 tokio::task::spawn_local(async move {
-                    let client_id = config.id.clone();
                     if let Err(error) =
-                        connect_acp_client(state.clone(), config, workspace_root).await
+                        connect_acp_client(state.clone(), config, workspace_root, buffer_id).await
                     {
-                        send_client_failure(&state, &client_id, error);
+                        send_client_failure(&state, buffer_id, error);
                     }
                 });
             }
@@ -1672,6 +1761,7 @@ async fn connect_acp_client(
     state: Rc<RefCell<AcpRuntimeState>>,
     config: user::acp::AcpClientConfig,
     workspace_root: PathBuf,
+    buffer_id: BufferId,
 ) -> Result<(), String> {
     let mut command = Command::new(&config.command);
     command.args(&config.args);
@@ -1699,9 +1789,8 @@ async fn connect_acp_client(
         .ok_or_else(|| "ACP client stdout unavailable".to_owned())?;
     if let Some(stderr) = child.stderr.take() {
         let state = state.clone();
-        let client_id = config.id.clone();
         tokio::task::spawn_local(async move {
-            drain_stderr(state, client_id, stderr).await;
+            drain_stderr(state, buffer_id, stderr).await;
         });
     }
 
@@ -1710,11 +1799,10 @@ async fn connect_acp_client(
         ClientSideConnection::new(client, stdin.compat_write(), stdout.compat(), |task| {
             tokio::task::spawn_local(task);
         });
-    let client_id = config.id.clone();
     let state_clone = state.clone();
     tokio::task::spawn_local(async move {
         if let Err(error) = io_task.await {
-            send_client_log(&state_clone, &client_id, format!("ACP I/O error: {error}"));
+            send_client_log(&state_clone, buffer_id, format!("ACP I/O error: {error}"));
         }
     });
 
@@ -1748,6 +1836,7 @@ async fn connect_acp_client(
         },
     );
     let _ = state.borrow().event_tx.send(AcpEvent::Connected {
+        buffer_id,
         client_id: config.id,
         session_id,
         modes,
@@ -2028,7 +2117,7 @@ fn choose_permission_outcome(
 
 async fn drain_stderr(
     state: Rc<RefCell<AcpRuntimeState>>,
-    client_id: String,
+    buffer_id: BufferId,
     stderr: tokio::process::ChildStderr,
 ) {
     let mut reader = BufReader::new(stderr);
@@ -2040,29 +2129,29 @@ async fn drain_stderr(
             Ok(_) => {
                 let message = line.trim_end().to_owned();
                 if !message.is_empty() {
-                    send_client_log(&state, &client_id, message);
+                    send_client_log(&state, buffer_id, message);
                 }
             }
             Err(error) => {
-                send_client_log(&state, &client_id, format!("ACP stderr error: {error}"));
+                send_client_log(&state, buffer_id, format!("ACP stderr error: {error}"));
                 break;
             }
         }
     }
 }
 
-fn send_client_log(state: &Rc<RefCell<AcpRuntimeState>>, client_id: &str, message: String) {
-    let _ = state.borrow().event_tx.send(AcpEvent::ClientLog {
-        client_id: client_id.to_owned(),
-        message,
-    });
+fn send_client_log(state: &Rc<RefCell<AcpRuntimeState>>, buffer_id: BufferId, message: String) {
+    let _ = state
+        .borrow()
+        .event_tx
+        .send(AcpEvent::ClientLog { buffer_id, message });
 }
 
-fn send_client_failure(state: &Rc<RefCell<AcpRuntimeState>>, client_id: &str, message: String) {
-    let _ = state.borrow().event_tx.send(AcpEvent::ClientFailed {
-        client_id: client_id.to_owned(),
-        message,
-    });
+fn send_client_failure(state: &Rc<RefCell<AcpRuntimeState>>, buffer_id: BufferId, message: String) {
+    let _ = state
+        .borrow()
+        .event_tx
+        .send(AcpEvent::ClientFailed { buffer_id, message });
 }
 
 fn send_session_lines(

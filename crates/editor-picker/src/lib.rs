@@ -226,8 +226,12 @@ impl PickerSession {
 }
 
 fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
-    let query = query.trim();
-    if query.is_empty() {
+    let query_terms = query
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if query_terms.is_empty() {
         return Some(PickerMatch {
             item: item.clone(),
             score: 0,
@@ -236,10 +240,41 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
     }
 
     let label_chars: Vec<char> = item.label().chars().collect();
-    let query_chars: Vec<char> = query
-        .chars()
-        .map(|character| character.to_ascii_lowercase())
-        .collect();
+    let label_lower = item.label().to_ascii_lowercase();
+    let mut score = 0i64;
+    let mut matched_positions = Vec::new();
+
+    for (term_index, term) in query_terms.iter().enumerate() {
+        let matched = match_term(term, &label_chars, &label_lower)?;
+        score += matched.score;
+        if term_index == 0 && label_lower.starts_with(term) {
+            score += 24;
+        }
+        matched_positions.extend(matched.matched_positions);
+    }
+
+    matched_positions.sort_unstable();
+    matched_positions.dedup();
+    score -= label_chars.len() as i64;
+
+    Some(PickerMatch {
+        item: item.clone(),
+        score,
+        matched_positions,
+    })
+}
+
+struct TermMatch {
+    score: i64,
+    matched_positions: Vec<usize>,
+}
+
+fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<TermMatch> {
+    let query_chars = term.chars().collect::<Vec<_>>();
+    if query_chars.is_empty() {
+        return None;
+    }
+
     let mut matched_positions = Vec::with_capacity(query_chars.len());
     let mut query_index = 0usize;
     let mut score = 0i64;
@@ -284,18 +319,11 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
         return None;
     }
 
-    if item
-        .label()
-        .to_ascii_lowercase()
-        .starts_with(&query.to_ascii_lowercase())
-    {
-        score += 24;
+    if label_lower.starts_with(term) {
+        score += 12;
     }
 
-    score -= label_chars.len() as i64;
-
-    Some(PickerMatch {
-        item: item.clone(),
+    Some(TermMatch {
         score,
         matched_positions,
     })
@@ -371,5 +399,44 @@ mod tests {
         session.set_query("command");
 
         assert_eq!(session.match_count(), 16);
+    }
+
+    #[test]
+    fn whitespace_query_matches_multiple_terms() {
+        let items = vec![
+            item("pick-mode", "acp.pick-mode"),
+            item("cycle-mode", "acp.cycle-mode"),
+            item("workspace", "workspace.list-files"),
+        ];
+        let mut session = PickerSession::new("Commands", items);
+
+        session.set_query("acp mode");
+
+        assert_eq!(session.match_count(), 2);
+        assert!(
+            session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().label() == "acp.pick-mode")
+        );
+        assert!(
+            session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().label() == "acp.cycle-mode")
+        );
+    }
+
+    #[test]
+    fn whitespace_query_requires_all_terms() {
+        let items = vec![
+            item("pick-mode", "acp.pick-mode"),
+            item("workspace", "workspace.list-files"),
+        ];
+        let mut session = PickerSession::new("Commands", items);
+
+        session.set_query("acp files");
+
+        assert_eq!(session.match_count(), 0);
     }
 }
