@@ -103,6 +103,11 @@ const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const HOOK_ACP_DISCONNECT: &str = "ui.acp.disconnect";
 const HOOK_ACP_PERMISSION_APPROVE: &str = "ui.acp.permission-approve";
 const HOOK_ACP_PERMISSION_DENY: &str = "ui.acp.permission-deny";
+const HOOK_ACP_PICK_SESSION: &str = "ui.acp.pick-session";
+const HOOK_ACP_PICK_MODE: &str = "ui.acp.pick-mode";
+const HOOK_ACP_PICK_MODEL: &str = "ui.acp.pick-model";
+const HOOK_ACP_CYCLE_MODE: &str = "ui.acp.cycle-mode";
+const HOOK_ACP_COMPLETE_SLASH: &str = "ui.acp.complete-slash";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
 const HOOK_WORKSPACE_WINDOW_LEFT: &str = "ui.workspace.window-left";
@@ -112,6 +117,8 @@ const HOOK_WORKSPACE_WINDOW_RIGHT: &str = "ui.workspace.window-right";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = user::acp::ACP_BUFFER_KIND;
+const ACP_INPUT_PLACEHOLDER: &str =
+    "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
 const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
 const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
 const GIT_DIFF_KIND: &str = user::git::GIT_DIFF_KIND;
@@ -901,6 +908,9 @@ impl UndoTree {
 struct InputField {
     prompt: String,
     text: String,
+    placeholder: Option<String>,
+    hint: Option<String>,
+    cursor: usize,
 }
 
 impl InputField {
@@ -908,6 +918,9 @@ impl InputField {
         Self {
             prompt: prompt.into(),
             text: String::new(),
+            placeholder: None,
+            hint: None,
+            cursor: 0,
         }
     }
 
@@ -919,24 +932,182 @@ impl InputField {
         &self.text
     }
 
+    fn placeholder(&self) -> Option<&str> {
+        self.placeholder.as_deref()
+    }
+
+    fn hint(&self) -> Option<&str> {
+        self.hint.as_deref()
+    }
+
+    fn set_placeholder(&mut self, placeholder: Option<String>) {
+        self.placeholder = placeholder;
+    }
+
+    fn set_hint(&mut self, hint: Option<String>) {
+        self.hint = hint;
+    }
+
     fn text_len(&self) -> usize {
-        self.text.chars().count()
+        let (line, col) = self.cursor_line_col();
+        let _ = line;
+        col
+    }
+
+    fn text_line_count(&self) -> usize {
+        self.line_starts().len().max(1)
+    }
+
+    fn cursor_row(&self) -> usize {
+        let (line, _) = self.cursor_line_col();
+        line
     }
 
     fn append_text(&mut self, text: &str) {
+        self.insert_text(text);
+    }
+
+    fn set_text(&mut self, text: &str) {
         let filtered: String = text
             .chars()
-            .filter(|character| *character != '\n')
+            .filter(|character| *character != '\r')
             .collect();
+        self.text.clear();
         self.text.push_str(&filtered);
+        self.cursor = self.text.chars().count();
     }
 
     fn backspace(&mut self) -> bool {
-        self.text.pop().is_some()
+        if self.cursor == 0 {
+            return false;
+        }
+        let start = self.cursor.saturating_sub(1);
+        let end = self.cursor;
+        self.delete_range(start, end);
+        self.cursor = start;
+        true
+    }
+
+    fn delete_forward(&mut self) -> bool {
+        if self.cursor >= self.text.chars().count() {
+            return false;
+        }
+        let end = self.cursor.saturating_add(1);
+        self.delete_range(self.cursor, end);
+        true
+    }
+
+    fn move_left(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor = self.cursor.saturating_sub(1);
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        let total = self.text.chars().count();
+        if self.cursor >= total {
+            return false;
+        }
+        self.cursor = (self.cursor + 1).min(total);
+        true
+    }
+
+    fn move_up(&mut self) -> bool {
+        let starts = self.line_starts();
+        let total = self.text.chars().count();
+        let (line, col) = self.cursor_line_col_with_starts(&starts);
+        if line == 0 {
+            return false;
+        }
+        let prev_line = line.saturating_sub(1);
+        let prev_len = Self::line_len_for(&starts, total, prev_line);
+        let new_col = col.min(prev_len);
+        self.cursor = starts[prev_line] + new_col;
+        true
+    }
+
+    fn move_down(&mut self) -> bool {
+        let starts = self.line_starts();
+        let total = self.text.chars().count();
+        let (line, col) = self.cursor_line_col_with_starts(&starts);
+        let next_line = line.saturating_add(1);
+        if next_line >= starts.len() {
+            return false;
+        }
+        let next_len = Self::line_len_for(&starts, total, next_line);
+        let new_col = col.min(next_len);
+        self.cursor = starts[next_line] + new_col;
+        true
     }
 
     fn clear(&mut self) {
         self.text.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        let filtered: String = text
+            .chars()
+            .filter(|character| *character != '\r')
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        let insert_at = self.byte_index_for_char(self.cursor);
+        self.text.insert_str(insert_at, &filtered);
+        self.cursor = self.cursor.saturating_add(filtered.chars().count());
+    }
+
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let starts = self.line_starts();
+        self.cursor_line_col_with_starts(&starts)
+    }
+
+    fn cursor_line_col_with_starts(&self, starts: &[usize]) -> (usize, usize) {
+        let line = starts
+            .iter()
+            .rposition(|start| *start <= self.cursor)
+            .unwrap_or(0);
+        let col = self.cursor.saturating_sub(starts[line]);
+        (line, col)
+    }
+
+    fn line_starts(&self) -> Vec<usize> {
+        let mut starts = vec![0];
+        for (index, character) in self.text.chars().enumerate() {
+            if character == '\n' {
+                starts.push(index.saturating_add(1));
+            }
+        }
+        starts
+    }
+
+    fn line_len_for(starts: &[usize], total: usize, line: usize) -> usize {
+        let start = starts.get(line).copied().unwrap_or(0);
+        let end = starts
+            .get(line.saturating_add(1))
+            .copied()
+            .map(|next| next.saturating_sub(1))
+            .unwrap_or(total);
+        end.saturating_sub(start)
+    }
+
+    fn byte_index_for_char(&self, char_index: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len())
+    }
+
+    fn delete_range(&mut self, start: usize, end: usize) {
+        let start_byte = self.byte_index_for_char(start);
+        let end_byte = self.byte_index_for_char(end);
+        if start_byte < end_byte {
+            self.text.replace_range(start_byte..end_byte, "");
+        }
     }
 }
 
@@ -2650,6 +2821,22 @@ enum PickerAction {
         action: GitCommitActionKind,
         commit: String,
     },
+    AcpInsertSlashCommand {
+        buffer_id: BufferId,
+        command: String,
+    },
+    AcpLoadSession {
+        buffer_id: BufferId,
+        session_id: String,
+    },
+    AcpSetMode {
+        buffer_id: BufferId,
+        mode_id: String,
+    },
+    AcpSetModel {
+        buffer_id: BufferId,
+        model_id: String,
+    },
     CopyToClipboard(String),
 }
 
@@ -3461,12 +3648,13 @@ impl ShellState {
         visible_rows: usize,
         wrap_cols: usize,
     ) -> Result<bool, ShellError> {
-        let visible_rows =
-            if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
-                visible_rows.saturating_sub(1).max(1)
-            } else {
-                visible_rows
-            };
+        let input_rows =
+            active_shell_buffer_input_rows(&self.runtime).map_err(ShellError::Runtime)?;
+        let visible_rows = if input_rows > 0 {
+            visible_rows.saturating_sub(input_rows).max(1)
+        } else {
+            visible_rows
+        };
         self.active_buffer_mut()?.set_viewport_lines(visible_rows);
         match event {
             Event::Quit { .. } => return Ok(true),
@@ -3530,6 +3718,18 @@ impl ShellState {
                 {
                     ui.pending_ctrl_c = None;
                 }
+                if keymod.intersects(ctrl_mod())
+                    && keycode == Keycode::J
+                    && matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                    && active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)?
+                    && active_shell_buffer_is_acp(&self.runtime).map_err(ShellError::Runtime)?
+                {
+                    if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                        input.append_text("\n");
+                    }
+                    self.ensure_visible(visible_rows, wrap_cols)?;
+                    return Ok(false);
+                }
                 if self.try_runtime_keybinding(keycode, keymod)? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
                     self.ensure_visible(visible_rows, wrap_cols)?;
@@ -3561,16 +3761,52 @@ impl ShellState {
 
                 match keycode {
                     Keycode::Left => {
-                        let _ = self.active_buffer_mut()?.move_left();
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_has_input(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.move_left();
+                            }
+                        } else {
+                            let _ = self.active_buffer_mut()?.move_left();
+                        }
                     }
                     Keycode::Right => {
-                        let _ = self.active_buffer_mut()?.move_right();
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_has_input(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.move_right();
+                            }
+                        } else {
+                            let _ = self.active_buffer_mut()?.move_right();
+                        }
                     }
                     Keycode::Up => {
-                        let _ = self.active_buffer_mut()?.move_up();
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_has_input(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.move_up();
+                            }
+                        } else {
+                            let _ = self.active_buffer_mut()?.move_up();
+                        }
                     }
                     Keycode::Down => {
-                        let _ = self.active_buffer_mut()?.move_down();
+                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_has_input(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
+                                input.move_down();
+                            }
+                        } else {
+                            let _ = self.active_buffer_mut()?.move_down();
+                        }
                     }
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_rows as i32),
                     Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_rows as i32)),
@@ -3628,7 +3864,7 @@ impl ShellState {
                             .map_err(ShellError::Runtime)?
                         {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
-                                input.backspace();
+                                input.delete_forward();
                             }
                         } else if !active_shell_buffer_read_only(&self.runtime)
                             .map_err(ShellError::Runtime)?
@@ -3638,9 +3874,20 @@ impl ShellState {
                         }
                     }
                     Keycode::Tab => {
-                        if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_is_git_status(&self.runtime)
+                        if !keymod.intersects(shift_mod())
+                            && matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                            && active_shell_buffer_has_input(&self.runtime)
                                 .map_err(ShellError::Runtime)?
+                            && active_shell_buffer_is_acp(&self.runtime)
+                                .map_err(ShellError::Runtime)?
+                        {
+                            acp::acp_complete_slash(&mut self.runtime)
+                                .map_err(ShellError::Runtime)?;
+                        } else if !matches!(
+                            self.input_mode()?,
+                            InputMode::Insert | InputMode::Replace
+                        ) && active_shell_buffer_is_git_status(&self.runtime)
+                            .map_err(ShellError::Runtime)?
                         {
                             toggle_git_section(&mut self.runtime).map_err(ShellError::Runtime)?;
                         } else {
@@ -3677,6 +3924,7 @@ impl ShellState {
     ) -> Result<(), ShellError> {
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
+        let acp_connected = acp::acp_connected(&self.runtime).unwrap_or(false);
         let theme_registry = self.runtime.services().get::<ThemeRegistry>();
         let workspace_name = self
             .runtime
@@ -3692,6 +3940,7 @@ impl ShellState {
             runtime_popup.as_ref(),
             &workspace_name,
             ui.attached_lsp_server(),
+            acp_connected,
             theme_registry,
             width,
             height,
@@ -4144,6 +4393,8 @@ impl ShellState {
             InputMode::Insert => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let handled = {
                         let buffer = self.active_buffer_mut()?;
                         if let Some(input) = buffer.input_field_mut() {
@@ -4154,6 +4405,8 @@ impl ShellState {
                         }
                     };
                     if handled {
+                        acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
                         self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
                         self.maybe_finish_change_after_input()?;
                     }
@@ -4190,6 +4443,8 @@ impl ShellState {
             InputMode::Replace => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let handled = {
                         let buffer = self.active_buffer_mut()?;
                         if let Some(input) = buffer.input_field_mut() {
@@ -4200,6 +4455,8 @@ impl ShellState {
                         }
                     };
                     if handled {
+                        acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
                         self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
                         self.maybe_finish_change_after_input()?;
                     }
@@ -4900,6 +5157,31 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_ACP_PERMISSION_DENY,
         "Denies the latest ACP permission request.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_PICK_SESSION,
+        "Opens the ACP session picker for the active client.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_PICK_MODE,
+        "Opens the ACP mode picker for the active session.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_PICK_MODEL,
+        "Opens the ACP model picker for the active session.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_CYCLE_MODE,
+        "Cycles to the next ACP session mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_COMPLETE_SLASH,
+        "Opens ACP slash command completion for the active input.",
     )?;
     register_hook(
         runtime,
@@ -5840,6 +6122,44 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_ACP_PICK_SESSION,
+            "shell.acp-pick-session",
+            |_, runtime| {
+                acp::acp_pick_session(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_ACP_PICK_MODE, "shell.acp-pick-mode", |_, runtime| {
+            acp::acp_pick_mode(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_ACP_PICK_MODEL, "shell.acp-pick-model", |_, runtime| {
+            acp::acp_pick_model(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_ACP_CYCLE_MODE, "shell.acp-cycle-mode", |_, runtime| {
+            acp::acp_cycle_mode(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_COMPLETE_SLASH,
+            "shell.acp-complete-slash",
+            |_, runtime| {
+                acp::acp_complete_slash(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
             let (action, query) = {
                 let ui = shell_ui_mut(runtime)?;
@@ -5987,6 +6307,28 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         reset_git_commit(runtime, &commit, GitResetMode::Keep)?;
                     }
                 },
+                PickerAction::AcpInsertSlashCommand { buffer_id, command } => {
+                    acp::acp_insert_slash_command(runtime, buffer_id, &command)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpLoadSession {
+                    buffer_id,
+                    session_id,
+                } => {
+                    acp::acp_load_session(runtime, buffer_id, &session_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpSetMode { buffer_id, mode_id } => {
+                    acp::acp_set_mode(runtime, buffer_id, &mode_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpSetModel {
+                    buffer_id,
+                    model_id,
+                } => {
+                    acp::acp_set_model(runtime, buffer_id, &model_id)?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::CopyToClipboard(text) => {
                     write_system_clipboard(&text);
                 }
@@ -6112,6 +6454,18 @@ fn active_shell_buffer_has_input(runtime: &EditorRuntime) -> Result<bool, String
     Ok(shell_buffer(runtime, buffer_id)?.has_input_field())
 }
 
+fn input_render_rows(buffer: &ShellBuffer) -> usize {
+    buffer
+        .input_field()
+        .map(|input| input.text_line_count() + input.hint().is_some() as usize)
+        .unwrap_or(0)
+}
+
+fn active_shell_buffer_input_rows(runtime: &EditorRuntime) -> Result<usize, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(input_render_rows(shell_buffer(runtime, buffer_id)?))
+}
+
 fn buffer_is_git_status(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND)
 }
@@ -6144,6 +6498,11 @@ fn active_shell_buffer_is_git_commit(runtime: &EditorRuntime) -> Result<bool, St
     Ok(buffer_is_git_commit(
         &shell_buffer(runtime, buffer_id)?.kind,
     ))
+}
+
+fn active_shell_buffer_is_acp(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(buffer_is_acp(&shell_buffer(runtime, buffer_id)?.kind))
 }
 
 fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
@@ -12965,11 +13324,18 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::U => Some("Ctrl+u".to_owned()),
             Keycode::V => Some("Ctrl+v".to_owned()),
             Keycode::Y => Some("Ctrl+y".to_owned()),
+            Keycode::Space => Some("Ctrl+Space".to_owned()),
             Keycode::Grave => Some("Ctrl+`".to_owned()),
             Keycode::Period | Keycode::KpPeriod => Some("Ctrl+.".to_owned()),
             Keycode::Return | Keycode::KpEnter => Some("Ctrl+Enter".to_owned()),
             _ => None,
         };
+    }
+
+    if keymod.intersects(shift_mod()) {
+        if matches!(keycode, Keycode::Tab) {
+            return Some("Shift+Tab".to_owned());
+        }
     }
 
     match keycode {
@@ -13002,6 +13368,10 @@ fn normalize_text_token(chord: &str) -> String {
 
 fn ctrl_mod() -> Mod {
     Mod::LCTRLMOD | Mod::RCTRLMOD
+}
+
+fn shift_mod() -> Mod {
+    Mod::LSHIFTMOD | Mod::RSHIFTMOD
 }
 
 fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
@@ -13257,7 +13627,9 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
             (true, Some(InputField::new("Ask > ")))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => {
-            (true, Some(InputField::new("Ask > ")))
+            let mut input = InputField::new("> ");
+            input.set_placeholder(Some(ACP_INPUT_PLACEHOLDER.to_owned()));
+            (true, Some(input))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => (true, None),
@@ -13319,6 +13691,8 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),
                 "Type into the prompt and press Ctrl+Enter to send.".to_owned(),
+                "Use / for slash commands, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
+                    .to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => Vec::new(),
@@ -13373,6 +13747,7 @@ fn render_shell_state(
     runtime_popup: Option<&RuntimePopupSnapshot>,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    acp_connected: bool,
     theme_registry: Option<&ThemeRegistry>,
     width: u32,
     height: u32,
@@ -13446,6 +13821,7 @@ fn render_shell_state(
                 state.vim().recording_macro,
                 workspace_name,
                 lsp_server,
+                acp_connected,
                 git_summary.as_ref(),
                 theme_registry,
                 cell_width,
@@ -13464,6 +13840,7 @@ fn render_shell_state(
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
             workspace_name,
             lsp_server,
+            acp_connected,
             theme_registry,
             cell_width,
             line_height,
@@ -13496,6 +13873,7 @@ fn render_runtime_popup_overlay(
     popup_rect: Rect,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    acp_connected: bool,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -13536,6 +13914,7 @@ fn render_runtime_popup_overlay(
             state.vim().recording_macro,
             workspace_name,
             lsp_server,
+            acp_connected,
             git_summary.as_ref(),
             theme_registry,
             cell_width,
@@ -13606,6 +13985,7 @@ fn render_buffer(
     recording_macro: Option<char>,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    acp_connected: bool,
     git_summary: Option<&GitSummarySnapshot>,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
@@ -13699,6 +14079,7 @@ fn render_buffer(
             line: buffer.cursor_row() + 1,
             column: buffer.cursor_col() + 1,
             lsp_server,
+            acp_connected,
             git: git_info,
         }),
         rect.width().saturating_sub(24),
@@ -13706,8 +14087,19 @@ fn render_buffer(
 
     let body_y = rect.y() + 10;
     let statusline_y = rect.y() + rect.height() as i32 - line_height - 8;
-    let input_reserved = if buffer.has_input_field() {
-        (line_height + 8).max(line_height)
+    let (input_text_lines, input_hint_lines) = buffer
+        .input_field()
+        .map(|input| (input.text_line_count(), usize::from(input.hint().is_some())))
+        .unwrap_or((0, 0));
+    let input_box_height = if input_text_lines > 0 {
+        (line_height * input_text_lines as i32 + 8).max(line_height)
+    } else {
+        0
+    };
+    let input_hint_gap = if input_hint_lines > 0 { 4 } else { 0 };
+    let input_footer_gap = if input_hint_lines > 0 { 10 } else { 0 };
+    let input_reserved = if input_text_lines > 0 {
+        input_box_height + input_hint_gap + input_hint_lines as i32 * line_height + input_footer_gap
     } else {
         0
     };
@@ -13890,27 +14282,96 @@ fn render_buffer(
             adjust_color(base_background, if is_dark { 8 } else { -8 }),
         );
         let input_foreground = theme_color(theme_registry, "ui.input.foreground", foreground);
+        let placeholder_color = theme_color(theme_registry, "ui.input.placeholder", muted);
         fill_rect(
             target,
             PixelRectToRect::rect(
                 rect.x() + 8,
                 input_y - 4,
                 rect.width().saturating_sub(16),
-                input_reserved.max(line_height) as u32,
+                input_box_height.max(line_height) as u32,
             ),
             input_background,
         )?;
+        if buffer_is_acp(&buffer.kind) {
+            let border = if acp_connected {
+                git_added_fallback
+            } else {
+                border_color
+            };
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x() + 8,
+                    input_y - 4,
+                    rect.width().saturating_sub(16),
+                    1,
+                ),
+                border,
+            )?;
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x() + 8,
+                    input_y - 4 + input_box_height.max(line_height) as i32,
+                    rect.width().saturating_sub(16),
+                    1,
+                ),
+                border,
+            )?;
+        }
         let input_x = text_x;
-        let input_text = format!("{}{}", input.prompt(), input.text());
-        draw_text(target, input_x, input_y, &input_text, input_foreground)?;
+        let prompt = input.prompt();
+        let prompt_len = prompt.chars().count();
+        let prompt_padding = " ".repeat(prompt_len);
+        if input.text().is_empty() {
+            if let Some(placeholder) = input.placeholder() {
+                let line = format!("{prompt}{placeholder}");
+                draw_text(target, input_x, input_y, &line, placeholder_color)?;
+            } else {
+                draw_text(target, input_x, input_y, prompt, input_foreground)?;
+            }
+        } else {
+            for (index, line) in input.text().split('\n').enumerate() {
+                let prefix = if index == 0 { prompt } else { &prompt_padding };
+                let rendered = format!("{prefix}{line}");
+                draw_text(
+                    target,
+                    input_x,
+                    input_y + index as i32 * line_height,
+                    &rendered,
+                    input_foreground,
+                )?;
+            }
+        }
+        if let Some(hint) = input.hint() {
+            let hint_y = input_y + input_box_height + input_hint_gap;
+            if let Some((mode_label, rest)) = hint.split_once(" · ") {
+                let prefix = format!("{prompt_padding}{mode_label}");
+                draw_text(target, input_x, hint_y, &prefix, git_added_fallback)?;
+                let prefix_width = text_width(fonts, &prefix)? as i32;
+                let suffix = format!(" · {rest}");
+                draw_text(
+                    target,
+                    input_x + prefix_width,
+                    hint_y,
+                    &suffix,
+                    placeholder_color,
+                )?;
+            } else {
+                let hint_line = format!("{prompt_padding}{hint}");
+                draw_text(target, input_x, hint_y, &hint_line, placeholder_color)?;
+            }
+        }
         if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
-            let input_col = input.prompt().chars().count() + input.text_len();
+            let input_col = prompt_len + input.text_len();
+            let input_row = input.cursor_row();
             let cursor_width = (cell_width / 4).max(2) as u32;
             fill_rounded_rect(
                 target,
                 PixelRectToRect::rect(
                     input_x + (input_col as i32 * cell_width),
-                    input_y,
+                    input_y + input_row as i32 * line_height,
                     cursor_width,
                     line_height.max(2) as u32,
                 ),
@@ -13930,13 +14391,26 @@ fn render_buffer(
         ),
         border_color,
     )?;
-    draw_text(
-        target,
-        rect.x() + 12,
-        statusline_y,
-        &statusline,
-        title_color,
-    )?;
+    let statusline_x = rect.x() + 12;
+    let acp_icon = user::nerd_font::symbols::fa::FA_CONNECTDEVELOP;
+    if acp_connected && statusline.contains(acp_icon) {
+        if let Some((before, rest)) = statusline.split_once(acp_icon) {
+            let mut draw_x = statusline_x;
+            if !before.is_empty() {
+                draw_text(target, draw_x, statusline_y, before, title_color)?;
+                draw_x += text_width(fonts, before)? as i32;
+            }
+            draw_text(target, draw_x, statusline_y, acp_icon, git_added_fallback)?;
+            draw_x += text_width(fonts, acp_icon)? as i32;
+            if !rest.is_empty() {
+                draw_text(target, draw_x, statusline_y, rest, title_color)?;
+            }
+        } else {
+            draw_text(target, statusline_x, statusline_y, &statusline, title_color)?;
+        }
+    } else {
+        draw_text(target, statusline_x, statusline_y, &statusline, title_color)?;
+    }
 
     let _ = ascent;
     fill_rect(

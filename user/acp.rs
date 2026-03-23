@@ -1,4 +1,6 @@
-use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+};
 
 pub const ACP_BUFFER_KIND: &str = "acp";
 
@@ -57,6 +59,36 @@ pub fn package() -> PluginPackage {
             Some("acp-clients"),
         ),
         hook_command(
+            "acp.pick-session",
+            "Opens the ACP session picker for the active client.",
+            "ui.acp.pick-session",
+            None,
+        ),
+        hook_command(
+            "acp.pick-mode",
+            "Opens the ACP mode picker for the active session.",
+            "ui.acp.pick-mode",
+            None,
+        ),
+        hook_command(
+            "acp.pick-model",
+            "Opens the ACP model picker for the active session.",
+            "ui.acp.pick-model",
+            None,
+        ),
+        hook_command(
+            "acp.cycle-mode",
+            "Cycles to the next ACP session mode.",
+            "ui.acp.cycle-mode",
+            None,
+        ),
+        hook_command(
+            "acp.complete-slash",
+            "Opens ACP slash command completion.",
+            "ui.acp.complete-slash",
+            None,
+        ),
+        hook_command(
             "acp.disconnect",
             "Disconnects the active ACP client.",
             "ui.acp.disconnect",
@@ -76,7 +108,20 @@ pub fn package() -> PluginPackage {
         ),
     ];
 
-    PluginPackage::new("acp", true, "Agent Client Protocol integrations.").with_commands(commands)
+    let key_bindings = vec![
+        PluginKeyBinding::new(
+            "Ctrl+Space",
+            "acp.complete-slash",
+            PluginKeymapScope::Global,
+        )
+        .with_vim_mode(PluginVimMode::Insert),
+        PluginKeyBinding::new("Shift+Tab", "acp.cycle-mode", PluginKeymapScope::Global)
+            .with_vim_mode(PluginVimMode::Insert),
+    ];
+
+    PluginPackage::new("acp", true, "Agent Client Protocol integrations.")
+        .with_commands(commands)
+        .with_key_bindings(key_bindings)
 }
 
 fn hook_command(

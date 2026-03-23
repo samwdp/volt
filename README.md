@@ -1,7 +1,21 @@
+> [!WARNING]
+> Volt is in early development and issues are to be expected. Please feel free to report bugs and issues in the Issues section.
+
 ![volt](./crates/volt/assets/banner.png)
+
+<p align="center">
+  <a href="https://github.com/samwdp/volt/releases"><img alt="Latest Release" src="https://img.shields.io/github/v/release/samwdp/volt?style=flat-square&color=blue" /></a>
+  <a href="https://github.com/samwdp/volt/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/samwdp/volt?style=flat-square" /></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-brightgreen?style=flat-square" />
+  <img alt="License" src="https://img.shields.io/github/license/samwdp/volt?style=flat-square" />
+  <a href="https://github.com/OpenSource03/harnss/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/samwdp/volt/build.yml?style=flat-square&label=build" /></a>
+</p>
+
+---
 
 `volt` is a greenfield native text editor project built in Rust. The long-term direction is an Emacs-inspired, 4coder-style editor with a Rust core, a compiled `user` extension library, and native rendering.
 
+---
 ## Workspace layout
 
 - `crates/volt` - process entry point and startup bootstrap for the `volt` executable

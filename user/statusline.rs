@@ -19,6 +19,8 @@ pub struct StatuslineContext<'a> {
     pub column: usize,
     /// Attached language server name, if any.
     pub lsp_server: Option<&'a str>,
+    /// Whether an ACP client is connected.
+    pub acp_connected: bool,
     /// Git statusline info, if available.
     pub git: Option<GitStatuslineInfo<'a>>,
 }
@@ -41,6 +43,7 @@ pub type StatuslineSegment = for<'a> fn(&StatuslineContext<'a>) -> Option<String
 pub fn segments() -> Vec<StatuslineSegment> {
     vec![
         mode_segment,
+        acp_segment,
         macro_recording_segment,
         workspace_segment,
         filetype_segment,
@@ -68,6 +71,13 @@ fn macro_recording_segment(context: &StatuslineContext<'_>) -> Option<String> {
     context
         .recording_macro
         .map(|register| format!("@{register}"))
+}
+
+fn acp_segment(context: &StatuslineContext<'_>) -> Option<String> {
+    if !context.acp_connected {
+        return None;
+    }
+    Some(crate::nerd_font::symbols::fa::FA_CONNECTDEVELOP.to_owned())
 }
 
 fn workspace_segment(context: &StatuslineContext<'_>) -> Option<String> {
@@ -131,6 +141,7 @@ mod tests {
             line: 3,
             column: 9,
             lsp_server: Some("rust-analyzer"),
+            acp_connected: false,
             git: None,
         });
 
@@ -152,6 +163,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            acp_connected: false,
             git: None,
         });
 
@@ -170,6 +182,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            acp_connected: false,
             git: None,
         });
 
@@ -193,6 +206,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            acp_connected: false,
             git: None,
         });
 
@@ -218,6 +232,7 @@ mod tests {
             line: 10,
             column: 2,
             lsp_server: None,
+            acp_connected: false,
             git: Some(super::GitStatuslineInfo {
                 branch: "main",
                 added: 12,
