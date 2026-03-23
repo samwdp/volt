@@ -3186,15 +3186,6 @@ impl ShellUiState {
         &mut self.buffers[index]
     }
 
-    fn active_buffer_mut(&mut self) -> Option<&mut ShellBuffer> {
-        let buffer_id = self
-            .workspace_view()?
-            .panes
-            .get(self.active_pane_index())?
-            .buffer_id;
-        self.buffer_mut(buffer_id)
-    }
-
     fn active_buffer_id(&self) -> Option<BufferId> {
         self.workspace_view()?
             .panes
@@ -3701,15 +3692,10 @@ impl ShellState {
     }
 
     pub(crate) fn active_buffer_mut(&mut self) -> Result<&mut ShellBuffer, ShellError> {
-        let popup_buffer_id = self.runtime_popup()?.map(|popup| popup.active_buffer);
+        let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+        ensure_shell_buffer(&mut self.runtime, buffer_id).map_err(ShellError::Runtime)?;
         let ui = self.ui_mut()?;
-        if let Some(buffer_id) = popup_buffer_id {
-            return ui
-                .buffer_mut(buffer_id)
-                .ok_or_else(|| ShellError::Runtime("active popup buffer is missing".to_owned()));
-        }
-
-        ui.active_buffer_mut()
+        ui.buffer_mut(buffer_id)
             .ok_or_else(|| ShellError::Runtime("active shell buffer is missing".to_owned()))
     }
 
@@ -13811,6 +13797,8 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::E => Some("Ctrl+e".to_owned()),
             Keycode::F => Some("Ctrl+f".to_owned()),
             Keycode::H => Some("Ctrl+h".to_owned()),
+            Keycode::J => Some("Ctrl+j".to_owned()),
+            Keycode::K => Some("Ctrl+k".to_owned()),
             Keycode::L => Some("Ctrl+l".to_owned()),
             Keycode::N => Some("Ctrl+n".to_owned()),
             Keycode::P => Some("Ctrl+p".to_owned()),
