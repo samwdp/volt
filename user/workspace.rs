@@ -34,6 +34,26 @@ pub fn package() -> PluginPackage {
             "Saves all modified file buffers in the active workspace.",
             vec![PluginAction::emit_hook("workspace.save", None::<&str>)],
         ),
+        hook_command(
+            "workspace.window-left",
+            "Moves focus to the window on the left (wraps).",
+            "ui.workspace.window-left",
+        ),
+        hook_command(
+            "workspace.window-down",
+            "Moves focus to the window below (wraps).",
+            "ui.workspace.window-down",
+        ),
+        hook_command(
+            "workspace.window-up",
+            "Moves focus to the window above (wraps).",
+            "ui.workspace.window-up",
+        ),
+        hook_command(
+            "workspace.window-right",
+            "Moves focus to the window on the right (wraps).",
+            "ui.workspace.window-right",
+        ),
     ])
 }
 
@@ -56,5 +76,13 @@ fn picker_command(name: &str, description: &str, provider: &str) -> PluginComman
         name,
         description,
         vec![PluginAction::emit_hook("ui.picker.open", Some(provider))],
+    )
+}
+
+fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand {
+    PluginCommand::new(
+        name,
+        description,
+        vec![PluginAction::emit_hook(hook_name, None::<&str>)],
     )
 }

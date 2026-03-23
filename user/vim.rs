@@ -718,6 +718,32 @@ pub fn package() -> PluginPackage {
         ),
         normal_binding("Ctrl+f", "workspace.new", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
+        // Window navigation
+        normal_binding(
+            "Ctrl+h",
+            "workspace.window-left",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "Ctrl+j",
+            "workspace.window-down",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "Ctrl+k",
+            "workspace.window-up",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "Ctrl+l",
+            "workspace.window-right",
+            PluginKeymapScope::Workspace,
+        ),
+        // Window navigation (popups)
+        normal_binding("Ctrl+h", "workspace.window-left", PluginKeymapScope::Popup),
+        normal_binding("Ctrl+j", "workspace.window-down", PluginKeymapScope::Popup),
+        normal_binding("Ctrl+k", "workspace.window-up", PluginKeymapScope::Popup),
+        normal_binding("Ctrl+l", "workspace.window-right", PluginKeymapScope::Popup),
         // Insert mode keys
         PluginKeyBinding::new("Escape", "vim.enter-normal-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),

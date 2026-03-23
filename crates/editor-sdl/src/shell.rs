@@ -99,6 +99,10 @@ const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
+const HOOK_WORKSPACE_WINDOW_LEFT: &str = "ui.workspace.window-left";
+const HOOK_WORKSPACE_WINDOW_DOWN: &str = "ui.workspace.window-down";
+const HOOK_WORKSPACE_WINDOW_UP: &str = "ui.workspace.window-up";
+const HOOK_WORKSPACE_WINDOW_RIGHT: &str = "ui.workspace.window-right";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
@@ -2521,6 +2525,14 @@ enum PaneSplitDirection {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowMoveDirection {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum GitBranchActionKind {
     Checkout,
@@ -2794,6 +2806,7 @@ pub(crate) struct ShellUiState {
     pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
+    popup_focus: bool,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
 }
@@ -2832,6 +2845,7 @@ impl ShellUiState {
             pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
+            popup_focus: false,
             yank_flash: None,
             git_summary: GitSummaryState::new(),
         }
@@ -2845,6 +2859,21 @@ impl ShellUiState {
 
     fn picker_visible(&self) -> bool {
         self.picker.is_some()
+    }
+
+    fn set_popup_focus(&mut self, focus: bool) {
+        self.popup_focus = focus;
+    }
+
+    fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {
+        if let Some(buffer) = self.buffer(popup.active_buffer) {
+            return !buffer_is_oil_preview(&buffer.kind);
+        }
+        true
+    }
+
+    fn popup_focus_active(&self, popup: &RuntimePopupSnapshot) -> bool {
+        self.popup_focus && self.popup_focus_allowed(popup)
     }
 
     fn git_summary(&self) -> Option<GitSummarySnapshot> {
@@ -3200,6 +3229,18 @@ impl ShellUiState {
             view.panes.push(ShellPane { pane_id, buffer_id });
             view.split_direction = Some(direction);
         }
+    }
+
+    fn shift_active_pane(&mut self, delta: isize) -> Option<PaneId> {
+        if !self.picker_visible()
+            && let Some(view) = self.workspace_view_mut()
+            && view.panes.len() > 1
+        {
+            let pane_count = view.panes.len() as isize;
+            let next = (view.active_pane as isize + delta).rem_euclid(pane_count);
+            view.active_pane = next as usize;
+        }
+        self.active_pane_id()
     }
 
     fn cycle_active_pane(&mut self) -> Option<PaneId> {
@@ -4870,6 +4911,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_WINDOW_LEFT,
+        "Moves focus to the window on the left.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_WINDOW_DOWN,
+        "Moves focus to the window below.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_WINDOW_UP,
+        "Moves focus to the window above.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_WINDOW_RIGHT,
+        "Moves focus to the window on the right.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_GIT_STATUS_OPEN_POPUP,
         "Opens the git status buffer in the popup window.",
     )?;
@@ -5590,6 +5651,46 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_WORKSPACE_WINDOW_LEFT,
+            "shell.workspace-window-left",
+            |_, runtime| {
+                move_workspace_window(runtime, WindowMoveDirection::Left)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_WINDOW_DOWN,
+            "shell.workspace-window-down",
+            |_, runtime| {
+                move_workspace_window(runtime, WindowMoveDirection::Down)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_WINDOW_UP,
+            "shell.workspace-window-up",
+            |_, runtime| {
+                move_workspace_window(runtime, WindowMoveDirection::Up)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_WINDOW_RIGHT,
+            "shell.workspace-window-right",
+            |_, runtime| {
+                move_workspace_window(runtime, WindowMoveDirection::Right)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_GIT_STATUS_OPEN_POPUP,
             "shell.git-status-open-popup",
             |_, runtime| {
@@ -5935,11 +6036,7 @@ fn vim_count_digit(chord: &str, has_existing_count: bool) -> Option<usize> {
 fn active_shell_buffer_id(runtime: &EditorRuntime) -> Result<BufferId, String> {
     if let Some(popup) = active_runtime_popup(runtime)? {
         if let Ok(ui) = shell_ui(runtime) {
-            if let Some(buffer) = ui.buffer(popup.active_buffer) {
-                if !buffer_is_oil_preview(&buffer.kind) {
-                    return Ok(popup.active_buffer);
-                }
-            } else {
+            if ui.popup_focus_active(&popup) {
                 return Ok(popup.active_buffer);
             }
         } else {
@@ -8824,6 +8921,7 @@ fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         "*git-status*",
         BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
     );
+    shell_ui_mut(runtime)?.set_popup_focus(true);
     refresh_git_status_buffer(runtime, buffer_id)
 }
 
@@ -9482,6 +9580,7 @@ fn open_oil_preview_popup(runtime: &mut EditorRuntime, path: &Path) -> Result<()
         .model_mut()
         .open_popup_buffer(workspace_id, "Preview", buffer_id)
         .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.set_popup_focus(false);
     let buffer = runtime
         .model()
         .workspace(workspace_id)
@@ -9521,6 +9620,7 @@ fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup_buffer(workspace_id, "Oil Help", buffer_id)
         .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.set_popup_focus(true);
     let buffer = runtime
         .model()
         .workspace(workspace_id)
@@ -12116,6 +12216,7 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
             .model_mut()
             .close_popup(workspace_id, popup_id)
             .map_err(|error| error.to_string())?;
+        shell_ui_mut(runtime)?.set_popup_focus(false);
         return Ok(());
     }
 
@@ -12128,6 +12229,7 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
+    shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
 }
 
@@ -12202,6 +12304,91 @@ fn split_runtime_pane(
 
 fn cycle_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let pane_id = shell_ui_mut(runtime)?.cycle_active_pane();
+    let Some(pane_id) = pane_id else {
+        return Ok(());
+    };
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, pane_id)
+        .map_err(|error| error.to_string())?;
+    let window_id = active_window_id(runtime)?;
+    let buffer_id = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .pane(pane_id)
+        .and_then(|pane| pane.active_buffer());
+    let mut event = HookEvent::new()
+        .with_window(window_id)
+        .with_workspace(workspace_id)
+        .with_pane(pane_id);
+    if let Some(buffer_id) = buffer_id {
+        event = event.with_buffer(buffer_id);
+    }
+    runtime
+        .emit_hook(builtins::PANE_SWITCH, event)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn move_workspace_window(
+    runtime: &mut EditorRuntime,
+    direction: WindowMoveDirection,
+) -> Result<(), String> {
+    if let Some(popup) = active_runtime_popup(runtime)? {
+        let (focus_allowed, focus_active) = {
+            let ui = shell_ui(runtime)?;
+            (
+                ui.popup_focus_allowed(&popup),
+                ui.popup_focus_active(&popup),
+            )
+        };
+        if focus_allowed {
+            let emit_switch = |runtime: &mut EditorRuntime| -> Result<(), String> {
+                let window_id = active_window_id(runtime)?;
+                let workspace_id = runtime
+                    .model()
+                    .active_workspace_id()
+                    .map_err(|error| error.to_string())?;
+                runtime
+                    .emit_hook(
+                        builtins::PANE_SWITCH,
+                        HookEvent::new()
+                            .with_window(window_id)
+                            .with_workspace(workspace_id),
+                    )
+                    .map_err(|error| error.to_string())
+            };
+            if !focus_active && direction == WindowMoveDirection::Down {
+                shell_ui_mut(runtime)?.set_popup_focus(true);
+                emit_switch(runtime)?;
+                return Ok(());
+            }
+            if focus_active
+                && matches!(
+                    direction,
+                    WindowMoveDirection::Up | WindowMoveDirection::Left
+                )
+            {
+                shell_ui_mut(runtime)?.set_popup_focus(false);
+                emit_switch(runtime)?;
+                return Ok(());
+            }
+            if focus_active {
+                return Ok(());
+            }
+        }
+    }
+
+    let delta = match direction {
+        WindowMoveDirection::Left | WindowMoveDirection::Up => -1,
+        WindowMoveDirection::Right | WindowMoveDirection::Down => 1,
+    };
+    let pane_id = shell_ui_mut(runtime)?.shift_active_pane(delta);
     let Some(pane_id) = pane_id else {
         return Ok(());
     };
@@ -14070,14 +14257,16 @@ fn render_shell_state(
     let pane_inactive_background = adjust_color(base_background, if is_dark { -6 } else { 6 });
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
+    let popup_focus = runtime_popup
+        .map(|popup| state.popup_focus_active(popup))
+        .unwrap_or(false);
 
     target.clear(base_background);
 
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
-        let active = pane_index == state.active_pane_index()
-            && !state.picker_visible()
-            && runtime_popup.is_none();
+        let active =
+            pane_index == state.active_pane_index() && !state.picker_visible() && !popup_focus;
         let background = if active {
             pane_active_background
         } else {
@@ -14342,6 +14531,7 @@ fn render_runtime_popup_overlay(
         PixelRectToRect::rect(popup_rect.x(), popup_rect.y(), popup_rect.width(), 1),
         border_color,
     )?;
+    let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let visual_range = (state.input_mode() == InputMode::Visual)
             .then(|| {
@@ -14357,7 +14547,7 @@ fn render_runtime_popup_overlay(
             fonts,
             buffer,
             popup_rect,
-            true,
+            popup_focus,
             visual_range,
             yank_flash,
             state.input_mode(),
