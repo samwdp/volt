@@ -4,6 +4,8 @@
 //! under the `user/` directory so the future extension model matches the planned
 //! 4coder-style workflow.
 
+/// Agent Client Protocol integrations.
+pub mod acp;
 /// Buffer management and save commands.
 pub mod buffer;
 /// Debug adapter integration hooks and commands.
@@ -53,6 +55,7 @@ use editor_theme::Theme;
 pub fn packages() -> Vec<PluginPackage> {
     vec![
         buffer::package(),
+        acp::package(),
         interactive::package(),
         pane::package(),
         lsp::package(),

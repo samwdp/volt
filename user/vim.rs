@@ -896,8 +896,12 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Workspace,
         ),
         // Leader bindings
+        leader_binding("space", "picker.open-buffers", PluginKeymapScope::Workspace),
         leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
+        // buffer
+        leader_binding("b d", "buffer.close", PluginKeymapScope::Workspace),
+        leader_binding("b k", "buffer.close-picker", PluginKeymapScope::Workspace),
         // Git
         leader_binding("g s", "git.status-open", PluginKeymapScope::Workspace),
         leader_binding(
