@@ -7,6 +7,8 @@ name = "VS Code Dark"
 "ui.input.background" = "#1e1e1e"
 "ui.input.foreground" = "#d4d4d4"
 "ui.yank-flash" = "#569cd66e"
+"ui.statusline.active" = "#4fc1ff"
+"ui.statusline.inactive" = "#6a9955"
 # Git status
 "git.status.section.header" = "#ce9178"
 "git.status.section.count" = "#6a9955"
@@ -52,6 +54,7 @@ name = "VS Code Dark"
 
 [options]
 "ui.line-number.relative" = true
+"ui.nerd-fonts" = true
 font = "default"
 font_size = 18
 cursor_roundness = 2

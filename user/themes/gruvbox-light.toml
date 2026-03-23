@@ -7,6 +7,8 @@ name = "Gruvbox Light"
 "ui.input.background" = "#fbf1c7"
 "ui.input.foreground" = "#3c3836"
 "ui.yank-flash" = "#4585886e"
+"ui.statusline.active" = "#076678"
+"ui.statusline.inactive" = "#928374"
 # Git status
 "git.status.section.header" = "#b57614"
 "git.status.section.count" = "#928374"
@@ -52,6 +54,7 @@ name = "Gruvbox Light"
 
 [options]
 "ui.line-number.relative" = true
+"ui.nerd-fonts" = true
 font = "default"
 font_size = 18
 cursor_roundness = 2

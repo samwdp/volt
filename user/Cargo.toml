@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lib]
 name = "user"
@@ -22,4 +23,5 @@ editor-lsp = { path = "../crates/editor-lsp" }
 editor-plugin-api = { path = "../crates/editor-plugin-api" }
 editor-syntax = { path = "../crates/editor-syntax" }
 editor-theme = { path = "../crates/editor-theme" }
+nerd-font-symbols = "0.3.0"
 toml = "0.8.23"

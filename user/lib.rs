@@ -18,6 +18,8 @@ pub mod lang;
 pub mod lsp;
 /// Multiple cursor workflows.
 pub mod multicursor;
+/// Nerd font symbols and metadata.
+pub mod nerd_font;
 /// Directory editing and navigation workflows.
 pub mod oil;
 /// Pane layout management.

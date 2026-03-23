@@ -35,6 +35,12 @@ pub fn package() -> PluginPackage {
             Some("themes"),
         ),
         hook_command(
+            "picker.open-nerd-fonts",
+            "Opens the nerd font picker popup.",
+            "ui.picker.open",
+            Some("nerd-fonts"),
+        ),
+        hook_command(
             "picker.select-next",
             "Moves to the next picker result.",
             "ui.picker.next",
@@ -93,6 +99,12 @@ pub fn package() -> PluginPackage {
         .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("F6", "picker.open-keybindings", PluginKeymapScope::Global),
         PluginKeyBinding::new("F7", "picker.open-themes", PluginKeymapScope::Global),
+        PluginKeyBinding::new(
+            "Space f n",
+            "picker.open-nerd-fonts",
+            PluginKeymapScope::Workspace,
+        )
+        .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+p", "popup.previous", PluginKeymapScope::Global)

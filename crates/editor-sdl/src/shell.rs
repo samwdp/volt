@@ -144,6 +144,8 @@ const TOKEN_GIT_STATUS_STASH_NAME: &str = "git.status.stash.name";
 const TOKEN_GIT_STATUS_STASH_SUMMARY: &str = "git.status.stash.summary";
 const TOKEN_GIT_STATUS_COMMAND: &str = "git.status.command";
 const TOKEN_GIT_STATUS_MESSAGE: &str = "git.status.message";
+const TOKEN_STATUSLINE_ACTIVE: &str = "ui.statusline.active";
+const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
@@ -154,11 +156,18 @@ const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
+const OPTION_NERD_FONTS: &str = "ui.nerd-fonts";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
+const NERD_FONT_FALLBACK_CANDIDATES: &[&str] = &[
+    "crates\\volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
+    "assets\\font\\SymbolsNerdFontMono-Regular.ttf",
+    "volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
+    "..\\..\\crates\\volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
+];
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/logo.png"
@@ -249,6 +258,39 @@ impl DrawTarget<'_> {
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
+    nerd_fonts: bool,
+}
+
+struct FontSet<'ttf> {
+    primary: Font<'ttf>,
+    fallback: Option<Font<'ttf>>,
+    fallback_baseline_offset: i32,
+}
+
+impl<'ttf> FontSet<'ttf> {
+    fn new(primary: Font<'ttf>, fallback: Option<Font<'ttf>>) -> Self {
+        let fallback_baseline_offset = fallback
+            .as_ref()
+            .map(|fallback| primary.ascent() - fallback.ascent())
+            .unwrap_or(0);
+        Self {
+            primary,
+            fallback,
+            fallback_baseline_offset,
+        }
+    }
+
+    fn primary(&self) -> &Font<'ttf> {
+        &self.primary
+    }
+
+    fn fallback(&self) -> Option<&Font<'ttf>> {
+        self.fallback.as_ref()
+    }
+
+    fn fallback_baseline_offset(&self) -> i32 {
+        self.fallback_baseline_offset
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2399,6 +2441,7 @@ enum PickerAction {
         action: GitCommitActionKind,
         commit: String,
     },
+    CopyToClipboard(String),
 }
 
 #[derive(Debug, Clone)]
@@ -3373,7 +3416,7 @@ impl ShellState {
     fn render(
         &mut self,
         target: &mut DrawTarget<'_>,
-        font: &Font<'_>,
+        fonts: &FontSet<'_>,
         width: u32,
         height: u32,
         cell_width: i32,
@@ -3392,7 +3435,7 @@ impl ShellState {
             .to_owned();
         render_shell_state(
             target,
-            font,
+            fonts,
             ui,
             runtime_popup.as_ref(),
             &workspace_name,
@@ -4158,7 +4201,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut state = ShellState::new_with_log(log_file_path)?;
     let mut theme_settings =
         theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
-    let mut font_path = resolve_font_path(theme_settings.font_request.as_deref())?;
+    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings)?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
@@ -4172,12 +4215,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
     }
     video.text_input().start(&window);
-    let mut font = ttf
-        .load_font(&font_path, theme_settings.font_size as f32)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let mut line_height = font.height().max(1) as usize;
-    let mut ascent = font.ascent();
-    let mut cell_width = font
+    let mut line_height = fonts.primary().height().max(1) as usize;
+    let mut ascent = fonts.primary().ascent();
+    let mut cell_width = fonts
+        .primary()
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
@@ -4203,7 +4244,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     &state,
                     &config,
                     &mut theme_settings,
-                    &mut font,
+                    &mut fonts,
                     &mut font_path,
                     &mut line_height,
                     &mut ascent,
@@ -4261,7 +4302,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let mut scene = Vec::new();
                 if let Err(error) = state.render(
                     &mut DrawTarget::Scene(&mut scene),
-                    &font,
+                    &fonts,
                     render_width,
                     render_height,
                     cell_width,
@@ -4271,7 +4312,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     state.record_shell_error("shell.render", error);
                     return FrameOutcome::Continue;
                 }
-                if let Err(error) = present_scene_to_canvas(&mut canvas, &font, &scene) {
+                if let Err(error) = present_scene_to_canvas(&mut canvas, &fonts, &scene) {
                     state.record_shell_error("shell.present", error);
                 }
 
@@ -4312,12 +4353,12 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_theme_runtime(
-    ttf: &sdl3::ttf::Sdl3TtfContext,
+fn update_theme_runtime<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
     config: &ShellConfig,
     theme_settings: &mut ThemeRuntimeSettings,
-    font: &mut Font<'_>,
+    fonts: &mut FontSet<'ttf>,
     font_path: &mut PathBuf,
     line_height: &mut usize,
     ascent: &mut i32,
@@ -4330,16 +4371,15 @@ fn update_theme_runtime(
 
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
+        || updated.nerd_fonts != theme_settings.nerd_fonts
     {
-        let next_font_path = resolve_font_path(updated.font_request.as_deref())?;
-        let next_font = ttf
-            .load_font(&next_font_path, updated.font_size as f32)
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        let (next_fonts, next_font_path) = load_font_set(ttf, &updated)?;
         *font_path = next_font_path;
-        *font = next_font;
-        *line_height = font.height().max(1) as usize;
-        *ascent = font.ascent();
-        *cell_width = font
+        *fonts = next_fonts;
+        *line_height = fonts.primary().height().max(1) as usize;
+        *ascent = fonts.primary().ascent();
+        *cell_width = fonts
+            .primary()
             .size_of_char('M')
             .map_err(|error| ShellError::Sdl(error.to_string()))?
             .0
@@ -4363,9 +4403,13 @@ fn theme_runtime_settings(
         .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
         .map(|value| value.max(1.0).round() as u32)
         .unwrap_or(config.font_size);
+    let nerd_fonts = theme_registry
+        .and_then(|registry| registry.resolve_bool(OPTION_NERD_FONTS))
+        .unwrap_or(false);
     ThemeRuntimeSettings {
         font_request,
         font_size,
+        nerd_fonts,
     }
 }
 
@@ -4402,6 +4446,38 @@ fn resolve_font_request(request: &str) -> Option<PathBuf> {
         return None;
     }
     find_font_by_name(trimmed)
+}
+
+fn resolve_nerd_font_fallback_path() -> Result<PathBuf, ShellError> {
+    for candidate in NERD_FONT_FALLBACK_CANDIDATES {
+        if let Some(path) = resolve_font_request(candidate) {
+            return Ok(path);
+        }
+    }
+    Err(ShellError::Runtime(format!(
+        "nerd font fallback not found; tried {}",
+        NERD_FONT_FALLBACK_CANDIDATES.join(", ")
+    )))
+}
+
+fn load_font_set<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    settings: &ThemeRuntimeSettings,
+) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
+    let primary_path = resolve_font_path(settings.font_request.as_deref())?;
+    let primary = ttf
+        .load_font(&primary_path, settings.font_size as f32)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let fallback = if settings.nerd_fonts {
+        let fallback_path = resolve_nerd_font_fallback_path()?;
+        Some(
+            ttf.load_font(&fallback_path, settings.font_size as f32)
+                .map_err(|error| ShellError::Sdl(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    Ok((FontSet::new(primary, fallback), primary_path))
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -5544,6 +5620,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         reset_git_commit(runtime, &commit, GitResetMode::Keep)?;
                     }
                 },
+                PickerAction::CopyToClipboard(text) => {
+                    write_system_clipboard(&text);
+                }
             }
 
             Ok(())
@@ -11931,6 +12010,7 @@ fn picker_overlay(runtime: &EditorRuntime, provider: &str) -> Result<PickerOverl
         "workspace.files" => workspace_file_picker_overlay(runtime),
         "undo-tree" => undo_tree_picker_overlay(runtime),
         "themes" => theme_picker_overlay(runtime),
+        "nerd-fonts" => Ok(nerd_font_picker_overlay()),
         other => Err(format!("unknown picker provider `{other}`")),
     }
 }
@@ -12238,6 +12318,21 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
     entries.extend(contextual_keybinding_entries("Oil", OIL_KEYBINDINGS));
 
     PickerOverlay::from_entries("Keybindings", entries)
+}
+
+fn nerd_font_picker_overlay() -> PickerOverlay {
+    let entries = user::nerd_font::symbols()
+        .iter()
+        .map(|symbol| {
+            let label = format!("{} {}", symbol.glyph, symbol.name);
+            let detail = format!("{} | {}", symbol.category.label(), symbol.codepoint_label());
+            PickerEntry {
+                item: PickerItem::new(symbol.id(), label, detail, Some(symbol.glyph.to_owned())),
+                action: PickerAction::CopyToClipboard(symbol.glyph.to_owned()),
+            }
+        })
+        .collect();
+    PickerOverlay::from_entries("Nerd Font Symbols", entries)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -13464,7 +13559,7 @@ fn popup_window_height(content_height: u32, line_height: i32) -> u32 {
 #[allow(clippy::too_many_arguments)]
 fn render_shell_state(
     target: &mut DrawTarget<'_>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
     workspace_name: &str,
@@ -13529,7 +13624,7 @@ fn render_shell_state(
             let yank_flash = state.yank_flash(buffer.id(), now);
             render_buffer(
                 target,
-                font,
+                fonts,
                 buffer,
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 active,
@@ -13550,7 +13645,7 @@ fn render_shell_state(
     if let Some(popup) = runtime_popup {
         render_runtime_popup_overlay(
             target,
-            font,
+            fonts,
             state,
             popup,
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
@@ -13567,7 +13662,7 @@ fn render_shell_state(
     if let Some(picker) = state.picker() {
         render_picker_overlay(
             target,
-            font,
+            fonts,
             picker,
             width,
             height,
@@ -13581,7 +13676,7 @@ fn render_shell_state(
 
 fn render_picker_overlay(
     target: &mut DrawTarget<'_>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     picker: &PickerOverlay,
     width: u32,
     height: u32,
@@ -13710,8 +13805,8 @@ fn render_picker_overlay(
             )?;
         }
 
-        let label = truncate_text_to_width(font, matched.item().label(), label_width)?;
-        let detail = truncate_text_to_width(font, matched.item().detail(), detail_width)?;
+        let label = truncate_text_to_width(fonts, matched.item().label(), label_width)?;
+        let detail = truncate_text_to_width(fonts, matched.item().detail(), detail_width)?;
         draw_text(
             target,
             content_left,
@@ -13731,7 +13826,7 @@ fn render_picker_overlay(
             target,
             popup_rect.x + 16,
             popup_rect.y + popup_rect.height as i32 - line_height - 18,
-            &truncate_text_to_width(font, preview, popup_rect.width.saturating_sub(32))?,
+            &truncate_text_to_width(fonts, preview, popup_rect.width.saturating_sub(32))?,
             subtle,
         )?;
     }
@@ -13742,7 +13837,7 @@ fn render_picker_overlay(
 #[allow(clippy::too_many_arguments)]
 fn render_runtime_popup_overlay(
     target: &mut DrawTarget<'_>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
     popup_rect: Rect,
@@ -13776,7 +13871,7 @@ fn render_runtime_popup_overlay(
         let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
             target,
-            font,
+            fonts,
             buffer,
             popup_rect,
             true,
@@ -13845,7 +13940,7 @@ fn collect_wrapped_lines(
 #[allow(clippy::too_many_arguments)]
 fn render_buffer(
     target: &mut DrawTarget<'_>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     buffer: &ShellBuffer,
     rect: Rect,
     active: bool,
@@ -13869,10 +13964,16 @@ fn render_buffer(
     let is_dark = is_dark_color(base_background);
     let muted = blend_color(foreground, base_background, 0.5);
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
+    let statusline_active = theme_color(
+        theme_registry,
+        TOKEN_STATUSLINE_ACTIVE,
+        Color::RGBA(110, 170, 255, 255),
+    );
+    let statusline_inactive = theme_color(theme_registry, TOKEN_STATUSLINE_INACTIVE, muted);
     let title_color = if active {
-        Color::RGBA(110, 170, 255, 255)
+        statusline_active
     } else {
-        muted
+        statusline_inactive
     };
     let text_color = foreground;
     let cursor = Color::RGB(110, 170, 255);
@@ -13890,7 +13991,7 @@ fn render_buffer(
         .unwrap_or(Color::RGBA(112, 196, 255, 120));
     let cell_width = cell_width.max(1);
     let statusline = truncate_text_to_width(
-        font,
+        fonts,
         &user::statusline::compose(&user::statusline::StatuslineContext {
             vim_mode: input_mode.label(),
             recording_macro,
@@ -14052,7 +14153,7 @@ fn render_buffer(
             }
             draw_buffer_text(
                 target,
-                font,
+                fonts,
                 segment_x,
                 y,
                 &wrapped.line,
@@ -14142,7 +14243,7 @@ fn render_buffer(
 #[allow(clippy::too_many_arguments)]
 fn draw_buffer_text(
     target: &mut DrawTarget<'_>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     x: i32,
     y: i32,
     line: &str,
@@ -14181,7 +14282,7 @@ fn draw_buffer_text(
             continue;
         }
         draw_text(target, draw_x, y, &colored_segment, color)?;
-        draw_x += text_width(font, &colored_segment)? as i32;
+        draw_x += text_width(fonts, &colored_segment)? as i32;
     }
     Ok(())
 }
@@ -14329,11 +14430,87 @@ fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
     clamped
 }
 
-fn text_width(font: &Font<'_>, text: &str) -> Result<u32, ShellError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontRole {
+    Primary,
+    Fallback,
+}
+
+#[derive(Debug, Clone)]
+struct FontRun {
+    role: FontRole,
+    text: String,
+}
+
+fn font_run_width(font: &Font<'_>, text: &str) -> Result<u32, ShellError> {
     Ok(font
         .size_of(text)
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0)
+}
+
+fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
+    let Some(fallback) = fonts.fallback() else {
+        return FontRole::Primary;
+    };
+    if fonts.primary().find_glyph(character).is_some() {
+        return FontRole::Primary;
+    }
+    if fallback.find_glyph(character).is_some() {
+        return FontRole::Fallback;
+    }
+    FontRole::Primary
+}
+
+fn font_runs(text: &str, fonts: &FontSet<'_>) -> Vec<FontRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if fonts.fallback().is_none() || text.is_ascii() {
+        return vec![FontRun {
+            role: FontRole::Primary,
+            text: text.to_owned(),
+        }];
+    }
+    let mut runs = Vec::new();
+    let mut current_role = FontRole::Primary;
+    let mut current_text = String::new();
+    for character in text.chars() {
+        let next_role = font_role_for_char(fonts, character);
+        if next_role != current_role && !current_text.is_empty() {
+            runs.push(FontRun {
+                role: current_role,
+                text: std::mem::take(&mut current_text),
+            });
+        }
+        current_role = next_role;
+        current_text.push(character);
+    }
+    if !current_text.is_empty() {
+        runs.push(FontRun {
+            role: current_role,
+            text: current_text,
+        });
+    }
+    runs
+}
+
+fn text_width(fonts: &FontSet<'_>, text: &str) -> Result<u32, ShellError> {
+    let Some(fallback) = fonts.fallback() else {
+        return font_run_width(fonts.primary(), text);
+    };
+    if text.is_ascii() {
+        return font_run_width(fonts.primary(), text);
+    }
+    let mut width = 0u32;
+    for run in font_runs(text, fonts) {
+        let font = match run.role {
+            FontRole::Primary => fonts.primary(),
+            FontRole::Fallback => fallback,
+        };
+        width = width.saturating_add(font_run_width(font, &run.text)?);
+    }
+    Ok(width)
 }
 
 fn to_sdl_color(color: ThemeColor) -> Color {
@@ -14354,7 +14531,7 @@ fn to_pixel_rect(rect: Rect) -> PixelRect {
 
 fn present_scene_to_canvas(
     canvas: &mut Canvas<Window>,
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     scene: &[DrawCommand],
 ) -> Result<(), ShellError> {
     for command in scene {
@@ -14380,30 +14557,64 @@ fn present_scene_to_canvas(
                 from_render_color(*color),
             )?,
             DrawCommand::Text { x, y, text, color } => {
-                if text.is_empty() {
-                    continue;
-                }
-
-                let surface = font
-                    .render(text)
-                    .blended(from_render_color(*color))
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                let texture_creator = canvas.texture_creator();
-                let texture = texture_creator
-                    .create_texture_from_surface(&surface)
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                canvas
-                    .copy(
-                        &texture,
-                        None,
-                        Rect::new(*x, *y, surface.width(), surface.height()),
-                    )
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                render_text_with_fonts(canvas, fonts, *x, *y, text, *color)?;
             }
         }
     }
 
     canvas.present();
+    Ok(())
+}
+
+fn render_text_with_fonts(
+    canvas: &mut Canvas<Window>,
+    fonts: &FontSet<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: RenderColor,
+) -> Result<(), ShellError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let mut draw_x = x;
+    let fallback = fonts.fallback();
+    let runs = if fallback.is_none() || text.is_ascii() {
+        vec![FontRun {
+            role: FontRole::Primary,
+            text: text.to_owned(),
+        }]
+    } else {
+        font_runs(text, fonts)
+    };
+    for run in runs {
+        if run.text.is_empty() {
+            continue;
+        }
+        let (font, y_offset) = match run.role {
+            FontRole::Primary => (fonts.primary(), 0),
+            FontRole::Fallback => (
+                fallback.expect("fallback font missing"),
+                fonts.fallback_baseline_offset(),
+            ),
+        };
+        let surface = font
+            .render(&run.text)
+            .blended(from_render_color(color))
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        let texture_creator = canvas.texture_creator();
+        let texture = texture_creator
+            .create_texture_from_surface(&surface)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        canvas
+            .copy(
+                &texture,
+                None,
+                Rect::new(draw_x, y + y_offset, surface.width(), surface.height()),
+            )
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        draw_x += font_run_width(font, &run.text)? as i32;
+    }
     Ok(())
 }
 
@@ -14499,7 +14710,7 @@ fn fill_rounded_rect_canvas<T: RenderTarget>(
 }
 
 fn truncate_text_to_width(
-    font: &Font<'_>,
+    fonts: &FontSet<'_>,
     text: &str,
     max_width: u32,
 ) -> Result<String, ShellError> {
@@ -14507,20 +14718,12 @@ fn truncate_text_to_width(
         return Ok(String::new());
     }
 
-    if font
-        .size_of(text)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?
-        .0
-        <= max_width
-    {
+    if text_width(fonts, text)? <= max_width {
         return Ok(text.to_owned());
     }
 
     let ellipsis = "...";
-    let ellipsis_width = font
-        .size_of(ellipsis)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?
-        .0;
+    let ellipsis_width = text_width(fonts, ellipsis)?;
     if ellipsis_width >= max_width {
         return Ok("...".to_owned());
     }
@@ -14530,12 +14733,7 @@ fn truncate_text_to_width(
         let mut candidate = truncated.clone();
         candidate.push(character);
         candidate.push_str(ellipsis);
-        if font
-            .size_of(&candidate)
-            .map_err(|error| ShellError::Sdl(error.to_string()))?
-            .0
-            > max_width
-        {
+        if text_width(fonts, &candidate)? > max_width {
             break;
         }
         truncated.push(character);

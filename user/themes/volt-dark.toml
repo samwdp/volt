@@ -7,6 +7,8 @@ name = "Volt Dark"
 "ui.input.background" = "#181b22"
 "ui.input.foreground" = "#d7dde8"
 "ui.yank-flash" = "#61afef6e"
+"ui.statusline.active" = "#6eaaff"
+"ui.statusline.inactive" = "#5c6370"
 # Git status
 "git.status.section.header" = "#d19a66"
 "git.status.section.count" = "#5c6370"
@@ -52,6 +54,7 @@ name = "Volt Dark"
 
 [options]
 "ui.line-number.relative" = true
+"ui.nerd-fonts" = true
 font = "default"
 font_size = 18
 cursor_roundness = 2
