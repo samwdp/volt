@@ -166,12 +166,29 @@ fn create_acp_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new());
+    let mut shell_buffer =
+        ShellBuffer::from_runtime_buffer(buffer, initial_acp_buffer_lines(client));
     shell_buffer.clear_input();
     shell_buffer.set_language_id(Some("markdown".to_owned()));
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
+}
+
+fn initial_acp_buffer_lines(client: &user::acp::AcpClientConfig) -> Vec<String> {
+    let mut lines = Vec::new();
+    if client.id.eq_ignore_ascii_case("copilot") {
+        lines.push("![copilot](copilot.png)".to_owned());
+        lines.push(String::new());
+    }
+    lines.push(format!("# {}", client.label));
+    lines.push(String::new());
+    lines.push(format!(
+        "{} Connected via ACP.",
+        user::nerd_font::symbols::fa::FA_CONNECTDEVELOP
+    ));
+    lines.push(String::new());
+    lines
 }
 
 fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -230,7 +247,10 @@ pub(super) fn submit_acp_prompt(
     };
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.append_output_lines(&[format!("{prompt}{text}")]);
+        buffer.append_output_lines(&[format!(
+            "{} **You:** {prompt}{text}",
+            user::nerd_font::symbols::md::MD_ACCOUNT
+        )]);
         buffer.clear_input();
     }
     let mut manager = manager
@@ -2465,7 +2485,12 @@ fn handle_session_update(
         }
         SessionUpdate::AgentThoughtChunk(_) => {}
         SessionUpdate::ToolCall(call) => {
-            let mut lines = vec![format!("[tool] {} ({:?})", call.title, call.status)];
+            let mut lines = vec![format!(
+                "{} **{}** · {}",
+                user::nerd_font::symbols::cod::COD_TOOLS,
+                call.title,
+                format_acp_status_badge(&call.status)
+            )];
             lines.extend(render_tool_call_content(&call.content));
             let _ = state
                 .borrow()
@@ -2473,9 +2498,13 @@ fn handle_session_update(
                 .send(AcpEvent::SessionLines { session_id, lines });
         }
         SessionUpdate::ToolCallUpdate(update) => {
-            let mut lines = vec![format!("[tool] update {}", update.tool_call_id)];
+            let mut lines = vec![format!(
+                "{} linked update `{}`",
+                user::nerd_font::symbols::cod::COD_LINK,
+                update.tool_call_id
+            )];
             if let Some(status) = update.fields.status {
-                lines.push(format!("status: {status:?}"));
+                lines.push(format!("  {}", format_acp_status_badge(&status)));
             }
             if let Some(content) = update.fields.content {
                 lines.extend(render_tool_call_content(&content));
@@ -2488,7 +2517,12 @@ fn handle_session_update(
         SessionUpdate::Plan(plan) => {
             let mut lines = Vec::new();
             for entry in plan.entries {
-                lines.push(format!("[plan] {} ({:?})", entry.content, entry.status));
+                lines.push(format!(
+                    "{} {} · {}",
+                    user::nerd_font::symbols::cod::COD_NOTEBOOK,
+                    entry.content,
+                    format_acp_status_badge(&entry.status)
+                ));
             }
             if !lines.is_empty() {
                 let _ = state
@@ -2527,25 +2561,69 @@ fn handle_session_update(
     }
 }
 
+fn format_acp_status_badge(status: &impl std::fmt::Debug) -> String {
+    let raw = format!("{status:?}");
+    let icon = match raw.as_str() {
+        "Pending" | "Running" | "InProgress" => user::nerd_font::symbols::cod::COD_LOADING,
+        "Completed" | "Success" | "Succeeded" => user::nerd_font::symbols::cod::COD_CHECK,
+        "Failed" | "Error" => user::nerd_font::symbols::cod::COD_ERROR,
+        "Cancelled" | "Canceled" | "Denied" => user::nerd_font::symbols::cod::COD_CIRCLE_SLASH,
+        _ => user::nerd_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
+    };
+    format!("{icon} {}", humanize_debug_label(&raw))
+}
+
+fn humanize_debug_label(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_word = false;
+    for character in value.chars() {
+        if matches!(character, '_' | '-') {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+            previous_was_word = false;
+            continue;
+        }
+        let starts_new_word = character.is_ascii_uppercase() && previous_was_word;
+        if starts_new_word && !output.ends_with(' ') {
+            output.push(' ');
+        }
+        output.push(character);
+        previous_was_word = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+    output
+}
+
 fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) -> Vec<String> {
     let mut lines = Vec::new();
     for item in content {
         match item {
             agent_client_protocol::ToolCallContent::Content(content) => {
                 if let ContentBlock::Text(text) = &content.content {
-                    lines.push(text.text.clone());
+                    for line in text.text.lines() {
+                        if line.trim().is_empty() {
+                            lines.push(String::new());
+                        } else {
+                            lines.push(format!("  {line}"));
+                        }
+                    }
                 }
             }
             agent_client_protocol::ToolCallContent::Diff(diff) => {
                 lines.push(format!(
-                    "[diff] {} ({} -> {})",
+                    "  {} `{}` · {} -> {}",
+                    user::nerd_font::symbols::cod::COD_DIFF_MODIFIED,
                     diff.path.display(),
                     diff.old_text.as_ref().map_or("new", |_| "old"),
                     "new"
                 ));
             }
             agent_client_protocol::ToolCallContent::Terminal(terminal) => {
-                lines.push(format!("[terminal] {}", terminal.terminal_id));
+                lines.push(format!(
+                    "  {} terminal `{}`",
+                    user::nerd_font::symbols::cod::COD_TERMINAL,
+                    terminal.terminal_id
+                ));
             }
             _ => {}
         }
@@ -2554,14 +2632,24 @@ fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) 
 }
 
 fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
-    let mut lines = vec!["Permission requested by agent.".to_owned()];
+    let mut lines = vec![format!(
+        "{} Permission requested by agent.",
+        user::nerd_font::symbols::cod::COD_WARNING
+    )];
     if let Some(status) = request.tool_call.fields.status {
-        lines.push(format!("Status: {status:?}"));
+        lines.push(format!("  {}", format_acp_status_badge(&status)));
     }
     if let Some(title) = request.tool_call.fields.title.clone() {
-        lines.push(format!("Tool: {title}"));
+        lines.push(format!(
+            "{} **{}**",
+            user::nerd_font::symbols::cod::COD_TOOLS,
+            title
+        ));
     }
-    lines.push("Use acp.permission-approve or acp.permission-deny.".to_owned());
+    lines.push(format!(
+        "{} Use `acp.permission-approve` or `acp.permission-deny`.",
+        user::nerd_font::symbols::cod::COD_CHECKLIST
+    ));
     lines
 }
 

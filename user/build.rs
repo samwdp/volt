@@ -1,9 +1,4 @@
-use std::{
-    env,
-    error::Error,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{env, error::Error, fs, path::PathBuf};
 
 const MODULES: &[(&str, &str)] = &[
     ("cod", "Cod"),
@@ -23,14 +18,11 @@ const MODULES: &[(&str, &str)] = &[
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let lock_path = manifest_dir.join("..").join("Cargo.lock");
-    println!("cargo:rerun-if-changed={}", lock_path.display());
-    let version = lock_version(&lock_path, "nerd-font-symbols")?;
-    let crate_dir = find_registry_crate("nerd-font-symbols", &version)?;
+    let symbols_dir = manifest_dir.join("nerd_font_symbols");
 
     let mut output = String::from("pub const NERD_FONT_SYMBOLS: &[NerdFontSymbol] = &[\n");
     for (module, category) in MODULES {
-        let module_path = crate_dir.join("src").join(format!("{module}.rs"));
+        let module_path = symbols_dir.join(format!("{module}.rs"));
         println!("cargo:rerun-if-changed={}", module_path.display());
         let contents = fs::read_to_string(&module_path)?;
         for line in contents.lines() {
@@ -53,55 +45,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     fs::write(out_dir.join("nerd_font_data.rs"), output)?;
     Ok(())
-}
-
-fn lock_version(lock_path: &Path, crate_name: &str) -> Result<String, Box<dyn Error>> {
-    let contents = fs::read_to_string(lock_path)?;
-    let mut in_target = false;
-    for line in contents.lines() {
-        if line.trim() == "[[package]]" {
-            in_target = false;
-            continue;
-        }
-        if let Some(name) = line.trim().strip_prefix("name = \"") {
-            if name
-                .strip_suffix('\"')
-                .is_some_and(|value| value == crate_name)
-            {
-                in_target = true;
-            }
-            continue;
-        }
-        if in_target
-            && let Some(version) = line.trim().strip_prefix("version = \"")
-            && let Some(version) = version.strip_suffix('\"')
-        {
-            return Ok(version.to_owned());
-        }
-    }
-    Err(format!("failed to find {crate_name} in Cargo.lock").into())
-}
-
-fn find_registry_crate(crate_name: &str, version: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let cargo_home = env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".cargo")))
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
-        .ok_or("failed to resolve CARGO_HOME")?;
-    let registry_src = cargo_home.join("registry").join("src");
-    let target_dir = format!("{crate_name}-{version}");
-    for entry in fs::read_dir(&registry_src)? {
-        let entry = entry?;
-        let candidate = entry.path().join(&target_dir);
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "failed to locate {target_dir} under {}",
-        registry_src.display()
-    )
-    .into())
 }
 
 fn parse_symbol_line(line: &str) -> Option<(&str, &str)> {

@@ -24,6 +24,8 @@ pub mod lsp;
 pub mod multicursor;
 /// Nerd font symbols and metadata.
 pub mod nerd_font;
+/// Vendored Nerd Font symbol modules.
+pub mod nerd_font_symbols;
 /// Directory editing and navigation workflows.
 pub mod oil;
 /// Pane layout management.

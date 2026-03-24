@@ -1307,6 +1307,18 @@ impl GitSummaryState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ActiveBufferEventContext {
+    buffer_id: BufferId,
+    input_rows: usize,
+    has_input: bool,
+    is_read_only: bool,
+    is_git_status: bool,
+    is_git_commit: bool,
+    is_acp: bool,
+    is_directory: bool,
+}
+
 #[derive(Debug, Clone)]
 struct GitViewState {
     label: String,
@@ -2128,6 +2140,7 @@ impl ShellBuffer {
         }
         let original_cursor = self.cursor_point();
         let original_scroll = self.scroll_row;
+        let follow_output = self.should_follow_output();
         let insert_text = lines.join("\n");
         if self.line_count() == 0 {
             self.text.set_cursor(TextPoint::new(0, 0));
@@ -2140,7 +2153,11 @@ impl ShellBuffer {
         }
         self.text.mark_clean();
         self.text.set_cursor(original_cursor);
-        self.scroll_row = original_scroll;
+        if follow_output {
+            self.scroll_output_to_end();
+        } else {
+            self.scroll_row = original_scroll.min(self.line_count().saturating_sub(1));
+        }
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
         self.syntax_lines.clear();
@@ -2159,6 +2176,7 @@ impl ShellBuffer {
         }
         let original_cursor = self.cursor_point();
         let original_scroll = self.scroll_row;
+        let follow_output = self.should_follow_output();
         if self.line_count() == 0 {
             self.text.set_cursor(TextPoint::new(0, 0));
             self.text.insert_text(text);
@@ -2170,7 +2188,11 @@ impl ShellBuffer {
         }
         self.text.mark_clean();
         self.text.set_cursor(original_cursor);
-        self.scroll_row = original_scroll;
+        if follow_output {
+            self.scroll_output_to_end();
+        } else {
+            self.scroll_row = original_scroll.min(self.line_count().saturating_sub(1));
+        }
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
         self.syntax_lines.clear();
@@ -2209,6 +2231,18 @@ impl ShellBuffer {
 
     fn line_len_chars(&self, line_index: usize) -> usize {
         self.text.line_len_chars(line_index).unwrap_or(0)
+    }
+
+    fn should_follow_output(&self) -> bool {
+        if self.line_count() == 0 {
+            return true;
+        }
+        self.line_at_viewport_offset(self.viewport_lines().saturating_sub(1)) + 1
+            >= self.line_count()
+    }
+
+    fn scroll_output_to_end(&mut self) {
+        self.scroll_row = self.line_count().saturating_sub(self.viewport_lines());
     }
 
     fn path(&self) -> Option<&Path> {
@@ -4348,17 +4382,43 @@ impl ShellState {
             .transpose()
     }
 
-    fn handle_event(&mut self, event: Event, visible_rows: usize) -> Result<bool, ShellError> {
-        let input_rows =
-            active_shell_buffer_input_rows(&self.runtime).map_err(ShellError::Runtime)?;
-        let visible_rows = if input_rows > 0 {
-            visible_rows.saturating_sub(input_rows).max(1)
+    fn handle_event(
+        &mut self,
+        event: Event,
+        visible_rows: usize,
+        render_width: u32,
+        pane_height: u32,
+    ) -> Result<bool, ShellError> {
+        let active_buffer =
+            active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
+        let visible_rows = if active_buffer.input_rows > 0 {
+            visible_rows.saturating_sub(active_buffer.input_rows).max(1)
         } else {
             visible_rows
         };
         self.active_buffer_mut()?.set_viewport_lines(visible_rows);
+        let (input_mode, picker_visible) = {
+            let ui = self.ui()?;
+            (ui.input_mode(), ui.picker_visible())
+        };
         match event {
             Event::Quit { .. } => return Ok(true),
+            Event::MouseButtonDown { x, y, .. } => {
+                if picker_visible {
+                    return Ok(false);
+                }
+                let mouse_x = x as i32;
+                let mouse_y = y as i32;
+                if self.runtime_popup()?.is_some() && mouse_y >= pane_height as i32 {
+                    self.ui_mut()?.set_popup_focus(true);
+                    return Ok(false);
+                }
+                if let Some(pane_id) =
+                    self.pane_id_at_point(render_width, pane_height, mouse_x, mouse_y)?
+                {
+                    self.focus_runtime_pane(pane_id)?;
+                }
+            }
             Event::KeyDown {
                 keycode: Some(keycode),
                 keymod,
@@ -4371,7 +4431,7 @@ impl ShellState {
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
                 let is_ctrl_k = keymod.intersects(ctrl_mod()) && keycode == Keycode::K;
                 let is_ctrl_key = matches!(keycode, Keycode::LCtrl | Keycode::RCtrl);
-                if active_shell_buffer_is_git_commit(&self.runtime).map_err(ShellError::Runtime)? {
+                if active_buffer.is_git_commit {
                     let mut should_commit = false;
                     let mut should_cancel = false;
                     let mut consume = false;
@@ -4397,13 +4457,11 @@ impl ShellState {
                         }
                     }
                     if should_commit || should_cancel {
-                        let buffer_id =
-                            active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                         if should_commit {
-                            commit_git_buffer(&mut self.runtime, buffer_id)
+                            commit_git_buffer(&mut self.runtime, active_buffer.buffer_id)
                                 .map_err(ShellError::Runtime)?;
                         } else {
-                            cancel_git_commit_buffer(&mut self.runtime, buffer_id)
+                            cancel_git_commit_buffer(&mut self.runtime, active_buffer.buffer_id)
                                 .map_err(ShellError::Runtime)?;
                         }
                         return Ok(false);
@@ -4421,16 +4479,22 @@ impl ShellState {
                 }
                 if keymod.intersects(ctrl_mod())
                     && keycode == Keycode::J
-                    && matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                    && active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)?
-                    && active_shell_buffer_is_acp(&self.runtime).map_err(ShellError::Runtime)?
+                    && matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                    && active_buffer.has_input
+                    && active_buffer.is_acp
                 {
                     if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                         input.append_text("\n");
                     }
                     return Ok(false);
                 }
-                if self.try_runtime_keybinding(keycode, keymod)? {
+                if self.try_runtime_keybinding_cached(
+                    keycode,
+                    keymod,
+                    input_mode,
+                    picker_visible,
+                    active_buffer.is_directory,
+                )? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
                     return Ok(false);
                 }
@@ -4439,7 +4503,7 @@ impl ShellState {
                     return Ok(true);
                 }
 
-                if self.picker_visible()? {
+                if picker_visible {
                     if matches!(keycode, Keycode::Return | Keycode::KpEnter) {
                         self.runtime
                             .execute_command("picker.submit")
@@ -4458,9 +4522,8 @@ impl ShellState {
 
                 match keycode {
                     Keycode::Left => {
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_has_input(&self.runtime)
-                                .map_err(ShellError::Runtime)?
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.has_input
                         {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_left();
@@ -4470,9 +4533,8 @@ impl ShellState {
                         }
                     }
                     Keycode::Right => {
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_has_input(&self.runtime)
-                                .map_err(ShellError::Runtime)?
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.has_input
                         {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_right();
@@ -4482,9 +4544,8 @@ impl ShellState {
                         }
                     }
                     Keycode::Up => {
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_has_input(&self.runtime)
-                                .map_err(ShellError::Runtime)?
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.has_input
                         {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_up();
@@ -4494,9 +4555,8 @@ impl ShellState {
                         }
                     }
                     Keycode::Down => {
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_has_input(&self.runtime)
-                                .map_err(ShellError::Runtime)?
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.has_input
                         {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_down();
@@ -4508,15 +4568,11 @@ impl ShellState {
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_rows as i32),
                     Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_rows as i32)),
                     Keycode::Return | Keycode::KpEnter
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_shell_buffer_has_input(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        if active_buffer.has_input {
                             submit_input_buffer(&mut self.runtime).map_err(ShellError::Runtime)?;
-                        } else if !active_shell_buffer_read_only(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        } else if !active_buffer.is_read_only {
                             let (indent_size, use_tabs) = {
                                 let ui = self.ui()?;
                                 let buffer_id = ui.active_buffer_id().ok_or_else(|| {
@@ -4539,52 +4595,39 @@ impl ShellState {
                         }
                     }
                     Keycode::Backspace
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_shell_buffer_has_input(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        if active_buffer.has_input {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.backspace();
                             }
-                        } else if !active_shell_buffer_read_only(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        } else if !active_buffer.is_read_only {
                             self.active_buffer_mut()?.backspace();
                             self.mark_active_buffer_syntax_dirty()?;
                         }
                     }
                     Keycode::Delete
-                        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) =>
+                        if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_shell_buffer_has_input(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        if active_buffer.has_input {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.delete_forward();
                             }
-                        } else if !active_shell_buffer_read_only(&self.runtime)
-                            .map_err(ShellError::Runtime)?
-                        {
+                        } else if !active_buffer.is_read_only {
                             self.active_buffer_mut()?.delete_forward();
                             self.mark_active_buffer_syntax_dirty()?;
                         }
                     }
                     Keycode::Tab => {
                         if !keymod.intersects(shift_mod())
-                            && matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                            && active_shell_buffer_has_input(&self.runtime)
-                                .map_err(ShellError::Runtime)?
-                            && active_shell_buffer_is_acp(&self.runtime)
-                                .map_err(ShellError::Runtime)?
+                            && matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.has_input
+                            && active_buffer.is_acp
                         {
                             acp::acp_complete_slash(&mut self.runtime)
                                 .map_err(ShellError::Runtime)?;
-                        } else if !matches!(
-                            self.input_mode()?,
-                            InputMode::Insert | InputMode::Replace
-                        ) && active_shell_buffer_is_git_status(&self.runtime)
-                            .map_err(ShellError::Runtime)?
+                        } else if !matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                            && active_buffer.is_git_status
                         {
                             toggle_git_section(&mut self.runtime).map_err(ShellError::Runtime)?;
                         } else {
@@ -4605,6 +4648,50 @@ impl ShellState {
         }
 
         Ok(false)
+    }
+
+    fn pane_id_at_point(
+        &self,
+        width: u32,
+        pane_height: u32,
+        x: i32,
+        y: i32,
+    ) -> Result<Option<PaneId>, ShellError> {
+        if x < 0 || y < 0 || y >= pane_height as i32 {
+            return Ok(None);
+        }
+        let ui = self.ui()?;
+        let Some(panes) = ui.panes() else {
+            return Ok(None);
+        };
+        let pane_rects = match ui.pane_split_direction() {
+            PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
+            PaneSplitDirection::Horizontal => {
+                horizontal_pane_rects(width, pane_height, panes.len())
+            }
+        };
+        Ok(panes
+            .iter()
+            .zip(pane_rects.iter())
+            .find_map(|(pane, rect)| {
+                pixel_rect_contains_point(*rect, x, y).then_some(pane.pane_id)
+            }))
+    }
+
+    fn focus_runtime_pane(&mut self, pane_id: PaneId) -> Result<(), ShellError> {
+        let workspace_id = self
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        self.runtime
+            .model_mut()
+            .focus_pane(workspace_id, pane_id)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        let ui = self.ui_mut()?;
+        ui.set_popup_focus(false);
+        ui.focus_pane(pane_id);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5389,20 +5476,46 @@ impl ShellState {
         Ok(changed)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_runtime_keybinding(
         &mut self,
         keycode: Keycode,
         keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        let active_buffer =
+            active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
+        let (input_mode, picker_visible) = {
+            let ui = self.ui()?;
+            (ui.input_mode(), ui.picker_visible())
+        };
+        self.try_runtime_keybinding_cached(
+            keycode,
+            keymod,
+            input_mode,
+            picker_visible,
+            active_buffer.is_directory,
+        )
+    }
+
+    fn try_runtime_keybinding_cached(
+        &mut self,
+        keycode: Keycode,
+        keymod: Mod,
+        input_mode: InputMode,
+        picker_visible: bool,
+        active_buffer_is_directory: bool,
     ) -> Result<bool, ShellError> {
         let Some(chord) = keydown_chord(keycode, keymod) else {
             return Ok(false);
         };
 
         clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
-        let vim_mode = keymap_vim_mode(self.input_mode()?);
+        let vim_mode = keymap_vim_mode(input_mode);
+        let in_text_insert_mode = matches!(input_mode, InputMode::Insert | InputMode::Replace);
 
-        if !self.picker_visible()?
-            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+        if !picker_visible
+            && !in_text_insert_mode
+            && active_buffer_is_directory
             && handle_directory_keydown_chord(&mut self.runtime, &chord)
                 .map_err(ShellError::Runtime)?
         {
@@ -5412,7 +5525,7 @@ impl ShellState {
             return Ok(true);
         }
 
-        if self.picker_visible()?
+        if picker_visible
             && self
                 .runtime
                 .keymaps()
@@ -5439,8 +5552,8 @@ impl ShellState {
             return Ok(true);
         }
 
-        if !self.picker_visible()?
-            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+        if !picker_visible
+            && !in_text_insert_mode
             && self
                 .runtime
                 .keymaps()
@@ -5708,7 +5821,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         .as_ref()
                         .map(|_| TypingEventMetadata::from_event(&event));
                     let event_started = typing_frame.as_ref().map(|_| Instant::now());
-                    match state.handle_event(event, visible_rows) {
+                    match state.handle_event(event, visible_rows, render_width, pane_height) {
                         Ok(true) => return FrameOutcome::Quit,
                         Ok(false) => {}
                         Err(error) => state.record_shell_error("shell.handle-event", error),
@@ -7490,9 +7603,26 @@ fn input_render_rows(buffer: &ShellBuffer) -> usize {
         .unwrap_or(0)
 }
 
-fn active_shell_buffer_input_rows(runtime: &EditorRuntime) -> Result<usize, String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    Ok(input_render_rows(shell_buffer(runtime, buffer_id)?))
+fn active_buffer_event_context(
+    runtime: &EditorRuntime,
+) -> Result<ActiveBufferEventContext, String> {
+    let ui = shell_ui(runtime)?;
+    let buffer_id = ui
+        .active_buffer_id()
+        .ok_or_else(|| "active buffer is missing".to_owned())?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "active shell buffer is missing".to_owned())?;
+    Ok(ActiveBufferEventContext {
+        buffer_id,
+        input_rows: input_render_rows(buffer),
+        has_input: buffer.has_input_field(),
+        is_read_only: buffer.is_read_only(),
+        is_git_status: buffer_is_git_status(&buffer.kind),
+        is_git_commit: buffer_is_git_commit(&buffer.kind),
+        is_acp: buffer_is_acp(&buffer.kind),
+        is_directory: buffer_is_directory(&buffer.kind),
+    })
 }
 
 fn buffer_is_git_status(kind: &BufferKind) -> bool {
@@ -7513,25 +7643,6 @@ fn buffer_is_directory(kind: &BufferKind) -> bool {
 
 fn buffer_is_oil_preview(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND)
-}
-
-fn active_shell_buffer_is_git_status(runtime: &EditorRuntime) -> Result<bool, String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    Ok(buffer_is_git_status(
-        &shell_buffer(runtime, buffer_id)?.kind,
-    ))
-}
-
-fn active_shell_buffer_is_git_commit(runtime: &EditorRuntime) -> Result<bool, String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    Ok(buffer_is_git_commit(
-        &shell_buffer(runtime, buffer_id)?.kind,
-    ))
-}
-
-fn active_shell_buffer_is_acp(runtime: &EditorRuntime) -> Result<bool, String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    Ok(buffer_is_acp(&shell_buffer(runtime, buffer_id)?.kind))
 }
 
 fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
@@ -15696,6 +15807,12 @@ fn popup_window_height(content_height: u32, line_height: i32) -> u32 {
     let max_height = content_height.saturating_sub(row_height).max(row_height);
     let clamped = desired.min(max_height);
     (clamped / row_height).max(1) * row_height
+}
+
+fn pixel_rect_contains_point(rect: PixelRect, x: i32, y: i32) -> bool {
+    let right = rect.x.saturating_add(rect.width as i32);
+    let bottom = rect.y.saturating_add(rect.height as i32);
+    x >= rect.x && x < right && y >= rect.y && y < bottom
 }
 
 #[allow(clippy::too_many_arguments)]

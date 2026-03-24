@@ -1,6 +1,6 @@
 //! Nerd font symbols and metadata.
 
-pub use nerd_font_symbols as symbols;
+pub use crate::nerd_font_symbols as symbols;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NerdFontCategory {
