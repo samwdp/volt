@@ -25,7 +25,7 @@ use crate::state::{
     VimRecordedInput, VimSearchDirection, VimState, VimTextObjectKind, VimVisualSnapshot,
     VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
 };
-use editor_buffer::{TextBuffer, TextPoint, TextRange, WordKind};
+use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
     KeymapVimMode, PaneId, SectionAction, SectionCollapseState, SectionRenderLine,
@@ -5264,7 +5264,9 @@ impl ShellState {
     fn schedule_picker_search_refresh(&mut self) -> Result<(), ShellError> {
         enum DynamicPickerSearch {
             Vim {
-                buffer: Box<ShellBuffer>,
+                buffer_id: BufferId,
+                buffer_revision: u64,
+                text: TextSnapshot,
                 direction: VimSearchDirection,
                 query: String,
             },
@@ -5284,11 +5286,13 @@ impl ShellState {
                 let buffer_id = ui
                     .active_buffer_id()
                     .ok_or_else(|| ShellError::Runtime("active buffer is missing".to_owned()))?;
-                let buffer = ui.buffer(buffer_id).cloned().ok_or_else(|| {
+                let buffer = ui.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime("active shell buffer is missing".to_owned())
                 })?;
                 Some(DynamicPickerSearch::Vim {
-                    buffer: Box::new(buffer),
+                    buffer_id,
+                    buffer_revision: buffer.text.revision(),
+                    text: buffer.text.snapshot(),
                     direction,
                     query,
                 })
@@ -5304,13 +5308,19 @@ impl ShellState {
 
         match pending {
             Some(DynamicPickerSearch::Vim {
-                buffer,
+                buffer_id,
+                buffer_revision,
+                text,
                 direction,
                 query,
             }) => {
-                self.ui_mut()?
-                    .vim_search_worker
-                    .schedule(*buffer, direction, query);
+                self.ui_mut()?.vim_search_worker.schedule(
+                    buffer_id,
+                    buffer_revision,
+                    text,
+                    direction,
+                    query,
+                );
             }
             Some(DynamicPickerSearch::Workspace { root, query }) => {
                 self.ui_mut()?.workspace_search_worker.schedule(root, query);
@@ -7932,7 +7942,7 @@ struct VimSearchWorkerRequest {
     request_id: u64,
     buffer_id: BufferId,
     buffer_revision: u64,
-    buffer: ShellBuffer,
+    text: TextSnapshot,
     direction: VimSearchDirection,
     query: String,
 }
@@ -7963,7 +7973,7 @@ impl VimSearchWorkerState {
                 while let Ok(newer_request) = request_rx.try_recv() {
                     request = newer_request;
                 }
-                let data = vim_search_entries(&request.buffer, request.direction, &request.query);
+                let data = vim_search_entries(&request.text, request.direction, &request.query);
                 if let Ok(mut results) = worker_results.lock() {
                     results.push(VimSearchWorkerResult {
                         request_id: request.request_id,
@@ -7991,16 +8001,23 @@ impl VimSearchWorkerState {
         self.pending = None;
     }
 
-    fn schedule(&mut self, buffer: ShellBuffer, direction: VimSearchDirection, query: String) {
+    fn schedule(
+        &mut self,
+        buffer_id: BufferId,
+        buffer_revision: u64,
+        text: TextSnapshot,
+        direction: VimSearchDirection,
+        query: String,
+    ) {
         const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(100);
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending = Some(PendingVimSearchRequest {
             due_at: Instant::now() + SEARCH_REFRESH_DEBOUNCE,
             request: VimSearchWorkerRequest {
                 request_id: self.next_request_id,
-                buffer_id: buffer.id(),
-                buffer_revision: buffer.text.revision(),
-                buffer,
+                buffer_id,
+                buffer_revision,
+                text,
                 direction,
                 query,
             },
@@ -8316,21 +8333,20 @@ fn fuzzy_match_positions_in_chars(
 }
 
 fn search_start_char(
-    buffer: &ShellBuffer,
+    buffer: &TextSnapshot,
     direction: VimSearchDirection,
     pattern_len: usize,
 ) -> usize {
-    let cursor = buffer.cursor_point();
+    let cursor = buffer.cursor();
     match direction {
         VimSearchDirection::Forward => buffer
             .point_after(cursor)
-            .map(|point| buffer.text.point_to_char_index(point))
-            .unwrap_or(buffer.text.char_count()),
+            .map(|point| buffer.point_to_char_index(point))
+            .unwrap_or(buffer.char_count()),
         VimSearchDirection::Backward => buffer
-            .text
             .point_before(cursor)
-            .map(|point| buffer.text.point_to_char_index(point))
-            .unwrap_or_else(|| buffer.text.char_count().saturating_sub(pattern_len)),
+            .map(|point| buffer.point_to_char_index(point))
+            .unwrap_or_else(|| buffer.char_count().saturating_sub(pattern_len)),
     }
 }
 
@@ -8373,7 +8389,7 @@ fn pick_search_selection_index(
 }
 
 fn vim_search_entries(
-    buffer: &ShellBuffer,
+    buffer: &TextSnapshot,
     direction: VimSearchDirection,
     query: &str,
 ) -> SearchPickerData {
@@ -8387,18 +8403,18 @@ fn vim_search_entries(
 
     let case_sensitive = search_is_case_sensitive(query);
     let pattern = normalize_search_pattern(query, case_sensitive);
-    let line_count = buffer.text.line_count();
+    let line_count = buffer.line_count();
     let mut matches = Vec::new();
 
     for line_index in 0..line_count {
-        let Some(line) = buffer.text.line(line_index) else {
+        let Some(line) = buffer.line(line_index) else {
             continue;
         };
         let chars: Vec<char> = line.chars().collect();
         let positions = exact_match_positions_in_chars(&chars, &pattern, case_sensitive);
         for start in positions {
             let point = TextPoint::new(line_index, start);
-            let char_index = buffer.text.point_to_char_index(point);
+            let char_index = buffer.point_to_char_index(point);
             matches.push(VimSearchMatch {
                 point,
                 char_index,
@@ -8410,14 +8426,14 @@ fn vim_search_entries(
 
     if matches.is_empty() {
         for line_index in 0..line_count {
-            let Some(line) = buffer.text.line(line_index) else {
+            let Some(line) = buffer.line(line_index) else {
                 continue;
             };
             let chars: Vec<char> = line.chars().collect();
             let positions = fuzzy_match_positions_in_chars(&chars, &pattern, case_sensitive);
             for (start, span) in positions {
                 let point = TextPoint::new(line_index, start);
-                let char_index = buffer.text.point_to_char_index(point);
+                let char_index = buffer.point_to_char_index(point);
                 matches.push(VimSearchMatch {
                     point,
                     char_index,
@@ -13670,15 +13686,16 @@ fn refresh_git_fringe(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resul
     if !fringe_state.try_begin_refresh() {
         return Ok(());
     }
-    let buffer_text = {
+    let text_snapshot = {
         let buffer = shell_buffer(runtime, buffer_id)?;
-        buffer.text.text()
+        buffer.text.snapshot()
     };
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
         buffer.clear_git_fringe_dirty();
     }
 
     std::thread::spawn(move || {
+        let buffer_text = text_snapshot.text();
         let snapshot = if git_repository_present(&root) {
             build_git_fringe_snapshot(&root, &relative_path, &buffer_text, line_count)
         } else {

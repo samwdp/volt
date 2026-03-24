@@ -212,6 +212,98 @@ impl<'a> Iterator for TextByteChunks<'a> {
     }
 }
 
+/// Lightweight read-only snapshot of a [`TextBuffer`] for background work.
+#[derive(Debug, Clone)]
+pub struct TextSnapshot {
+    rope: Rope,
+    cursor: TextPoint,
+}
+
+impl TextSnapshot {
+    /// Returns the total number of logical lines in the snapshot.
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// Returns the total number of characters in the snapshot.
+    pub fn char_count(&self) -> usize {
+        self.rope.len_chars()
+    }
+
+    /// Returns the cursor position captured in the snapshot.
+    pub const fn cursor(&self) -> TextPoint {
+        self.cursor
+    }
+
+    /// Returns the character index for a point after clamping it into the snapshot.
+    pub fn point_to_char_index(&self, point: TextPoint) -> usize {
+        self.point_to_char(point)
+    }
+
+    /// Returns the point immediately before the given point.
+    pub fn point_before(&self, point: TextPoint) -> Option<TextPoint> {
+        let char_index = self.point_to_char(point);
+        (char_index > 0).then(|| self.char_to_point(char_index - 1))
+    }
+
+    /// Returns the point immediately after the given point.
+    pub fn point_after(&self, point: TextPoint) -> Option<TextPoint> {
+        let char_index = self.point_to_char(point);
+        (char_index < self.char_count()).then(|| self.char_to_point(char_index + 1))
+    }
+
+    /// Returns a single line without its trailing line ending.
+    pub fn line(&self, line_index: usize) -> Option<String> {
+        if line_index >= self.line_count() {
+            return None;
+        }
+
+        Some(trimmed_line(self.rope.line(line_index)))
+    }
+
+    /// Returns the full normalized text backing the snapshot.
+    pub fn text(&self) -> String {
+        self.rope.to_string()
+    }
+
+    fn line_len_chars_impl(&self, line_index: usize) -> usize {
+        visible_line_len(self.rope.line(line_index))
+    }
+
+    fn clamp_point(&self, point: TextPoint) -> TextPoint {
+        let max_line = self.line_count().saturating_sub(1);
+        let line = point.line.min(max_line);
+        let column = point.column.min(self.line_len_chars_impl(line));
+        TextPoint { line, column }
+    }
+
+    fn point_to_char(&self, point: TextPoint) -> usize {
+        let point = self.clamp_point(point);
+        self.rope.line_to_char(point.line) + point.column
+    }
+
+    fn char_to_point(&self, char_index: usize) -> TextPoint {
+        if self.char_count() == 0 {
+            return TextPoint::default();
+        }
+
+        let char_index = char_index.min(self.char_count());
+        if char_index == self.char_count() {
+            let line = self.line_count().saturating_sub(1);
+            return TextPoint {
+                line,
+                column: self.line_len_chars_impl(line),
+            };
+        }
+
+        let line = self.rope.char_to_line(char_index);
+        let column = char_index
+            .saturating_sub(self.rope.line_to_char(line))
+            .min(self.line_len_chars_impl(line));
+        TextPoint { line, column }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditRecord {
     start_char: usize,
@@ -442,6 +534,14 @@ impl TextBuffer {
     /// Returns the full normalized text backing the buffer.
     pub fn text(&self) -> String {
         self.rope.to_string()
+    }
+
+    /// Returns a lightweight read-only snapshot suitable for background work.
+    pub fn snapshot(&self) -> TextSnapshot {
+        TextSnapshot {
+            rope: self.rope.clone(),
+            cursor: self.cursor,
+        }
     }
 
     /// Returns the starting byte offset for a line.
@@ -1995,6 +2095,25 @@ mod tests {
 
         let window = buffer.lines(199_998, 3);
         assert_eq!(window, vec!["line 199998", "line 199999", "line 200000"]);
+    }
+
+    #[test]
+    fn text_snapshot_preserves_pre_edit_content_and_cursor() {
+        let mut buffer = TextBuffer::from_text("alpha\nbeta");
+        buffer.set_cursor(TextPoint::new(1, 2));
+        let snapshot = buffer.snapshot();
+
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+
+        assert_eq!(snapshot.cursor(), TextPoint::new(1, 2));
+        assert_eq!(snapshot.text(), "alpha\nbeta");
+        assert_eq!(snapshot.line(1).as_deref(), Some("beta"));
+        assert_eq!(snapshot.point_to_char_index(TextPoint::new(1, 0)), 6);
+        assert_eq!(
+            snapshot.point_after(TextPoint::new(0, 4)),
+            Some(TextPoint::new(0, 5))
+        );
     }
 
     #[test]
