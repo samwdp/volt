@@ -896,10 +896,10 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Workspace,
         ),
         // Leader bindings
-        leader_binding("space", "picker.open-buffers", PluginKeymapScope::Workspace),
         leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
         // buffer
+        leader_binding("b b", "picker.open-buffers", PluginKeymapScope::Workspace),
         leader_binding("b d", "buffer.close", PluginKeymapScope::Workspace),
         leader_binding("b k", "buffer.close-picker", PluginKeymapScope::Workspace),
         // Git
@@ -909,8 +909,10 @@ pub fn package() -> PluginPackage {
             "picker.open-nerd-fonts",
             PluginKeymapScope::Workspace,
         ),
+        leader_binding("s g", "workspace.search", PluginKeymapScope::Workspace),
         // Workspace
         leader_binding("p s", "workspace.switch", PluginKeymapScope::Workspace),
+        leader_binding("p d", "workspace.delete", PluginKeymapScope::Workspace),
         // Open
         leader_binding(
             "o p",
