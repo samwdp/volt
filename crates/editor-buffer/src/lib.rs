@@ -3,10 +3,11 @@
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    ops::Range,
     path::{Path, PathBuf},
 };
 
-use ropey::{Rope, RopeBuilder, RopeSlice};
+use ropey::{Rope, RopeBuilder, RopeSlice, iter::Chunks as RopeChunks};
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str =
@@ -155,11 +156,68 @@ pub struct BufferStats {
     pub dirty: bool,
 }
 
+/// One logical edit expressed in byte offsets and line/column positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextEdit {
+    /// Revision before the edit was applied.
+    pub before_revision: u64,
+    /// Revision after the edit was applied.
+    pub after_revision: u64,
+    /// Starting byte offset of the edit.
+    pub start_byte: usize,
+    /// Exclusive ending byte offset in the old text.
+    pub old_end_byte: usize,
+    /// Exclusive ending byte offset in the new text.
+    pub new_end_byte: usize,
+    /// Starting position of the edit in the old text.
+    pub start_position: TextPoint,
+    /// Exclusive ending position of the replaced range in the old text.
+    pub old_end_position: TextPoint,
+    /// Exclusive ending position of the inserted range in the new text.
+    pub new_end_position: TextPoint,
+}
+
+enum TextByteChunkSource<'a> {
+    Empty(Option<&'a [u8]>),
+    Chunks(RopeChunks<'a>),
+}
+
+/// Iterator over UTF-8 byte chunks from a [`TextBuffer`] byte range.
+pub struct TextByteChunks<'a> {
+    source: TextByteChunkSource<'a>,
+}
+
+impl<'a> TextByteChunks<'a> {
+    fn empty() -> Self {
+        Self {
+            source: TextByteChunkSource::Empty(Some(&[])),
+        }
+    }
+
+    fn from_chunks(chunks: RopeChunks<'a>) -> Self {
+        Self {
+            source: TextByteChunkSource::Chunks(chunks),
+        }
+    }
+}
+
+impl<'a> Iterator for TextByteChunks<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.source {
+            TextByteChunkSource::Empty(chunk) => chunk.take(),
+            TextByteChunkSource::Chunks(chunks) => chunks.next().map(str::as_bytes),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditRecord {
     start_char: usize,
     removed_text: String,
     inserted_text: String,
+    edit: TextEdit,
     before_cursor: TextPoint,
     after_cursor: TextPoint,
     before_state_id: u64,
@@ -384,6 +442,56 @@ impl TextBuffer {
     /// Returns the full normalized text backing the buffer.
     pub fn text(&self) -> String {
         self.rope.to_string()
+    }
+
+    /// Returns the starting byte offset for a line.
+    pub fn line_start_byte(&self, line_index: usize) -> Option<usize> {
+        (line_index < self.line_count()).then(|| self.rope.line_to_byte(line_index))
+    }
+
+    /// Returns the UTF-8 chunk containing a byte index and the chunk's starting byte offset.
+    pub fn chunk_at_byte(&self, byte_index: usize) -> Option<(&str, usize)> {
+        (byte_index <= self.byte_count()).then(|| {
+            let (chunk, chunk_start_byte, _, _) = self.rope.chunk_at_byte(byte_index);
+            (chunk, chunk_start_byte)
+        })
+    }
+
+    /// Returns an iterator over UTF-8 chunks for a byte range.
+    pub fn byte_slice_chunks(&self, byte_range: Range<usize>) -> TextByteChunks<'_> {
+        assert!(byte_range.start <= byte_range.end);
+        assert!(byte_range.end <= self.byte_count());
+        if byte_range.start == byte_range.end {
+            return TextByteChunks::empty();
+        }
+        TextByteChunks::from_chunks(self.rope.byte_slice(byte_range).chunks())
+    }
+
+    /// Returns the applied edit chain needed to move from `revision` to the current state.
+    ///
+    /// Returns `None` when the current undo history cannot describe a contiguous forward path.
+    pub fn edits_since(&self, revision: u64) -> Option<Vec<TextEdit>> {
+        if revision > self.state_id {
+            return None;
+        }
+        if revision == self.state_id {
+            return Some(Vec::new());
+        }
+        let start_index = self
+            .undo_stack
+            .iter()
+            .position(|record| record.before_state_id == revision)?;
+        let records = &self.undo_stack[start_index..];
+        if records.is_empty()
+            || records.first()?.before_state_id != revision
+            || records.last()?.after_state_id != self.state_id
+            || records
+                .windows(2)
+                .any(|pair| pair[0].after_state_id != pair[1].before_state_id)
+        {
+            return None;
+        }
+        Some(records.iter().map(|record| record.edit).collect())
     }
 
     /// Returns the current contents of a range.
@@ -638,8 +746,14 @@ impl TextBuffer {
         let range = range.normalized();
         let start_char = self.point_to_char(range.start());
         let end_char = self.point_to_char(range.end());
+        let start_position = self.char_to_point(start_char);
+        let start_byte = self.rope.char_to_byte(start_char);
         let inserted_text = normalize_inline_text(text);
         let removed_text = self.rope.slice(start_char..end_char).to_string();
+        let old_end_byte = start_byte + removed_text.len();
+        let new_end_byte = start_byte + inserted_text.len();
+        let old_end_position = advance_point_by_text(start_position, &removed_text);
+        let new_end_position = advance_point_by_text(start_position, &inserted_text);
         let before_cursor = self.cursor;
         let before_state_id = self.state_id;
         let after_state_id = self.next_state_id;
@@ -653,6 +767,16 @@ impl TextBuffer {
             start_char,
             removed_text,
             inserted_text,
+            edit: TextEdit {
+                before_revision: before_state_id,
+                after_revision: after_state_id,
+                start_byte,
+                old_end_byte,
+                new_end_byte,
+                start_position,
+                old_end_position,
+                new_end_position,
+            },
             before_cursor,
             after_cursor: self.cursor,
             before_state_id,
@@ -1742,6 +1866,18 @@ fn trimmed_line(slice: RopeSlice<'_>) -> String {
     line
 }
 
+fn advance_point_by_text(mut point: TextPoint, text: &str) -> TextPoint {
+    for character in text.chars() {
+        if character == '\n' {
+            point.line += 1;
+            point.column = 0;
+        } else {
+            point.column += 1;
+        }
+    }
+    point
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fmt::Write as _, io::Cursor};
@@ -1803,6 +1939,22 @@ mod tests {
         assert!(buffer.redo());
         assert_eq!(buffer.text(), "hello world");
         assert!(buffer.is_dirty());
+    }
+
+    #[test]
+    fn edits_since_returns_contiguous_forward_edits() {
+        let mut buffer = TextBuffer::from_text("alpha");
+        let base_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text(" beta");
+        buffer.insert_text("\ngamma");
+
+        let edits = must(buffer.edits_since(base_revision).ok_or("missing edits"));
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].before_revision, base_revision);
+        assert_eq!(edits[0].after_revision + 1, edits[1].after_revision);
+        assert_eq!(edits[0].start_position, TextPoint::new(0, 5));
+        assert_eq!(edits[1].new_end_position, TextPoint::new(1, 5));
     }
 
     #[test]

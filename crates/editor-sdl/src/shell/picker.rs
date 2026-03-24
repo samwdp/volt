@@ -1006,6 +1006,12 @@ pub(super) fn render_picker_overlay(
     theme_registry: Option<&ThemeRegistry>,
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
+    let cell_width = fonts
+        .primary()
+        .size_of_char('M')
+        .map_err(|error| ShellError::Sdl(error.to_string()))?
+        .0
+        .max(1) as i32;
     let picker_roundness = theme_registry
         .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
         .map(|value| value.clamp(0.0, 64.0).round() as u32)
@@ -1127,8 +1133,8 @@ pub(super) fn render_picker_overlay(
             )?;
         }
 
-        let label = truncate_text_to_width(fonts, matched.item().label(), label_width)?;
-        let detail = truncate_text_to_width(fonts, matched.item().detail(), detail_width)?;
+        let label = truncate_text_to_width(matched.item().label(), label_width, cell_width);
+        let detail = truncate_text_to_width(matched.item().detail(), detail_width, cell_width);
         draw_text(
             target,
             content_left,
@@ -1148,7 +1154,7 @@ pub(super) fn render_picker_overlay(
             target,
             popup_rect.x + 16,
             popup_rect.y + popup_rect.height as i32 - line_height - 18,
-            &truncate_text_to_width(fonts, preview, popup_rect.width.saturating_sub(32))?,
+            &truncate_text_to_width(preview, popup_rect.width.saturating_sub(32), cell_width),
             subtle,
         )?;
     }

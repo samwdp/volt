@@ -72,12 +72,11 @@ fn lock_version(lock_path: &Path, crate_name: &str) -> Result<String, Box<dyn Er
             }
             continue;
         }
-        if in_target {
-            if let Some(version) = line.trim().strip_prefix("version = \"") {
-                if let Some(version) = version.strip_suffix('\"') {
-                    return Ok(version.to_owned());
-                }
-            }
+        if in_target
+            && let Some(version) = line.trim().strip_prefix("version = \"")
+            && let Some(version) = version.strip_suffix('\"')
+        {
+            return Ok(version.to_owned());
         }
     }
     Err(format!("failed to find {crate_name} in Cargo.lock").into())

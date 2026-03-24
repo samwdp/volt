@@ -19,6 +19,18 @@ pub const fn role() -> &'static str {
     ROLE
 }
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 /// Classifies the type of work a process represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -319,6 +331,7 @@ impl CompilationRunner {
 fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
     let started = Instant::now();
     let mut command = Command::new(spec.program());
+    configure_background_command(&mut command);
     command.args(spec.args());
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 

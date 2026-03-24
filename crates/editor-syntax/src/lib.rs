@@ -9,9 +9,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use editor_buffer::TextBuffer;
+use editor_buffer::{TextBuffer, TextByteChunks, TextEdit};
 pub use tree_sitter::Language;
-use tree_sitter::{Parser, Query, QueryCursor, Range, StreamingIterator, Tree};
+use tree_sitter::{
+    InputEdit, Parser, Point, Query, QueryCursor, Range, StreamingIterator, TextProvider, Tree,
+};
 use tree_sitter_language::LanguageFn;
 
 /// Human-readable summary of this crate's responsibility.
@@ -353,6 +355,51 @@ impl SyntaxSnapshot {
     }
 }
 
+/// Reusable parser/tree state for incremental highlighting of one buffer.
+pub struct SyntaxParseSession {
+    language_id: String,
+    revision: u64,
+    parser: Parser,
+    tree: Tree,
+    last_highlight_window: Option<HighlightWindow>,
+    last_snapshot: Option<SyntaxSnapshot>,
+}
+
+/// A requested line window for range-limited syntax highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HighlightWindow {
+    start_line: usize,
+    line_count: usize,
+}
+
+impl HighlightWindow {
+    /// Creates a new line window.
+    pub const fn new(start_line: usize, line_count: usize) -> Self {
+        Self {
+            start_line,
+            line_count,
+        }
+    }
+
+    /// Returns the first requested line.
+    pub const fn start_line(&self) -> usize {
+        self.start_line
+    }
+
+    /// Returns the requested number of lines.
+    pub const fn line_count(&self) -> usize {
+        self.line_count
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.line_count == 0
+    }
+
+    const fn end_line_exclusive(&self) -> usize {
+        self.start_line.saturating_add(self.line_count)
+    }
+}
+
 /// Errors that can occur while registering, installing, or executing syntax providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxError {
@@ -501,7 +548,24 @@ struct LoadedLanguage {
 struct ParsedHighlight {
     snapshot: SyntaxSnapshot,
     tree: Tree,
-    source: String,
+}
+
+struct ParseTreeResult {
+    tree: Tree,
+    changed_ranges: Option<Vec<Range>>,
+    applied_edits: Option<Vec<TextEdit>>,
+}
+
+struct TextBufferProvider<'a> {
+    buffer: &'a TextBuffer,
+}
+
+impl<'a> TextProvider<&'a [u8]> for TextBufferProvider<'a> {
+    type I = TextByteChunks<'a>;
+
+    fn text(&mut self, node: tree_sitter::Node) -> Self::I {
+        self.buffer.byte_slice_chunks(node.byte_range())
+    }
 }
 
 impl LoadedLanguage {
@@ -723,13 +787,38 @@ impl SyntaxRegistry {
         extension: &str,
         buffer: &TextBuffer,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_extension_impl(extension, buffer, None, None)
+    }
+
+    /// Parses and highlights a line window for a known file extension.
+    pub fn highlight_buffer_for_extension_window(
+        &mut self,
+        extension: &str,
+        buffer: &TextBuffer,
+        highlight_window: HighlightWindow,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_extension_impl(extension, buffer, Some(highlight_window), None)
+    }
+
+    fn highlight_buffer_for_extension_impl(
+        &mut self,
+        extension: &str,
+        buffer: &TextBuffer,
+        highlight_window: Option<HighlightWindow>,
+        parse_session: Option<&mut Option<SyntaxParseSession>>,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
         let extension = normalize_extension(extension);
         let language_id = self
             .extensions
             .get(&extension)
             .cloned()
             .ok_or_else(|| SyntaxError::UnknownExtension(extension.clone()))?;
-        self.highlight_buffer_for_language(&language_id, buffer)
+        self.highlight_buffer_for_language_impl(
+            &language_id,
+            buffer,
+            highlight_window,
+            parse_session,
+        )
     }
 
     /// Parses and highlights a buffer using a registered language identifier.
@@ -737,6 +826,52 @@ impl SyntaxRegistry {
         &mut self,
         language_id: &str,
         buffer: &TextBuffer,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_language_impl(language_id, buffer, None, None)
+    }
+
+    /// Parses and highlights a line window using a registered language identifier.
+    pub fn highlight_buffer_for_language_window(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        highlight_window: HighlightWindow,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_language_impl(language_id, buffer, Some(highlight_window), None)
+    }
+
+    /// Parses and highlights a buffer using a reusable parse session.
+    pub fn highlight_buffer_for_language_with_session(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        parse_session: &mut Option<SyntaxParseSession>,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_language_impl(language_id, buffer, None, Some(parse_session))
+    }
+
+    /// Parses and highlights a line window using a reusable parse session.
+    pub fn highlight_buffer_for_language_window_with_session(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        highlight_window: HighlightWindow,
+        parse_session: &mut Option<SyntaxParseSession>,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_language_impl(
+            language_id,
+            buffer,
+            Some(highlight_window),
+            Some(parse_session),
+        )
+    }
+
+    fn highlight_buffer_for_language_impl(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        highlight_window: Option<HighlightWindow>,
+        mut parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         let language_id = language_id.to_owned();
         let config = self
@@ -761,7 +896,8 @@ impl SyntaxRegistry {
                 &language_id,
                 loaded,
                 buffer,
-                None,
+                highlight_window,
+                parse_session.as_deref_mut(),
             )?)
         } else {
             None
@@ -770,7 +906,13 @@ impl SyntaxRegistry {
         let mut snapshot = if let Some(parse) = &base_parse {
             parse.snapshot.clone()
         } else {
-            highlight_loaded_language(&language_id, loaded, buffer, None)?
+            highlight_loaded_language(
+                &language_id,
+                loaded,
+                buffer,
+                highlight_window,
+                parse_session,
+            )?
         };
 
         for extra_language_id in config.additional_highlight_languages() {
@@ -783,18 +925,29 @@ impl SyntaxRegistry {
                 let Some(parse) = base_parse.as_ref() else {
                     continue;
                 };
-                let inline_lines = markdown_inline_line_indices(&parse.tree);
+                let mut inline_lines = markdown_inline_line_indices(&parse.tree);
+                if let Some(highlight_window) = highlight_window {
+                    let end_line = highlight_window.end_line_exclusive();
+                    inline_lines
+                        .retain(|line| *line >= highlight_window.start_line() && *line < end_line);
+                }
                 if inline_lines.is_empty() {
                     continue;
                 }
                 highlight_inline_language_per_line(
                     extra_language_id,
                     loaded,
-                    &parse.source,
+                    buffer,
                     &inline_lines,
                 )?
             } else {
-                highlight_loaded_language(extra_language_id, loaded, buffer, None)?
+                highlight_loaded_language(
+                    extra_language_id,
+                    loaded,
+                    buffer,
+                    highlight_window,
+                    None,
+                )?
             };
             snapshot
                 .highlight_spans
@@ -811,12 +964,32 @@ impl SyntaxRegistry {
         path: impl AsRef<Path>,
         buffer: &TextBuffer,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_path_impl(path, buffer, None, None)
+    }
+
+    /// Parses and highlights a line window using a file path's extension.
+    pub fn highlight_buffer_for_path_window(
+        &mut self,
+        path: impl AsRef<Path>,
+        buffer: &TextBuffer,
+        highlight_window: HighlightWindow,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_path_impl(path, buffer, Some(highlight_window), None)
+    }
+
+    fn highlight_buffer_for_path_impl(
+        &mut self,
+        path: impl AsRef<Path>,
+        buffer: &TextBuffer,
+        highlight_window: Option<HighlightWindow>,
+        parse_session: Option<&mut Option<SyntaxParseSession>>,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
         let path = path.as_ref();
         let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
             .ok_or_else(|| SyntaxError::UnknownExtension(path.display().to_string()))?;
-        self.highlight_buffer_for_extension(extension, buffer)
+        self.highlight_buffer_for_extension_impl(extension, buffer, highlight_window, parse_session)
     }
 
     fn ensure_loaded_language(&mut self, language_id: &str) -> Result<(), SyntaxError> {
@@ -937,12 +1110,7 @@ fn load_language(
     }
 }
 
-fn parse_tree(
-    language_id: &str,
-    loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
-    ranges: Option<&[Range]>,
-) -> Result<(Tree, String), SyntaxError> {
+fn create_parser(language_id: &str, loaded: &LoadedLanguage) -> Result<Parser, SyntaxError> {
     let mut parser = Parser::new();
     parser
         .set_language(&loaded.language)
@@ -950,29 +1118,151 @@ fn parse_tree(
             language_id: language_id.to_owned(),
             message: error.to_string(),
         })?;
-    if let Some(ranges) = ranges {
-        parser
-            .set_included_ranges(ranges)
-            .map_err(|error| SyntaxError::IncludedRangesFailed {
-                language_id: language_id.to_owned(),
-                message: error.to_string(),
-            })?;
-    }
-
-    let source = buffer.text();
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))?;
-
-    Ok((tree, source))
+    Ok(parser)
 }
 
-fn highlight_tree(loaded: &LoadedLanguage, tree: &Tree, source: &str) -> Vec<HighlightSpan> {
+fn text_edit_to_input_edit(edit: TextEdit) -> InputEdit {
+    InputEdit {
+        start_byte: edit.start_byte,
+        old_end_byte: edit.old_end_byte,
+        new_end_byte: edit.new_end_byte,
+        start_position: Point {
+            row: edit.start_position.line,
+            column: edit.start_position.column,
+        },
+        old_end_position: Point {
+            row: edit.old_end_position.line,
+            column: edit.old_end_position.column,
+        },
+        new_end_position: Point {
+            row: edit.new_end_position.line,
+            column: edit.new_end_position.column,
+        },
+    }
+}
+
+fn parse_with_parser(
+    language_id: &str,
+    parser: &mut Parser,
+    buffer: &TextBuffer,
+    old_tree: Option<&Tree>,
+) -> Result<Tree, SyntaxError> {
+    let byte_count = buffer.byte_count();
+    parser
+        .parse_with_options(
+            &mut |byte_offset, _| {
+                if byte_offset >= byte_count {
+                    return &[][..];
+                }
+                let Some((chunk, chunk_start_byte)) = buffer.chunk_at_byte(byte_offset) else {
+                    return &[][..];
+                };
+                &chunk.as_bytes()[byte_offset.saturating_sub(chunk_start_byte)..]
+            },
+            old_tree,
+            None,
+        )
+        .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))
+}
+
+fn parse_tree(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    buffer: &TextBuffer,
+    parse_session: Option<&mut Option<SyntaxParseSession>>,
+) -> Result<ParseTreeResult, SyntaxError> {
+    let Some(parse_session) = parse_session else {
+        let mut parser = create_parser(language_id, loaded)?;
+        return Ok(ParseTreeResult {
+            tree: parse_with_parser(language_id, &mut parser, buffer, None)?,
+            changed_ranges: None,
+            applied_edits: None,
+        });
+    };
+
+    if let Some(session) = parse_session.as_mut()
+        && session.language_id == language_id
+    {
+        if session.revision == buffer.revision() {
+            return Ok(ParseTreeResult {
+                tree: session.tree.clone(),
+                changed_ranges: Some(Vec::new()),
+                applied_edits: Some(Vec::new()),
+            });
+        }
+
+        let applied_edits = if session.revision < buffer.revision() {
+            buffer.edits_since(session.revision)
+        } else {
+            None
+        };
+        let edited_tree = applied_edits.as_ref().map(|edits| {
+            let mut tree = session.tree.clone();
+            for edit in edits {
+                tree.edit(&text_edit_to_input_edit(*edit));
+            }
+            tree
+        });
+        let new_tree = parse_with_parser(
+            language_id,
+            &mut session.parser,
+            buffer,
+            edited_tree.as_ref(),
+        )?;
+        let changed_ranges = edited_tree
+            .as_ref()
+            .map(|previous_tree| previous_tree.changed_ranges(&new_tree).collect::<Vec<_>>());
+        session.revision = buffer.revision();
+        session.tree = new_tree.clone();
+        return Ok(ParseTreeResult {
+            tree: new_tree,
+            changed_ranges,
+            applied_edits,
+        });
+    }
+
+    let mut parser = create_parser(language_id, loaded)?;
+    let tree = parse_with_parser(language_id, &mut parser, buffer, None)?;
+    *parse_session = Some(SyntaxParseSession {
+        language_id: language_id.to_owned(),
+        revision: buffer.revision(),
+        parser,
+        tree: tree.clone(),
+        last_highlight_window: None,
+        last_snapshot: None,
+    });
+    Ok(ParseTreeResult {
+        tree,
+        changed_ranges: None,
+        applied_edits: None,
+    })
+}
+
+fn highlight_tree(
+    loaded: &LoadedLanguage,
+    tree: &Tree,
+    buffer: &TextBuffer,
+    highlight_window: Option<HighlightWindow>,
+) -> Vec<HighlightSpan> {
     let mut query_cursor = QueryCursor::new();
+    if let Some(highlight_window) = highlight_window.filter(|window| !window.is_empty()) {
+        query_cursor.set_point_range(
+            Point {
+                row: highlight_window.start_line(),
+                column: 0,
+            }..Point {
+                row: highlight_window.end_line_exclusive(),
+                column: 0,
+            },
+        );
+    }
     let capture_names = loaded.query.capture_names();
     let mut highlight_spans = Vec::new();
-
-    let mut matches = query_cursor.matches(&loaded.query, tree.root_node(), source.as_bytes());
+    let mut matches = query_cursor.matches(
+        &loaded.query,
+        tree.root_node(),
+        TextBufferProvider { buffer },
+    );
     loop {
         matches.advance();
         let Some(query_match) = matches.get() else {
@@ -1001,24 +1291,175 @@ fn highlight_tree(loaded: &LoadedLanguage, tree: &Tree, source: &str) -> Vec<Hig
     highlight_spans
 }
 
+fn sort_highlight_spans(highlight_spans: &mut [HighlightSpan]) {
+    highlight_spans.sort_by(|left, right| {
+        (
+            left.start_byte,
+            left.end_byte,
+            left.start_position.line,
+            left.start_position.column,
+            &left.capture_name,
+            &left.theme_token,
+        )
+            .cmp(&(
+                right.start_byte,
+                right.end_byte,
+                right.start_position.line,
+                right.start_position.column,
+                &right.capture_name,
+                &right.theme_token,
+            ))
+    });
+}
+
+fn span_intersects_window(span: &HighlightSpan, window: HighlightWindow) -> bool {
+    span.start_position.line < window.end_line_exclusive()
+        && span.end_position.line >= window.start_line()
+}
+
+fn apply_text_edits_to_span(mut span: HighlightSpan, edits: &[TextEdit]) -> HighlightSpan {
+    for edit in edits {
+        let input_edit = text_edit_to_input_edit(*edit);
+        let mut range = Range {
+            start_byte: span.start_byte,
+            end_byte: span.end_byte,
+            start_point: Point {
+                row: span.start_position.line,
+                column: span.start_position.column,
+            },
+            end_point: Point {
+                row: span.end_position.line,
+                column: span.end_position.column,
+            },
+        };
+        input_edit.edit_range(&mut range);
+
+        span.start_byte = range.start_byte;
+        span.end_byte = range.end_byte;
+        span.start_position = SyntaxPoint::new(range.start_point.row, range.start_point.column);
+        span.end_position = SyntaxPoint::new(range.end_point.row, range.end_point.column);
+    }
+
+    span
+}
+
+fn changed_range_windows(
+    changed_ranges: &[Range],
+    highlight_window: HighlightWindow,
+) -> Vec<HighlightWindow> {
+    const CONTEXT_LINES: usize = 1;
+
+    if highlight_window.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = changed_ranges
+        .iter()
+        .filter_map(|range| {
+            let start_line = range
+                .start_point
+                .row
+                .saturating_sub(CONTEXT_LINES)
+                .max(highlight_window.start_line());
+            let end_line_exclusive = range
+                .end_point
+                .row
+                .saturating_add(1)
+                .saturating_add(CONTEXT_LINES)
+                .min(highlight_window.end_line_exclusive());
+            (start_line < end_line_exclusive)
+                .then(|| HighlightWindow::new(start_line, end_line_exclusive - start_line))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(HighlightWindow::start_line);
+
+    let mut merged: Vec<HighlightWindow> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && last.end_line_exclusive() >= range.start_line()
+        {
+            let end_line_exclusive = last.end_line_exclusive().max(range.end_line_exclusive());
+            *last = HighlightWindow::new(last.start_line(), end_line_exclusive - last.start_line());
+            continue;
+        }
+        merged.push(range);
+    }
+    merged
+}
+
 fn highlight_loaded_language_with_tree(
     language_id: &str,
     loaded: &LoadedLanguage,
     buffer: &TextBuffer,
-    ranges: Option<&[Range]>,
+    highlight_window: Option<HighlightWindow>,
+    parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<ParsedHighlight, SyntaxError> {
-    let (tree, source) = parse_tree(language_id, loaded, buffer, ranges)?;
-    let highlight_spans = highlight_tree(loaded, &tree, &source);
+    let (parse_result, mut session) = match parse_session {
+        Some(parse_session) => (
+            parse_tree(language_id, loaded, buffer, Some(parse_session))?,
+            parse_session.as_mut(),
+        ),
+        None => (parse_tree(language_id, loaded, buffer, None)?, None),
+    };
+
+    let mut highlight_spans = session
+        .as_ref()
+        .and_then(|session| {
+            let previous_snapshot = session.last_snapshot.as_ref()?;
+            if session.last_highlight_window != highlight_window {
+                return None;
+            }
+            let changed_ranges = parse_result.changed_ranges.as_ref()?;
+            let applied_edits = parse_result.applied_edits.as_deref().unwrap_or(&[]);
+            let previous_highlight_spans = previous_snapshot
+                .highlight_spans
+                .iter()
+                .cloned()
+                .map(|span| apply_text_edits_to_span(span, applied_edits))
+                .collect::<Vec<_>>();
+            if changed_ranges.is_empty() {
+                return Some(previous_highlight_spans);
+            }
+            let highlight_window = highlight_window?;
+            let changed_windows = changed_range_windows(changed_ranges, highlight_window);
+            if changed_windows.is_empty() {
+                return Some(previous_highlight_spans);
+            }
+
+            let mut highlight_spans = previous_highlight_spans
+                .iter()
+                .filter(|span| {
+                    !changed_windows
+                        .iter()
+                        .any(|window| span_intersects_window(span, *window))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for changed_window in changed_windows {
+                highlight_spans.extend(highlight_tree(
+                    loaded,
+                    &parse_result.tree,
+                    buffer,
+                    Some(changed_window),
+                ));
+            }
+            Some(highlight_spans)
+        })
+        .unwrap_or_else(|| highlight_tree(loaded, &parse_result.tree, buffer, highlight_window));
+    sort_highlight_spans(&mut highlight_spans);
     let snapshot = SyntaxSnapshot {
         language_id: language_id.to_owned(),
-        root_kind: tree.root_node().kind().to_owned(),
-        has_errors: tree.root_node().has_error(),
+        root_kind: parse_result.tree.root_node().kind().to_owned(),
+        has_errors: parse_result.tree.root_node().has_error(),
         highlight_spans,
     };
+    if let Some(session) = session.as_mut() {
+        session.last_highlight_window = highlight_window;
+        session.last_snapshot = Some(snapshot.clone());
+    }
     Ok(ParsedHighlight {
         snapshot,
-        tree,
-        source,
+        tree: parse_result.tree,
     })
 }
 
@@ -1026,9 +1467,17 @@ fn highlight_loaded_language(
     language_id: &str,
     loaded: &LoadedLanguage,
     buffer: &TextBuffer,
-    ranges: Option<&[Range]>,
+    highlight_window: Option<HighlightWindow>,
+    parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<SyntaxSnapshot, SyntaxError> {
-    Ok(highlight_loaded_language_with_tree(language_id, loaded, buffer, ranges)?.snapshot)
+    Ok(highlight_loaded_language_with_tree(
+        language_id,
+        loaded,
+        buffer,
+        highlight_window,
+        parse_session,
+    )?
+    .snapshot)
 }
 
 fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
@@ -1049,62 +1498,32 @@ fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
     lines.into_iter().collect()
 }
 
-fn line_start_offsets(source: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    for (index, byte) in source.as_bytes().iter().enumerate() {
-        if *byte == b'\n' {
-            starts.push(index + 1);
-        }
-    }
-    starts
-}
-
-fn line_byte_bounds(
-    line_starts: &[usize],
-    source_len: usize,
-    line: usize,
-) -> Option<(usize, usize)> {
-    let start = *line_starts.get(line)?;
-    let end = if line + 1 < line_starts.len() {
-        line_starts[line + 1].saturating_sub(1)
-    } else {
-        source_len
-    };
-    (start <= end).then_some((start, end))
-}
-
 fn highlight_inline_language_per_line(
     language_id: &str,
     loaded: &LoadedLanguage,
-    source: &str,
+    buffer: &TextBuffer,
     line_indices: &[usize],
 ) -> Result<SyntaxSnapshot, SyntaxError> {
-    let line_starts = line_start_offsets(source);
     let mut highlight_spans = Vec::new();
     let mut has_errors = false;
 
     for &line_index in line_indices {
-        let Some((start, end)) = line_byte_bounds(&line_starts, source.len(), line_index) else {
+        let Some(line_text) = buffer.line(line_index) else {
             continue;
         };
-        if start >= end {
+        if line_text.is_empty() {
             continue;
         }
-        let line_text = &source[start..end];
-        let mut parser = Parser::new();
-        parser.set_language(&loaded.language).map_err(|error| {
-            SyntaxError::ParserConfiguration {
-                language_id: language_id.to_owned(),
-                message: error.to_string(),
-            }
-        })?;
-        let tree = parser
-            .parse(line_text, None)
-            .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))?;
+        let Some(start_byte) = buffer.line_start_byte(line_index) else {
+            continue;
+        };
+        let line_buffer = TextBuffer::from_text(&line_text);
+        let mut parser = create_parser(language_id, loaded)?;
+        let tree = parse_with_parser(language_id, &mut parser, &line_buffer, None)?;
         has_errors |= tree.root_node().has_error();
 
-        let spans = highlight_tree(loaded, &tree, line_text);
-        let line_len = end.saturating_sub(start);
+        let spans = highlight_tree(loaded, &tree, &line_buffer, None);
+        let line_len = line_text.chars().count();
         for span in spans {
             let start_col = span.start_position.column.min(line_len);
             let end_col = span.end_position.column.min(line_len);
@@ -1112,8 +1531,8 @@ fn highlight_inline_language_per_line(
                 continue;
             }
             highlight_spans.push(HighlightSpan {
-                start_byte: start.saturating_add(span.start_byte),
-                end_byte: start.saturating_add(span.end_byte),
+                start_byte: start_byte.saturating_add(span.start_byte),
+                end_byte: start_byte.saturating_add(span.end_byte),
                 start_position: SyntaxPoint::new(line_index, start_col),
                 end_position: SyntaxPoint::new(line_index, end_col),
                 capture_name: span.capture_name,
@@ -1295,7 +1714,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxError, SyntaxRegistry,
+        CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
+        SyntaxParseSession, SyntaxRegistry,
     };
     use editor_buffer::TextBuffer;
 
@@ -1440,6 +1860,96 @@ fn main() {
 
         assert!(!visible.is_empty());
         assert!(visible.iter().all(|span| span.start_position.line <= 259));
+    }
+
+    #[test]
+    fn highlight_window_limits_highlight_spans_to_requested_lines() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut source = String::new();
+        for index in 0..512 {
+            source.push_str(&format!(
+                "fn demo_{index}() {{ let value = \"line_{index}\"; }}\n"
+            ));
+        }
+        let buffer = TextBuffer::from_text(source);
+
+        let full_snapshot = must(registry.highlight_buffer_for_extension("rs", &buffer));
+        let window = HighlightWindow::new(240, 16);
+        let windowed_snapshot =
+            must(registry.highlight_buffer_for_extension_window("rs", &buffer, window));
+
+        assert!(!windowed_snapshot.highlight_spans.is_empty());
+        assert!(windowed_snapshot.highlight_spans.len() < full_snapshot.highlight_spans.len());
+        assert!(windowed_snapshot.highlight_spans.iter().all(|span| {
+            span.start_position.line < window.end_line_exclusive()
+                && span.end_position.line >= window.start_line()
+        }));
+    }
+
+    #[test]
+    fn incremental_parse_session_matches_cold_highlight_after_edits() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut buffer = TextBuffer::from_text("fn main() {\n    let value = 1;\n}\n");
+        let mut parse_session: Option<SyntaxParseSession> = None;
+        let initial_snapshot = must(registry.highlight_buffer_for_language_with_session(
+            "rust",
+            &buffer,
+            &mut parse_session,
+        ));
+
+        buffer.set_cursor(editor_buffer::TextPoint::new(1, 16));
+        buffer.insert_text("mut ");
+        let incremental_snapshot = must(registry.highlight_buffer_for_language_with_session(
+            "rust",
+            &buffer,
+            &mut parse_session,
+        ));
+        let cold_snapshot = must(registry.highlight_buffer_for_language("rust", &buffer));
+
+        assert_eq!(incremental_snapshot, cold_snapshot);
+        assert_ne!(initial_snapshot, incremental_snapshot);
+    }
+
+    #[test]
+    fn incremental_windowed_session_matches_cold_highlight_after_edits() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut source = String::new();
+        for index in 0..512 {
+            source.push_str(&format!(
+                "fn demo_{index}() {{ let value = \"line_{index}\"; }}\n"
+            ));
+        }
+        let mut buffer = TextBuffer::from_text(source);
+        let window = HighlightWindow::new(240, 24);
+        let mut parse_session: Option<SyntaxParseSession> = None;
+
+        let _ = must(registry.highlight_buffer_for_language_window_with_session(
+            "rust",
+            &buffer,
+            window,
+            &mut parse_session,
+        ));
+
+        buffer.set_cursor(editor_buffer::TextPoint::new(248, 0));
+        buffer.insert_text("x");
+
+        let incremental_snapshot =
+            must(registry.highlight_buffer_for_language_window_with_session(
+                "rust",
+                &buffer,
+                window,
+                &mut parse_session,
+            ));
+        let cold_snapshot =
+            must(registry.highlight_buffer_for_language_window("rust", &buffer, window));
+
+        assert_eq!(incremental_snapshot, cold_snapshot);
     }
 
     #[test]

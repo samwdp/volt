@@ -16,6 +16,18 @@ pub const fn role() -> &'static str {
     ROLE
 }
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 /// One file entry in a git status listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusEntry {
@@ -362,7 +374,9 @@ impl Error for RepositoryFilesError {
 /// Returns the tracked and unignored files visible from a repository root.
 pub fn list_repository_files(root: impl AsRef<Path>) -> Result<Vec<PathBuf>, RepositoryFilesError> {
     let root = root.as_ref();
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    let output = command
         .args([
             "ls-files",
             "-z",

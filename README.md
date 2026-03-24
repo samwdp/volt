@@ -72,9 +72,11 @@ You can run the current shell and bootstrap demos with:
 
 `cargo run -p volt -- --shell-hidden`
 
+`cargo run -p volt -- --profile-typing`
+
 `cargo run -p volt -- --bootstrap-demo`
 
-The default launch path opens the visible SDL3 shell on the stable SDL canvas path. The hidden smoke-test path prints the selected backend/renderer so you can verify shell startup. The bootstrap demo prints a startup summary showing the currently wired picker, job, terminal, LSP, DAP, theme, directory, git, and syntax subsystems.
+The default launch path opens the visible SDL3 shell on the stable SDL canvas path. The hidden smoke-test path prints the selected backend/renderer so you can verify shell startup. `--profile-typing` keeps per-frame input timing samples in memory and writes a typing profile log on exit so you can inspect which stages are slow while typing. The bootstrap demo prints a startup summary showing the currently wired picker, job, terminal, LSP, DAP, theme, directory, git, and syntax subsystems.
 
 Inside the SDL shell, the default user package wiring now gives you:
 

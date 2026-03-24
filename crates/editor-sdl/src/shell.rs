@@ -12,13 +12,13 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::config::{ShellConfig, ShellError, ShellSummary};
+use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary};
 use crate::state::{
     BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
     LastSearch, ScrollCommand, ShellMotion, VimFindKind, VimMark, VimOperator, VimPending,
@@ -43,7 +43,10 @@ use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
     find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
 };
-use editor_syntax::{LanguageConfiguration, SyntaxError, SyntaxRegistry, SyntaxSnapshot};
+use editor_syntax::{
+    HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
+    SyntaxSnapshot,
+};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
 use sdl3::{
     event::Event,
@@ -186,10 +189,10 @@ const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
 const NERD_FONT_FALLBACK_CANDIDATES: &[&str] = &[
-    "crates\\volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
-    "assets\\font\\SymbolsNerdFontMono-Regular.ttf",
-    "volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
-    "..\\..\\crates\\volt\\assets\\font\\SymbolsNerdFontMono-Regular.ttf",
+    "crates/volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
+    "assets/font/SymbolsNerdFontMono-Regular.ttf",
+    "volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
+    "../../crates/volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
 ];
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -197,6 +200,22 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
 ));
 const ERROR_LOG_MAX_ENTRIES: usize = 200;
 const ERROR_LOG_FILE_NAME: &str = "errors.log";
+const TYPING_PROFILE_LOG_FILE_NAME: &str = "typing-profile.log";
+const TYPING_PROFILE_MAX_FRAMES: usize = 10_000;
+const TYPING_PROFILE_SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(8);
+const FRAME_PACING_TARGET_120FPS: Duration = Duration::from_nanos(8_333_333);
+const FRAME_PACING_YIELD_THRESHOLD: Duration = Duration::from_millis(1);
+const FRAME_PACING_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
+const TYPING_EVENT_BATCH_LIMIT: usize = 24;
+const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
+const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
+const SYNTAX_WINDOW_MIN_LINES: usize = 256;
+const SYNTAX_WINDOW_MARGIN_LINES: usize = 96;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct ClipboardContext {
     video: sdl3::VideoSubsystem,
@@ -219,6 +238,15 @@ fn with_clipboard_util<T>(f: impl FnOnce(&sdl3::clipboard::ClipboardUtil) -> T) 
             f(&clipboard)
         })
     })
+}
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn write_system_clipboard(text: &str) {
@@ -277,7 +305,7 @@ impl DrawTarget<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
@@ -321,6 +349,36 @@ struct LineSyntaxSpan {
     start: usize,
     end: usize,
     theme_token: String,
+}
+
+type IndexedSyntaxLines = BTreeMap<usize, Vec<LineSyntaxSpan>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyntaxLineWindow {
+    start_line: usize,
+    line_count: usize,
+}
+
+impl SyntaxLineWindow {
+    fn new(start_line: usize, line_count: usize) -> Option<Self> {
+        (line_count > 0).then_some(Self {
+            start_line,
+            line_count,
+        })
+    }
+
+    fn end_line_exclusive(self) -> usize {
+        self.start_line.saturating_add(self.line_count)
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.start_line <= other.start_line
+            && self.end_line_exclusive() >= other.end_line_exclusive()
+    }
+
+    fn to_highlight_window(self) -> HighlightWindow {
+        HighlightWindow::new(self.start_line, self.line_count)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1148,6 +1206,7 @@ impl GitFringeSnapshot {
 struct GitFringeState {
     snapshot: Arc<Mutex<GitFringeSnapshot>>,
     inflight: Arc<AtomicBool>,
+    revision: Arc<AtomicU64>,
 }
 
 impl GitFringeState {
@@ -1155,6 +1214,7 @@ impl GitFringeState {
         Self {
             snapshot: Arc::new(Mutex::new(GitFringeSnapshot::default())),
             inflight: Arc::new(AtomicBool::new(false)),
+            revision: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1176,7 +1236,12 @@ impl GitFringeState {
     fn update_snapshot(&self, snapshot: GitFringeSnapshot) {
         if let Ok(mut guard) = self.snapshot.lock() {
             *guard = snapshot;
+            self.revision.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    fn snapshot_revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 }
 
@@ -1191,6 +1256,7 @@ struct GitSummarySnapshot {
 struct GitSummaryState {
     snapshot: Arc<Mutex<Option<GitSummarySnapshot>>>,
     inflight: Arc<AtomicBool>,
+    revision: Arc<AtomicU64>,
     last_refresh_at: Option<Instant>,
 }
 
@@ -1199,6 +1265,7 @@ impl GitSummaryState {
         Self {
             snapshot: Arc::new(Mutex::new(None)),
             inflight: Arc::new(AtomicBool::new(false)),
+            revision: Arc::new(AtomicU64::new(0)),
             last_refresh_at: None,
         }
     }
@@ -1211,13 +1278,13 @@ impl GitSummaryState {
     fn set_snapshot(&self, snapshot: Option<GitSummarySnapshot>) {
         if let Ok(mut guard) = self.snapshot.lock() {
             *guard = snapshot;
+            self.revision.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     fn refresh_due(&self, now: Instant) -> bool {
-        const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
         self.last_refresh_at
-            .map(|last| now.duration_since(last) >= SUMMARY_REFRESH_INTERVAL)
+            .map(|last| now.duration_since(last) >= GIT_SUMMARY_REFRESH_INTERVAL)
             .unwrap_or(true)
     }
 
@@ -1233,6 +1300,10 @@ impl GitSummaryState {
 
     fn finish_refresh(&self) {
         self.inflight.store(false, Ordering::Release);
+    }
+
+    fn snapshot_revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 }
 
@@ -1753,6 +1824,8 @@ pub(crate) struct ShellBuffer {
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
     syntax_requested_revision: Option<u64>,
+    syntax_requested_window: Option<SyntaxLineWindow>,
+    syntax_applied_window: Option<SyntaxLineWindow>,
     last_edit_at: Option<Instant>,
 }
 
@@ -1827,6 +1900,8 @@ impl ShellBuffer {
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
             syntax_requested_revision: None,
+            syntax_requested_window: None,
+            syntax_applied_window: None,
             last_edit_at: None,
         }
     }
@@ -1864,6 +1939,8 @@ impl ShellBuffer {
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
             syntax_requested_revision: None,
+            syntax_requested_window: None,
+            syntax_applied_window: None,
             last_edit_at: None,
         }
     }
@@ -1901,6 +1978,8 @@ impl ShellBuffer {
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
             syntax_requested_revision: None,
+            syntax_requested_window: None,
+            syntax_applied_window: None,
             last_edit_at: None,
         }
     }
@@ -1977,6 +2056,11 @@ impl ShellBuffer {
             .and_then(|state| state.try_line_kind(line_index))
     }
 
+    fn git_fringe_revision(&self) -> Option<u64> {
+        self.git_fringe_state()
+            .map(GitFringeState::snapshot_revision)
+    }
+
     fn mark_git_fringe_dirty(&mut self) {
         if matches!(self.kind, BufferKind::File) && self.git_fringe.is_some() {
             self.git_fringe_dirty = true;
@@ -1984,9 +2068,9 @@ impl ShellBuffer {
         }
     }
 
-    fn git_fringe_refresh_due(&self, now: Instant) -> bool {
-        const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
-        self.git_fringe_dirty
+    fn git_fringe_refresh_due(&self, now: Instant, typing_active: bool) -> bool {
+        !typing_active
+            && self.git_fringe_dirty
             && self
                 .git_fringe_last_edit_at
                 .map(|last| now.duration_since(last) >= GIT_FRINGE_REFRESH_DEBOUNCE)
@@ -2140,9 +2224,20 @@ impl ShellBuffer {
     }
 
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
-        self.syntax_lines = syntax.as_ref().map(index_syntax_lines).unwrap_or_default();
+        let syntax_window = syntax.as_ref().and_then(|_| self.full_syntax_window());
+        self.set_indexed_syntax_lines(syntax.map(index_syntax_lines), syntax_window);
+    }
+
+    fn set_indexed_syntax_lines(
+        &mut self,
+        syntax_lines: Option<IndexedSyntaxLines>,
+        syntax_window: Option<SyntaxLineWindow>,
+    ) {
+        self.syntax_lines = syntax_lines.unwrap_or_default();
         self.syntax_dirty = false;
         self.syntax_requested_revision = Some(self.text.revision());
+        self.syntax_requested_window = syntax_window;
+        self.syntax_applied_window = syntax_window;
         self.last_edit_at = None;
     }
 
@@ -2170,6 +2265,8 @@ impl ShellBuffer {
         self.syntax_lines.clear();
         self.syntax_dirty = false;
         self.syntax_requested_revision = None;
+        self.syntax_requested_window = None;
+        self.syntax_applied_window = None;
         self.last_edit_at = None;
         self.scroll_row = 0;
         self.invalidate_wrap_cache();
@@ -2190,6 +2287,8 @@ impl ShellBuffer {
         self.syntax_lines.clear();
         self.syntax_dirty = false;
         self.syntax_requested_revision = None;
+        self.syntax_requested_window = None;
+        self.syntax_applied_window = None;
         self.last_edit_at = None;
         let line_count = self.line_count();
         if line_count == 0 {
@@ -2208,6 +2307,8 @@ impl ShellBuffer {
     fn mark_syntax_dirty(&mut self) {
         if self.kind == BufferKind::File || self.language_id.is_some() {
             self.syntax_dirty = true;
+            self.syntax_requested_window = None;
+            self.syntax_applied_window = None;
             self.last_edit_at = Some(Instant::now());
             self.mark_git_fringe_dirty();
         }
@@ -2217,26 +2318,85 @@ impl ShellBuffer {
         if self.kind == BufferKind::File || self.language_id.is_some() {
             self.syntax_dirty = true;
             self.syntax_requested_revision = None;
+            self.syntax_requested_window = None;
+            self.syntax_applied_window = None;
             self.last_edit_at = None;
         }
     }
 
-    fn mark_syntax_refresh_requested(&mut self) {
+    fn mark_syntax_refresh_requested(&mut self, syntax_window: Option<SyntaxLineWindow>) {
         self.syntax_requested_revision = Some(self.text.revision());
+        self.syntax_requested_window = syntax_window;
     }
 
     fn syntax_refresh_due(&self, now: Instant) -> bool {
-        const SYNTAX_REFRESH_DEBOUNCE: Duration = Duration::from_millis(75);
+        const SYNTAX_REFRESH_COLD_DEBOUNCE: Duration = Duration::from_millis(75);
+        const SYNTAX_REFRESH_INCREMENTAL_DEBOUNCE: Duration = Duration::from_millis(8);
+        let debounce = if self.syntax_applied_window.is_some() {
+            SYNTAX_REFRESH_INCREMENTAL_DEBOUNCE
+        } else {
+            SYNTAX_REFRESH_COLD_DEBOUNCE
+        };
         self.syntax_dirty
             && self.syntax_requested_revision != Some(self.text.revision())
             && self
                 .last_edit_at
-                .map(|last_edit_at| now.duration_since(last_edit_at) >= SYNTAX_REFRESH_DEBOUNCE)
+                .map(|last_edit_at| now.duration_since(last_edit_at) >= debounce)
                 .unwrap_or(true)
     }
 
     fn line_syntax_spans(&self, line_index: usize) -> Option<&[LineSyntaxSpan]> {
         self.syntax_lines.get(&line_index).map(Vec::as_slice)
+    }
+
+    fn full_syntax_window(&self) -> Option<SyntaxLineWindow> {
+        SyntaxLineWindow::new(0, self.line_count())
+    }
+
+    fn desired_syntax_window(&self) -> Option<SyntaxLineWindow> {
+        if self.kind != BufferKind::File && self.language_id.is_none() {
+            return None;
+        }
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return None;
+        }
+        let visible_lines = self.viewport_lines();
+        let target_lines = visible_lines
+            .saturating_add(SYNTAX_WINDOW_MARGIN_LINES.saturating_mul(2))
+            .max(SYNTAX_WINDOW_MIN_LINES)
+            .min(line_count);
+        let centered_margin = target_lines.saturating_sub(visible_lines) / 2;
+        let max_start_line = line_count.saturating_sub(target_lines);
+        let start_line = self
+            .scroll_row
+            .saturating_sub(centered_margin)
+            .min(max_start_line);
+        SyntaxLineWindow::new(start_line, target_lines)
+    }
+
+    fn ensure_visible_syntax_window(&mut self) {
+        let Some(desired_window) = self.desired_syntax_window() else {
+            return;
+        };
+        let current_revision = self.text.revision();
+        let applied_matches = self.syntax_requested_revision == Some(current_revision)
+            && self
+                .syntax_applied_window
+                .map(|window| window.contains(desired_window))
+                .unwrap_or(false);
+        let requested_matches = self.syntax_requested_revision == Some(current_revision)
+            && self
+                .syntax_requested_window
+                .map(|window| window.contains(desired_window))
+                .unwrap_or(false);
+        if applied_matches || requested_matches {
+            return;
+        }
+        self.syntax_dirty = true;
+        self.syntax_requested_revision = None;
+        self.syntax_requested_window = None;
+        self.last_edit_at = None;
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -3169,6 +3329,10 @@ impl ShellUiState {
         self.git_summary.snapshot()
     }
 
+    fn git_summary_revision(&self) -> u64 {
+        self.git_summary.snapshot_revision()
+    }
+
     fn git_summary_refresh_due(&self, now: Instant) -> bool {
         self.git_summary.refresh_due(now)
     }
@@ -3431,6 +3595,11 @@ impl ShellUiState {
         })
     }
 
+    fn yank_flash_deadline(&self, now: Instant) -> Option<Instant> {
+        self.yank_flash
+            .and_then(|flash| (now <= flash.until).then_some(flash.until))
+    }
+
     fn buffer(&self, buffer_id: BufferId) -> Option<&ShellBuffer> {
         self.buffers.iter().find(|buffer| buffer.id() == buffer_id)
     }
@@ -3623,17 +3792,432 @@ impl ErrorLog {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TypingFrameProfile {
+    frame_index: u32,
+    timestamp: SystemTime,
+    frame_pacing_sleep: Duration,
+    polled_events: usize,
+    keydown_events: usize,
+    text_input_events: usize,
+    text_preview: String,
+    handle_event_total: Duration,
+    keydown_handle_total: Duration,
+    text_input_handle_total: Duration,
+    text_input_inner_total: Duration,
+    picker_refresh: Duration,
+    syntax_refresh: Duration,
+    syntax_worker_compute: Duration,
+    syntax_result_count: usize,
+    syntax_highlight_spans: usize,
+    git_refresh: Duration,
+    acp_refresh: Duration,
+    render: Duration,
+    present: Duration,
+    frame_total: Duration,
+    first_text_to_present: Option<Duration>,
+    last_text_to_present: Option<Duration>,
+}
+
+#[derive(Debug)]
+struct ActiveTypingFrameProfile {
+    frame_index: u32,
+    timestamp: SystemTime,
+    frame_pacing_sleep: Duration,
+    polled_events: usize,
+    keydown_events: usize,
+    text_input_events: usize,
+    text_preview: String,
+    handle_event_total: Duration,
+    keydown_handle_total: Duration,
+    text_input_handle_total: Duration,
+    text_input_inner_total: Duration,
+    picker_refresh: Duration,
+    syntax_refresh: Duration,
+    syntax_worker_compute: Duration,
+    syntax_result_count: usize,
+    syntax_highlight_spans: usize,
+    git_refresh: Duration,
+    acp_refresh: Duration,
+    render: Duration,
+    present: Duration,
+    first_text_input_started_at: Option<Instant>,
+    last_text_input_started_at: Option<Instant>,
+}
+
+impl ActiveTypingFrameProfile {
+    fn new(frame_index: u32, frame_pacing_sleep: Duration) -> Self {
+        Self {
+            frame_index,
+            timestamp: SystemTime::now(),
+            frame_pacing_sleep,
+            polled_events: 0,
+            keydown_events: 0,
+            text_input_events: 0,
+            text_preview: String::new(),
+            handle_event_total: Duration::from_secs(0),
+            keydown_handle_total: Duration::from_secs(0),
+            text_input_handle_total: Duration::from_secs(0),
+            text_input_inner_total: Duration::from_secs(0),
+            picker_refresh: Duration::from_secs(0),
+            syntax_refresh: Duration::from_secs(0),
+            syntax_worker_compute: Duration::from_secs(0),
+            syntax_result_count: 0,
+            syntax_highlight_spans: 0,
+            git_refresh: Duration::from_secs(0),
+            acp_refresh: Duration::from_secs(0),
+            render: Duration::from_secs(0),
+            present: Duration::from_secs(0),
+            first_text_input_started_at: None,
+            last_text_input_started_at: None,
+        }
+    }
+
+    fn record_event(
+        &mut self,
+        metadata: &TypingEventMetadata,
+        handle_event_total: Duration,
+        text_input_inner_total: Option<Duration>,
+    ) {
+        self.polled_events = self.polled_events.saturating_add(1);
+        self.handle_event_total += handle_event_total;
+        match metadata {
+            TypingEventMetadata::KeyDown => {
+                self.keydown_events = self.keydown_events.saturating_add(1);
+                self.keydown_handle_total += handle_event_total;
+            }
+            TypingEventMetadata::TextInput { text, received_at } => {
+                self.text_input_events = self.text_input_events.saturating_add(1);
+                self.text_input_handle_total += handle_event_total;
+                self.text_input_inner_total +=
+                    text_input_inner_total.unwrap_or_else(|| Duration::from_secs(0));
+                if self.first_text_input_started_at.is_none() {
+                    self.first_text_input_started_at = Some(*received_at);
+                }
+                self.last_text_input_started_at = Some(*received_at);
+                self.push_text_preview(text);
+            }
+            TypingEventMetadata::Other => {}
+        }
+    }
+
+    fn push_text_preview(&mut self, text: &str) {
+        const MAX_PREVIEW_CHARS: usize = 24;
+        if self.text_preview.chars().count() >= MAX_PREVIEW_CHARS {
+            return;
+        }
+        let sanitized = sanitize_typing_preview(text);
+        if !self.text_preview.is_empty() {
+            self.text_preview.push('|');
+        }
+        for character in sanitized.chars() {
+            if self.text_preview.chars().count() >= MAX_PREVIEW_CHARS {
+                self.text_preview.push('…');
+                break;
+            }
+            self.text_preview.push(character);
+        }
+    }
+
+    fn finish(self, frame_total: Duration, presented_at: Instant) -> TypingFrameProfile {
+        TypingFrameProfile {
+            frame_index: self.frame_index,
+            timestamp: self.timestamp,
+            frame_pacing_sleep: self.frame_pacing_sleep,
+            polled_events: self.polled_events,
+            keydown_events: self.keydown_events,
+            text_input_events: self.text_input_events,
+            text_preview: self.text_preview,
+            handle_event_total: self.handle_event_total,
+            keydown_handle_total: self.keydown_handle_total,
+            text_input_handle_total: self.text_input_handle_total,
+            text_input_inner_total: self.text_input_inner_total,
+            picker_refresh: self.picker_refresh,
+            syntax_refresh: self.syntax_refresh,
+            syntax_worker_compute: self.syntax_worker_compute,
+            syntax_result_count: self.syntax_result_count,
+            syntax_highlight_spans: self.syntax_highlight_spans,
+            git_refresh: self.git_refresh,
+            acp_refresh: self.acp_refresh,
+            render: self.render,
+            present: self.present,
+            frame_total,
+            first_text_to_present: self
+                .first_text_input_started_at
+                .map(|received_at| presented_at.duration_since(received_at)),
+            last_text_to_present: self
+                .last_text_input_started_at
+                .map(|received_at| presented_at.duration_since(received_at)),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TypingEventMetadata {
+    KeyDown,
+    TextInput { text: String, received_at: Instant },
+    Other,
+}
+
+impl TypingEventMetadata {
+    fn from_event(event: &Event) -> Self {
+        match event {
+            Event::KeyDown { .. } => Self::KeyDown,
+            Event::TextInput { text, .. } => Self::TextInput {
+                text: text.clone(),
+                received_at: Instant::now(),
+            },
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TypingProfiler {
+    log_path: PathBuf,
+    frames: Vec<TypingFrameProfile>,
+    max_frames: usize,
+    dropped_frames: usize,
+}
+
+impl TypingProfiler {
+    fn new(log_path: PathBuf) -> Self {
+        Self {
+            log_path,
+            frames: Vec::new(),
+            max_frames: TYPING_PROFILE_MAX_FRAMES,
+            dropped_frames: 0,
+        }
+    }
+
+    fn record_frame(&mut self, frame: TypingFrameProfile) {
+        if frame.text_input_events == 0
+            && frame.keydown_events == 0
+            && frame.syntax_result_count == 0
+            && frame.frame_total < TYPING_PROFILE_SLOW_FRAME_THRESHOLD
+        {
+            return;
+        }
+        self.frames.push(frame);
+        if self.frames.len() > self.max_frames {
+            let overflow = self.frames.len() - self.max_frames;
+            self.frames.drain(0..overflow);
+            self.dropped_frames = self.dropped_frames.saturating_add(overflow);
+        }
+    }
+
+    fn write_report(&self) -> Result<TypingProfileSummary, String> {
+        ensure_log_directory(&self.log_path)?;
+        let mut file = fs::File::create(&self.log_path).map_err(|error| {
+            format!(
+                "failed to create typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        let input_frames = self
+            .frames
+            .iter()
+            .filter(|frame| frame.text_input_events > 0)
+            .collect::<Vec<_>>();
+        let input_frame_times = input_frames
+            .iter()
+            .map(|frame| frame.frame_total)
+            .collect::<Vec<_>>();
+        let syntax_result_frames = self
+            .frames
+            .iter()
+            .filter(|frame| frame.syntax_result_count > 0)
+            .collect::<Vec<_>>();
+        let syntax_worker_times = syntax_result_frames
+            .iter()
+            .map(|frame| frame.syntax_worker_compute)
+            .collect::<Vec<_>>();
+        let syntax_apply_times = syntax_result_frames
+            .iter()
+            .map(|frame| frame.syntax_refresh)
+            .collect::<Vec<_>>();
+        let slowest_frame = self
+            .frames
+            .iter()
+            .map(|frame| frame.frame_total)
+            .max()
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        writeln!(file, "Volt typing profile").map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        writeln!(file, "Frames captured: {}", self.frames.len()).map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        writeln!(file, "Frames with text input: {}", input_frames.len()).map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        writeln!(file, "Dropped frames: {}", self.dropped_frames).map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        if !input_frame_times.is_empty() {
+            writeln!(
+                file,
+                "Input frame total: avg={}, p50={}, p95={}, max={}",
+                format_duration_ms(average_duration(&input_frame_times)),
+                format_duration_ms(percentile_duration(&input_frame_times, 50)),
+                format_duration_ms(percentile_duration(&input_frame_times, 95)),
+                format_duration_ms(
+                    *input_frame_times
+                        .iter()
+                        .max()
+                        .unwrap_or(&Duration::from_secs(0))
+                ),
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to write typing profile `{}`: {error}",
+                    self.log_path.display()
+                )
+            })?;
+        }
+        if !syntax_result_frames.is_empty() {
+            let syntax_result_total = syntax_result_frames
+                .iter()
+                .map(|frame| frame.syntax_result_count)
+                .sum::<usize>();
+            let syntax_span_total = syntax_result_frames
+                .iter()
+                .map(|frame| frame.syntax_highlight_spans)
+                .sum::<usize>();
+            writeln!(
+                file,
+                "Syntax worker compute: avg={}, p50={}, p95={}, max={} (frames={}, results={}, spans={})",
+                format_duration_ms(average_duration(&syntax_worker_times)),
+                format_duration_ms(percentile_duration(&syntax_worker_times, 50)),
+                format_duration_ms(percentile_duration(&syntax_worker_times, 95)),
+                format_duration_ms(
+                    *syntax_worker_times
+                        .iter()
+                        .max()
+                        .unwrap_or(&Duration::from_secs(0))
+                ),
+                syntax_result_frames.len(),
+                syntax_result_total,
+                syntax_span_total,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to write typing profile `{}`: {error}",
+                    self.log_path.display()
+                )
+            })?;
+            writeln!(
+                file,
+                "Syntax UI apply: avg={}, p50={}, p95={}, max={}",
+                format_duration_ms(average_duration(&syntax_apply_times)),
+                format_duration_ms(percentile_duration(&syntax_apply_times, 50)),
+                format_duration_ms(percentile_duration(&syntax_apply_times, 95)),
+                format_duration_ms(
+                    *syntax_apply_times
+                        .iter()
+                        .max()
+                        .unwrap_or(&Duration::from_secs(0))
+                ),
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to write typing profile `{}`: {error}",
+                    self.log_path.display()
+                )
+            })?;
+        }
+        writeln!(file).map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        writeln!(file, "Slowest captured frames").map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        let mut slowest_frames = self.frames.iter().collect::<Vec<_>>();
+        slowest_frames.sort_by_key(|frame| std::cmp::Reverse(frame.frame_total));
+        for frame in slowest_frames.into_iter().take(20) {
+            writeln!(file, "{}", format_typing_frame_profile(frame)).map_err(|error| {
+                format!(
+                    "failed to write typing profile `{}`: {error}",
+                    self.log_path.display()
+                )
+            })?;
+        }
+        writeln!(file).map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        writeln!(file, "All captured frames").map_err(|error| {
+            format!(
+                "failed to write typing profile `{}`: {error}",
+                self.log_path.display()
+            )
+        })?;
+        for frame in &self.frames {
+            writeln!(file, "{}", format_typing_frame_profile(frame)).map_err(|error| {
+                format!(
+                    "failed to write typing profile `{}`: {error}",
+                    self.log_path.display()
+                )
+            })?;
+        }
+
+        Ok(TypingProfileSummary {
+            log_path: self.log_path.display().to_string(),
+            frames_captured: self.frames.len(),
+            input_frames_captured: input_frames.len(),
+            slowest_frame_micros: slowest_frame.as_micros(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellVisualRefreshKey {
+    render_width: u32,
+    render_height: u32,
+    theme_settings: ThemeRuntimeSettings,
+    git_summary_revision: u64,
+    git_fringe_revisions: Vec<(BufferId, u64)>,
+    yank_flash_until: Option<Instant>,
+}
+
 pub(crate) struct ShellState {
     pub(crate) runtime: EditorRuntime,
+    typing_profiler: Option<TypingProfiler>,
+    last_text_input_profile: Option<Duration>,
+    last_text_input_at: Option<Instant>,
 }
 
 impl ShellState {
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, ShellError> {
-        Self::new_with_log(default_error_log_path())
+        Self::new_with_log(default_error_log_path(), false)
     }
 
-    pub(crate) fn new_with_log(log_file_path: PathBuf) -> Result<Self, ShellError> {
+    pub(crate) fn new_with_log(
+        log_file_path: PathBuf,
+        profile_input_latency: bool,
+    ) -> Result<Self, ShellError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
         let workspace_id = runtime
@@ -3684,7 +4268,7 @@ impl ShellState {
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
 
-        let log_dir_error = ensure_error_log_directory(&log_file_path).err();
+        let log_dir_error = ensure_log_directory(&log_file_path).err();
         runtime.services_mut().insert(ErrorLog::new(
             errors_id,
             log_file_path,
@@ -3712,7 +4296,13 @@ impl ShellState {
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
         register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
 
-        Ok(Self { runtime })
+        Ok(Self {
+            runtime,
+            typing_profiler: profile_input_latency
+                .then(|| TypingProfiler::new(default_typing_profile_log_path())),
+            last_text_input_profile: None,
+            last_text_input_at: None,
+        })
     }
 
     fn record_error(&mut self, source: &str, message: impl Into<String>) {
@@ -3723,12 +4313,42 @@ impl ShellState {
         self.record_error(source, error.to_string());
     }
 
-    fn handle_event(
-        &mut self,
-        event: Event,
-        visible_rows: usize,
-        wrap_cols: usize,
-    ) -> Result<bool, ShellError> {
+    fn begin_typing_frame(
+        &self,
+        frame_index: u32,
+        frame_pacing_sleep: Duration,
+    ) -> Option<ActiveTypingFrameProfile> {
+        self.typing_profiler
+            .as_ref()
+            .map(|_| ActiveTypingFrameProfile::new(frame_index, frame_pacing_sleep))
+    }
+
+    fn record_typing_frame(&mut self, frame: TypingFrameProfile) {
+        if let Some(profiler) = self.typing_profiler.as_mut() {
+            profiler.record_frame(frame);
+        }
+    }
+
+    fn take_last_text_input_profile(&mut self) -> Option<Duration> {
+        self.last_text_input_profile.take()
+    }
+
+    fn secondary_refresh_deferred_for_typing(&self, now: Instant) -> bool {
+        git_refresh_deferred_for_typing(self.last_text_input_at, now)
+    }
+
+    fn frame_pacing_deferred_for_typing(&self, now: Instant) -> bool {
+        frame_pacing_deferred_for_typing(self.last_text_input_at, now)
+    }
+
+    fn finish_typing_profile(&mut self) -> Result<Option<TypingProfileSummary>, String> {
+        self.typing_profiler
+            .as_ref()
+            .map(TypingProfiler::write_report)
+            .transpose()
+    }
+
+    fn handle_event(&mut self, event: Event, visible_rows: usize) -> Result<bool, ShellError> {
         let input_rows =
             active_shell_buffer_input_rows(&self.runtime).map_err(ShellError::Runtime)?;
         let visible_rows = if input_rows > 0 {
@@ -3808,12 +4428,10 @@ impl ShellState {
                     if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                         input.append_text("\n");
                     }
-                    self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
                 }
                 if self.try_runtime_keybinding(keycode, keymod)? {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
-                    self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
                 }
 
@@ -3827,7 +4445,6 @@ impl ShellState {
                             .execute_command("picker.submit")
                             .map_err(|error| ShellError::Runtime(error.to_string()))?;
                         self.sync_active_buffer().map_err(ShellError::Runtime)?;
-                        self.ensure_visible(visible_rows, wrap_cols)?;
                         return Ok(false);
                     }
                     if keycode == Keycode::Backspace
@@ -3836,7 +4453,6 @@ impl ShellState {
                         picker.backspace_query();
                         self.schedule_picker_search_refresh()?;
                     }
-                    self.ensure_visible(visible_rows, wrap_cols)?;
                     return Ok(false);
                 }
 
@@ -3988,7 +4604,6 @@ impl ShellState {
             _ => {}
         }
 
-        self.ensure_visible(visible_rows, wrap_cols)?;
         Ok(false)
     }
 
@@ -4461,6 +5076,17 @@ impl ShellState {
     }
 
     pub(crate) fn handle_text_input(&mut self, text: &str) -> Result<(), ShellError> {
+        self.last_text_input_at = Some(Instant::now());
+        self.last_text_input_profile = None;
+        let profile_started = self.typing_profiler.as_ref().map(|_| Instant::now());
+        let result = self.handle_text_input_inner(text);
+        if let Some(profile_started) = profile_started {
+            self.last_text_input_profile = Some(profile_started.elapsed());
+        }
+        result
+    }
+
+    fn handle_text_input_inner(&mut self, text: &str) -> Result<(), ShellError> {
         if self.picker_visible()? {
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(picker) = self.ui_mut()?.picker_mut() {
@@ -4638,7 +5264,7 @@ impl ShellState {
     fn schedule_picker_search_refresh(&mut self) -> Result<(), ShellError> {
         enum DynamicPickerSearch {
             Vim {
-                buffer: ShellBuffer,
+                buffer: Box<ShellBuffer>,
                 direction: VimSearchDirection,
                 query: String,
             },
@@ -4662,7 +5288,7 @@ impl ShellState {
                     ShellError::Runtime("active shell buffer is missing".to_owned())
                 })?;
                 Some(DynamicPickerSearch::Vim {
-                    buffer,
+                    buffer: Box::new(buffer),
                     direction,
                     query,
                 })
@@ -4684,7 +5310,7 @@ impl ShellState {
             }) => {
                 self.ui_mut()?
                     .vim_search_worker
-                    .schedule(buffer, direction, query);
+                    .schedule(*buffer, direction, query);
             }
             Some(DynamicPickerSearch::Workspace { root, query }) => {
                 self.ui_mut()?.workspace_search_worker.schedule(root, query);
@@ -4695,7 +5321,7 @@ impl ShellState {
         Ok(())
     }
 
-    fn refresh_pending_picker_searches(&mut self) -> Result<(), ShellError> {
+    fn refresh_pending_picker_searches(&mut self) -> Result<bool, ShellError> {
         let now = Instant::now();
         {
             let ui = self.ui_mut()?;
@@ -4703,6 +5329,7 @@ impl ShellState {
             ui.workspace_search_worker.dispatch_due(now);
         }
 
+        let mut changed = false;
         if let Some(result) = self.ui()?.vim_search_worker.take_latest_result() {
             let should_apply = {
                 let ui = self.ui()?;
@@ -4723,6 +5350,7 @@ impl ShellState {
                 && picker.vim_search_direction() == Some(result.direction)
             {
                 picker.set_entries(result.data.entries, result.data.selected_index);
+                changed = true;
             }
         }
 
@@ -4744,10 +5372,11 @@ impl ShellState {
                 && picker.workspace_search_root().is_some()
             {
                 picker.set_entries(result.data.entries, result.data.selected_index);
+                changed = true;
             }
         }
 
-        Ok(())
+        Ok(changed)
     }
 
     pub(crate) fn try_runtime_keybinding(
@@ -4855,17 +5484,100 @@ impl ShellState {
         Ok(())
     }
 
-    fn refresh_pending_syntax(&mut self) -> Result<(), ShellError> {
+    fn refresh_pending_syntax(&mut self) -> Result<SyntaxRefreshStats, ShellError> {
+        self.active_buffer_mut()?.ensure_visible_syntax_window();
         refresh_pending_syntax(&mut self.runtime).map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_git(&mut self) -> Result<(), ShellError> {
-        refresh_pending_git(&mut self.runtime).map_err(ShellError::Runtime)
+    fn refresh_pending_git(&mut self, now: Instant, typing_active: bool) -> Result<(), ShellError> {
+        refresh_pending_git(&mut self.runtime, now, typing_active).map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_acp(&mut self) -> Result<(), ShellError> {
+    fn refresh_pending_acp(&mut self) -> Result<bool, ShellError> {
         acp::refresh_pending_acp(&mut self.runtime).map_err(ShellError::Runtime)
     }
+
+    fn visual_refresh_key(
+        &self,
+        render_width: u32,
+        render_height: u32,
+        theme_settings: &ThemeRuntimeSettings,
+        now: Instant,
+    ) -> Result<ShellVisualRefreshKey, ShellError> {
+        let ui = self.ui()?;
+        Ok(ShellVisualRefreshKey {
+            render_width,
+            render_height,
+            theme_settings: theme_settings.clone(),
+            git_summary_revision: ui.git_summary_revision(),
+            git_fringe_revisions: ui
+                .buffers
+                .iter()
+                .filter_map(|buffer| {
+                    buffer
+                        .git_fringe_revision()
+                        .map(|revision| (buffer.id(), revision))
+                })
+                .collect(),
+            yank_flash_until: ui.yank_flash_deadline(now),
+        })
+    }
+}
+
+fn frame_pacing_remaining(frame_started: Instant, now: Instant) -> Duration {
+    let elapsed = now
+        .checked_duration_since(frame_started)
+        .unwrap_or_else(|| Duration::from_secs(0));
+    FRAME_PACING_TARGET_120FPS.saturating_sub(elapsed)
+}
+
+fn pace_frame_to_120fps(frame_started: Instant) -> Duration {
+    let mut now = Instant::now();
+    let mut remaining = frame_pacing_remaining(frame_started, now);
+    if remaining.is_zero() {
+        return Duration::from_secs(0);
+    }
+    let sleep_started = now;
+    while !remaining.is_zero() {
+        if remaining > FRAME_PACING_YIELD_THRESHOLD {
+            std::thread::sleep(remaining.saturating_sub(FRAME_PACING_YIELD_THRESHOLD));
+        } else {
+            std::thread::yield_now();
+        }
+        now = Instant::now();
+        remaining = frame_pacing_remaining(frame_started, now);
+    }
+    sleep_started.elapsed()
+}
+
+fn git_refresh_deferred_for_typing(last_text_input_at: Option<Instant>, now: Instant) -> bool {
+    last_text_input_at
+        .map(|last| {
+            now.checked_duration_since(last)
+                .unwrap_or_else(|| Duration::from_secs(0))
+                < GIT_REFRESH_TYPING_IDLE_THRESHOLD
+        })
+        .unwrap_or(false)
+}
+
+fn frame_pacing_deferred_for_typing(last_text_input_at: Option<Instant>, now: Instant) -> bool {
+    last_text_input_at
+        .map(|last| {
+            now.checked_duration_since(last)
+                .unwrap_or_else(|| Duration::from_secs(0))
+                < FRAME_PACING_TYPING_IDLE_THRESHOLD
+        })
+        .unwrap_or(false)
+}
+
+fn should_yield_after_typing_batch(
+    text_input_events: usize,
+    events_processed: usize,
+    batch_started: Instant,
+) -> bool {
+    text_input_events > 0
+        && (events_processed >= TYPING_EVENT_BATCH_LIMIT
+            || batch_started.elapsed() >= TYPING_EVENT_BATCH_TIME_BUDGET)
 }
 
 /// Runs the SDL3 + SDL_ttf demo shell.
@@ -4880,7 +5592,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let mut state = ShellState::new_with_log(log_file_path)?;
+    let mut state = ShellState::new_with_log(log_file_path, config.profile_input_latency)?;
     let mut theme_settings =
         theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
     let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings)?;
@@ -4912,15 +5624,21 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     let mut frames_rendered = 0;
+    let mut last_scene: Option<Vec<DrawCommand>> = None;
+    let mut last_visual_key: Option<ShellVisualRefreshKey> = None;
 
     enum FrameOutcome {
         Continue,
         Quit,
     }
 
+    let mut frame_pacing_sleep = Duration::from_secs(0);
     loop {
+        let frame_started = Instant::now();
         let frame_result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> FrameOutcome {
+                let mut typing_frame =
+                    state.begin_typing_frame(frames_rendered, frame_pacing_sleep);
                 if let Err(error) = update_theme_runtime(
                     &ttf,
                     &state,
@@ -4968,43 +5686,147 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let visible_rows =
                     ((active_height.saturating_sub(72)) / line_height_px).max(1) as usize;
                 let wrap_cols = wrap_columns_for_width(render_width, cell_width);
+                let mut had_events = false;
+                let event_batch_started = Instant::now();
+                let mut frame_polled_events = 0usize;
+                let mut frame_text_input_events = 0usize;
 
                 for event in event_pump.poll_iter() {
-                    match state.handle_event(event, visible_rows, wrap_cols) {
+                    had_events = true;
+                    frame_polled_events = frame_polled_events.saturating_add(1);
+                    let profiled_event = typing_frame
+                        .as_ref()
+                        .map(|_| TypingEventMetadata::from_event(&event));
+                    let event_started = typing_frame.as_ref().map(|_| Instant::now());
+                    match state.handle_event(event, visible_rows) {
                         Ok(true) => return FrameOutcome::Quit,
                         Ok(false) => {}
                         Err(error) => state.record_shell_error("shell.handle-event", error),
                     }
+                    if matches!(profiled_event, Some(TypingEventMetadata::TextInput { .. })) {
+                        frame_text_input_events = frame_text_input_events.saturating_add(1);
+                    }
+                    if let Some(frame) = typing_frame.as_mut()
+                        && let Some(profiled_event) = profiled_event.as_ref()
+                        && let Some(event_started) = event_started
+                    {
+                        frame.record_event(
+                            profiled_event,
+                            event_started.elapsed(),
+                            state.take_last_text_input_profile(),
+                        );
+                    }
+                    if should_yield_after_typing_batch(
+                        frame_text_input_events,
+                        frame_polled_events,
+                        event_batch_started,
+                    ) {
+                        break;
+                    }
+                }
+                if had_events && let Err(error) = state.ensure_visible(visible_rows, wrap_cols) {
+                    state.record_shell_error("shell.ensure-visible", error);
                 }
 
-                if let Err(error) = state.refresh_pending_picker_searches() {
-                    state.record_shell_error("shell.picker-search-refresh", error);
+                let refresh_now = Instant::now();
+                let typing_active = state.secondary_refresh_deferred_for_typing(refresh_now);
+                let picker_refresh_started = Instant::now();
+                let picker_changed = match state.refresh_pending_picker_searches() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.picker-search-refresh", error);
+                        false
+                    }
+                };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.picker_refresh = picker_refresh_started.elapsed();
                 }
-                if let Err(error) = state.refresh_pending_syntax() {
-                    state.record_shell_error("shell.syntax-refresh", error);
+                let syntax_refresh_started = Instant::now();
+                let syntax_stats = match state.refresh_pending_syntax() {
+                    Ok(stats) => stats,
+                    Err(error) => {
+                        state.record_shell_error("shell.syntax-refresh", error);
+                        SyntaxRefreshStats::default()
+                    }
+                };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.syntax_refresh = syntax_refresh_started.elapsed();
+                    frame.syntax_worker_compute = syntax_stats.worker_compute;
+                    frame.syntax_result_count = syntax_stats.result_count;
+                    frame.syntax_highlight_spans = syntax_stats.highlight_spans;
                 }
-                if let Err(error) = state.refresh_pending_git() {
+                let syntax_changed = syntax_stats.changed;
+                let git_refresh_started = Instant::now();
+                if let Err(error) = state.refresh_pending_git(refresh_now, typing_active) {
                     state.record_shell_error("shell.git-refresh", error);
                 }
-                if let Err(error) = state.refresh_pending_acp() {
-                    state.record_shell_error("shell.acp-refresh", error);
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.git_refresh = git_refresh_started.elapsed();
+                }
+                let acp_refresh_started = Instant::now();
+                let acp_changed = match state.refresh_pending_acp() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.acp-refresh", error);
+                        false
+                    }
+                };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.acp_refresh = acp_refresh_started.elapsed();
                 }
 
-                let mut scene = Vec::new();
-                if let Err(error) = state.render(
-                    &mut DrawTarget::Scene(&mut scene),
-                    &fonts,
+                let visual_key = match state.visual_refresh_key(
                     render_width,
                     render_height,
-                    cell_width,
-                    line_height as i32,
-                    ascent,
+                    &theme_settings,
+                    Instant::now(),
                 ) {
-                    state.record_shell_error("shell.render", error);
-                    return FrameOutcome::Continue;
-                }
-                if let Err(error) = present_scene_to_canvas(&mut canvas, &fonts, &scene) {
-                    state.record_shell_error("shell.present", error);
+                    Ok(key) => key,
+                    Err(error) => {
+                        state.record_shell_error("shell.visual-refresh-key", error);
+                        return FrameOutcome::Continue;
+                    }
+                };
+                let should_render = last_scene.is_none()
+                    || had_events
+                    || picker_changed
+                    || syntax_changed
+                    || acp_changed
+                    || last_visual_key.as_ref() != Some(&visual_key);
+                let presented_at = if should_render {
+                    let mut scene = Vec::new();
+                    let render_started = Instant::now();
+                    if let Err(error) = state.render(
+                        &mut DrawTarget::Scene(&mut scene),
+                        &fonts,
+                        render_width,
+                        render_height,
+                        cell_width,
+                        line_height as i32,
+                        ascent,
+                    ) {
+                        state.record_shell_error("shell.render", error);
+                        return FrameOutcome::Continue;
+                    }
+                    if let Some(frame) = typing_frame.as_mut() {
+                        frame.render = render_started.elapsed();
+                    }
+                    if last_scene.as_ref() != Some(&scene) {
+                        let present_started = Instant::now();
+                        if let Err(error) = present_scene_to_canvas(&mut canvas, &fonts, &scene) {
+                            state.record_shell_error("shell.present", error);
+                        } else if let Some(frame) = typing_frame.as_mut() {
+                            frame.present = present_started.elapsed();
+                        }
+                        last_scene = Some(scene);
+                    }
+                    last_visual_key = Some(visual_key);
+                    Instant::now()
+                } else {
+                    Instant::now()
+                };
+                if let Some(frame) = typing_frame.take() {
+                    state.record_typing_frame(frame.finish(frame_started.elapsed(), presented_at));
                 }
 
                 FrameOutcome::Continue
@@ -5032,7 +5854,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(16));
+        frame_pacing_sleep = if state.frame_pacing_deferred_for_typing(Instant::now()) {
+            Duration::from_secs(0)
+        } else {
+            pace_frame_to_120fps(frame_started)
+        };
     }
 
     Ok(build_shell_summary(
@@ -5758,11 +6584,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             if finish_change {
                 finish_change_recording(runtime)?;
             }
-            if is_directory && matches!(previous_mode, InputMode::Insert | InputMode::Replace) {
-                if let Err(error) = apply_directory_edit_queue(runtime, buffer_id) {
-                    record_runtime_error(runtime, "oil.directory", error.clone());
-                    return Err(error);
-                }
+            if is_directory
+                && matches!(previous_mode, InputMode::Insert | InputMode::Replace)
+                && let Err(error) = apply_directory_edit_queue(runtime, buffer_id)
+            {
+                record_runtime_error(runtime, "oil.directory", error.clone());
+                return Err(error);
             }
             Ok(())
         })
@@ -7195,7 +8022,7 @@ impl VimSearchWorkerState {
 
     fn take_latest_result(&self) -> Option<VimSearchWorkerResult> {
         let mut results = self.results.lock().ok()?;
-        results.drain(..).last()
+        results.drain(..).next_back()
     }
 }
 
@@ -7288,7 +8115,7 @@ impl WorkspaceSearchWorkerState {
 
     fn take_latest_result(&self) -> Option<WorkspaceSearchWorkerResult> {
         let mut results = self.results.lock().ok()?;
-        results.drain(..).last()
+        results.drain(..).next_back()
     }
 }
 
@@ -7297,6 +8124,7 @@ struct SyntaxRefreshWorkerRequest {
     buffer_revision: u64,
     path: Option<PathBuf>,
     buffer_language_id: Option<String>,
+    syntax_window: Option<SyntaxLineWindow>,
     text: TextBuffer,
 }
 
@@ -7306,7 +8134,18 @@ struct SyntaxRefreshWorkerResult {
     path: Option<PathBuf>,
     buffer_language_id: Option<String>,
     language_id: Option<String>,
-    syntax_result: Option<Result<SyntaxSnapshot, String>>,
+    syntax_window: Option<SyntaxLineWindow>,
+    compute_elapsed: Duration,
+    highlight_span_count: usize,
+    syntax_result: Option<Result<IndexedSyntaxLines, String>>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SyntaxRefreshStats {
+    changed: bool,
+    worker_compute: Duration,
+    result_count: usize,
+    highlight_spans: usize,
 }
 
 struct SyntaxRefreshWorkerState {
@@ -7328,6 +8167,8 @@ impl SyntaxRefreshWorkerState {
         let worker_results = Arc::clone(&results);
         std::thread::spawn(move || {
             let mut registry = SyntaxRegistry::with_install_root(install_root);
+            let mut parse_sessions: BTreeMap<BufferId, Option<SyntaxParseSession>> =
+                BTreeMap::new();
             if registry.register_all(configs).is_err() {
                 return;
             }
@@ -7340,12 +8181,27 @@ impl SyntaxRefreshWorkerState {
                 }
 
                 for request in latest_by_buffer.into_values() {
+                    let compute_started = Instant::now();
+                    let parse_session = parse_sessions.entry(request.buffer_id).or_insert(None);
                     let (language_id, syntax_result) = compute_buffer_syntax(
                         &mut registry,
                         request.path.as_deref(),
                         &request.text,
                         request.buffer_language_id.as_deref(),
+                        request.syntax_window,
+                        parse_session,
                     );
+                    if language_id.is_none() {
+                        parse_sessions.remove(&request.buffer_id);
+                    }
+                    let (highlight_span_count, syntax_result) = match syntax_result {
+                        Some(Ok(snapshot)) => {
+                            let highlight_span_count = snapshot.highlight_count();
+                            (highlight_span_count, Some(Ok(index_syntax_lines(snapshot))))
+                        }
+                        Some(Err(error)) => (0, Some(Err(error.to_string()))),
+                        None => (0, None),
+                    };
                     if let Ok(mut results) = worker_results.lock() {
                         results.push(SyntaxRefreshWorkerResult {
                             buffer_id: request.buffer_id,
@@ -7353,8 +8209,10 @@ impl SyntaxRefreshWorkerState {
                             path: request.path,
                             buffer_language_id: request.buffer_language_id,
                             language_id,
-                            syntax_result: syntax_result
-                                .map(|result| result.map_err(|error| error.to_string())),
+                            syntax_window: request.syntax_window,
+                            compute_elapsed: compute_started.elapsed(),
+                            highlight_span_count,
+                            syntax_result,
                         });
                     } else {
                         return;
@@ -9867,10 +10725,10 @@ fn oil_default_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     if let Some(root) = active_directory_root(runtime)? {
         return Ok(root);
     }
-    if let Some(path) = active_shell_buffer_path(runtime)? {
-        if let Some(parent) = path.parent() {
-            return Ok(parent.to_path_buf());
-        }
+    if let Some(path) = active_shell_buffer_path(runtime)?
+        && let Some(parent) = path.parent()
+    {
+        return Ok(parent.to_path_buf());
     }
     oil_workspace_root(runtime)
 }
@@ -9984,10 +10842,7 @@ fn set_directory_root(
     state.sort_mode = sort_mode;
     state.trash_enabled = trash_enabled;
     apply_directory_state(runtime, buffer_id, state)?;
-    if previous_root
-        .as_ref()
-        .map_or(true, |prev| prev != &root_for_compare)
-    {
+    if previous_root.as_ref() != Some(&root_for_compare) {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         let target_line = if buffer.line_count() > 1 { 1 } else { 0 };
         buffer.goto_line(target_line);
@@ -10488,7 +11343,7 @@ fn open_oil_preview_popup(runtime: &mut EditorRuntime, path: &Path) -> Result<()
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
     let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
-    refresh_buffer_syntax(runtime, buffer_id)?;
+    queue_buffer_syntax_refresh(runtime, buffer_id)?;
     Ok(())
 }
 
@@ -10535,11 +11390,16 @@ fn open_external_path(path: &Path) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
+        let mut command = Command::new("cmd");
+        configure_background_command(&mut command);
+        command
             .arg("/C")
             .arg("start")
             .arg("")
             .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
     }
@@ -10604,7 +11464,7 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
     }
-    refresh_buffer_syntax(runtime, buffer_id)
+    queue_buffer_syntax_refresh(runtime, buffer_id)
 }
 
 fn git_commit_temp_path() -> PathBuf {
@@ -12596,7 +13456,13 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
     }
 }
 
-fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
+fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshStats, String> {
+    let mut stats = SyntaxRefreshStats::default();
+    if let Some(buffer_id) = shell_ui(runtime)?.active_buffer_id()
+        && let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id)
+    {
+        buffer.ensure_visible_syntax_window();
+    }
     let syntax_results = shell_ui(runtime)?.syntax_refresh_worker.take_results();
     if !syntax_results.is_empty() {
         let ui = shell_ui_mut(runtime)?;
@@ -12612,10 +13478,16 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
             {
                 continue;
             }
+            stats.changed = true;
+            stats.worker_compute += result.compute_elapsed;
+            stats.result_count = stats.result_count.saturating_add(1);
+            stats.highlight_spans = stats
+                .highlight_spans
+                .saturating_add(result.highlight_span_count);
             buffer.set_language_id(result.language_id.clone());
             match result.syntax_result {
-                Some(Ok(snapshot)) => {
-                    buffer.set_syntax_snapshot(Some(snapshot));
+                Some(Ok(syntax_lines)) => {
+                    buffer.set_indexed_syntax_lines(Some(syntax_lines), result.syntax_window);
                     buffer.set_syntax_error(None);
                 }
                 Some(Err(error)) => {
@@ -12648,12 +13520,14 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .map(ShellBuffer::id)
                 .collect::<Vec<_>>()
         };
+        let had_due_buffers = !buffer_ids.is_empty();
 
         for buffer_id in buffer_ids {
             refresh_buffer_syntax(runtime, buffer_id)?;
         }
 
-        return Ok(());
+        stats.changed = stats.changed || had_due_buffers;
+        return Ok(stats);
     }
 
     let now = Instant::now();
@@ -12667,20 +13541,21 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
                 buffer_revision: buffer.text.revision(),
                 path: buffer.path().map(Path::to_path_buf),
                 buffer_language_id: buffer.language_id().map(str::to_owned),
+                syntax_window: buffer.desired_syntax_window(),
                 text: buffer.text.clone(),
             })
             .collect::<Vec<_>>()
     };
 
     if requests.is_empty() {
-        return Ok(());
+        return Ok(stats);
     }
 
     {
         let ui = shell_ui_mut(runtime)?;
         for request in &requests {
             if let Some(buffer) = ui.buffer_mut(request.buffer_id) {
-                buffer.mark_syntax_refresh_requested();
+                buffer.mark_syntax_refresh_requested(request.syntax_window);
             }
         }
         for request in requests {
@@ -12688,22 +13563,29 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
         }
     }
 
+    Ok(stats)
+}
+
+fn refresh_pending_git(
+    runtime: &mut EditorRuntime,
+    now: Instant,
+    typing_active: bool,
+) -> Result<(), String> {
+    refresh_pending_git_fringe(runtime, now, typing_active)?;
+    refresh_pending_git_summary(runtime, now, typing_active)?;
     Ok(())
 }
 
-fn refresh_pending_git(runtime: &mut EditorRuntime) -> Result<(), String> {
-    refresh_pending_git_fringe(runtime)?;
-    refresh_pending_git_summary(runtime)?;
-    Ok(())
-}
-
-fn refresh_pending_git_fringe(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let now = Instant::now();
+fn refresh_pending_git_fringe(
+    runtime: &mut EditorRuntime,
+    now: Instant,
+    typing_active: bool,
+) -> Result<(), String> {
     let buffer_ids = {
         let ui = shell_ui(runtime)?;
         ui.buffers
             .iter()
-            .filter(|buffer| buffer.git_fringe_refresh_due(now))
+            .filter(|buffer| buffer.git_fringe_refresh_due(now, typing_active))
             .map(ShellBuffer::id)
             .collect::<Vec<_>>()
     };
@@ -12715,21 +13597,12 @@ fn refresh_pending_git_fringe(runtime: &mut EditorRuntime) -> Result<(), String>
     Ok(())
 }
 
-fn refresh_pending_git_summary(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let now = Instant::now();
-    let root = match git_root(runtime) {
-        Ok(root) => root,
-        Err(_) => {
-            if let Ok(ui) = shell_ui(runtime) {
-                ui.clear_git_summary();
-            }
-            return Ok(());
-        }
-    };
-    if !git_repository_present(&root) {
-        if let Ok(ui) = shell_ui(runtime) {
-            ui.clear_git_summary();
-        }
+fn refresh_pending_git_summary(
+    runtime: &mut EditorRuntime,
+    now: Instant,
+    typing_active: bool,
+) -> Result<(), String> {
+    if typing_active {
         return Ok(());
     }
     let summary_state = {
@@ -12743,6 +13616,16 @@ fn refresh_pending_git_summary(runtime: &mut EditorRuntime) -> Result<(), String
         }
         ui.mark_git_summary_refreshed(now);
         summary_state
+    };
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(_) => {
+            if let Ok(ui) = shell_ui(runtime) {
+                ui.clear_git_summary();
+            }
+            summary_state.finish_refresh();
+            return Ok(());
+        }
     };
 
     std::thread::spawn(move || {
@@ -12774,17 +13657,6 @@ fn refresh_git_fringe(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resul
         };
         (path.to_path_buf(), buffer.line_count(), fringe_state)
     };
-    if !git_repository_present(&root) {
-        fringe_state.update_snapshot(GitFringeSnapshot::default());
-        if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-            buffer.clear_git_fringe_dirty();
-        }
-        return Ok(());
-    }
-    let buffer_text = {
-        let buffer = shell_buffer(runtime, buffer_id)?;
-        buffer.text.text()
-    };
     let relative_path = match path.strip_prefix(&root) {
         Ok(relative) => relative.to_path_buf(),
         Err(_) => {
@@ -12798,12 +13670,20 @@ fn refresh_git_fringe(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resul
     if !fringe_state.try_begin_refresh() {
         return Ok(());
     }
+    let buffer_text = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer.text.text()
+    };
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
         buffer.clear_git_fringe_dirty();
     }
 
     std::thread::spawn(move || {
-        let snapshot = build_git_fringe_snapshot(&root, &relative_path, &buffer_text, line_count);
+        let snapshot = if git_repository_present(&root) {
+            build_git_fringe_snapshot(&root, &relative_path, &buffer_text, line_count)
+        } else {
+            GitFringeSnapshot::default()
+        };
         fringe_state.update_snapshot(snapshot);
         fringe_state.finish_refresh();
     });
@@ -12955,11 +13835,9 @@ fn git_command_output_background(
     args: &[&str],
     allowed_exit_codes: &[i32],
 ) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    let output = command.args(args).current_dir(root).output().ok()?;
     let exit_code = output.status.code()?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
         return None;
@@ -13438,11 +14316,25 @@ fn refresh_workspace_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
             }
         }
     }
-    refresh_pending_syntax(runtime)
+    refresh_pending_syntax(runtime).map(|_| ())
+}
+
+fn queue_buffer_syntax_refresh(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    {
+        let ui = shell_ui_mut(runtime)?;
+        let Some(buffer) = ui.buffer_mut(buffer_id) else {
+            return Ok(());
+        };
+        buffer.force_syntax_refresh();
+    }
+    refresh_pending_syntax(runtime).map(|_| ())
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
-    let (path, text, buffer_language_id) = {
+    let (path, text, buffer_language_id, syntax_window) = {
         let Some(buffer) = shell_ui(runtime)?.buffer(buffer_id) else {
             return Ok(());
         };
@@ -13452,14 +14344,18 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
             buffer
                 .language_id()
                 .map(|language_id| language_id.to_owned()),
+            buffer.desired_syntax_window(),
         )
     };
 
+    let mut parse_session = None;
     let (language_id, syntax_result) = compute_buffer_syntax(
         syntax_registry_mut(runtime)?,
         path.as_deref(),
         &text,
         buffer_language_id.as_deref(),
+        syntax_window,
+        &mut parse_session,
     );
 
     let ui = shell_ui_mut(runtime)?;
@@ -13467,7 +14363,7 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
         match syntax_result {
             Some(Ok(snapshot)) => {
                 buffer.set_language_id(language_id.clone());
-                buffer.set_syntax_snapshot(Some(snapshot));
+                buffer.set_indexed_syntax_lines(Some(index_syntax_lines(snapshot)), syntax_window);
                 buffer.set_syntax_error(None);
             }
             Some(Err(error)) => {
@@ -13497,29 +14393,32 @@ fn compute_buffer_syntax(
     path: Option<&Path>,
     text: &TextBuffer,
     buffer_language_id: Option<&str>,
+    syntax_window: Option<SyntaxLineWindow>,
+    parse_session: &mut Option<SyntaxParseSession>,
 ) -> (Option<String>, Option<Result<SyntaxSnapshot, SyntaxError>>) {
-    if let Some(path) = path {
-        let language_id = registry
-            .language_for_path(path)
-            .map(|language| language.id().to_owned());
-        let syntax_result = match registry.highlight_buffer_for_path(path, text) {
-            Ok(snapshot) => Ok(snapshot),
-            Err(SyntaxError::GrammarNotInstalled { language_id, .. }) => {
-                if let Err(error) = registry.install_language(&language_id) {
-                    Err(error)
-                } else {
-                    registry.highlight_buffer_for_path(path, text)
-                }
-            }
-            Err(error) => Err(error),
-        };
-        return (language_id, Some(syntax_result));
-    }
-
-    let Some(language_id) = buffer_language_id.map(str::to_owned) else {
+    let highlight_window = syntax_window.map(SyntaxLineWindow::to_highlight_window);
+    let language_id = path
+        .and_then(|path| {
+            registry
+                .language_for_path(path)
+                .map(|language| language.id().to_owned())
+        })
+        .or_else(|| buffer_language_id.map(str::to_owned));
+    let Some(language_id) = language_id else {
+        *parse_session = None;
         return (None, None);
     };
-    let syntax_result = match registry.highlight_buffer_for_language(&language_id, text) {
+    let syntax_result = match match highlight_window {
+        Some(window) => registry.highlight_buffer_for_language_window_with_session(
+            &language_id,
+            text,
+            window,
+            parse_session,
+        ),
+        None => {
+            registry.highlight_buffer_for_language_with_session(&language_id, text, parse_session)
+        }
+    } {
         Ok(snapshot) => Ok(snapshot),
         Err(SyntaxError::GrammarNotInstalled {
             language_id: missing_language_id,
@@ -13528,7 +14427,19 @@ fn compute_buffer_syntax(
             if let Err(error) = registry.install_language(&missing_language_id) {
                 Err(error)
             } else {
-                registry.highlight_buffer_for_language(&language_id, text)
+                match highlight_window {
+                    Some(window) => registry.highlight_buffer_for_language_window_with_session(
+                        &language_id,
+                        text,
+                        window,
+                        parse_session,
+                    ),
+                    None => registry.highlight_buffer_for_language_with_session(
+                        &language_id,
+                        text,
+                        parse_session,
+                    ),
+                }
             }
         }
         Err(error) => Err(error),
@@ -13578,7 +14489,6 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
             .focus_buffer(workspace_id, existing)
             .map_err(|error| error.to_string())?;
         shell_ui_mut(runtime)?.focus_buffer_in_active_pane(existing);
-        refresh_buffer_syntax(runtime, existing)?;
         return Ok(existing);
     }
 
@@ -13620,7 +14530,7 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
             )
             .map_err(|error| error.to_string())?;
     }
-    refresh_buffer_syntax(runtime, buffer_id)?;
+    queue_buffer_syntax_refresh(runtime, buffer_id)?;
 
     Ok(buffer_id)
 }
@@ -13797,7 +14707,9 @@ fn workspace_search_grep_output(root: &Path, query: &str) -> Result<String, Stri
 }
 
 fn run_search_command(root: &Path, command: &str, args: &[String]) -> Result<String, String> {
-    let output = Command::new(command)
+    let mut process = Command::new(command);
+    configure_background_command(&mut process);
+    let output = process
         .args(args)
         .current_dir(root)
         .output()
@@ -13938,8 +14850,8 @@ mod tests {
 
     #[test]
     fn parse_rg_workspace_search_line_extracts_location() {
-        let parsed =
-            parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();").unwrap();
+        let parsed = parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();")
+            .expect("rg output should parse into a workspace search match");
         assert_eq!(parsed.0, r"src\main.rs");
         assert_eq!(parsed.1, 12);
         assert_eq!(parsed.2, 7);
@@ -13948,8 +14860,8 @@ mod tests {
 
     #[test]
     fn parse_grep_workspace_search_line_finds_case_insensitive_column() {
-        let parsed =
-            parse_grep_workspace_search_line(r"src\lib.rs:3:Hello Workspace", "workspace").unwrap();
+        let parsed = parse_grep_workspace_search_line(r"src\lib.rs:3:Hello Workspace", "workspace")
+            .expect("grep output should parse into a workspace search match");
         assert_eq!(parsed.0, r"src\lib.rs");
         assert_eq!(parsed.1, 3);
         assert_eq!(parsed.2, 7);
@@ -13961,6 +14873,79 @@ mod tests {
         assert_eq!(workspace_search_char_column("aébc", 0), 0);
         assert_eq!(workspace_search_char_column("aébc", 1), 1);
         assert_eq!(workspace_search_char_column("aébc", 3), 2);
+    }
+
+    #[test]
+    fn frame_pacing_remaining_clamps_to_120fps_budget() {
+        let now = Instant::now();
+        let remaining = frame_pacing_remaining(now - Duration::from_millis(2), now);
+        assert!(remaining >= Duration::from_micros(6_000));
+        assert_eq!(
+            frame_pacing_remaining(now - Duration::from_millis(10), now),
+            Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn git_refresh_is_deferred_while_typing() {
+        let now = Instant::now();
+        assert!(git_refresh_deferred_for_typing(Some(now), now));
+        assert!(git_refresh_deferred_for_typing(
+            Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
+            now
+        ));
+        assert!(!git_refresh_deferred_for_typing(
+            Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD),
+            now
+        ));
+        assert!(!git_refresh_deferred_for_typing(None, now));
+    }
+
+    #[test]
+    fn frame_pacing_is_deferred_while_typing() {
+        let now = Instant::now();
+        assert!(frame_pacing_deferred_for_typing(Some(now), now));
+        assert!(frame_pacing_deferred_for_typing(
+            Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
+            now
+        ));
+        assert!(!frame_pacing_deferred_for_typing(
+            Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD),
+            now
+        ));
+        assert!(!frame_pacing_deferred_for_typing(None, now));
+    }
+
+    #[test]
+    fn typing_event_batches_yield_once_budget_is_exhausted() {
+        let now = Instant::now();
+        assert!(!should_yield_after_typing_batch(
+            0,
+            TYPING_EVENT_BATCH_LIMIT,
+            now
+        ));
+        assert!(!should_yield_after_typing_batch(
+            1,
+            TYPING_EVENT_BATCH_LIMIT - 1,
+            now
+        ));
+        assert!(should_yield_after_typing_batch(
+            1,
+            TYPING_EVENT_BATCH_LIMIT,
+            now
+        ));
+        assert!(should_yield_after_typing_batch(
+            1,
+            1,
+            now - TYPING_EVENT_BATCH_TIME_BUDGET
+        ));
+    }
+
+    #[test]
+    fn truncate_text_to_width_uses_cell_budget() {
+        assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
+        assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
+        assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
     }
 }
 
@@ -14182,10 +15167,8 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
         };
     }
 
-    if keymod.intersects(shift_mod()) {
-        if matches!(keycode, Keycode::Tab) {
-            return Some("Shift+Tab".to_owned());
-        }
+    if keymod.intersects(shift_mod()) && matches!(keycode, Keycode::Tab) {
+        return Some("Shift+Tab".to_owned());
     }
 
     match keycode {
@@ -14240,13 +15223,13 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     }
 }
 
-fn default_error_log_path() -> PathBuf {
+fn default_volt_state_dir() -> PathBuf {
     if cfg!(target_os = "windows") {
         let base = env::var_os("LOCALAPPDATA")
             .or_else(|| env::var_os("APPDATA"))
             .map(PathBuf::from)
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        base.join("volt").join(ERROR_LOG_FILE_NAME)
+        base.join("volt")
     } else {
         let base = env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
@@ -14254,11 +15237,19 @@ fn default_error_log_path() -> PathBuf {
                 env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
             })
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        base.join("volt").join(ERROR_LOG_FILE_NAME)
+        base.join("volt")
     }
 }
 
-fn ensure_error_log_directory(path: &Path) -> Result<(), String> {
+fn default_error_log_path() -> PathBuf {
+    default_volt_state_dir().join(ERROR_LOG_FILE_NAME)
+}
+
+fn default_typing_profile_log_path() -> PathBuf {
+    default_volt_state_dir().join(TYPING_PROFILE_LOG_FILE_NAME)
+}
+
+fn ensure_log_directory(path: &Path) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -14296,6 +15287,91 @@ fn format_timestamp(timestamp: SystemTime) -> String {
         Ok(duration) => format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()),
         Err(_) => "0.000".to_owned(),
     }
+}
+
+fn format_duration_ms(duration: Duration) -> String {
+    let micros = duration.as_micros();
+    format!("{}.{:03}ms", micros / 1_000, micros % 1_000)
+}
+
+fn average_duration(durations: &[Duration]) -> Duration {
+    if durations.is_empty() {
+        return Duration::from_secs(0);
+    }
+    let total_micros = durations
+        .iter()
+        .map(|duration| duration.as_micros())
+        .sum::<u128>();
+    let average_micros = total_micros / durations.len() as u128;
+    let seconds = average_micros / 1_000_000;
+    let nanos = ((average_micros % 1_000_000) * 1_000) as u32;
+    Duration::new(seconds.min(u64::MAX as u128) as u64, nanos)
+}
+
+fn percentile_duration(durations: &[Duration], percentile: usize) -> Duration {
+    if durations.is_empty() {
+        return Duration::from_secs(0);
+    }
+    let mut sorted = durations.to_vec();
+    sorted.sort();
+    let clamped = percentile.min(100);
+    let index = ((sorted.len().saturating_sub(1)) * clamped) / 100;
+    sorted[index]
+}
+
+fn format_typing_frame_profile(frame: &TypingFrameProfile) -> String {
+    let timestamp = format_timestamp(frame.timestamp);
+    let preview = if frame.text_preview.is_empty() {
+        "<none>".to_owned()
+    } else {
+        frame.text_preview.clone()
+    };
+    let first_to_present = frame
+        .first_text_to_present
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "-".to_owned());
+    let last_to_present = frame
+        .last_text_to_present
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "-".to_owned());
+    format!(
+        "[{timestamp}] frame={} pacing_sleep={} events={} keydowns={} text_inputs={} preview=\"{}\" handle={} keydown_handle={} text_handle={} text_inner={} picker={} syntax_apply={} syntax_worker={} syntax_results={} syntax_spans={} git={} acp={} render={} present={} total={} first_text_to_present={} last_text_to_present={}",
+        frame.frame_index,
+        format_duration_ms(frame.frame_pacing_sleep),
+        frame.polled_events,
+        frame.keydown_events,
+        frame.text_input_events,
+        preview,
+        format_duration_ms(frame.handle_event_total),
+        format_duration_ms(frame.keydown_handle_total),
+        format_duration_ms(frame.text_input_handle_total),
+        format_duration_ms(frame.text_input_inner_total),
+        format_duration_ms(frame.picker_refresh),
+        format_duration_ms(frame.syntax_refresh),
+        format_duration_ms(frame.syntax_worker_compute),
+        frame.syntax_result_count,
+        frame.syntax_highlight_spans,
+        format_duration_ms(frame.git_refresh),
+        format_duration_ms(frame.acp_refresh),
+        format_duration_ms(frame.render),
+        format_duration_ms(frame.present),
+        format_duration_ms(frame.frame_total),
+        first_to_present,
+        last_to_present,
+    )
+}
+
+fn sanitize_typing_preview(text: &str) -> String {
+    let mut sanitized = String::new();
+    for character in text.chars() {
+        match character {
+            '\n' => sanitized.push_str("\\n"),
+            '\r' => sanitized.push_str("\\r"),
+            '\t' => sanitized.push_str("\\t"),
+            other => sanitized.push(other),
+        }
+    }
+    sanitized
 }
 
 fn format_error_entry_lines(entry: &ErrorEntry) -> Vec<String> {
@@ -14379,6 +15455,13 @@ fn build_shell_summary(
     renderer_name: String,
     font_path: &Path,
 ) -> ShellSummary {
+    let typing_profile = match state.finish_typing_profile() {
+        Ok(profile) => profile,
+        Err(error) => {
+            state.record_error("typing-profile", error);
+            None
+        }
+    };
     let pane_count = match state.pane_count() {
         Ok(count) => count,
         Err(error) => {
@@ -14400,6 +15483,7 @@ fn build_shell_summary(
         render_backend: RenderBackend::SdlCanvas,
         renderer_name,
         font_path: font_path.display().to_string(),
+        typing_profile,
     }
 }
 
@@ -14833,7 +15917,7 @@ fn collect_wrapped_lines(
 #[allow(clippy::too_many_arguments)]
 fn render_buffer(
     target: &mut DrawTarget<'_>,
-    fonts: &FontSet<'_>,
+    _fonts: &FontSet<'_>,
     buffer: &ShellBuffer,
     rect: Rect,
     active: bool,
@@ -14926,7 +16010,6 @@ fn render_buffer(
             })
     });
     let statusline = truncate_text_to_width(
-        fonts,
         &user::statusline::compose(&user::statusline::StatuslineContext {
             vim_mode: input_mode.label(),
             recording_macro,
@@ -14941,7 +16024,8 @@ fn render_buffer(
             git: git_info,
         }),
         rect.width().saturating_sub(24),
-    )?;
+        cell_width,
+    );
 
     let body_y = rect.y() + 10;
     let statusline_y = rect.y() + rect.height() as i32 - line_height - 8;
@@ -15116,7 +16200,6 @@ fn render_buffer(
             }
             draw_buffer_text(
                 target,
-                fonts,
                 segment_x,
                 y,
                 &wrapped.line,
@@ -15125,6 +16208,7 @@ fn render_buffer(
                 buffer.line_syntax_spans(line_index),
                 theme_registry,
                 text_color,
+                cell_width,
             )?;
             visual_row = visual_row.saturating_add(1);
         }
@@ -15171,7 +16255,7 @@ fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
-                    input_y - 4 + input_box_height.max(line_height) as i32,
+                    input_y - 4 + input_box_height.max(line_height),
                     rect.width().saturating_sub(16),
                     1,
                 ),
@@ -15207,7 +16291,7 @@ fn render_buffer(
             if let Some((mode_label, rest)) = hint.split_once(" · ") {
                 let prefix = format!("{prompt_padding}{mode_label}");
                 draw_text(target, input_x, hint_y, &prefix, git_added_fallback)?;
-                let prefix_width = text_width(fonts, &prefix)? as i32;
+                let prefix_width = monospace_text_width(&prefix, cell_width) as i32;
                 let suffix = format!(" · {rest}");
                 draw_text(
                     target,
@@ -15256,10 +16340,10 @@ fn render_buffer(
             let mut draw_x = statusline_x;
             if !before.is_empty() {
                 draw_text(target, draw_x, statusline_y, before, title_color)?;
-                draw_x += text_width(fonts, before)? as i32;
+                draw_x += monospace_text_width(before, cell_width) as i32;
             }
             draw_text(target, draw_x, statusline_y, acp_icon, git_added_fallback)?;
-            draw_x += text_width(fonts, acp_icon)? as i32;
+            draw_x += monospace_text_width(acp_icon, cell_width) as i32;
             if !rest.is_empty() {
                 draw_text(target, draw_x, statusline_y, rest, title_color)?;
             }
@@ -15288,7 +16372,6 @@ fn render_buffer(
 #[allow(clippy::too_many_arguments)]
 fn draw_buffer_text(
     target: &mut DrawTarget<'_>,
-    fonts: &FontSet<'_>,
     x: i32,
     y: i32,
     line: &str,
@@ -15297,6 +16380,7 @@ fn draw_buffer_text(
     line_syntax_spans: Option<&[LineSyntaxSpan]>,
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
+    cell_width: i32,
 ) -> Result<(), ShellError> {
     let segment_text = char_map.slice(line, segment.start_col, segment.end_col);
     let mut clipped_spans = Vec::new();
@@ -15327,7 +16411,7 @@ fn draw_buffer_text(
             continue;
         }
         draw_text(target, draw_x, y, &colored_segment, color)?;
-        draw_x += text_width(fonts, &colored_segment)? as i32;
+        draw_x += monospace_text_width(&colored_segment, cell_width) as i32;
     }
     Ok(())
 }
@@ -15436,17 +16520,22 @@ fn selection_columns_for_visual(
     }
 }
 
-fn index_syntax_lines(snapshot: &SyntaxSnapshot) -> BTreeMap<usize, Vec<LineSyntaxSpan>> {
+fn index_syntax_lines(snapshot: SyntaxSnapshot) -> IndexedSyntaxLines {
     let mut syntax_lines = BTreeMap::new();
-    for span in &snapshot.highlight_spans {
-        for line_index in span.start_position.line..=span.end_position.line {
-            let start = if line_index == span.start_position.line {
-                span.start_position.column
+    for span in snapshot.highlight_spans {
+        let start_line = span.start_position.line;
+        let end_line = span.end_position.line;
+        let start_column = span.start_position.column;
+        let end_column = span.end_position.column;
+        let mut theme_token = span.theme_token;
+        for line_index in start_line..=end_line {
+            let start = if line_index == start_line {
+                start_column
             } else {
                 0
             };
-            let end = if line_index == span.end_position.line {
-                span.end_position.column
+            let end = if line_index == end_line {
+                end_column
             } else {
                 usize::MAX
             };
@@ -15459,7 +16548,11 @@ fn index_syntax_lines(snapshot: &SyntaxSnapshot) -> BTreeMap<usize, Vec<LineSynt
                 .push(LineSyntaxSpan {
                     start,
                     end,
-                    theme_token: span.theme_token.clone(),
+                    theme_token: if line_index == end_line {
+                        std::mem::take(&mut theme_token)
+                    } else {
+                        theme_token.clone()
+                    },
                 });
         }
     }
@@ -15485,13 +16578,6 @@ enum FontRole {
 struct FontRun {
     role: FontRole,
     text: String,
-}
-
-fn font_run_width(font: &Font<'_>, text: &str) -> Result<u32, ShellError> {
-    Ok(font
-        .size_of(text)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?
-        .0)
 }
 
 fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
@@ -15540,22 +16626,8 @@ fn font_runs(text: &str, fonts: &FontSet<'_>) -> Vec<FontRun> {
     runs
 }
 
-fn text_width(fonts: &FontSet<'_>, text: &str) -> Result<u32, ShellError> {
-    let Some(fallback) = fonts.fallback() else {
-        return font_run_width(fonts.primary(), text);
-    };
-    if text.is_ascii() {
-        return font_run_width(fonts.primary(), text);
-    }
-    let mut width = 0u32;
-    for run in font_runs(text, fonts) {
-        let font = match run.role {
-            FontRole::Primary => fonts.primary(),
-            FontRole::Fallback => fallback,
-        };
-        width = width.saturating_add(font_run_width(font, &run.text)?);
-    }
-    Ok(width)
+fn monospace_text_width(text: &str, cell_width: i32) -> u32 {
+    (text.chars().count() as u32).saturating_mul(cell_width.max(1) as u32)
 }
 
 fn to_sdl_color(color: ThemeColor) -> Color {
@@ -15658,7 +16730,7 @@ fn render_text_with_fonts(
                 Rect::new(draw_x, y + y_offset, surface.width(), surface.height()),
             )
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        draw_x += font_run_width(font, &run.text)? as i32;
+        draw_x += surface.width() as i32;
     }
     Ok(())
 }
@@ -15754,38 +16826,34 @@ fn fill_rounded_rect_canvas<T: RenderTarget>(
     Ok(())
 }
 
-fn truncate_text_to_width(
-    fonts: &FontSet<'_>,
-    text: &str,
-    max_width: u32,
-) -> Result<String, ShellError> {
+fn truncate_text_to_width(text: &str, max_width: u32, cell_width: i32) -> String {
     if text.is_empty() || max_width == 0 {
-        return Ok(String::new());
+        return String::new();
     }
 
-    if text_width(fonts, text)? <= max_width {
-        return Ok(text.to_owned());
+    let cell_width = cell_width.max(1) as u32;
+    let max_cells = (max_width / cell_width) as usize;
+    if text.chars().count() <= max_cells {
+        return text.to_owned();
     }
 
     let ellipsis = "...";
-    let ellipsis_width = text_width(fonts, ellipsis)?;
-    if ellipsis_width >= max_width {
-        return Ok("...".to_owned());
+    let ellipsis_cells = ellipsis.chars().count();
+    if max_cells <= ellipsis_cells {
+        return "...".to_owned();
     }
 
     let mut truncated = String::new();
+    let available_cells = max_cells.saturating_sub(ellipsis_cells);
     for character in text.chars() {
-        let mut candidate = truncated.clone();
-        candidate.push(character);
-        candidate.push_str(ellipsis);
-        if text_width(fonts, &candidate)? > max_width {
+        if truncated.chars().count() >= available_cells {
             break;
         }
         truncated.push(character);
     }
 
     truncated.push_str(ellipsis);
-    Ok(truncated)
+    truncated
 }
 
 struct PixelRectToRect;

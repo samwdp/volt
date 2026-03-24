@@ -35,29 +35,41 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::*;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub(super) fn init_acp_manager(runtime: &mut EditorRuntime) -> Result<(), ShellError> {
     let manager = AcpManager::new().map_err(ShellError::Runtime)?;
     runtime.services_mut().insert(Arc::new(Mutex::new(manager)));
     Ok(())
 }
 
-pub(super) fn refresh_pending_acp(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn refresh_pending_acp(runtime: &mut EditorRuntime) -> Result<bool, String> {
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
         .ok_or_else(|| "acp manager service missing".to_owned())?
         .clone();
-    let actions = {
+    let (events_changed, actions) = {
         let mut manager = manager
             .lock()
             .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-        manager.drain_events(runtime)?;
-        manager.take_pending_ui_actions()
+        let events_changed = manager.drain_events(runtime)?;
+        (events_changed, manager.take_pending_ui_actions())
     };
+    let mut changed = events_changed || !actions.is_empty();
     for action in actions {
         handle_acp_ui_action(runtime, action)?;
+        changed = true;
     }
-    Ok(())
+    Ok(changed)
 }
 
 pub(super) fn acp_connected(runtime: &EditorRuntime) -> Result<bool, String> {
@@ -292,7 +304,7 @@ pub(super) fn acp_insert_slash_command(
     let existing = input.text().to_owned();
     let trailing = existing
         .strip_prefix('/')
-        .and_then(|text| text.splitn(2, ' ').nth(1))
+        .and_then(|text| text.split_once(' ').map(|(_, suffix)| suffix))
         .map(str::trim_start)
         .filter(|text| !text.is_empty());
     let next = match trailing {
@@ -305,20 +317,20 @@ pub(super) fn acp_insert_slash_command(
 
 fn format_acp_mode_label(mode_id: &SessionModeId) -> String {
     let raw = mode_id.to_string();
-    if let Some((_, suffix)) = raw.rsplit_once('#') {
-        if !suffix.is_empty() {
-            return suffix.to_owned();
-        }
+    if let Some((_, suffix)) = raw.rsplit_once('#')
+        && !suffix.is_empty()
+    {
+        return suffix.to_owned();
     }
     raw
 }
 
 fn format_acp_model_label(model_id: &ModelId) -> String {
     let raw = model_id.to_string();
-    if let Some((_, suffix)) = raw.rsplit_once('/') {
-        if !suffix.is_empty() {
-            return suffix.to_owned();
-        }
+    if let Some((_, suffix)) = raw.rsplit_once('/')
+        && !suffix.is_empty()
+    {
+        return suffix.to_owned();
     }
     raw
 }
@@ -346,10 +358,10 @@ fn update_acp_input_hint(
             Some(segments.join(" · "))
         }
     };
-    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-        if let Some(input) = buffer.input_field_mut() {
-            input.set_hint(hint);
-        }
+    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
+        && let Some(input) = buffer.input_field_mut()
+    {
+        input.set_hint(hint);
     }
 }
 
@@ -852,12 +864,10 @@ fn open_slash_command_picker(
         .into_iter()
         .map(|command| {
             let mut detail = command.description.clone();
-            if let Some(available_input) = command.input.as_ref() {
-                if let agent_client_protocol::AvailableCommandInput::Unstructured(input) =
-                    available_input
-                {
-                    detail.push_str(&format!(" | {}", input.hint));
-                }
+            if let Some(agent_client_protocol::AvailableCommandInput::Unstructured(input)) =
+                command.input.as_ref()
+            {
+                detail.push_str(&format!(" | {}", input.hint));
             }
             PickerEntry {
                 item: PickerItem::new(
@@ -1100,12 +1110,13 @@ impl AcpManager {
         });
     }
 
-    fn drain_events(&mut self, runtime: &mut EditorRuntime) -> Result<(), String> {
+    fn drain_events(&mut self, runtime: &mut EditorRuntime) -> Result<bool, String> {
         let events: Vec<AcpEvent> = self.events.try_iter().collect();
+        let changed = !events.is_empty();
         for event in events {
             self.handle_event(runtime, event)?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn handle_event(&mut self, runtime: &mut EditorRuntime, event: AcpEvent) -> Result<(), String> {
@@ -1176,10 +1187,9 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.append_output_text(&text);
-                    }
+                    buffer.append_output_text(&text);
                 }
             }
             AcpEvent::SessionLines { session_id, lines } => {
@@ -1187,10 +1197,9 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.append_output_lines(&lines);
-                    }
+                    buffer.append_output_lines(&lines);
                 }
             }
             AcpEvent::SessionCommands {
@@ -1199,14 +1208,14 @@ impl AcpManager {
             } => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.available_commands = commands;
-                    if !session.available_commands.is_empty() {
-                        if let Some(trigger) = self.pending_slash.remove(&session.buffer_id) {
-                            self.pending_ui_actions
-                                .push(AcpUiAction::OpenSlashCompletion {
-                                    buffer_id: session.buffer_id,
-                                    trigger,
-                                });
-                        }
+                    if !session.available_commands.is_empty()
+                        && let Some(trigger) = self.pending_slash.remove(&session.buffer_id)
+                    {
+                        self.pending_ui_actions
+                            .push(AcpUiAction::OpenSlashCompletion {
+                                buffer_id: session.buffer_id,
+                                trigger,
+                            });
                     }
                 }
             }
@@ -1764,6 +1773,7 @@ async fn connect_acp_client(
     buffer_id: BufferId,
 ) -> Result<(), String> {
     let mut command = Command::new(&config.command);
+    configure_background_command(&mut command);
     command.args(&config.args);
     if let Some(cwd) = config.cwd.as_ref() {
         command.current_dir(cwd);
@@ -2294,6 +2304,7 @@ impl Client for AcpClient {
         args: CreateTerminalRequest,
     ) -> agent_client_protocol::Result<CreateTerminalResponse> {
         let mut command = Command::new(args.command);
+        configure_background_command(&mut command);
         command.args(args.args);
         if let Some(cwd) = args.cwd.as_ref() {
             command.current_dir(cwd);
@@ -2340,12 +2351,11 @@ impl Client for AcpClient {
             .terminals
             .get_mut(&args.terminal_id)
             .ok_or_else(|| Error::resource_not_found(None))?;
-        if terminal.exit_status.borrow().is_none() {
-            if let Ok(Some(status)) = terminal.child.try_wait() {
-                let exit =
-                    TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32));
-                *terminal.exit_status.borrow_mut() = Some(exit);
-            }
+        if terminal.exit_status.borrow().is_none()
+            && let Ok(Some(status)) = terminal.child.try_wait()
+        {
+            let exit = TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32));
+            *terminal.exit_status.borrow_mut() = Some(exit);
         }
         let output = terminal.output.borrow().clone();
         let (trimmed, truncated) = apply_output_limit(&output, terminal.output_limit);
@@ -2394,12 +2404,15 @@ impl Client for AcpClient {
         &self,
         args: KillTerminalRequest,
     ) -> agent_client_protocol::Result<KillTerminalResponse> {
-        let mut state = self.state.borrow_mut();
-        let terminal = state
-            .terminals
-            .get_mut(&args.terminal_id)
-            .ok_or_else(|| Error::resource_not_found(None))?;
+        let terminal = self.state.borrow_mut().terminals.remove(&args.terminal_id);
+        let Some(mut terminal) = terminal else {
+            return Err(Error::resource_not_found(None));
+        };
         let _ = terminal.child.kill().await;
+        self.state
+            .borrow_mut()
+            .terminals
+            .insert(args.terminal_id, terminal);
         Ok(KillTerminalResponse::new())
     }
 }

@@ -19,6 +19,8 @@ pub struct ShellConfig {
     pub render_backend: RenderBackend,
     /// Optional frame limit used for smoke tests.
     pub frame_limit: Option<u32>,
+    /// Enables detailed typing/input latency profiling and writes a report on exit.
+    pub profile_input_latency: bool,
 }
 
 impl Default for ShellConfig {
@@ -31,8 +33,22 @@ impl Default for ShellConfig {
             hidden: false,
             render_backend: RenderBackend::SdlCanvas,
             frame_limit: None,
+            profile_input_latency: false,
         }
     }
+}
+
+/// Summary written when typing profiling is enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingProfileSummary {
+    /// Output path of the written typing profile log.
+    pub log_path: String,
+    /// Number of captured frames retained in the report.
+    pub frames_captured: usize,
+    /// Number of retained frames that included text input.
+    pub input_frames_captured: usize,
+    /// Slowest retained frame duration in microseconds.
+    pub slowest_frame_micros: u128,
 }
 
 /// Summary returned after the demo shell exits.
@@ -50,6 +66,8 @@ pub struct ShellSummary {
     pub renderer_name: String,
     /// Font path selected by the text renderer.
     pub font_path: String,
+    /// Typing profile report metadata when input profiling was enabled.
+    pub typing_profile: Option<TypingProfileSummary>,
 }
 
 /// Errors raised while creating or running the SDL demo shell.

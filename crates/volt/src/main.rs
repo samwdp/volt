@@ -57,45 +57,44 @@ struct DapState {
     sessions: Vec<DebugSessionPlan>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    ShellDemo,
+    ShellHidden,
+    BootstrapDemo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LaunchOptions {
+    mode: LaunchMode,
+    profile_input_latency: bool,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        None | Some("--shell-demo") => {
-            let summary = run_demo_shell(ShellConfig::default())?;
-            println!(
-                "volt shell demo: frames={}, panes={}, popup_visible={}, backend={:?}, renderer={}, font={}",
-                summary.frames_rendered,
-                summary.pane_count,
-                summary.popup_visible,
-                summary.render_backend,
-                summary.renderer_name,
-                summary.font_path,
-            );
+    let options = parse_launch_options(std::env::args().skip(1))?;
+    match options.mode {
+        LaunchMode::ShellDemo => {
+            let summary = run_demo_shell(ShellConfig {
+                profile_input_latency: options.profile_input_latency,
+                ..ShellConfig::default()
+            })?;
+            print_shell_summary("volt shell demo", &summary);
             return Ok(());
         }
-        Some("--shell-hidden") => {
+        LaunchMode::ShellHidden => {
             let summary = run_demo_shell(ShellConfig {
                 hidden: true,
                 frame_limit: Some(1),
+                profile_input_latency: options.profile_input_latency,
                 ..ShellConfig::default()
             })?;
-            println!(
-                "volt hidden shell smoke test: frames={}, panes={}, popup_visible={}, backend={:?}, renderer={}, font={}",
-                summary.frames_rendered,
-                summary.pane_count,
-                summary.popup_visible,
-                summary.render_backend,
-                summary.renderer_name,
-                summary.font_path,
-            );
+            print_shell_summary("volt hidden shell smoke test", &summary);
             return Ok(());
         }
-        Some("--bootstrap-demo") => {}
-        Some(mode) => {
-            return Err(format!(
-                "unknown mode `{mode}`; expected `--shell-demo`, `--shell-hidden`, or `--bootstrap-demo`"
-            )
-            .into())
+        LaunchMode::BootstrapDemo => {
+            if options.profile_input_latency {
+                return Err("`--profile-input` is only supported with shell modes".into());
+            }
         }
     }
 
@@ -656,6 +655,77 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
+    let mut mode = LaunchMode::ShellDemo;
+    let mut explicit_mode = false;
+    let mut profile_input_latency = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--shell-demo" => {
+                if explicit_mode {
+                    return Err("shell mode was provided more than once".to_owned());
+                }
+                explicit_mode = true;
+                mode = LaunchMode::ShellDemo;
+            }
+            "--shell-hidden" => {
+                if explicit_mode {
+                    return Err("shell mode was provided more than once".to_owned());
+                }
+                explicit_mode = true;
+                mode = LaunchMode::ShellHidden;
+            }
+            "--bootstrap-demo" => {
+                if explicit_mode {
+                    return Err("shell mode was provided more than once".to_owned());
+                }
+                explicit_mode = true;
+                mode = LaunchMode::BootstrapDemo;
+            }
+            "--profile-input" | "--profile-typing" => {
+                profile_input_latency = true;
+            }
+            other => {
+                return Err(format!(
+                    "unknown mode `{other}`; expected `--shell-demo`, `--shell-hidden`, `--bootstrap-demo`, `--profile-input`, or `--profile-typing`"
+                ));
+            }
+        }
+    }
+
+    Ok(LaunchOptions {
+        mode,
+        profile_input_latency,
+    })
+}
+
+fn print_shell_summary(prefix: &str, summary: &editor_sdl::ShellSummary) {
+    print!(
+        "{prefix}: frames={}, panes={}, popup_visible={}, backend={:?}, renderer={}, font={}",
+        summary.frames_rendered,
+        summary.pane_count,
+        summary.popup_visible,
+        summary.render_backend,
+        summary.renderer_name,
+        summary.font_path,
+    );
+    if let Some(profile) = summary.typing_profile.as_ref() {
+        print!(
+            ", input_profile={}, profiled_frames={}, input_frames={}, slowest_frame={}",
+            profile.log_path,
+            profile.frames_captured,
+            profile.input_frames_captured,
+            format_micros_as_millis(profile.slowest_frame_micros),
+        );
+    }
+    println!();
+}
+
+fn format_micros_as_millis(micros: u128) -> String {
+    format!("{}.{:03}ms", micros / 1_000, micros % 1_000)
+}
+
 fn command_palette_items(runtime: &EditorRuntime) -> Vec<PickerItem> {
     runtime
         .commands()
@@ -670,4 +740,44 @@ fn command_palette_items(runtime: &EditorRuntime) -> Vec<PickerItem> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_launch_options_defaults_to_shell_demo() {
+        let options = parse_launch_options(Vec::<String>::new())
+            .expect("empty args should default to shell demo mode");
+        assert_eq!(
+            options,
+            LaunchOptions {
+                mode: LaunchMode::ShellDemo,
+                profile_input_latency: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_launch_options_accepts_profile_alias() {
+        let options =
+            parse_launch_options(["--shell-hidden".to_owned(), "--profile-typing".to_owned()])
+                .expect("profile alias should enable typing profile mode");
+        assert_eq!(
+            options,
+            LaunchOptions {
+                mode: LaunchMode::ShellHidden,
+                profile_input_latency: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_launch_options_rejects_multiple_modes() {
+        let error =
+            parse_launch_options(["--shell-demo".to_owned(), "--bootstrap-demo".to_owned()])
+                .expect_err("multiple launch modes should be rejected");
+        assert!(error.contains("more than once"));
+    }
 }
