@@ -1,5 +1,6 @@
 #![doc = r#"SDL3 windowing, input, and demo shell rendering for the native editor."#]
 
+mod browser_host;
 mod config;
 mod shell;
 mod state;

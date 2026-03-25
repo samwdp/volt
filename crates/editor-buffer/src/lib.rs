@@ -1361,16 +1361,17 @@ impl TextBuffer {
         }
 
         let mut char_index = original;
-        if matches_word_kind(self.rope.char(char_index), kind) {
+        let current_class = word_motion_class(self.rope.char(char_index), kind);
+        if current_class != WordMotionClass::Whitespace {
             while char_index < self.char_count()
-                && matches_word_kind(self.rope.char(char_index), kind)
+                && word_motion_class(self.rope.char(char_index), kind) == current_class
             {
                 char_index += 1;
             }
         }
 
         while char_index < self.char_count()
-            && is_object_separator(self.rope.char(char_index), kind)
+            && word_motion_class(self.rope.char(char_index), kind) == WordMotionClass::Whitespace
         {
             char_index += 1;
         }
@@ -1394,13 +1395,18 @@ impl TextBuffer {
         }
 
         let mut char_index = original.saturating_sub(1);
-        while char_index > 0 && is_object_separator(self.rope.char(char_index), kind) {
+        while char_index > 0
+            && word_motion_class(self.rope.char(char_index), kind) == WordMotionClass::Whitespace
+        {
             char_index -= 1;
         }
-        if is_object_separator(self.rope.char(char_index), kind) {
+        let current_class = word_motion_class(self.rope.char(char_index), kind);
+        if current_class == WordMotionClass::Whitespace {
             return false;
         }
-        while char_index > 0 && matches_word_kind(self.rope.char(char_index - 1), kind) {
+        while char_index > 0
+            && word_motion_class(self.rope.char(char_index - 1), kind) == current_class
+        {
             char_index -= 1;
         }
 
@@ -1813,6 +1819,34 @@ fn is_punctuation_char(character: char) -> bool {
     !character.is_whitespace() && !is_word_char(character)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordMotionClass {
+    Whitespace,
+    Word,
+    Punctuation,
+}
+
+fn word_motion_class(character: char, kind: WordKind) -> WordMotionClass {
+    match kind {
+        WordKind::Word => {
+            if character.is_whitespace() {
+                WordMotionClass::Whitespace
+            } else if is_word_char(character) {
+                WordMotionClass::Word
+            } else {
+                WordMotionClass::Punctuation
+            }
+        }
+        WordKind::BigWord => {
+            if character.is_whitespace() {
+                WordMotionClass::Whitespace
+            } else {
+                WordMotionClass::Word
+            }
+        }
+    }
+}
+
 fn matches_word_kind(character: char, kind: WordKind) -> bool {
     match kind {
         WordKind::Word => is_word_char(character),
@@ -2183,14 +2217,44 @@ mod tests {
     }
 
     #[test]
-    fn word_motions_skip_punctuation_runs() {
+    fn word_motions_treat_punctuation_runs_as_words() {
         let mut buffer = TextBuffer::from_text("alpha... beta");
+
+        assert!(buffer.move_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 5));
 
         assert!(buffer.move_word_forward());
         assert_eq!(buffer.cursor(), TextPoint::new(0, 9));
 
         assert!(buffer.move_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 5));
+
+        assert!(buffer.move_word_backward());
         assert_eq!(buffer.cursor(), TextPoint::new(0, 0));
+    }
+
+    #[test]
+    fn word_motions_stop_on_punctuation_before_crossing_lines() {
+        let mut buffer = TextBuffer::from_text("PluginKeymapScope::Workspace,\n),\nnormal_binding");
+        buffer.set_cursor(TextPoint::new(0, 19));
+
+        assert!(buffer.move_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 28));
+
+        assert!(buffer.move_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(1, 0));
+
+        assert!(buffer.move_word_forward());
+        assert_eq!(buffer.cursor(), TextPoint::new(2, 0));
+
+        assert!(buffer.move_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(1, 0));
+
+        assert!(buffer.move_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 28));
+
+        assert!(buffer.move_word_backward());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 19));
     }
 
     #[test]

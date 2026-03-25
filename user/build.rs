@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let symbols_dir = manifest_dir.join("nerd_font_symbols");
 
-    let mut output = String::from("pub const NERD_FONT_SYMBOLS: &[NerdFontSymbol] = &[\n");
+    let mut output = String::from("pub const ICON_FONT_SYMBOLS: &[IconFontSymbol] = &[\n");
     for (module, category) in MODULES {
         let module_path = symbols_dir.join(format!("{module}.rs"));
         println!("cargo:rerun-if-changed={}", module_path.display());
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 continue;
             };
             output.push_str(&format!(
-                "    NerdFontSymbol {{ name: \"{}\", glyph: \"{}\", category: NerdFontCategory::{} }},\n",
+                "    IconFontSymbol {{ name: \"{}\", glyph: \"{}\", category: IconFontCategory::{} }},\n",
                 escape_rust_string(name),
                 escape_rust_string(glyph),
                 category
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     output.push_str("];\n");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    fs::write(out_dir.join("nerd_font_data.rs"), output)?;
+    fs::write(out_dir.join("icon_font_data.rs"), output)?;
     Ok(())
 }
 

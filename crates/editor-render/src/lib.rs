@@ -205,9 +205,8 @@ fn preferred_berkeley_mono_font() -> Option<PathBuf> {
         else {
             continue;
         };
-        let looks_like_berkeley_mono = (file_name.contains("berkeleymono")
-            || file_name.contains("berkeley mono"))
-            && file_name.contains("nerd");
+        let looks_like_berkeley_mono =
+            file_name.contains("berkeleymono") || file_name.contains("berkeley mono");
         if looks_like_berkeley_mono {
             return Some(path);
         }

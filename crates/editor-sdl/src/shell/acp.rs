@@ -185,7 +185,7 @@ fn initial_acp_buffer_lines(client: &user::acp::AcpClientConfig) -> Vec<String> 
     lines.push(String::new());
     lines.push(format!(
         "{} Connected via ACP.",
-        user::nerd_font::symbols::fa::FA_CONNECTDEVELOP
+        user::icon_font::symbols::fa::FA_CONNECTDEVELOP
     ));
     lines.push(String::new());
     lines
@@ -243,16 +243,18 @@ pub(super) fn submit_acp_prompt(
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&["ACP session is not connected.".to_owned()]);
         buffer.clear_input();
+        refresh_acp_input_hint(runtime, buffer_id)?;
         return Ok(());
     };
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&[format!(
             "{} **You:** {prompt}{text}",
-            user::nerd_font::symbols::md::MD_ACCOUNT
+            user::icon_font::symbols::md::MD_ACCOUNT
         )]);
         buffer.clear_input();
     }
+    refresh_acp_input_hint(runtime, buffer_id)?;
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
@@ -332,6 +334,7 @@ pub(super) fn acp_insert_slash_command(
         None => format!("/{command} "),
     };
     input.set_text(&next);
+    refresh_acp_input_hint(runtime, buffer_id)?;
     Ok(())
 }
 
@@ -355,34 +358,120 @@ fn format_acp_model_label(model_id: &ModelId) -> String {
     raw
 }
 
+fn command_input_hint(command: &AvailableCommand) -> Option<&str> {
+    match command.input.as_ref() {
+        Some(agent_client_protocol::AvailableCommandInput::Unstructured(input)) => {
+            Some(input.hint.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn active_command_input_hint(commands: &[AvailableCommand], text: &str) -> Option<String> {
+    let trimmed = text.strip_prefix('/')?.trim_start();
+    let command_name = trimmed
+        .split_whitespace()
+        .next()
+        .filter(|command| !command.is_empty())?;
+    commands
+        .iter()
+        .find(|command| command.name == command_name)
+        .and_then(command_input_hint)
+        .map(str::to_owned)
+}
+
+fn build_acp_input_hint(
+    mode_id: Option<&SessionModeId>,
+    model_id: Option<&ModelId>,
+    command_hint: Option<&str>,
+) -> Option<String> {
+    let mut segments = Vec::new();
+    if let Some(mode_id) = mode_id {
+        segments.push(format_acp_mode_label(mode_id));
+    }
+    if let Some(model_id) = model_id {
+        segments.push(format_acp_model_label(model_id));
+    }
+    if let Some(command_hint) = command_hint.filter(|hint| !hint.trim().is_empty()) {
+        segments.push(command_hint.to_owned());
+    }
+    if mode_id.is_some() {
+        segments.push("shift+tab switch mode".to_owned());
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join(" · "))
+    }
+}
+
 fn update_acp_input_hint(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
     mode_id: Option<&SessionModeId>,
     model_id: Option<&ModelId>,
+    available_commands: &[AvailableCommand],
 ) {
-    let hint = {
-        let mut segments = Vec::new();
-        if let Some(mode_id) = mode_id {
-            segments.push(format_acp_mode_label(mode_id));
-        }
-        if let Some(model_id) = model_id {
-            segments.push(format_acp_model_label(model_id));
-        }
-        if mode_id.is_some() {
-            segments.push("shift+tab switch mode".to_owned());
-        }
-        if segments.is_empty() {
-            None
-        } else {
-            Some(segments.join(" · "))
-        }
-    };
+    let input_text = shell_buffer(runtime, buffer_id)
+        .ok()
+        .and_then(|buffer| buffer.input_field().map(|input| input.text().to_owned()))
+        .unwrap_or_default();
+    let command_hint = active_command_input_hint(available_commands, &input_text);
+    let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref());
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
         && let Some(input) = buffer.input_field_mut()
     {
         input.set_hint(hint);
     }
+}
+
+pub(super) fn refresh_acp_input_hint(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let is_acp = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+        )
+    };
+    if !is_acp {
+        return Ok(());
+    }
+    let Some(manager) = runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() else {
+        return Ok(());
+    };
+    let (mode_id, model_id, available_commands) = {
+        let manager = manager
+            .lock()
+            .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+        let session = manager
+            .session_for_buffer(buffer_id)
+            .and_then(|session_id| manager.sessions.get(&session_id));
+        match session {
+            Some(session) => (
+                session
+                    .mode_state
+                    .as_ref()
+                    .map(|state| state.current_mode_id.clone()),
+                session
+                    .model_state
+                    .as_ref()
+                    .map(|state| state.current_model_id.clone()),
+                session.available_commands.clone(),
+            ),
+            None => (None, None, Vec::new()),
+        }
+    };
+    update_acp_input_hint(
+        runtime,
+        buffer_id,
+        mode_id.as_ref(),
+        model_id.as_ref(),
+        &available_commands,
+    );
+    Ok(())
 }
 
 fn config_option_matches(option: &SessionConfigOption, needle: &str) -> bool {
@@ -1165,23 +1254,23 @@ impl AcpManager {
                         model_config_id: None,
                     },
                 );
-                let (mode_id, model_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| {
-                        (
-                            session
-                                .mode_state
-                                .as_ref()
-                                .map(|state| &state.current_mode_id),
-                            session
-                                .model_state
-                                .as_ref()
-                                .map(|state| &state.current_model_id),
-                        )
-                    })
-                    .unwrap_or((None, None));
-                update_acp_input_hint(runtime, buffer_id, mode_id, model_id);
+                if let Some(session) = self.sessions.get(&session_id) {
+                    let mode_id = session
+                        .mode_state
+                        .as_ref()
+                        .map(|state| &state.current_mode_id);
+                    let model_id = session
+                        .model_state
+                        .as_ref()
+                        .map(|state| &state.current_model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
+                }
                 if let Some(target_session_id) = pending.load_session_id {
                     self.load_session(
                         session_id,
@@ -1228,6 +1317,21 @@ impl AcpManager {
             } => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.available_commands = commands;
+                    let mode_id = session
+                        .mode_state
+                        .as_ref()
+                        .map(|state| &state.current_mode_id);
+                    let model_id = session
+                        .model_state
+                        .as_ref()
+                        .map(|state| &state.current_model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
                     if !session.available_commands.is_empty()
                         && let Some(trigger) = self.pending_slash.remove(&session.buffer_id)
                     {
@@ -1277,7 +1381,13 @@ impl AcpManager {
                         .model_state
                         .as_ref()
                         .map(|state| &state.current_model_id);
-                    update_acp_input_hint(runtime, session.buffer_id, mode_id, model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::SessionModeUpdate {
@@ -1299,7 +1409,13 @@ impl AcpManager {
                         .model_state
                         .as_ref()
                         .map(|state| &state.current_model_id);
-                    update_acp_input_hint(runtime, session.buffer_id, mode_id, model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::SessionList {
@@ -1373,23 +1489,23 @@ impl AcpManager {
                         buffer.replace_with_lines(Vec::new());
                         buffer.clear_input();
                     }
-                    let (mode_id, model_id) = self
-                        .sessions
-                        .get(&new_session_id)
-                        .map(|session| {
-                            (
-                                session
-                                    .mode_state
-                                    .as_ref()
-                                    .map(|state| &state.current_mode_id),
-                                session
-                                    .model_state
-                                    .as_ref()
-                                    .map(|state| &state.current_model_id),
-                            )
-                        })
-                        .unwrap_or((None, None));
-                    update_acp_input_hint(runtime, buffer_id, mode_id, model_id);
+                    if let Some(session) = self.sessions.get(&new_session_id) {
+                        let mode_id = session
+                            .mode_state
+                            .as_ref()
+                            .map(|state| &state.current_mode_id);
+                        let model_id = session
+                            .model_state
+                            .as_ref()
+                            .map(|state| &state.current_model_id);
+                        update_acp_input_hint(
+                            runtime,
+                            buffer_id,
+                            mode_id,
+                            model_id,
+                            &session.available_commands,
+                        );
+                    }
                 }
             }
             AcpEvent::SessionModeSet {
@@ -1408,7 +1524,13 @@ impl AcpManager {
                         .model_state
                         .as_ref()
                         .map(|state| &state.current_model_id);
-                    update_acp_input_hint(runtime, session.buffer_id, Some(&mode_id), model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        Some(&mode_id),
+                        model_id,
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::SessionModelSet {
@@ -1427,7 +1549,13 @@ impl AcpManager {
                         .mode_state
                         .as_ref()
                         .map(|state| &state.current_mode_id);
-                    update_acp_input_hint(runtime, session.buffer_id, mode_id, Some(&model_id));
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        mode_id,
+                        Some(&model_id),
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::SessionConfigSet {
@@ -1464,7 +1592,13 @@ impl AcpManager {
                         .model_state
                         .as_ref()
                         .map(|state| &state.current_model_id);
-                    update_acp_input_hint(runtime, session.buffer_id, mode_id, model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        session.buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::Disconnected {
@@ -1474,7 +1608,7 @@ impl AcpManager {
                 if let Some(session) = self.sessions.remove(&session_id) {
                     self.buffers.remove(&session.buffer_id);
                     self.pending_slash.remove(&session.buffer_id);
-                    update_acp_input_hint(runtime, session.buffer_id, None, None);
+                    update_acp_input_hint(runtime, session.buffer_id, None, None, &[]);
                     let _ = message;
                 }
             }
@@ -2100,7 +2234,7 @@ fn resolve_permission_response(
         let index = state
             .pending_permissions
             .iter()
-            .rposition(|pending| pending.session_id == session_id);
+            .position(|pending| pending.session_id == session_id);
         index.and_then(|index| state.pending_permissions.remove(index))
     };
     let Some(pending) = pending else {
@@ -2487,7 +2621,7 @@ fn handle_session_update(
         SessionUpdate::ToolCall(call) => {
             let mut lines = vec![format!(
                 "{} **{}** · {}",
-                user::nerd_font::symbols::cod::COD_TOOLS,
+                user::icon_font::symbols::cod::COD_TOOLS,
                 call.title,
                 format_acp_status_badge(&call.status)
             )];
@@ -2500,7 +2634,7 @@ fn handle_session_update(
         SessionUpdate::ToolCallUpdate(update) => {
             let mut lines = vec![format!(
                 "{} linked update `{}`",
-                user::nerd_font::symbols::cod::COD_LINK,
+                user::icon_font::symbols::cod::COD_LINK,
                 update.tool_call_id
             )];
             if let Some(status) = update.fields.status {
@@ -2519,7 +2653,7 @@ fn handle_session_update(
             for entry in plan.entries {
                 lines.push(format!(
                     "{} {} · {}",
-                    user::nerd_font::symbols::cod::COD_NOTEBOOK,
+                    user::icon_font::symbols::cod::COD_NOTEBOOK,
                     entry.content,
                     format_acp_status_badge(&entry.status)
                 ));
@@ -2564,11 +2698,11 @@ fn handle_session_update(
 fn format_acp_status_badge(status: &impl std::fmt::Debug) -> String {
     let raw = format!("{status:?}");
     let icon = match raw.as_str() {
-        "Pending" | "Running" | "InProgress" => user::nerd_font::symbols::cod::COD_LOADING,
-        "Completed" | "Success" | "Succeeded" => user::nerd_font::symbols::cod::COD_CHECK,
-        "Failed" | "Error" => user::nerd_font::symbols::cod::COD_ERROR,
-        "Cancelled" | "Canceled" | "Denied" => user::nerd_font::symbols::cod::COD_CIRCLE_SLASH,
-        _ => user::nerd_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
+        "Pending" | "Running" | "InProgress" => user::icon_font::symbols::cod::COD_LOADING,
+        "Completed" | "Success" | "Succeeded" => user::icon_font::symbols::cod::COD_CHECK,
+        "Failed" | "Error" => user::icon_font::symbols::cod::COD_ERROR,
+        "Cancelled" | "Canceled" | "Denied" => user::icon_font::symbols::cod::COD_CIRCLE_SLASH,
+        _ => user::icon_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
     };
     format!("{icon} {}", humanize_debug_label(&raw))
 }
@@ -2612,7 +2746,7 @@ fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) 
             agent_client_protocol::ToolCallContent::Diff(diff) => {
                 lines.push(format!(
                     "  {} `{}` · {} -> {}",
-                    user::nerd_font::symbols::cod::COD_DIFF_MODIFIED,
+                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED,
                     diff.path.display(),
                     diff.old_text.as_ref().map_or("new", |_| "old"),
                     "new"
@@ -2621,7 +2755,7 @@ fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) 
             agent_client_protocol::ToolCallContent::Terminal(terminal) => {
                 lines.push(format!(
                     "  {} terminal `{}`",
-                    user::nerd_font::symbols::cod::COD_TERMINAL,
+                    user::icon_font::symbols::cod::COD_TERMINAL,
                     terminal.terminal_id
                 ));
             }
@@ -2634,7 +2768,7 @@ fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) 
 fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     let mut lines = vec![format!(
         "{} Permission requested by agent.",
-        user::nerd_font::symbols::cod::COD_WARNING
+        user::icon_font::symbols::cod::COD_WARNING
     )];
     if let Some(status) = request.tool_call.fields.status {
         lines.push(format!("  {}", format_acp_status_badge(&status)));
@@ -2642,15 +2776,51 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     if let Some(title) = request.tool_call.fields.title.clone() {
         lines.push(format!(
             "{} **{}**",
-            user::nerd_font::symbols::cod::COD_TOOLS,
+            user::icon_font::symbols::cod::COD_TOOLS,
             title
         ));
     }
+    if let Some(locations) = request.tool_call.fields.locations.as_ref() {
+        for location in locations.iter().take(3) {
+            let suffix = location
+                .line
+                .map(|line| format!(":{line}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {} `{}`{suffix}",
+                user::icon_font::symbols::cod::COD_FILE,
+                location.path.display()
+            ));
+        }
+        if locations.len() > 3 {
+            lines.push(format!("  ... {} more location(s)", locations.len() - 3));
+        }
+    }
+    if !request.options.is_empty() {
+        lines.push(String::new());
+        for option in &request.options {
+            lines.push(format!(
+                "  - {} ({})",
+                option.name,
+                format_permission_option_kind(option.kind)
+            ));
+        }
+    }
     lines.push(format!(
         "{} Use `acp.permission-approve` or `acp.permission-deny`.",
-        user::nerd_font::symbols::cod::COD_CHECKLIST
+        user::icon_font::symbols::cod::COD_CHECKLIST
     ));
     lines
+}
+
+fn format_permission_option_kind(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "allow once",
+        PermissionOptionKind::AllowAlways => "allow always",
+        PermissionOptionKind::RejectOnce => "reject once",
+        PermissionOptionKind::RejectAlways => "reject always",
+        _ => "custom",
+    }
 }
 
 fn spawn_terminal_reader(
@@ -2686,4 +2856,66 @@ fn apply_output_limit(output: &str, limit: Option<u64>) -> (String, bool) {
         start += 1;
     }
     (output[start..].to_owned(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::{
+        AvailableCommandInput, PermissionOptionId, ToolCallLocation, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
+    };
+
+    #[test]
+    fn active_command_input_hint_uses_unstructured_command_metadata() {
+        let commands = vec![
+            AvailableCommand::new("open", "Open a file").input(
+                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("path to open")),
+            ),
+            AvailableCommand::new("status", "Show status"),
+        ];
+
+        assert_eq!(
+            active_command_input_hint(&commands, "/open "),
+            Some("path to open".to_owned())
+        );
+        assert_eq!(
+            active_command_input_hint(&commands, "/open src\\main.rs"),
+            Some("path to open".to_owned())
+        );
+        assert_eq!(active_command_input_hint(&commands, "/status"), None);
+        assert_eq!(active_command_input_hint(&commands, "hello"), None);
+    }
+
+    #[test]
+    fn permission_prompt_lines_show_locations_and_choices() {
+        let request = RequestPermissionRequest::new(
+            "session-1",
+            ToolCallUpdate::new(
+                "tool-1",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Pending)
+                    .title("Read project file")
+                    .locations(vec![ToolCallLocation::new("src\\main.rs").line(12u32)]),
+            ),
+            vec![
+                PermissionOption::new(
+                    PermissionOptionId::new("allow-once"),
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                ),
+                PermissionOption::new(
+                    PermissionOptionId::new("reject-once"),
+                    "Reject once",
+                    PermissionOptionKind::RejectOnce,
+                ),
+            ],
+        );
+
+        let rendered = permission_prompt_lines(&request).join("\n");
+        assert!(rendered.contains("Read project file"));
+        assert!(rendered.contains("src\\main.rs:12"));
+        assert!(rendered.contains("Allow once (allow once)"));
+        assert!(rendered.contains("Reject once (reject once)"));
+    }
 }

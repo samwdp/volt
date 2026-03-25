@@ -1,13 +1,19 @@
-#![doc = r#"Language Server Protocol registry, session plans, diagnostics, and launch metadata."#]
+#![doc = r#"Language Server Protocol registry, session plans, diagnostics, launch metadata, and client runtime management."#]
+
+mod client;
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf};
 
 use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
 
+pub use client::{
+    LspClientError, LspClientManager, LspCompletionItem, LspCompletionKind, LspHoverContents,
+    LspLogDirection, LspLogEntry, LspLogSnapshot,
+};
+
 /// Human-readable summary of this crate's responsibility.
-pub const ROLE: &str =
-    "Language Server Protocol registry, session plans, diagnostics, and launch metadata.";
+pub const ROLE: &str = "Language Server Protocol registry, session plans, diagnostics, launch metadata, and client runtime management.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -255,7 +261,7 @@ impl Error for LspError {}
 #[derive(Debug, Default, Clone)]
 pub struct LanguageServerRegistry {
     servers: BTreeMap<String, LanguageServerSpec>,
-    extensions: BTreeMap<String, String>,
+    extensions: BTreeMap<String, Vec<String>>,
 }
 
 impl LanguageServerRegistry {
@@ -281,12 +287,10 @@ impl LanguageServerRegistry {
             return Err(LspError::DuplicateServerId(server_id));
         }
         for extension in spec.file_extensions() {
-            if self.extensions.contains_key(extension) {
-                return Err(LspError::DuplicateExtension(extension.clone()));
-            }
-        }
-        for extension in spec.file_extensions() {
-            self.extensions.insert(extension.clone(), server_id.clone());
+            self.extensions
+                .entry(extension.clone())
+                .or_default()
+                .push(server_id.clone());
         }
         self.servers.insert(server_id, spec);
         Ok(())
@@ -310,9 +314,18 @@ impl LanguageServerRegistry {
 
     /// Returns a server for a file extension, if one is registered.
     pub fn server_for_extension(&self, extension: &str) -> Option<&LanguageServerSpec> {
+        self.servers_for_extension(extension).into_iter().next()
+    }
+
+    /// Returns all servers for a file extension, preserving registration order.
+    pub fn servers_for_extension(&self, extension: &str) -> Vec<&LanguageServerSpec> {
         let extension = normalize_extension(extension);
-        let server_id = self.extensions.get(&extension)?;
-        self.servers.get(server_id)
+        self.extensions
+            .get(&extension)
+            .into_iter()
+            .flat_map(|server_ids| server_ids.iter())
+            .filter_map(|server_id| self.servers.get(server_id))
+            .collect()
     }
 
     /// Prepares a session by explicit server identifier.
@@ -345,6 +358,24 @@ impl LanguageServerRegistry {
             .server_for_extension(&extension)
             .ok_or_else(|| LspError::UnknownExtension(extension.clone()))?;
         self.prepare_session(server.id(), root)
+    }
+
+    /// Prepares sessions for every server registered to an extension.
+    pub fn prepare_sessions_for_extension(
+        &self,
+        extension: &str,
+        root: Option<PathBuf>,
+    ) -> Result<Vec<LanguageServerSession>, LspError> {
+        let extension = normalize_extension(extension);
+        let servers = self.servers_for_extension(&extension);
+        if servers.is_empty() {
+            return Err(LspError::UnknownExtension(extension));
+        }
+        let mut sessions = Vec::with_capacity(servers.len());
+        for server in servers {
+            sessions.push(self.prepare_session(server.id(), root.clone())?);
+        }
+        Ok(sessions)
     }
 }
 
@@ -392,6 +423,30 @@ mod tests {
     }
 
     #[test]
+    fn registry_allows_multiple_servers_for_extension() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(LanguageServerSpec::new(
+            "harper",
+            "markdown",
+            ["md"],
+            "harper-ls",
+            ["--stdio"],
+        )));
+        must(registry.register(LanguageServerSpec::new(
+            "marksman",
+            "markdown",
+            ["md"],
+            "marksman",
+            ["server"],
+        )));
+
+        let servers = registry.servers_for_extension(".md");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].id(), "harper");
+        assert_eq!(servers[1].id(), "marksman");
+    }
+
+    #[test]
     fn prepared_session_contains_launch_spec_and_diagnostics() {
         let mut registry = LanguageServerRegistry::new();
         must(registry.register(rust_analyzer()));
@@ -414,5 +469,30 @@ mod tests {
         assert_eq!(session.launch().program(), "rust-analyzer");
         assert_eq!(session.launch().args(), ["--stdio"]);
         assert_eq!(session.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn prepare_sessions_for_extension_returns_all_matching_servers() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(LanguageServerSpec::new(
+            "harper",
+            "markdown",
+            ["md"],
+            "harper-ls",
+            ["--stdio"],
+        )));
+        must(registry.register(LanguageServerSpec::new(
+            "marksman",
+            "markdown",
+            ["md"],
+            "marksman",
+            ["server"],
+        )));
+
+        let sessions =
+            must(registry.prepare_sessions_for_extension("md", Some(PathBuf::from("P:\\volt"))));
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].server_id(), "harper");
+        assert_eq!(sessions[1].server_id(), "marksman");
     }
 }

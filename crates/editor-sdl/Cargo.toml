@@ -18,16 +18,21 @@ editor-core = { path = "../editor-core" }
 editor-fs = { path = "../editor-fs" }
 editor-git = { path = "../editor-git" }
 editor-jobs = { path = "../editor-jobs" }
+editor-lsp = { path = "../editor-lsp" }
 editor-picker = { path = "../editor-picker" }
 editor-plugin-host = { path = "../editor-plugin-host" }
 editor-render = { path = "../editor-render" }
 editor-syntax = { path = "../editor-syntax" }
 editor-theme = { path = "../editor-theme" }
-sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf"] }
+sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf", "raw-window-handle"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
+fontdue = "0.9.3"
 sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
 user = { package = "volt-user", path = "../../user" }
 agent-client-protocol = { version = "0.10.2", features = ["unstable_session_model"] }
 tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 async-trait = "0.1.89"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+wry = "0.53"

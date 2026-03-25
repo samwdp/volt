@@ -35,10 +35,10 @@ pub fn package() -> PluginPackage {
             Some("themes"),
         ),
         hook_command(
-            "picker.open-nerd-fonts",
-            "Opens the nerd font picker popup.",
+            "picker.open-icon-fonts",
+            "Opens the bundled icon font picker popup.",
             "ui.picker.open",
-            Some("nerd-fonts"),
+            Some("icon-fonts"),
         ),
         hook_command(
             "picker.select-next",

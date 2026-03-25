@@ -46,7 +46,7 @@ pub(super) fn picker_overlay(
         "workspace.search" => workspace_search_picker_overlay(runtime),
         "undo-tree" => undo_tree_picker_overlay(runtime),
         "themes" => theme_picker_overlay(runtime),
-        "nerd-fonts" => Ok(nerd_font_picker_overlay()),
+        "icon-fonts" => Ok(icon_font_picker_overlay()),
         "acp-clients" => Ok(acp_clients_picker_overlay()),
         other => Err(format!("unknown picker provider `{other}`")),
     }
@@ -373,8 +373,8 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
     PickerOverlay::from_entries("Keybindings", entries)
 }
 
-fn nerd_font_picker_overlay() -> PickerOverlay {
-    let entries = user::nerd_font::symbols()
+fn icon_font_picker_overlay() -> PickerOverlay {
+    let entries = user::icon_font::symbols()
         .iter()
         .map(|symbol| {
             let label = format!("{} {}", symbol.glyph, symbol.name);
@@ -385,7 +385,7 @@ fn nerd_font_picker_overlay() -> PickerOverlay {
             }
         })
         .collect();
-    PickerOverlay::from_entries("Nerd Font Symbols", entries)
+    PickerOverlay::from_entries("Bundled Icon Fonts", entries)
 }
 
 fn acp_clients_picker_overlay() -> PickerOverlay {

@@ -39,10 +39,23 @@ fn run_git(root: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>>
     }
 }
 
+fn set_active_buffer_text(
+    state: &mut ShellState,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    state.replace_active_buffer_text_for_test(text)?;
+    Ok(())
+}
+
+fn flush_picker_searches(state: &mut ShellState) -> Result<(), Box<dyn std::error::Error>> {
+    state.flush_picker_searches_for_test()?;
+    Ok(())
+}
+
 #[test]
 fn vim_bindings_switch_modes_and_move_words() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
-    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+    set_active_buffer_text(&mut state, "alpha beta")?;
 
     state.handle_text_input("w")?;
     assert_eq!(state.active_buffer_mut()?.cursor_col(), 6);
@@ -58,7 +71,7 @@ fn vim_bindings_switch_modes_and_move_words() -> Result<(), Box<dyn std::error::
 #[test]
 fn vim_extended_motions_and_edit_commands_work() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
-    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+    set_active_buffer_text(&mut state, "alpha beta")?;
 
     state.handle_text_input("w")?;
     assert_eq!(state.active_buffer_mut()?.cursor_col(), 6);
@@ -94,7 +107,7 @@ fn vim_extended_motions_and_edit_commands_work() -> Result<(), Box<dyn std::erro
 #[test]
 fn vim_counts_operators_and_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
-    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta gamma");
+    set_active_buffer_text(&mut state, "alpha beta gamma")?;
 
     state.handle_text_input("d")?;
     state.handle_text_input("w")?;
@@ -342,12 +355,225 @@ fn vim_search_prompt_supports_fuzzy_matches() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
+
+    state.handle_text_input("i")?;
+    assert!(state.try_runtime_keybinding(Keycode::Space, Mod::LCTRLMOD)?);
+    state.wait_for_autocomplete_results()?;
+    assert!(state.autocomplete_visible()?);
+    assert_eq!(
+        state.autocomplete_entries()?,
+        vec![
+            "alpha".to_owned(),
+            "alpine".to_owned(),
+            "alphabet".to_owned()
+        ]
+    );
+    assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
+
+    assert!(state.try_runtime_keybinding(Keycode::N, Mod::LCTRLMOD)?);
+    assert_eq!(state.autocomplete_selected()?, Some("alpine".to_owned()));
+    assert!(state.try_runtime_keybinding(Keycode::P, Mod::LCTRLMOD)?);
+    assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
+
+    state.handle_text_input("h")?;
+    state.wait_for_autocomplete_results()?;
+    assert_eq!(
+        state.autocomplete_entries()?,
+        vec!["alpha".to_owned(), "alphabet".to_owned()]
+    );
+
+    assert!(state.try_runtime_keybinding(Keycode::Y, Mod::LCTRLMOD)?);
+    assert_eq!(
+        state.active_buffer_mut()?.text.text(),
+        "alpine alphabet alpha\nalpha"
+    );
+    assert!(!state.autocomplete_visible()?);
+
+    Ok(())
+}
+
+#[test]
+fn autocomplete_opens_while_typing_buffer_tokens() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nal");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 2));
+
+    state.handle_text_input("p")?;
+    assert!(state.autocomplete_visible()?);
+    state.wait_for_autocomplete_results()?;
+    assert_eq!(
+        state.autocomplete_entries()?,
+        vec![
+            "alpha".to_owned(),
+            "alpine".to_owned(),
+            "alphabet".to_owned()
+        ]
+    );
+
+    state.handle_text_input(" ")?;
+    assert!(!state.autocomplete_visible()?);
+
+    Ok(())
+}
+
+#[test]
+fn ctrl_space_triggers_autocomplete_without_inserting_space()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
+
+    state.handle_text_input("i")?;
+    assert!(state.try_runtime_keybinding(Keycode::Space, Mod::LCTRLMOD)?);
+    state.handle_text_input(" ")?;
+    state.wait_for_autocomplete_results()?;
+
+    assert!(state.autocomplete_visible()?);
+    assert_eq!(
+        state.autocomplete_entries()?,
+        vec![
+            "alpha".to_owned(),
+            "alpine".to_owned(),
+            "alphabet".to_owned()
+        ]
+    );
+    assert_eq!(
+        state.active_buffer_mut()?.text.text(),
+        "alpine alphabet alpha\nalp"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ctrl_n_and_ctrl_p_cycle_autocomplete_without_inserting_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
+
+    state.handle_text_input("i")?;
+    assert!(state.try_runtime_keybinding(Keycode::Space, Mod::LCTRLMOD)?);
+    state.handle_text_input(" ")?;
+    state.wait_for_autocomplete_results()?;
+    assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
+
+    assert!(state.try_runtime_keybinding(Keycode::N, Mod::LCTRLMOD)?);
+    state.handle_text_input("n")?;
+    assert_eq!(state.autocomplete_selected()?, Some("alpine".to_owned()));
+
+    assert!(state.try_runtime_keybinding(Keycode::P, Mod::LCTRLMOD)?);
+    state.handle_text_input("p")?;
+    assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
+    assert_eq!(
+        state.active_buffer_mut()?.text.text(),
+        "alpine alphabet alpha\nalp"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn autocomplete_closes_when_no_results_remain() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta\ngh");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 2));
+
+    state.handle_text_input("z")?;
+    state.wait_for_autocomplete_results()?;
+
+    assert!(!state.autocomplete_visible()?);
+    Ok(())
+}
+
+#[test]
+fn hover_toggle_previews_and_focus_enters_panel() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 1));
+
+    state.handle_text_input("K")?;
+    assert!(state.hover_visible()?);
+    assert!(!state.hover_focused()?);
+    assert_eq!(state.hover_provider_label()?, Some("Token".to_owned()));
+
+    state
+        .runtime
+        .emit_hook(user::hover::HOOK_HOVER_FOCUS, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(state.hover_focused()?);
+
+    state
+        .runtime
+        .emit_hook(user::hover::HOOK_HOVER_FOCUS, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(state.hover_visible()?);
+    assert!(state.hover_focused()?);
+
+    state.handle_text_input("K")?;
+    assert!(!state.hover_visible()?);
+
+    Ok(())
+}
+
+#[test]
+fn hover_toggle_works_at_token_end() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 5));
+
+    state.handle_text_input("K")?;
+
+    assert!(state.hover_visible()?);
+    assert_eq!(state.hover_provider_label()?, Some("Token".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn hover_toggle_command_shows_feedback_without_symbol() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text(" alpha");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+    state
+        .runtime
+        .execute_command("hover.toggle")
+        .map_err(|error| error.to_string())?;
+
+    assert!(state.hover_visible()?);
+    assert_eq!(state.hover_provider_label()?, Some("Token".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn hover_closes_after_cursor_motion() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 1));
+
+    state.handle_text_input("K")?;
+    assert!(state.hover_visible()?);
+
+    state.handle_text_input("l")?;
+    assert_eq!(state.active_buffer_mut()?.cursor_col(), 2);
+    assert!(!state.hover_visible()?);
+
+    Ok(())
+}
+
+#[test]
 fn vim_search_prompt_matches_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
-    state.active_buffer_mut()?.text = TextBuffer::from_text("Users user");
+    set_active_buffer_text(&mut state, "Users user")?;
 
     state.handle_text_input("/")?;
     state.handle_text_input("user")?;
+    flush_picker_searches(&mut state)?;
     let picker = state.ui()?.picker().ok_or("missing search picker")?;
     assert_eq!(picker.session().match_count(), 2);
 
@@ -357,11 +583,11 @@ fn vim_search_prompt_matches_case_insensitive() -> Result<(), Box<dyn std::error
 #[test]
 fn vim_search_picker_selects_match_entries() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
-    state.active_buffer_mut()?.text =
-        TextBuffer::from_text("alpha\nsplit here\nbeta\nsplit again\n");
+    set_active_buffer_text(&mut state, "alpha\nsplit here\nbeta\nsplit again\n")?;
 
     state.handle_text_input("/")?;
     state.handle_text_input("split")?;
+    flush_picker_searches(&mut state)?;
     let picker = state.ui()?.picker().ok_or("missing search picker")?;
     assert!(picker.session().match_count() > 0);
     let selected = picker
@@ -423,6 +649,52 @@ fn vim_quickref_word_motions_work() -> Result<(), Box<dyn std::error::Error>> {
     state.handle_text_input("d")?;
     state.handle_text_input("%")?;
     assert_eq!(state.active_buffer_mut()?.text.text(), "call");
+
+    Ok(())
+}
+
+#[test]
+fn vim_word_motions_treat_punctuation_as_words() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    state.active_buffer_mut()?.text =
+        TextBuffer::from_text("PluginKeymapScope::Workspace,\n),\nnormal_binding");
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 19));
+
+    state.handle_text_input("w")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(0, 28)
+    );
+
+    state.handle_text_input("w")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(1, 0)
+    );
+
+    state.handle_text_input("w")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(2, 0)
+    );
+
+    state.handle_text_input("b")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(1, 0)
+    );
+
+    state.handle_text_input("b")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(0, 28)
+    );
+
+    state.handle_text_input("b")?;
+    assert_eq!(
+        state.active_buffer_mut()?.cursor_point(),
+        TextPoint::new(0, 19)
+    );
 
     Ok(())
 }

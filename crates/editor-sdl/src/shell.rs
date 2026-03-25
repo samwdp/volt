@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::browser_host::{
+    BrowserBufferPlan, BrowserHostEvent, BrowserHostService, BrowserLocationUpdate,
+    BrowserSurfacePlan, BrowserSyncPlan, BrowserViewportRect,
+};
 use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary};
 use crate::state::{
     BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
@@ -37,6 +41,10 @@ use editor_git::{
     parse_stash_list, parse_status,
 };
 use editor_jobs::{JobManager, JobSpec};
+use editor_lsp::{
+    Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
+    LanguageServerRegistry, LspClientManager, LspLogEntry, LspLogSnapshot,
+};
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
 use editor_render::{
@@ -48,12 +56,14 @@ use editor_syntax::{
     SyntaxSnapshot,
 };
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
+use fontdue::Font as RasterFont;
 use sdl3::{
     event::Event,
     keyboard::{Keycode, Mod},
     pixels::{Color, PixelFormat},
     rect::Rect,
     render::{Canvas, RenderTarget},
+    surface::Surface,
     ttf::Font,
     video::Window,
 };
@@ -101,6 +111,15 @@ const HOOK_PICKER_NEXT: &str = "ui.picker.next";
 const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
+const HOOK_AUTOCOMPLETE_TRIGGER: &str = user::autocomplete::HOOK_AUTOCOMPLETE_TRIGGER;
+const HOOK_AUTOCOMPLETE_NEXT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_NEXT;
+const HOOK_AUTOCOMPLETE_PREVIOUS: &str = user::autocomplete::HOOK_AUTOCOMPLETE_PREVIOUS;
+const HOOK_AUTOCOMPLETE_ACCEPT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_ACCEPT;
+const HOOK_AUTOCOMPLETE_CANCEL: &str = user::autocomplete::HOOK_AUTOCOMPLETE_CANCEL;
+const HOOK_HOVER_TOGGLE: &str = user::hover::HOOK_HOVER_TOGGLE;
+const HOOK_HOVER_FOCUS: &str = user::hover::HOOK_HOVER_FOCUS;
+const HOOK_HOVER_NEXT: &str = user::hover::HOOK_HOVER_NEXT;
+const HOOK_HOVER_PREVIOUS: &str = user::hover::HOOK_HOVER_PREVIOUS;
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
@@ -122,6 +141,17 @@ const HOOK_WORKSPACE_WINDOW_RIGHT: &str = "ui.workspace.window-right";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = user::acp::ACP_BUFFER_KIND;
+const BROWSER_KIND: &str = user::browser::BROWSER_KIND;
+const HOOK_BROWSER_URL: &str = user::browser::HOOK_BROWSER_URL;
+const AUTOCOMPLETE_BUFFER_PROVIDER: &str = user::autocomplete::PROVIDER_BUFFER;
+const AUTOCOMPLETE_LSP_PROVIDER: &str = user::autocomplete::PROVIDER_LSP;
+const HOVER_PROVIDER_TEST: &str = user::hover::PROVIDER_TEST_HOVER;
+const HOVER_PROVIDER_LSP: &str = user::hover::PROVIDER_LSP;
+const HOVER_PROVIDER_DIAGNOSTICS: &str = user::hover::PROVIDER_DIAGNOSTICS;
+const HOOK_LSP_START: &str = user::lsp::HOOK_LSP_START;
+const HOOK_LSP_STOP: &str = user::lsp::HOOK_LSP_STOP;
+const HOOK_LSP_RESTART: &str = user::lsp::HOOK_LSP_RESTART;
+const HOOK_LSP_LOG: &str = user::lsp::HOOK_LSP_LOG;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
 const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
@@ -175,6 +205,7 @@ const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
+const LSP_LOG_BUFFER_NAME: &str = "*lsp-log*";
 const OIL_PREVIEW_KIND: &str = "oil-preview";
 const OIL_HELP_KIND: &str = "oil-help";
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
@@ -182,17 +213,22 @@ const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
-const OPTION_NERD_FONTS: &str = "ui.nerd-fonts";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
-const NERD_FONT_FALLBACK_CANDIDATES: &[&str] = &[
-    "crates/volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
-    "assets/font/SymbolsNerdFontMono-Regular.ttf",
-    "volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
-    "../../crates/volt/assets/font/SymbolsNerdFontMono-Regular.ttf",
+const BUNDLED_ICON_FONT_SEARCH_DEPTH: usize = 6;
+const BUNDLED_ICON_FONT_DIR_CANDIDATES: &[&[&str]] =
+    &[&["crates", "volt", "assets", "font"], &["assets", "font"]];
+const BUNDLED_ICON_FONT_FILES: &[&str] = &[
+    "NFM.ttf",
+    "all-the-icons.ttf",
+    "file-icons.ttf",
+    "fontawesome.ttf",
+    "material-design-icons.ttf",
+    "octicons.ttf",
+    "weathericons.ttf",
 ];
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -309,25 +345,44 @@ impl DrawTarget<'_> {
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
-    nerd_fonts: bool,
+}
+
+struct IconFont<'ttf> {
+    name: String,
+    font: Font<'ttf>,
+    raster_font: RasterFont,
 }
 
 struct FontSet<'ttf> {
     primary: Font<'ttf>,
-    fallback: Option<Font<'ttf>>,
-    fallback_baseline_offset: i32,
+    icon_fonts: Vec<IconFont<'ttf>>,
+    icon_chars: BTreeSet<char>,
+    icon_pixel_size: f32,
 }
 
 impl<'ttf> FontSet<'ttf> {
-    fn new(primary: Font<'ttf>, fallback: Option<Font<'ttf>>) -> Self {
-        let fallback_baseline_offset = fallback
-            .as_ref()
-            .map(|fallback| primary.ascent() - fallback.ascent())
-            .unwrap_or(0);
+    fn new(
+        primary: Font<'ttf>,
+        icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
+        icon_pixel_size: f32,
+    ) -> Self {
+        let icon_chars = user::icon_font::symbols()
+            .iter()
+            .flat_map(|symbol| symbol.glyph.chars())
+            .collect();
+        let icon_fonts = icon_fonts
+            .into_iter()
+            .map(|(name, font, raster_font)| IconFont {
+                name,
+                font,
+                raster_font,
+            })
+            .collect();
         Self {
             primary,
-            fallback,
-            fallback_baseline_offset,
+            icon_fonts,
+            icon_chars,
+            icon_pixel_size,
         }
     }
 
@@ -335,12 +390,26 @@ impl<'ttf> FontSet<'ttf> {
         &self.primary
     }
 
-    fn fallback(&self) -> Option<&Font<'ttf>> {
-        self.fallback.as_ref()
+    fn icon_font(&self, index: usize) -> Option<&IconFont<'ttf>> {
+        self.icon_fonts.get(index)
     }
 
-    fn fallback_baseline_offset(&self) -> i32 {
-        self.fallback_baseline_offset
+    fn icon_font_index_for_char(&self, character: char) -> Option<usize> {
+        self.icon_fonts
+            .iter()
+            .position(|font| font.font.find_glyph(character).is_some())
+    }
+
+    fn icon_fonts(&self) -> &[IconFont<'ttf>] {
+        &self.icon_fonts
+    }
+
+    fn icon_pixel_size(&self) -> f32 {
+        self.icon_pixel_size
+    }
+
+    fn prefers_icon_font(&self, character: char) -> bool {
+        self.icon_chars.contains(&character)
     }
 }
 
@@ -1310,13 +1379,22 @@ impl GitSummaryState {
 #[derive(Debug, Clone, Copy)]
 struct ActiveBufferEventContext {
     buffer_id: BufferId,
-    input_rows: usize,
     has_input: bool,
     is_read_only: bool,
     is_git_status: bool,
     is_git_commit: bool,
     is_acp: bool,
     is_directory: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveLspBufferContext {
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: PathBuf,
+    text: String,
+    revision: u64,
+    root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -1825,6 +1903,7 @@ pub(crate) struct ShellBuffer {
     git_fringe: Option<GitFringeState>,
     git_fringe_dirty: bool,
     git_fringe_last_edit_at: Option<Instant>,
+    browser_state: Option<BrowserBufferState>,
     directory_state: Option<DirectoryViewState>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
@@ -1838,7 +1917,15 @@ pub(crate) struct ShellBuffer {
     syntax_requested_revision: Option<u64>,
     syntax_requested_window: Option<SyntaxLineWindow>,
     syntax_applied_window: Option<SyntaxLineWindow>,
+    lsp_enabled: bool,
+    lsp_diagnostics: Vec<LspDiagnostic>,
+    lsp_diagnostics_revision: u64,
     last_edit_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BrowserBufferState {
+    current_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1901,6 +1988,7 @@ impl ShellBuffer {
             git_fringe: None,
             git_fringe_dirty: false,
             git_fringe_last_edit_at: None,
+            browser_state: browser_state_for_kind(buffer.kind()),
             directory_state: None,
             text,
             undo_tree,
@@ -1914,6 +2002,9 @@ impl ShellBuffer {
             syntax_requested_revision: None,
             syntax_requested_window: None,
             syntax_applied_window: None,
+            lsp_enabled: true,
+            lsp_diagnostics: Vec::new(),
+            lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
     }
@@ -1940,6 +2031,7 @@ impl ShellBuffer {
             git_fringe,
             git_fringe_dirty,
             git_fringe_last_edit_at,
+            browser_state: browser_state_for_kind(buffer.kind()),
             directory_state: None,
             text,
             undo_tree,
@@ -1953,6 +2045,9 @@ impl ShellBuffer {
             syntax_requested_revision: None,
             syntax_requested_window: None,
             syntax_applied_window: None,
+            lsp_enabled: true,
+            lsp_diagnostics: Vec::new(),
+            lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
     }
@@ -1966,6 +2061,7 @@ impl ShellBuffer {
         };
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(&kind);
+        let browser_state = browser_state_for_kind(&kind);
 
         Self {
             id: buffer_id,
@@ -1979,6 +2075,7 @@ impl ShellBuffer {
             git_fringe: None,
             git_fringe_dirty: false,
             git_fringe_last_edit_at: None,
+            browser_state,
             directory_state: None,
             text,
             undo_tree,
@@ -1992,6 +2089,9 @@ impl ShellBuffer {
             syntax_requested_revision: None,
             syntax_requested_window: None,
             syntax_applied_window: None,
+            lsp_enabled: true,
+            lsp_diagnostics: Vec::new(),
+            lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
     }
@@ -2279,6 +2379,40 @@ impl ShellBuffer {
         self.language_id = language_id;
     }
 
+    fn lsp_diagnostics(&self) -> &[LspDiagnostic] {
+        &self.lsp_diagnostics
+    }
+
+    fn lsp_enabled(&self) -> bool {
+        self.lsp_enabled
+    }
+
+    fn set_lsp_enabled(&mut self, enabled: bool) {
+        self.lsp_enabled = enabled;
+    }
+
+    fn lsp_diagnostics_revision(&self) -> u64 {
+        self.lsp_diagnostics_revision
+    }
+
+    fn set_lsp_diagnostics(&mut self, diagnostics: Vec<LspDiagnostic>) -> bool {
+        if self.lsp_diagnostics == diagnostics {
+            return false;
+        }
+        self.lsp_diagnostics = diagnostics;
+        self.lsp_diagnostics_revision = self.lsp_diagnostics_revision.saturating_add(1);
+        true
+    }
+
+    fn lsp_diagnostic_severity(&self, line_index: usize) -> Option<LspDiagnosticSeverity> {
+        self.lsp_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.range().start().line <= line_index)
+            .filter(|diagnostic| diagnostic.range().end().line >= line_index)
+            .map(LspDiagnostic::severity)
+            .min_by_key(|severity| diagnostic_severity_rank(*severity))
+    }
+
     fn invalidate_wrap_cache(&mut self) {
         self.wrap_cache = None;
     }
@@ -2335,6 +2469,43 @@ impl ShellBuffer {
         self.text.set_cursor(TextPoint::new(line, column));
         let max_scroll = line_count.saturating_sub(1);
         self.scroll_row = scroll_row.min(max_scroll);
+        self.invalidate_wrap_cache();
+    }
+
+    fn replace_with_lines_follow_output(&mut self, lines: Vec<String>) {
+        let cursor = self.cursor_point();
+        let scroll_row = self.scroll_row;
+        let follow_output = self.should_follow_output();
+        let text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text = text;
+        self.text.mark_clean();
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.syntax_dirty = false;
+        self.syntax_requested_revision = None;
+        self.syntax_requested_window = None;
+        self.syntax_applied_window = None;
+        self.last_edit_at = None;
+        let line_count = self.line_count();
+        if line_count == 0 {
+            self.text.set_cursor(TextPoint::default());
+            self.scroll_row = 0;
+            return;
+        }
+        let line = cursor.line.min(line_count.saturating_sub(1));
+        let column = cursor.column.min(self.line_len_chars(line));
+        self.text.set_cursor(TextPoint::new(line, column));
+        if follow_output {
+            self.scroll_output_to_end();
+        } else {
+            let max_scroll = line_count.saturating_sub(1);
+            self.scroll_row = scroll_row.min(max_scroll);
+        }
         self.invalidate_wrap_cache();
     }
 
@@ -3075,6 +3246,260 @@ struct PickerEntry {
     action: PickerAction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutocompleteProviderKind {
+    Buffer,
+    Lsp,
+}
+
+#[derive(Debug, Clone)]
+struct AutocompleteProviderSpec {
+    id: String,
+    label: String,
+    icon: String,
+    item_icon: String,
+    or_group: Option<String>,
+    kind: AutocompleteProviderKind,
+}
+
+#[derive(Debug, Clone)]
+struct AutocompleteRegistry {
+    result_limit: usize,
+    providers: Vec<AutocompleteProviderSpec>,
+}
+
+impl AutocompleteRegistry {
+    fn from_user_config() -> Self {
+        let providers = user::autocomplete::providers()
+            .into_iter()
+            .filter_map(|provider| match provider.id.as_str() {
+                AUTOCOMPLETE_BUFFER_PROVIDER => Some(AutocompleteProviderSpec {
+                    id: provider.id,
+                    label: provider.label,
+                    icon: provider.icon,
+                    item_icon: provider.item_icon,
+                    or_group: provider.or_group,
+                    kind: AutocompleteProviderKind::Buffer,
+                }),
+                AUTOCOMPLETE_LSP_PROVIDER => Some(AutocompleteProviderSpec {
+                    id: provider.id,
+                    label: provider.label,
+                    icon: provider.icon,
+                    item_icon: provider.item_icon,
+                    or_group: provider.or_group,
+                    kind: AutocompleteProviderKind::Lsp,
+                }),
+                _ => None,
+            })
+            .collect();
+        Self {
+            result_limit: user::autocomplete::RESULT_LIMIT.max(1),
+            providers,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutocompleteQuery {
+    prefix: String,
+    token: String,
+    replace_range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutocompleteEntry {
+    provider_id: String,
+    provider_label: String,
+    provider_icon: String,
+    item_icon: String,
+    label: String,
+    replacement: String,
+    detail: Option<String>,
+    documentation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AutocompleteOverlay {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    query: AutocompleteQuery,
+    entries: Vec<AutocompleteEntry>,
+    selected_index: usize,
+}
+
+impl AutocompleteOverlay {
+    fn new(buffer_id: BufferId, buffer_revision: u64, query: AutocompleteQuery) -> Self {
+        Self {
+            buffer_id,
+            buffer_revision,
+            query,
+            entries: Vec::new(),
+            selected_index: 0,
+        }
+    }
+
+    fn selected(&self) -> Option<&AutocompleteEntry> {
+        self.entries.get(self.selected_index)
+    }
+
+    fn entries(&self) -> &[AutocompleteEntry] {
+        &self.entries
+    }
+
+    fn set_entries(&mut self, entries: Vec<AutocompleteEntry>) {
+        let previous = self
+            .selected()
+            .map(|entry| (entry.provider_id.clone(), entry.replacement.clone()));
+        self.entries = entries;
+        self.selected_index = previous
+            .and_then(|(provider_id, replacement)| {
+                self.entries.iter().position(|entry| {
+                    entry.provider_id == provider_id && entry.replacement == replacement
+                })
+            })
+            .unwrap_or(0);
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = self.selected_index.min(self.entries.len() - 1);
+        }
+    }
+
+    fn select_next(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+        self.selected_index = (self.selected_index + 1) % self.entries.len();
+    }
+
+    fn select_previous(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+        self.selected_index = self
+            .selected_index
+            .checked_sub(1)
+            .unwrap_or(self.entries.len() - 1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoverProviderKind {
+    TestHover,
+    Lsp,
+    Diagnostics,
+}
+
+#[derive(Debug, Clone)]
+struct HoverProviderSpec {
+    label: String,
+    icon: String,
+    kind: HoverProviderKind,
+}
+
+#[derive(Debug, Clone)]
+struct HoverRegistry {
+    line_limit: usize,
+    providers: Vec<HoverProviderSpec>,
+}
+
+impl HoverRegistry {
+    fn from_user_config() -> Self {
+        let providers = user::hover::providers()
+            .into_iter()
+            .filter_map(|provider| {
+                let kind = match provider.id.as_str() {
+                    HOVER_PROVIDER_TEST => HoverProviderKind::TestHover,
+                    HOVER_PROVIDER_LSP => HoverProviderKind::Lsp,
+                    HOVER_PROVIDER_DIAGNOSTICS => HoverProviderKind::Diagnostics,
+                    _ => return None,
+                };
+                Some(HoverProviderSpec {
+                    label: provider.label,
+                    icon: provider.icon,
+                    kind,
+                })
+            })
+            .collect();
+        Self {
+            line_limit: user::hover::LINE_LIMIT.max(1),
+            providers,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoverProviderContent {
+    provider_label: String,
+    provider_icon: String,
+    lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoverOverlay {
+    buffer_id: BufferId,
+    anchor: TextPoint,
+    token: String,
+    providers: Vec<HoverProviderContent>,
+    provider_index: usize,
+    scroll_offset: usize,
+    focused: bool,
+    line_limit: usize,
+}
+
+impl HoverOverlay {
+    fn current_provider(&self) -> Option<&HoverProviderContent> {
+        self.providers.get(self.provider_index)
+    }
+
+    fn select_next_provider(&mut self) {
+        if self.providers.is_empty() {
+            self.provider_index = 0;
+            return;
+        }
+        self.provider_index = (self.provider_index + 1) % self.providers.len();
+        self.scroll_offset = 0;
+    }
+
+    fn select_previous_provider(&mut self) {
+        if self.providers.is_empty() {
+            self.provider_index = 0;
+            return;
+        }
+        self.provider_index = self
+            .provider_index
+            .checked_sub(1)
+            .unwrap_or(self.providers.len() - 1);
+        self.scroll_offset = 0;
+    }
+
+    fn scroll_by(&mut self, delta: i32) {
+        let Some(provider) = self.current_provider() else {
+            self.scroll_offset = 0;
+            return;
+        };
+        let max_offset = provider.lines.len().saturating_sub(self.line_limit);
+        if delta.is_negative() {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.scroll_offset = (self.scroll_offset + delta as usize).min(max_offset);
+        }
+    }
+
+    fn visible_lines(&self) -> &[String] {
+        let Some(provider) = self.current_provider() else {
+            return &[];
+        };
+        let start = self.scroll_offset.min(provider.lines.len());
+        let end = (start + self.line_limit).min(provider.lines.len());
+        &provider.lines[start..end]
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PickerMode {
     Static,
@@ -3283,9 +3708,12 @@ pub(crate) struct ShellUiState {
     pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
+    autocomplete: Option<AutocompleteOverlay>,
+    hover: Option<HoverOverlay>,
     popup_focus: bool,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
+    autocomplete_worker: AutocompleteWorkerState,
     vim_search_worker: VimSearchWorkerState,
     workspace_search_worker: WorkspaceSearchWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
@@ -3325,9 +3753,12 @@ impl ShellUiState {
             pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
+            autocomplete: None,
+            hover: None,
             popup_focus: false,
             yank_flash: None,
             git_summary: GitSummaryState::new(),
+            autocomplete_worker: AutocompleteWorkerState::new(),
             vim_search_worker: VimSearchWorkerState::new(),
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
@@ -3392,6 +3823,8 @@ impl ShellUiState {
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn enter_insert_mode(&mut self) {
@@ -3399,6 +3832,8 @@ impl ShellUiState {
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn enter_replace_mode(&mut self) {
@@ -3406,6 +3841,8 @@ impl ShellUiState {
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn enter_visual_mode(&mut self, anchor: TextPoint, kind: VisualSelectionKind) {
@@ -3413,6 +3850,8 @@ impl ShellUiState {
         self.vim.visual_anchor = Some(anchor);
         self.vim.visual_kind = kind;
         self.vim.clear_transient();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     pub(crate) fn vim(&self) -> &VimState {
@@ -3445,6 +3884,8 @@ impl ShellUiState {
             self.active_workspace = workspace_id;
         }
         self.close_picker();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn add_workspace(
@@ -3489,8 +3930,9 @@ impl ShellUiState {
         &mut self,
         workspace_id: WorkspaceId,
         attached_lsp_server: Option<String>,
-    ) {
-        match attached_lsp_server {
+    ) -> bool {
+        let previous = self.attached_lsp_servers.get(&workspace_id).cloned();
+        match attached_lsp_server.clone() {
             Some(server) => {
                 self.attached_lsp_servers.insert(workspace_id, server);
             }
@@ -3498,6 +3940,7 @@ impl ShellUiState {
                 self.attached_lsp_servers.remove(&workspace_id);
             }
         }
+        previous != attached_lsp_server
     }
 
     fn panes(&self) -> Option<&[ShellPane]> {
@@ -3522,6 +3965,8 @@ impl ShellUiState {
         {
             view.active_pane = index;
         }
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn split_buffer_id(&self) -> Option<BufferId> {
@@ -3595,6 +4040,8 @@ impl ShellUiState {
     }
 
     fn set_picker(&mut self, picker: PickerOverlay) {
+        self.close_autocomplete();
+        self.close_hover();
         self.vim_search_worker.clear_pending();
         self.workspace_search_worker.clear_pending();
         self.picker = Some(picker);
@@ -3604,6 +4051,44 @@ impl ShellUiState {
         self.vim_search_worker.clear_pending();
         self.workspace_search_worker.clear_pending();
         self.picker = None;
+    }
+
+    fn autocomplete(&self) -> Option<&AutocompleteOverlay> {
+        self.autocomplete.as_ref()
+    }
+
+    fn autocomplete_mut(&mut self) -> Option<&mut AutocompleteOverlay> {
+        self.autocomplete.as_mut()
+    }
+
+    fn set_autocomplete(&mut self, autocomplete: AutocompleteOverlay) {
+        self.close_picker();
+        self.close_hover();
+        self.autocomplete_worker.clear_pending();
+        self.autocomplete = Some(autocomplete);
+    }
+
+    fn close_autocomplete(&mut self) {
+        self.autocomplete_worker.clear_pending();
+        self.autocomplete = None;
+    }
+
+    fn hover(&self) -> Option<&HoverOverlay> {
+        self.hover.as_ref()
+    }
+
+    fn hover_mut(&mut self) -> Option<&mut HoverOverlay> {
+        self.hover.as_mut()
+    }
+
+    fn set_hover(&mut self, hover: HoverOverlay) {
+        self.close_picker();
+        self.close_autocomplete();
+        self.hover = Some(hover);
+    }
+
+    fn close_hover(&mut self) {
+        self.hover = None;
     }
 
     fn configure_syntax_refresh_worker(
@@ -3712,6 +4197,8 @@ impl ShellUiState {
     fn focus_buffer(&mut self, buffer_id: BufferId) {
         self.focus_buffer_in_active_pane(buffer_id);
         self.close_picker();
+        self.close_autocomplete();
+        self.close_hover();
     }
 
     fn split_pane(&mut self, pane_id: PaneId, buffer_id: BufferId, direction: PaneSplitDirection) {
@@ -3823,6 +4310,35 @@ impl ErrorLog {
             let overflow = self.entries.len() - self.max_entries;
             self.entries.drain(0..overflow);
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LspLogBufferState {
+    buffer_ids: BTreeMap<WorkspaceId, BufferId>,
+    applied_revision: u64,
+}
+
+impl LspLogBufferState {
+    fn new(workspace_id: WorkspaceId, buffer_id: BufferId) -> Self {
+        let mut buffer_ids = BTreeMap::new();
+        buffer_ids.insert(workspace_id, buffer_id);
+        Self {
+            buffer_ids,
+            applied_revision: 0,
+        }
+    }
+
+    fn buffer_id(&self, workspace_id: WorkspaceId) -> Option<BufferId> {
+        self.buffer_ids.get(&workspace_id).copied()
+    }
+
+    fn insert_buffer(&mut self, workspace_id: WorkspaceId, buffer_id: BufferId) {
+        self.buffer_ids.insert(workspace_id, buffer_id);
+    }
+
+    fn remove_workspace(&mut self, workspace_id: WorkspaceId) {
+        self.buffer_ids.remove(&workspace_id);
     }
 }
 
@@ -4232,6 +4748,8 @@ struct ShellVisualRefreshKey {
     theme_settings: ThemeRuntimeSettings,
     git_summary_revision: u64,
     git_fringe_revisions: Vec<(BufferId, u64)>,
+    lsp_diagnostics_revisions: Vec<(BufferId, u64)>,
+    active_lsp_server: Option<String>,
     yank_flash_until: Option<Instant>,
 }
 
@@ -4240,6 +4758,14 @@ pub(crate) struct ShellState {
     typing_profiler: Option<TypingProfiler>,
     last_text_input_profile: Option<Duration>,
     last_text_input_at: Option<Instant>,
+    pending_suppressed_text_input: Option<SuppressedTextInput>,
+    browser_host: BrowserHostService,
+}
+
+#[derive(Debug)]
+struct SuppressedTextInput {
+    text: String,
+    expires_at: Instant,
 }
 
 impl ShellState {
@@ -4273,6 +4799,15 @@ impl ShellState {
             .model_mut()
             .create_buffer(workspace_id, "*errors*", BufferKind::Diagnostics, None)
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        let lsp_log_id = runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                LSP_LOG_BUFFER_NAME,
+                BufferKind::Diagnostics,
+                None,
+            )
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
 
         let (scratch, notes, primary_pane_id) = {
             let workspace = runtime
@@ -4300,6 +4835,9 @@ impl ShellState {
         ui_state
             .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics)
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
+        ui_state
+            .ensure_buffer(lsp_log_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
+            .replace_with_lines(initial_lsp_log_lines());
         runtime.services_mut().insert(ui_state);
 
         let log_dir_error = ensure_log_directory(&log_file_path).err();
@@ -4311,9 +4849,25 @@ impl ShellState {
         if let Some(error) = log_dir_error {
             record_runtime_error(&mut runtime, "error-log", error);
         }
+        runtime
+            .services_mut()
+            .insert(LspLogBufferState::new(workspace_id, lsp_log_id));
         runtime.services_mut().insert(FormatterRegistry::default());
         runtime.services_mut().insert(Mutex::new(JobManager::new()));
         acp::init_acp_manager(&mut runtime)?;
+        runtime
+            .services_mut()
+            .insert(AutocompleteRegistry::from_user_config());
+        runtime
+            .services_mut()
+            .insert(HoverRegistry::from_user_config());
+        let mut lsp_registry = LanguageServerRegistry::new();
+        lsp_registry
+            .register_all(user::language_servers())
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        runtime
+            .services_mut()
+            .insert(Arc::new(Mutex::new(LspClientManager::new(lsp_registry))));
         let mut syntax_registry = SyntaxRegistry::new();
         syntax_registry
             .register_all(user::syntax_languages())
@@ -4336,6 +4890,8 @@ impl ShellState {
                 .then(|| TypingProfiler::new(default_typing_profile_log_path())),
             last_text_input_profile: None,
             last_text_input_at: None,
+            pending_suppressed_text_input: None,
+            browser_host: BrowserHostService::new(),
         })
     }
 
@@ -4385,18 +4941,16 @@ impl ShellState {
     fn handle_event(
         &mut self,
         event: Event,
-        visible_rows: usize,
         render_width: u32,
-        pane_height: u32,
+        render_height: u32,
+        line_height: i32,
     ) -> Result<bool, ShellError> {
         let active_buffer =
             active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
-        let visible_rows = if active_buffer.input_rows > 0 {
-            visible_rows.saturating_sub(active_buffer.input_rows).max(1)
-        } else {
-            visible_rows
-        };
-        self.active_buffer_mut()?.set_viewport_lines(visible_rows);
+        let visible_rows = shell_buffer(&self.runtime, active_buffer.buffer_id)
+            .map_err(ShellError::Runtime)?
+            .viewport_lines();
+        let page_rows = visible_rows as i32;
         let (input_mode, picker_visible) = {
             let ui = self.ui()?;
             (ui.input_mode(), ui.picker_visible())
@@ -4409,14 +4963,47 @@ impl ShellState {
                 }
                 let mouse_x = x as i32;
                 let mouse_y = y as i32;
-                if self.runtime_popup()?.is_some() && mouse_y >= pane_height as i32 {
+                let runtime_popup = self.runtime_popup()?;
+                let popup_height = runtime_popup
+                    .as_ref()
+                    .map(|_| popup_window_height(render_height, line_height))
+                    .unwrap_or(0);
+                let pane_height = render_height.saturating_sub(popup_height);
+                let browser_plan = browser_sync_plan(
+                    self.ui()?,
+                    runtime_popup.as_ref(),
+                    render_width,
+                    render_height,
+                    line_height,
+                )?;
+                let clicked_browser_buffer =
+                    browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
+                if runtime_popup.is_some() && mouse_y >= pane_height as i32 {
                     self.ui_mut()?.set_popup_focus(true);
+                    if let Some(buffer_id) = clicked_browser_buffer {
+                        self.browser_host
+                            .focus_buffer(buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                    } else {
+                        self.browser_host
+                            .focus_parent()
+                            .map_err(ShellError::Runtime)?;
+                    }
                     return Ok(false);
                 }
                 if let Some(pane_id) =
                     self.pane_id_at_point(render_width, pane_height, mouse_x, mouse_y)?
                 {
                     self.focus_runtime_pane(pane_id)?;
+                    if let Some(buffer_id) = clicked_browser_buffer {
+                        self.browser_host
+                            .focus_buffer(buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                    } else {
+                        self.browser_host
+                            .focus_parent()
+                            .map_err(ShellError::Runtime)?;
+                    }
                 }
             }
             Event::KeyDown {
@@ -4425,7 +5012,18 @@ impl ShellState {
                 repeat,
                 ..
             } => {
-                if repeat && !repeated_keydown_allowed(keycode, keymod) {
+                let runtime_surface_before =
+                    active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+                let hover_repeat_allowed = self
+                    .ui()?
+                    .hover()
+                    .map(|hover| hover.focused)
+                    .unwrap_or(false)
+                    && matches!(
+                        keycode,
+                        Keycode::Up | Keycode::Down | Keycode::PageUp | Keycode::PageDown
+                    );
+                if repeat && !hover_repeat_allowed && !repeated_keydown_allowed(keycode, keymod) {
                     return Ok(false);
                 }
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
@@ -4488,6 +5086,12 @@ impl ShellState {
                     }
                     return Ok(false);
                 }
+                if self.handle_focused_hover_keydown(keycode, keymod)? {
+                    return Ok(false);
+                }
+                if self.handle_autocomplete_keydown(keycode, keymod)? {
+                    return Ok(false);
+                }
                 if self.try_runtime_keybinding_cached(
                     keycode,
                     keymod,
@@ -4495,7 +5099,7 @@ impl ShellState {
                     picker_visible,
                     active_buffer.is_directory,
                 )? {
-                    self.sync_active_buffer().map_err(ShellError::Runtime)?;
+                    self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                     return Ok(false);
                 }
 
@@ -4520,6 +5124,8 @@ impl ShellState {
                     return Ok(false);
                 }
 
+                let mut refresh_autocomplete = false;
+                let mut close_autocomplete = false;
                 match keycode {
                     Keycode::Left => {
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace)
@@ -4530,6 +5136,8 @@ impl ShellState {
                             }
                         } else {
                             let _ = self.active_buffer_mut()?.move_left();
+                            refresh_autocomplete =
+                                matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
                     Keycode::Right => {
@@ -4541,6 +5149,8 @@ impl ShellState {
                             }
                         } else {
                             let _ = self.active_buffer_mut()?.move_right();
+                            refresh_autocomplete =
+                                matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
                     Keycode::Up => {
@@ -4552,6 +5162,8 @@ impl ShellState {
                             }
                         } else {
                             let _ = self.active_buffer_mut()?.move_up();
+                            refresh_autocomplete =
+                                matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
                     Keycode::Down => {
@@ -4563,10 +5175,12 @@ impl ShellState {
                             }
                         } else {
                             let _ = self.active_buffer_mut()?.move_down();
+                            refresh_autocomplete =
+                                matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
-                    Keycode::PageDown => self.active_buffer_mut()?.scroll_by(visible_rows as i32),
-                    Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-(visible_rows as i32)),
+                    Keycode::PageDown => self.active_buffer_mut()?.scroll_by(page_rows),
+                    Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-page_rows),
                     Keycode::Return | Keycode::KpEnter
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
@@ -4592,6 +5206,7 @@ impl ShellState {
                                 format_current_line_indent(buffer, indent_size, use_tabs);
                             }
                             self.mark_active_buffer_syntax_dirty()?;
+                            close_autocomplete = true;
                         }
                     }
                     Keycode::Backspace
@@ -4601,9 +5216,22 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.backspace();
                             }
+                            if active_buffer.is_acp {
+                                acp::maybe_open_slash_completion(
+                                    &mut self.runtime,
+                                    active_buffer.buffer_id,
+                                )
+                                .map_err(ShellError::Runtime)?;
+                                acp::refresh_acp_input_hint(
+                                    &mut self.runtime,
+                                    active_buffer.buffer_id,
+                                )
+                                .map_err(ShellError::Runtime)?;
+                            }
                         } else if !active_buffer.is_read_only {
                             self.active_buffer_mut()?.backspace();
                             self.mark_active_buffer_syntax_dirty()?;
+                            refresh_autocomplete = true;
                         }
                     }
                     Keycode::Delete
@@ -4613,9 +5241,22 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.delete_forward();
                             }
+                            if active_buffer.is_acp {
+                                acp::maybe_open_slash_completion(
+                                    &mut self.runtime,
+                                    active_buffer.buffer_id,
+                                )
+                                .map_err(ShellError::Runtime)?;
+                                acp::refresh_acp_input_hint(
+                                    &mut self.runtime,
+                                    active_buffer.buffer_id,
+                                )
+                                .map_err(ShellError::Runtime)?;
+                            }
                         } else if !active_buffer.is_read_only {
                             self.active_buffer_mut()?.delete_forward();
                             self.mark_active_buffer_syntax_dirty()?;
+                            refresh_autocomplete = true;
                         }
                     }
                     Keycode::Tab => {
@@ -4632,6 +5273,7 @@ impl ShellState {
                             toggle_git_section(&mut self.runtime).map_err(ShellError::Runtime)?;
                         } else {
                             cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
+                            close_autocomplete = true;
                         }
                     }
                     Keycode::F2 => {
@@ -4639,6 +5281,11 @@ impl ShellState {
                             .map_err(ShellError::Runtime)?;
                     }
                     _ => {}
+                }
+                if close_autocomplete {
+                    self.ui_mut()?.close_autocomplete();
+                } else if refresh_autocomplete {
+                    self.schedule_autocomplete_refresh_if_active()?;
                 }
             }
             Event::TextInput { text, .. } => {
@@ -4648,6 +5295,33 @@ impl ShellState {
         }
 
         Ok(false)
+    }
+
+    fn queue_suppressed_text_input_for_chord(&mut self, chord: &str) {
+        const SUPPRESSED_TEXT_INPUT_WINDOW: Duration = Duration::from_millis(50);
+        let suppressed = match chord {
+            "Ctrl+Space" => Some(" "),
+            _ => chord
+                .strip_prefix("Ctrl+")
+                .filter(|suffix| suffix.len() == 1)
+                .filter(|suffix| {
+                    suffix
+                        .chars()
+                        .all(|character| character.is_ascii_lowercase())
+                }),
+        };
+        if let Some(text) = suppressed {
+            self.pending_suppressed_text_input = Some(SuppressedTextInput {
+                text: text.to_owned(),
+                expires_at: Instant::now() + SUPPRESSED_TEXT_INPUT_WINDOW,
+            });
+        }
+    }
+
+    fn should_suppress_text_input(&mut self, text: &str) -> bool {
+        self.pending_suppressed_text_input
+            .take()
+            .is_some_and(|pending| Instant::now() <= pending.expires_at && pending.text == text)
     }
 
     fn pane_id_at_point(
@@ -4732,6 +5406,53 @@ impl ShellState {
             ascent,
             Instant::now(),
         )
+    }
+
+    fn sync_browser_hosts(
+        &mut self,
+        window: &Window,
+        width: u32,
+        height: u32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let runtime_popup = self.runtime_popup()?;
+        let plan = browser_sync_plan(
+            self.ui()?,
+            runtime_popup.as_ref(),
+            width,
+            height,
+            line_height,
+        )?;
+        let updates = self
+            .browser_host
+            .sync_window(window, &plan)
+            .map_err(ShellError::Runtime)?;
+        if !updates.is_empty() {
+            apply_browser_location_updates(&mut self.runtime, &updates)
+                .map_err(ShellError::Runtime)?;
+        }
+        let events = self
+            .browser_host
+            .drain_events()
+            .map_err(ShellError::Runtime)?;
+        if !events.is_empty() {
+            self.apply_browser_host_events(&events)?;
+        }
+        Ok(())
+    }
+
+    fn apply_browser_host_events(&mut self, events: &[BrowserHostEvent]) -> Result<(), ShellError> {
+        for event in events {
+            match event {
+                BrowserHostEvent::FocusParentRequested { .. } => {
+                    self.browser_host
+                        .focus_parent()
+                        .map_err(ShellError::Runtime)?;
+                    self.ui_mut()?.enter_normal_mode();
+                }
+            }
+        }
+        Ok(())
     }
 
     fn pane_count(&self) -> Result<usize, ShellError> {
@@ -5020,6 +5741,8 @@ impl ShellState {
 
     fn execute_recorded_chord(&mut self, chord: &str) -> Result<(), ShellError> {
         let vim_mode = keymap_vim_mode(self.input_mode()?);
+        let runtime_surface_before =
+            active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
 
         if self.picker_visible()?
             && self
@@ -5054,7 +5777,7 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
-            self.sync_active_buffer().map_err(ShellError::Runtime)?;
+            self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
             self.clear_stale_vim_count()?;
         }
 
@@ -5078,11 +5801,13 @@ impl ShellState {
             .keymaps()
             .contains_for_mode(&scope, vim_mode, &chord)
         {
+            let runtime_surface_before =
+                active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
             self.runtime
                 .execute_key_binding_for_mode(&scope, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
-            self.sync_active_buffer().map_err(ShellError::Runtime)?;
+            self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
             self.clear_stale_vim_count()?;
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
@@ -5163,10 +5888,22 @@ impl ShellState {
     }
 
     pub(crate) fn handle_text_input(&mut self, text: &str) -> Result<(), ShellError> {
+        if self.should_suppress_text_input(text) {
+            return Ok(());
+        }
         self.last_text_input_at = Some(Instant::now());
         self.last_text_input_profile = None;
         let profile_started = self.typing_profiler.as_ref().map(|_| Instant::now());
+        let hover_before = self.ui()?.hover().cloned();
         let result = self.handle_text_input_inner(text);
+        let hover_changed = result.is_ok() && self.ui()?.hover().cloned() != hover_before;
+        let result = result.and_then(|()| {
+            if hover_changed {
+                Ok(())
+            } else {
+                self.refresh_hover_state().map(|_| ())
+            }
+        });
         if let Some(profile_started) = profile_started {
             self.last_text_input_profile = Some(profile_started.elapsed());
         }
@@ -5201,6 +5938,8 @@ impl ShellState {
                     if handled {
                         acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
+                        acp::refresh_acp_input_hint(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
                         self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
                         self.maybe_finish_change_after_input()?;
                     }
@@ -5230,6 +5969,7 @@ impl ShellState {
                     buffer.insert_text(normalized.as_ref());
                 }
                 self.mark_active_buffer_syntax_dirty()?;
+                self.schedule_autocomplete_refresh_if_active()?;
                 self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
@@ -5250,6 +5990,8 @@ impl ShellState {
                     };
                     if handled {
                         acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                        acp::refresh_acp_input_hint(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
                         self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
                         self.maybe_finish_change_after_input()?;
@@ -5280,6 +6022,7 @@ impl ShellState {
                     buffer.replace_mode_text(normalized.as_ref());
                 }
                 self.mark_active_buffer_syntax_dirty()?;
+                self.schedule_autocomplete_refresh_if_active()?;
                 self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
@@ -5335,10 +6078,12 @@ impl ShellState {
                 .keymaps()
                 .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
             {
+                let runtime_surface_before =
+                    active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
                 self.runtime
                     .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
                     .map_err(|error| ShellError::Runtime(error.to_string()))?;
-                self.sync_active_buffer().map_err(ShellError::Runtime)?;
+                self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                 self.clear_stale_vim_count()?;
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -5476,6 +6221,204 @@ impl ShellState {
         Ok(changed)
     }
 
+    fn schedule_autocomplete_refresh_if_active(&mut self) -> Result<(), ShellError> {
+        let registry = self
+            .runtime
+            .services()
+            .get::<AutocompleteRegistry>()
+            .cloned()
+            .ok_or_else(|| {
+                ShellError::Runtime("autocomplete registry service missing".to_owned())
+            })?;
+        let lsp_client = self
+            .runtime
+            .services()
+            .get::<Arc<Mutex<LspClientManager>>>()
+            .cloned();
+        let request = {
+            let ui = self.ui()?;
+            let Some(buffer_id) = ui.active_buffer_id() else {
+                return Ok(());
+            };
+            let Some(buffer) = ui.buffer(buffer_id) else {
+                return Ok(());
+            };
+            let root = if let Some(path) = buffer.path() {
+                workspace_root_for_path(&self.runtime, path).map_err(ShellError::Runtime)?
+            } else {
+                None
+            };
+            autocomplete_request_for_buffer(
+                buffer_id,
+                buffer,
+                root,
+                &registry,
+                lsp_client.clone(),
+                false,
+            )
+        };
+        let ui = self.ui_mut()?;
+        match request {
+            Some(request) => {
+                if ui
+                    .autocomplete()
+                    .map(|autocomplete| autocomplete.buffer_id != request.buffer_id)
+                    .unwrap_or(true)
+                {
+                    ui.set_autocomplete(AutocompleteOverlay::new(
+                        request.buffer_id,
+                        request.buffer_revision,
+                        request.query.clone(),
+                    ));
+                } else if let Some(autocomplete) = ui.autocomplete_mut() {
+                    autocomplete.buffer_revision = request.buffer_revision;
+                    autocomplete.query = request.query.clone();
+                }
+                ui.autocomplete_worker.schedule(request);
+            }
+            None => ui.close_autocomplete(),
+        }
+        Ok(())
+    }
+
+    fn refresh_pending_autocomplete(&mut self) -> Result<bool, ShellError> {
+        let now = Instant::now();
+        self.ui_mut()?.autocomplete_worker.dispatch_due(now);
+        let Some(result) = self.ui()?.autocomplete_worker.take_latest_result() else {
+            return Ok(false);
+        };
+        let should_apply = {
+            let ui = self.ui()?;
+            if let Some(autocomplete) = ui.autocomplete()
+                && let Some(buffer) = ui.buffer(result.buffer_id)
+            {
+                autocomplete.buffer_id == result.buffer_id
+                    && result.buffer_revision >= autocomplete.buffer_revision
+                    && ui.active_buffer_id() == Some(result.buffer_id)
+                    && buffer.text.revision() == result.buffer_revision
+                    && result.request_id == ui.autocomplete_worker.next_request_id
+            } else {
+                false
+            }
+        };
+        if !should_apply {
+            return Ok(false);
+        }
+        if result.entries.is_empty() {
+            self.ui_mut()?.close_autocomplete();
+            return Ok(true);
+        }
+        if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+            autocomplete.buffer_revision = result.buffer_revision;
+            autocomplete.query = result.query;
+            autocomplete.set_entries(result.entries);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn refresh_hover_state(&mut self) -> Result<bool, ShellError> {
+        let should_close = {
+            let ui = self.ui()?;
+            let Some(hover) = ui.hover() else {
+                return Ok(false);
+            };
+            let Some(buffer) = ui.buffer(hover.buffer_id) else {
+                return Ok(true);
+            };
+            buffer.cursor_point() != hover.anchor
+        };
+        if should_close {
+            self.ui_mut()?.close_hover();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn handle_focused_hover_keydown(
+        &mut self,
+        keycode: Keycode,
+        keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        if !self
+            .ui()?
+            .hover()
+            .map(|hover| hover.focused)
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        match keycode {
+            Keycode::Escape => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.focused = false;
+                }
+                Ok(true)
+            }
+            Keycode::N if keymod.intersects(ctrl_mod()) => {
+                cycle_hover_provider(&mut self.runtime, true).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            Keycode::P if keymod.intersects(ctrl_mod()) => {
+                cycle_hover_provider(&mut self.runtime, false).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            Keycode::Down => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_by(1);
+                }
+                Ok(true)
+            }
+            Keycode::Up => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_by(-1);
+                }
+                Ok(true)
+            }
+            Keycode::PageDown => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_by(hover.line_limit as i32);
+                }
+                Ok(true)
+            }
+            Keycode::PageUp => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_by(-(hover.line_limit as i32));
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn handle_autocomplete_keydown(
+        &mut self,
+        keycode: Keycode,
+        keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        let Some(chord) = keydown_chord(keycode, keymod) else {
+            return Ok(false);
+        };
+        let handled = {
+            let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() else {
+                return Ok(false);
+            };
+            if chord == user::autocomplete::NEXT_CHORD {
+                autocomplete.select_next();
+                true
+            } else if chord == user::autocomplete::PREVIOUS_CHORD {
+                autocomplete.select_previous();
+                true
+            } else {
+                false
+            }
+        };
+        if handled {
+            self.queue_suppressed_text_input_for_chord(&chord);
+        }
+        Ok(handled)
+    }
+
     #[cfg(test)]
     pub(crate) fn try_runtime_keybinding(
         &mut self,
@@ -5497,6 +6440,42 @@ impl ShellState {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_active_buffer_text_for_test(
+        &mut self,
+        text: &str,
+    ) -> Result<(), ShellError> {
+        let lines = if text.is_empty() {
+            Vec::new()
+        } else {
+            text.split('\n').map(str::to_owned).collect()
+        };
+        self.active_buffer_mut()?.replace_with_lines(lines);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_picker_searches_for_test(&mut self) -> Result<(), ShellError> {
+        const SEARCH_WAIT_STEP: Duration = Duration::from_millis(5);
+        const SEARCH_WAIT_ATTEMPTS: usize = 40;
+
+        {
+            let ui = self.ui_mut()?;
+            let due = Instant::now() + Duration::from_secs(1);
+            ui.vim_search_worker.dispatch_due(due);
+            ui.workspace_search_worker.dispatch_due(due);
+        }
+
+        for _ in 0..SEARCH_WAIT_ATTEMPTS {
+            if self.refresh_pending_picker_searches()? {
+                return Ok(());
+            }
+            std::thread::sleep(SEARCH_WAIT_STEP);
+        }
+
+        Ok(())
+    }
+
     fn try_runtime_keybinding_cached(
         &mut self,
         keycode: Keycode,
@@ -5512,6 +6491,7 @@ impl ShellState {
         clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
         let vim_mode = keymap_vim_mode(input_mode);
         let in_text_insert_mode = matches!(input_mode, InputMode::Insert | InputMode::Replace);
+        let hover_visible = self.ui()?.hover().is_some();
 
         if !picker_visible
             && !in_text_insert_mode
@@ -5519,7 +6499,37 @@ impl ShellState {
             && handle_directory_keydown_chord(&mut self.runtime, &chord)
                 .map_err(ShellError::Runtime)?
         {
+            self.queue_suppressed_text_input_for_chord(&chord);
             self.ui_mut()?.vim_mut().clear_transient();
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
+        if !picker_visible && !in_text_insert_mode && hover_visible && chord == "Tab" {
+            trigger_hover_focus(&mut self.runtime).map_err(ShellError::Runtime)?;
+            self.queue_suppressed_text_input_for_chord(&chord);
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
+        if !picker_visible
+            && !in_text_insert_mode
+            && hover_visible
+            && matches!(
+                chord.as_str(),
+                user::hover::NEXT_CHORD | user::hover::PREVIOUS_CHORD
+            )
+            && self
+                .runtime
+                .keymaps()
+                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+        {
+            self.runtime
+                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
             return Ok(true);
@@ -5534,6 +6544,7 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Popup, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
             return Ok(true);
@@ -5547,6 +6558,7 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
             return Ok(true);
@@ -5562,6 +6574,7 @@ impl ShellState {
             self.runtime
                 .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
                 .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
             return Ok(true);
@@ -5570,26 +6583,112 @@ impl ShellState {
         Ok(false)
     }
 
+    #[cfg(test)]
+    pub(crate) fn wait_for_autocomplete_results(&mut self) -> Result<(), ShellError> {
+        for _ in 0..40 {
+            self.ui_mut()?
+                .autocomplete_worker
+                .dispatch_due(Instant::now());
+            if self.refresh_pending_autocomplete()? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn autocomplete_visible(&self) -> Result<bool, ShellError> {
+        Ok(self.ui()?.autocomplete().is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn autocomplete_entries(&self) -> Result<Vec<String>, ShellError> {
+        Ok(self
+            .ui()?
+            .autocomplete()
+            .map(|autocomplete| {
+                autocomplete
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.replacement.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn autocomplete_selected(&self) -> Result<Option<String>, ShellError> {
+        Ok(self.ui()?.autocomplete().and_then(|autocomplete| {
+            autocomplete
+                .selected()
+                .map(|entry| entry.replacement.clone())
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_visible(&self) -> Result<bool, ShellError> {
+        Ok(self.ui()?.hover().is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_focused(&self) -> Result<bool, ShellError> {
+        Ok(self
+            .ui()?
+            .hover()
+            .map(|hover| hover.focused)
+            .unwrap_or(false))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_provider_label(&self) -> Result<Option<String>, ShellError> {
+        Ok(self.ui()?.hover().and_then(|hover| {
+            hover
+                .current_provider()
+                .map(|provider| provider.provider_label.clone())
+        }))
+    }
+
     fn sync_active_buffer(&mut self) -> Result<(), String> {
         sync_active_buffer(&mut self.runtime)
     }
 
-    fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize) -> Result<(), ShellError> {
+    fn sync_active_buffer_if_surface_changed(
+        &mut self,
+        previous_surface: Option<(PaneId, BufferId)>,
+    ) -> Result<(), ShellError> {
+        let runtime_surface = active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+        if runtime_surface != previous_surface {
+            self.sync_active_buffer().map_err(ShellError::Runtime)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_visible(&mut self, wrap_cols: usize) -> Result<(), ShellError> {
         let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-        let (language_id, has_input) = shell_ui(&self.runtime)
+        let (language_id, visible_rows) = shell_ui(&self.runtime)
             .map_err(ShellError::Runtime)?
             .buffer(buffer_id)
-            .map(|buffer| (buffer.language_id(), buffer.has_input_field()))
-            .unwrap_or((None, false));
+            .map(|buffer| (buffer.language_id(), buffer.viewport_lines()))
+            .unwrap_or((None, 1));
         let indent_size =
             theme_lang_indent(self.runtime.services().get::<ThemeRegistry>(), language_id);
-        let visible_rows = if has_input {
-            visible_rows.saturating_sub(1).max(1)
-        } else {
-            visible_rows
-        };
         self.active_buffer_mut()?
             .ensure_visible(visible_rows, wrap_cols, indent_size);
+        Ok(())
+    }
+
+    fn sync_active_viewport(
+        &mut self,
+        viewport_height: u32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+        let visible_rows = {
+            let buffer = shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
+            buffer_visible_rows_for_height(buffer, viewport_height, line_height)
+        };
+        self.active_buffer_mut()?.set_viewport_lines(visible_rows);
         Ok(())
     }
 
@@ -5616,8 +6715,33 @@ impl ShellState {
         refresh_pending_git(&mut self.runtime, now, typing_active).map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_acp(&mut self) -> Result<bool, ShellError> {
-        acp::refresh_pending_acp(&mut self.runtime).map_err(ShellError::Runtime)
+    fn refresh_pending_lsp(&mut self) -> Result<bool, ShellError> {
+        refresh_pending_lsp(&mut self.runtime).map_err(ShellError::Runtime)
+    }
+
+    fn refresh_pending_acp(
+        &mut self,
+        viewport_height: u32,
+        line_height: i32,
+    ) -> Result<bool, ShellError> {
+        self.sync_active_viewport(viewport_height, line_height)?;
+        let active_buffer_id =
+            active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+        let followed_output = {
+            let buffer =
+                shell_buffer(&self.runtime, active_buffer_id).map_err(ShellError::Runtime)?;
+            buffer.has_input_field() && buffer.should_follow_output()
+        };
+        let changed = acp::refresh_pending_acp(&mut self.runtime).map_err(ShellError::Runtime)?;
+        self.sync_active_viewport(viewport_height, line_height)?;
+        if changed
+            && followed_output
+            && active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?
+                == active_buffer_id
+        {
+            self.active_buffer_mut()?.scroll_output_to_end();
+        }
+        Ok(changed)
     }
 
     fn visual_refresh_key(
@@ -5642,6 +6766,12 @@ impl ShellState {
                         .map(|revision| (buffer.id(), revision))
                 })
                 .collect(),
+            lsp_diagnostics_revisions: ui
+                .buffers
+                .iter()
+                .map(|buffer| (buffer.id(), buffer.lsp_diagnostics_revision()))
+                .collect(),
+            active_lsp_server: ui.attached_lsp_server().map(str::to_owned),
             yank_flash_until: ui.yank_flash_deadline(now),
         })
     }
@@ -5805,10 +6935,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 } else {
                     pane_height
                 };
-                let line_height_px = line_height.max(1) as u32;
-                let visible_rows =
-                    ((active_height.saturating_sub(72)) / line_height_px).max(1) as usize;
                 let wrap_cols = wrap_columns_for_width(render_width, cell_width);
+                if let Err(error) = state.sync_active_viewport(active_height, line_height as i32) {
+                    state.record_shell_error("shell.sync-active-viewport", error);
+                }
                 let mut had_events = false;
                 let event_batch_started = Instant::now();
                 let mut frame_polled_events = 0usize;
@@ -5821,7 +6951,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         .as_ref()
                         .map(|_| TypingEventMetadata::from_event(&event));
                     let event_started = typing_frame.as_ref().map(|_| Instant::now());
-                    match state.handle_event(event, visible_rows, render_width, pane_height) {
+                    match state.handle_event(event, render_width, render_height, line_height as i32)
+                    {
                         Ok(true) => return FrameOutcome::Quit,
                         Ok(false) => {}
                         Err(error) => state.record_shell_error("shell.handle-event", error),
@@ -5847,7 +6978,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         break;
                     }
                 }
-                if had_events && let Err(error) = state.ensure_visible(visible_rows, wrap_cols) {
+                if had_events
+                    && let Err(error) =
+                        state.sync_active_viewport(active_height, line_height as i32)
+                {
+                    state.record_shell_error("shell.sync-active-viewport", error);
+                }
+                if had_events && let Err(error) = state.ensure_visible(wrap_cols) {
                     state.record_shell_error("shell.ensure-visible", error);
                 }
 
@@ -5858,6 +6995,27 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     Ok(changed) => changed,
                     Err(error) => {
                         state.record_shell_error("shell.picker-search-refresh", error);
+                        false
+                    }
+                };
+                let lsp_changed = match state.refresh_pending_lsp() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.lsp-refresh", error);
+                        false
+                    }
+                };
+                let autocomplete_changed = match state.refresh_pending_autocomplete() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.autocomplete-refresh", error);
+                        false
+                    }
+                };
+                let hover_changed = match state.refresh_hover_state() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.hover-refresh", error);
                         false
                     }
                 };
@@ -5887,7 +7045,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     frame.git_refresh = git_refresh_started.elapsed();
                 }
                 let acp_refresh_started = Instant::now();
-                let acp_changed = match state.refresh_pending_acp() {
+                let acp_changed = match state.refresh_pending_acp(active_height, line_height as i32)
+                {
                     Ok(changed) => changed,
                     Err(error) => {
                         state.record_shell_error("shell.acp-refresh", error);
@@ -5913,6 +7072,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let should_render = last_scene.is_none()
                     || had_events
                     || picker_changed
+                    || lsp_changed
+                    || autocomplete_changed
+                    || hover_changed
                     || syntax_changed
                     || acp_changed
                     || last_visual_key.as_ref() != Some(&visual_key);
@@ -5948,6 +7110,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 } else {
                     Instant::now()
                 };
+                if let Err(error) = state.sync_browser_hosts(
+                    canvas.window(),
+                    render_width,
+                    render_height,
+                    line_height as i32,
+                ) {
+                    state.record_shell_error("shell.browser-host", error);
+                }
                 if let Some(frame) = typing_frame.take() {
                     state.record_typing_frame(frame.finish(frame_started.elapsed(), presented_at));
                 }
@@ -6011,7 +7181,6 @@ fn update_theme_runtime<'ttf>(
 
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
-        || updated.nerd_fonts != theme_settings.nerd_fonts
     {
         let (next_fonts, next_font_path) = load_font_set(ttf, &updated)?;
         *font_path = next_font_path;
@@ -6043,13 +7212,9 @@ fn theme_runtime_settings(
         .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
         .map(|value| value.max(1.0).round() as u32)
         .unwrap_or(config.font_size);
-    let nerd_fonts = theme_registry
-        .and_then(|registry| registry.resolve_bool(OPTION_NERD_FONTS))
-        .unwrap_or(false);
     ThemeRuntimeSettings {
         font_request,
         font_size,
-        nerd_fonts,
     }
 }
 
@@ -6088,15 +7253,95 @@ fn resolve_font_request(request: &str) -> Option<PathBuf> {
     find_font_by_name(trimmed)
 }
 
-fn resolve_nerd_font_fallback_path() -> Result<PathBuf, ShellError> {
-    for candidate in NERD_FONT_FALLBACK_CANDIDATES {
-        if let Some(path) = resolve_font_request(candidate) {
-            return Ok(path);
+fn asset_path_from_parts(base: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(base.to_path_buf(), |candidate, part| candidate.join(part))
+}
+
+fn resolve_bundled_icon_font_dir() -> Result<PathBuf, ShellError> {
+    let mut roots = Vec::new();
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        roots.extend(
+            exe_dir
+                .ancestors()
+                .take(BUNDLED_ICON_FONT_SEARCH_DEPTH)
+                .map(Path::to_path_buf),
+        );
+    }
+    if let Ok(cwd) = env::current_dir() {
+        roots.extend(
+            cwd.ancestors()
+                .take(BUNDLED_ICON_FONT_SEARCH_DEPTH)
+                .map(Path::to_path_buf),
+        );
+    }
+    for root in roots {
+        for parts in BUNDLED_ICON_FONT_DIR_CANDIDATES {
+            let candidate = asset_path_from_parts(&root, parts);
+            if candidate.is_dir() {
+                return Ok(candidate);
+            }
         }
     }
+    let candidates = BUNDLED_ICON_FONT_DIR_CANDIDATES
+        .iter()
+        .map(|parts| parts.join("\\"))
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(ShellError::Runtime(format!(
-        "nerd font fallback not found; tried {}",
-        NERD_FONT_FALLBACK_CANDIDATES.join(", ")
+        "bundled icon font directory not found; looked for {candidates}"
+    )))
+}
+
+fn resolve_bundled_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
+    let font_dir = resolve_bundled_icon_font_dir()?;
+    BUNDLED_ICON_FONT_FILES
+        .iter()
+        .map(|name| {
+            let path = font_dir.join(name);
+            if path.is_file() {
+                Ok(path)
+            } else {
+                Err(ShellError::Runtime(format!(
+                    "bundled icon font `{name}` is missing from `{}`",
+                    font_dir.display()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
+    let mut missing_count = 0usize;
+    let mut examples = Vec::new();
+    for symbol in user::icon_font::symbols() {
+        let supported = symbol
+            .glyph
+            .chars()
+            .all(|character| fonts.icon_font_index_for_char(character).is_some());
+        if supported {
+            continue;
+        }
+        missing_count += 1;
+        if examples.len() < 12 {
+            examples.push(format!("{} ({})", symbol.id(), symbol.codepoint_label()));
+        }
+    }
+    if missing_count == 0 {
+        return Ok(());
+    }
+    let loaded_fonts = fonts
+        .icon_fonts()
+        .iter()
+        .map(|font| font.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ShellError::Runtime(format!(
+        "bundled icon font validation failed: {missing_count} exported icons are missing from the startup icon-font stack ({loaded_fonts}). examples: {}",
+        examples.join(", ")
     )))
 }
 
@@ -6108,16 +7353,36 @@ fn load_font_set<'ttf>(
     let primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let fallback = if settings.nerd_fonts {
-        let fallback_path = resolve_nerd_font_fallback_path()?;
-        Some(
-            ttf.load_font(&fallback_path, settings.font_size as f32)
-                .map_err(|error| ShellError::Sdl(error.to_string()))?,
-        )
-    } else {
-        None
-    };
-    Ok((FontSet::new(primary, fallback), primary_path))
+    let icon_fonts = resolve_bundled_icon_font_paths()?
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .unwrap_or("icon-font")
+                .to_owned();
+            let bytes = fs::read(&path).map_err(|error| {
+                ShellError::Runtime(format!(
+                    "failed to read bundled icon font `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            let raster_font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+                .map_err(|error| {
+                    ShellError::Runtime(format!(
+                        "failed to parse bundled icon font `{}`: {error}",
+                        path.display()
+                    ))
+                })?;
+            let font = ttf
+                .load_font(&path, settings.font_size as f32)
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            Ok((name, font, raster_font))
+        })
+        .collect::<Result<Vec<_>, ShellError>>()?;
+    let fonts = FontSet::new(primary, icon_fonts, settings.font_size as f32);
+    validate_bundled_icon_fonts(&fonts)?;
+    Ok((fonts, primary_path))
 }
 
 fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -6267,6 +7532,51 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     register_hook(runtime, HOOK_PICKER_CANCEL, "Closes the active picker.")?;
     register_hook(
         runtime,
+        HOOK_AUTOCOMPLETE_TRIGGER,
+        "Opens autocomplete for the active insert buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_AUTOCOMPLETE_NEXT,
+        "Moves to the next autocomplete suggestion.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_AUTOCOMPLETE_PREVIOUS,
+        "Moves to the previous autocomplete suggestion.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_AUTOCOMPLETE_ACCEPT,
+        "Accepts the selected autocomplete suggestion.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_AUTOCOMPLETE_CANCEL,
+        "Closes the active autocomplete window.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_HOVER_TOGGLE,
+        "Shows or closes the hover overlay at the cursor without focusing it.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_HOVER_FOCUS,
+        "Moves focus into the hover overlay at the cursor.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_HOVER_NEXT,
+        "Moves to the next hover provider tab.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_HOVER_PREVIOUS,
+        "Moves to the previous hover provider tab.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_ACP_DISCONNECT,
         "Disconnects the active ACP session.",
     )?;
@@ -6385,6 +7695,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_GIT_STATUS_OPEN_POPUP,
         "Opens the git status buffer in the popup window.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_URL,
+        "Detects a URL in the active buffer and opens it in the popup browser.",
     )?;
     register_hook(runtime, HOOK_GIT_DIFF_OPEN, "Opens the git diff buffer.")?;
     register_hook(runtime, HOOK_GIT_LOG_OPEN, "Opens the git log buffer.")?;
@@ -7065,6 +8380,84 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_AUTOCOMPLETE_TRIGGER,
+            "shell.autocomplete-trigger",
+            |_, runtime| {
+                trigger_autocomplete(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_AUTOCOMPLETE_NEXT,
+            "shell.autocomplete-next",
+            |_, runtime| {
+                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut() {
+                    autocomplete.select_next();
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_AUTOCOMPLETE_PREVIOUS,
+            "shell.autocomplete-previous",
+            |_, runtime| {
+                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut() {
+                    autocomplete.select_previous();
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_AUTOCOMPLETE_ACCEPT,
+            "shell.autocomplete-accept",
+            |_, runtime| {
+                accept_autocomplete(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_AUTOCOMPLETE_CANCEL,
+            "shell.autocomplete-cancel",
+            |_, runtime| {
+                shell_ui_mut(runtime)?.close_autocomplete();
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_HOVER_TOGGLE, "shell.hover-toggle", |_, runtime| {
+            trigger_hover_toggle(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_HOVER_FOCUS, "shell.hover-focus", |_, runtime| {
+            trigger_hover_focus(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_HOVER_NEXT, "shell.hover-next", |_, runtime| {
+            cycle_hover_provider(runtime, true)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_HOVER_PREVIOUS, "shell.hover-previous", |_, runtime| {
+            cycle_hover_provider(runtime, false)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_POPUP_TOGGLE, "shell.popup-toggle", |_, runtime| {
             toggle_runtime_popup(runtime)?;
             sync_active_buffer(runtime)?;
@@ -7154,6 +8547,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_BROWSER_URL, "shell.browser-url", |_, runtime| {
+            open_detected_browser_url(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_GIT_DIFF_OPEN, "shell.git-diff-open", |_, runtime| {
             open_git_diff_worktree(runtime)?;
             Ok(())
@@ -7195,6 +8594,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
+            shell_ui_mut(runtime)?.close_autocomplete();
             refresh_git_status_if_active(runtime)?;
             ensure_directory_buffer(runtime)?;
             Ok(())
@@ -7205,6 +8605,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             builtins::BUFFER_SWITCH,
             "shell.buffer-switch",
             |_, runtime| {
+                shell_ui_mut(runtime)?.close_autocomplete();
                 refresh_git_status_if_active(runtime)?;
                 ensure_directory_buffer(runtime)?;
                 Ok(())
@@ -7511,24 +8912,413 @@ fn load_window_icon() -> Result<sdl3::surface::Surface<'static>, ShellError> {
 }
 
 fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
-    if !runtime.hooks().contains("lsp.server-start") {
-        return Ok(());
+    if runtime.hooks().contains(HOOK_LSP_START) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_START,
+                "shell.track-lsp-server",
+                |event, runtime| start_lsp_for_active_buffer(runtime, event.detail.as_deref()),
+            )
+            .map_err(|error| error.to_string())?;
     }
 
-    runtime
-        .subscribe_hook(
-            "lsp.server-start",
-            "shell.track-lsp-server",
-            |event, runtime| {
-                let workspace_id = event
-                    .workspace_id
-                    .or_else(|| runtime.model().active_workspace_id().ok())
-                    .ok_or_else(|| "lsp status hook is missing a workspace".to_owned())?;
-                shell_ui_mut(runtime)?.set_attached_lsp_server(workspace_id, event.detail.clone());
-                Ok(())
-            },
+    if runtime.hooks().contains(HOOK_LSP_STOP) {
+        runtime
+            .subscribe_hook(HOOK_LSP_STOP, "shell.stop-lsp-server", |_, runtime| {
+                stop_lsp_for_active_buffer(runtime)
+            })
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runtime.hooks().contains(HOOK_LSP_RESTART) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_RESTART,
+                "shell.restart-lsp-server",
+                |_, runtime| restart_lsp_for_active_buffer(runtime, None),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runtime.hooks().contains(HOOK_LSP_LOG) {
+        runtime
+            .subscribe_hook(HOOK_LSP_LOG, "shell.open-lsp-log", |_, runtime| {
+                open_lsp_log_buffer(runtime)
+            })
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn start_lsp_for_active_buffer(
+    runtime: &mut EditorRuntime,
+    preferred_server_id: Option<&str>,
+) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let manager = lsp_client
+        .lock()
+        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+    if let Some(server_id) = preferred_server_id {
+        let supported = manager
+            .registered_server_ids_for_path(&context.path)
+            .into_iter()
+            .any(|registered| registered == server_id);
+        if !supported {
+            return Err(format!(
+                "language server `{server_id}` is not registered for `{}`",
+                context.path.display()
+            ));
+        }
+    } else if !manager.supports_path(&context.path) {
+        return Err(format!(
+            "no language server is registered for `{}`",
+            context.path.display()
+        ));
+    }
+    let labels = if let Some(server_id) = preferred_server_id {
+        manager.start_buffer_server(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+            server_id,
         )
-        .map_err(|error| error.to_string())
+    } else {
+        manager.sync_buffer(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    drop(manager);
+    if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(context.buffer_id) {
+        buffer.set_lsp_enabled(true);
+    }
+    let attached = (!labels.is_empty()).then(|| labels.join(", "));
+    shell_ui_mut(runtime)?.set_attached_lsp_server(context.workspace_id, attached);
+    Ok(())
+}
+
+fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    lsp_client
+        .lock()
+        .map_err(|_| "LSP client mutex poisoned".to_owned())?
+        .stop_buffer(&context.path)
+        .map_err(|error| error.to_string())?;
+    let ui = shell_ui_mut(runtime)?;
+    if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+        buffer.set_lsp_enabled(false);
+        buffer.set_lsp_diagnostics(Vec::new());
+    }
+    ui.set_attached_lsp_server(context.workspace_id, None);
+    Ok(())
+}
+
+fn restart_lsp_for_active_buffer(
+    runtime: &mut EditorRuntime,
+    preferred_server_id: Option<&str>,
+) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let manager = lsp_client
+        .lock()
+        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+    if let Some(server_id) = preferred_server_id {
+        let supported = manager
+            .registered_server_ids_for_path(&context.path)
+            .into_iter()
+            .any(|registered| registered == server_id);
+        if !supported {
+            return Err(format!(
+                "language server `{server_id}` is not registered for `{}`",
+                context.path.display()
+            ));
+        }
+    } else if !manager.supports_path(&context.path) {
+        return Err(format!(
+            "no language server is registered for `{}`",
+            context.path.display()
+        ));
+    }
+    let labels = manager
+        .restart_buffer(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+            preferred_server_id,
+        )
+        .map_err(|error| error.to_string())?;
+    drop(manager);
+    let ui = shell_ui_mut(runtime)?;
+    if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+        buffer.set_lsp_enabled(true);
+        buffer.set_lsp_diagnostics(Vec::new());
+    }
+    ui.set_attached_lsp_server(
+        context.workspace_id,
+        (!labels.is_empty()).then(|| labels.join(", ")),
+    );
+    Ok(())
+}
+
+fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = ensure_lsp_log_buffer(runtime, workspace_id)?;
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let ui = shell_ui_mut(runtime)?;
+    ui.focus_buffer_in_active_pane(buffer_id);
+    ui.enter_normal_mode();
+    Ok(())
+}
+
+fn ensure_lsp_log_buffer(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+) -> Result<BufferId, String> {
+    if let Some(buffer_id) = runtime
+        .services()
+        .get::<LspLogBufferState>()
+        .and_then(|state| state.buffer_id(workspace_id))
+    {
+        return Ok(buffer_id);
+    }
+
+    let snapshot = current_lsp_log_snapshot(runtime)?;
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            LSP_LOG_BUFFER_NAME,
+            BufferKind::Diagnostics,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_buffer(buffer_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
+            .replace_with_lines_follow_output(lsp_log_buffer_lines(snapshot.entries()));
+    }
+    runtime
+        .services_mut()
+        .get_mut::<LspLogBufferState>()
+        .ok_or_else(|| "LSP log buffer service missing".to_owned())?
+        .insert_buffer(workspace_id, buffer_id);
+    Ok(buffer_id)
+}
+
+fn current_lsp_log_snapshot(runtime: &EditorRuntime) -> Result<LspLogSnapshot, String> {
+    let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() else {
+        return Ok(LspLogSnapshot::default());
+    };
+    lsp_client
+        .lock()
+        .map(|manager| manager.log_snapshot())
+        .map_err(|_| "LSP client mutex poisoned".to_owned())
+}
+
+fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let active_buffer_is_acp = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer_is_acp(&buffer.kind) && buffer.has_input_field()
+    };
+    if active_buffer_is_acp {
+        return acp::acp_complete_slash(runtime);
+    }
+
+    let registry = runtime
+        .services()
+        .get::<AutocompleteRegistry>()
+        .cloned()
+        .ok_or_else(|| "autocomplete registry service missing".to_owned())?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned();
+    let request = {
+        let ui = shell_ui(runtime)?;
+        let Some(buffer) = ui.buffer(buffer_id) else {
+            return Ok(());
+        };
+        if buffer.is_read_only() || buffer.has_input_field() {
+            return Ok(());
+        }
+        let root = if let Some(path) = buffer.path() {
+            workspace_root_for_path(runtime, path)?
+        } else {
+            None
+        };
+        autocomplete_request_for_buffer(buffer_id, buffer, root, &registry, lsp_client, true)
+    };
+    let Some(request) = request else {
+        shell_ui_mut(runtime)?.close_autocomplete();
+        return Ok(());
+    };
+    let overlay =
+        AutocompleteOverlay::new(buffer_id, request.buffer_revision, request.query.clone());
+    let ui = shell_ui_mut(runtime)?;
+    ui.set_autocomplete(overlay);
+    ui.autocomplete_worker.schedule(request);
+    Ok(())
+}
+
+fn trigger_hover_toggle(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let same_anchor = {
+        let ui = shell_ui(runtime)?;
+        let Some(buffer) = ui.buffer(buffer_id) else {
+            return Ok(());
+        };
+        if buffer.has_input_field() {
+            return Ok(());
+        }
+        let cursor = buffer.cursor_point();
+        ui.hover()
+            .filter(|hover| hover.buffer_id == buffer_id && hover.anchor == cursor)
+            .is_some()
+    };
+    if same_anchor {
+        shell_ui_mut(runtime)?.close_hover();
+        return Ok(());
+    }
+    show_hover_overlay(runtime, false)
+}
+
+fn trigger_hover_focus(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let same_anchor_focus = {
+        let ui = shell_ui(runtime)?;
+        let Some(buffer) = ui.buffer(buffer_id) else {
+            return Ok(());
+        };
+        if buffer.has_input_field() {
+            return Ok(());
+        }
+        let cursor = buffer.cursor_point();
+        ui.hover()
+            .filter(|hover| hover.buffer_id == buffer_id && hover.anchor == cursor)
+            .map(|hover| hover.focused)
+    };
+    match same_anchor_focus {
+        Some(true) => return Ok(()),
+        Some(false) => {
+            if let Some(hover) = shell_ui_mut(runtime)?.hover_mut() {
+                hover.focused = true;
+            }
+            return Ok(());
+        }
+        None => {}
+    }
+
+    show_hover_overlay(runtime, true)
+}
+
+fn cycle_hover_provider(runtime: &mut EditorRuntime, next: bool) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let Some(hover) = shell_ui_mut(runtime)?.hover_mut() else {
+        return Ok(());
+    };
+    if next {
+        hover.select_next_provider();
+    } else {
+        hover.select_previous_provider();
+    }
+    Ok(())
+}
+
+fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let registry = runtime
+        .services()
+        .get::<HoverRegistry>()
+        .cloned()
+        .ok_or_else(|| "hover registry service missing".to_owned())?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned();
+    let overlay = {
+        let ui = shell_ui(runtime)?;
+        let Some(buffer) = ui.buffer(buffer_id) else {
+            return Ok(());
+        };
+        hover_overlay_for_buffer(buffer_id, buffer, &registry, lsp_client.as_ref())
+    };
+    let ui = shell_ui_mut(runtime)?;
+    if let Some(mut overlay) = overlay {
+        overlay.focused = focused;
+        ui.set_hover(overlay);
+    } else {
+        ui.close_hover();
+    }
+    Ok(())
+}
+
+fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let selected = {
+        let ui = shell_ui(runtime)?;
+        ui.autocomplete()
+            .and_then(|autocomplete| autocomplete.selected().cloned())
+    };
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let ui = shell_ui_mut(runtime)?;
+    let Some(buffer) = ui.buffer_mut(buffer_id) else {
+        ui.close_autocomplete();
+        return Ok(());
+    };
+    if buffer.is_read_only() || buffer.has_input_field() {
+        ui.close_autocomplete();
+        return Ok(());
+    }
+    let snapshot = buffer.text.snapshot();
+    let Some(query) = autocomplete_query(&snapshot, true) else {
+        ui.close_autocomplete();
+        return Ok(());
+    };
+    buffer.replace_range(query.replace_range, &selected.replacement);
+    buffer.mark_syntax_dirty();
+    ui.close_autocomplete();
+    Ok(())
 }
 
 fn register_hook(runtime: &mut EditorRuntime, name: &str, description: &str) -> Result<(), String> {
@@ -7596,11 +9386,18 @@ fn active_shell_buffer_has_input(runtime: &EditorRuntime) -> Result<bool, String
     Ok(shell_buffer(runtime, buffer_id)?.has_input_field())
 }
 
-fn input_render_rows(buffer: &ShellBuffer) -> usize {
-    buffer
-        .input_field()
-        .map(|input| input.text_line_count() + input.hint().is_some() as usize)
-        .unwrap_or(0)
+fn enter_insert_mode_for_input_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let has_input = shell_ui(runtime)?
+        .buffer(buffer_id)
+        .map(ShellBuffer::has_input_field)
+        .unwrap_or(false);
+    if has_input {
+        shell_ui_mut(runtime)?.enter_insert_mode();
+    }
+    Ok(())
 }
 
 fn active_buffer_event_context(
@@ -7615,13 +9412,36 @@ fn active_buffer_event_context(
         .ok_or_else(|| "active shell buffer is missing".to_owned())?;
     Ok(ActiveBufferEventContext {
         buffer_id,
-        input_rows: input_render_rows(buffer),
         has_input: buffer.has_input_field(),
         is_read_only: buffer.is_read_only(),
         is_git_status: buffer_is_git_status(&buffer.kind),
         is_git_commit: buffer_is_git_commit(&buffer.kind),
         is_acp: buffer_is_acp(&buffer.kind),
         is_directory: buffer_is_directory(&buffer.kind),
+    })
+}
+
+fn active_lsp_buffer_context(runtime: &EditorRuntime) -> Result<ActiveLspBufferContext, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let ui = shell_ui(runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "active shell buffer is missing".to_owned())?;
+    let path = buffer
+        .path()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "active buffer does not have a file path for LSP".to_owned())?;
+    Ok(ActiveLspBufferContext {
+        workspace_id,
+        buffer_id,
+        path: path.clone(),
+        text: buffer.text.text(),
+        revision: buffer.text.revision(),
+        root: workspace_root_for_path(runtime, &path)?,
     })
 }
 
@@ -7635,6 +9455,10 @@ fn buffer_is_git_commit(kind: &BufferKind) -> bool {
 
 fn buffer_is_acp(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND)
+}
+
+fn buffer_is_browser(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND)
 }
 
 fn buffer_is_directory(kind: &BufferKind) -> bool {
@@ -8042,6 +9866,613 @@ struct VimSearchMatch {
 struct SearchPickerData {
     entries: Vec<PickerEntry>,
     selected_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AutocompleteBufferRequest {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    text: TextSnapshot,
+    path: Option<PathBuf>,
+    root: Option<PathBuf>,
+    cursor: TextPoint,
+    query: AutocompleteQuery,
+    providers: Vec<AutocompleteProviderSpec>,
+    result_limit: usize,
+    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+}
+
+struct PendingAutocompleteRequest {
+    due_at: Instant,
+    request: AutocompleteWorkerRequest,
+}
+
+struct AutocompleteWorkerRequest {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    text: TextSnapshot,
+    path: Option<PathBuf>,
+    root: Option<PathBuf>,
+    cursor: TextPoint,
+    query: AutocompleteQuery,
+    providers: Vec<AutocompleteProviderSpec>,
+    result_limit: usize,
+    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+}
+
+struct AutocompleteWorkerResult {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    query: AutocompleteQuery,
+    entries: Vec<AutocompleteEntry>,
+}
+
+struct AutocompleteWorkerState {
+    pending: Option<PendingAutocompleteRequest>,
+    next_request_id: u64,
+    request_tx: Sender<AutocompleteWorkerRequest>,
+    results: Arc<Mutex<Vec<AutocompleteWorkerResult>>>,
+}
+
+impl AutocompleteWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<AutocompleteWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(mut request) = request_rx.recv() {
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    request = newer_request;
+                }
+                let entries = autocomplete_entries(&request);
+                if let Ok(mut results) = worker_results.lock() {
+                    results.push(AutocompleteWorkerResult {
+                        request_id: request.request_id,
+                        buffer_id: request.buffer_id,
+                        buffer_revision: request.buffer_revision,
+                        query: request.query,
+                        entries,
+                    });
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self {
+            pending: None,
+            next_request_id: 0,
+            request_tx,
+            results,
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending = None;
+    }
+
+    fn schedule(&mut self, request: AutocompleteBufferRequest) {
+        let debounce = if cfg!(test) {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(45)
+        };
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending = Some(PendingAutocompleteRequest {
+            due_at: Instant::now() + debounce,
+            request: AutocompleteWorkerRequest {
+                request_id: self.next_request_id,
+                buffer_id: request.buffer_id,
+                buffer_revision: request.buffer_revision,
+                text: request.text,
+                path: request.path,
+                root: request.root,
+                cursor: request.cursor,
+                query: request.query,
+                providers: request.providers,
+                result_limit: request.result_limit,
+                lsp_client: request.lsp_client,
+            },
+        });
+    }
+
+    fn dispatch_due(&mut self, now: Instant) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        let request = self.pending.take().map(|pending| pending.request);
+        if let Some(request) = request {
+            let _ = self.request_tx.send(request);
+        }
+    }
+
+    fn take_latest_result(&self) -> Option<AutocompleteWorkerResult> {
+        let mut results = self.results.lock().ok()?;
+        results.drain(..).next_back()
+    }
+}
+
+#[derive(Debug)]
+struct RankedAutocompleteEntry {
+    entry: AutocompleteEntry,
+    score: i64,
+    provider_index: usize,
+}
+
+fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<AutocompleteEntry> {
+    let mut ranked = Vec::new();
+    let mut satisfied_or_groups = BTreeSet::new();
+    for (provider_index, provider) in request.providers.iter().enumerate() {
+        if provider
+            .or_group
+            .as_ref()
+            .is_some_and(|group| satisfied_or_groups.contains(group))
+        {
+            continue;
+        }
+        let entries = match provider.kind {
+            AutocompleteProviderKind::Buffer => {
+                buffer_autocomplete_entries(&request.text, &request.query, provider)
+            }
+            AutocompleteProviderKind::Lsp => {
+                lsp_autocomplete_entries(request, &request.query, provider)
+            }
+        };
+        if !entries.is_empty()
+            && let Some(group) = provider.or_group.as_ref()
+        {
+            satisfied_or_groups.insert(group.clone());
+        }
+        ranked.extend(
+            entries
+                .into_iter()
+                .map(|(entry, score)| RankedAutocompleteEntry {
+                    entry,
+                    score,
+                    provider_index,
+                }),
+        );
+    }
+    ranked.sort_by(|left, right| {
+        left.provider_index
+            .cmp(&right.provider_index)
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| {
+                left.entry
+                    .replacement
+                    .chars()
+                    .count()
+                    .cmp(&right.entry.replacement.chars().count())
+            })
+            .then_with(|| left.entry.replacement.cmp(&right.entry.replacement))
+    });
+    if ranked.len() > request.result_limit {
+        ranked.truncate(request.result_limit);
+    }
+    ranked.into_iter().map(|entry| entry.entry).collect()
+}
+
+fn buffer_autocomplete_entries(
+    snapshot: &TextSnapshot,
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    let text = snapshot.text();
+    let counts = collect_autocomplete_token_counts(&text);
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    counts
+        .into_iter()
+        .filter_map(|(token, frequency)| {
+            let token_lower = token.to_ascii_lowercase();
+            if !prefix_lower.is_empty() && !token_lower.starts_with(&prefix_lower) {
+                return None;
+            }
+            if !query.token.is_empty() && token == query.token {
+                return None;
+            }
+            let score = autocomplete_score(&token, frequency, query);
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: provider.item_icon.clone(),
+                    label: token.clone(),
+                    replacement: token,
+                    detail: None,
+                    documentation: None,
+                },
+                score,
+            ))
+        })
+        .collect()
+}
+
+fn lsp_autocomplete_entries(
+    request: &AutocompleteWorkerRequest,
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    let Some(path) = request.path.as_deref() else {
+        return Vec::new();
+    };
+    let Some(lsp_client) = request.lsp_client.as_ref() else {
+        return Vec::new();
+    };
+    let completions = lsp_client
+        .lock()
+        .ok()
+        .and_then(|manager| {
+            let text = request.text.text();
+            manager
+                .sync_buffer(
+                    path,
+                    &text,
+                    request.buffer_revision,
+                    request.root.as_deref(),
+                )
+                .ok()?;
+            manager.completions(path, request.cursor).ok()
+        })
+        .unwrap_or_default();
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    completions
+        .into_iter()
+        .filter_map(|item| {
+            let replacement = item.insert_text().to_owned();
+            let label = item.label().to_owned();
+            let candidate = if label.is_empty() {
+                replacement.clone()
+            } else {
+                label.clone()
+            };
+            let candidate_lower = candidate.to_ascii_lowercase();
+            if !prefix_lower.is_empty() && !candidate_lower.starts_with(&prefix_lower) {
+                return None;
+            }
+            if !query.token.is_empty() && replacement == query.token {
+                return None;
+            }
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: user::autocomplete::lsp_kind_icon(item.kind()).to_owned(),
+                    label: candidate.clone(),
+                    replacement,
+                    detail: item.detail().map(str::to_owned),
+                    documentation: item.documentation().map(str::to_owned),
+                },
+                autocomplete_score(&candidate, 2, query) + 40,
+            ))
+        })
+        .collect()
+}
+
+fn collect_autocomplete_token_counts(text: &str) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    let mut token = String::new();
+    for character in text.chars() {
+        if is_completion_word_char(character) {
+            token.push(character);
+            continue;
+        }
+        if !token.is_empty() {
+            *counts.entry(std::mem::take(&mut token)).or_insert(0) += 1;
+        }
+    }
+    if !token.is_empty() {
+        *counts.entry(token).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn autocomplete_score(token: &str, frequency: usize, query: &AutocompleteQuery) -> i64 {
+    let starts_with_exact_case =
+        usize::from(!query.prefix.is_empty() && token.starts_with(&query.prefix));
+    (frequency as i64 * 100)
+        + (starts_with_exact_case as i64 * 24)
+        + (query.prefix.chars().count() as i64 * 8)
+        - token.chars().count() as i64
+}
+
+fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<AutocompleteQuery> {
+    let cursor = snapshot.cursor();
+    let line = snapshot.line(cursor.line)?;
+    let characters = line.chars().collect::<Vec<_>>();
+    let cursor_col = cursor.column.min(characters.len());
+    let mut start = cursor_col;
+    while start > 0 && is_completion_word_char(characters[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor_col;
+    while end < characters.len() && is_completion_word_char(characters[end]) {
+        end += 1;
+    }
+    if !allow_empty && start == cursor_col && end == cursor_col {
+        return None;
+    }
+    let prefix = characters[start..cursor_col].iter().collect::<String>();
+    if !allow_empty && prefix.is_empty() {
+        return None;
+    }
+    let token = characters[start..end].iter().collect::<String>();
+    Some(AutocompleteQuery {
+        prefix,
+        token,
+        replace_range: TextRange::new(
+            TextPoint::new(cursor.line, start),
+            TextPoint::new(cursor.line, end),
+        ),
+    })
+}
+
+fn is_completion_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn completion_token_at_cursor(buffer: &ShellBuffer) -> Option<(TextRange, String)> {
+    let cursor = buffer.cursor_point();
+    let line = buffer.text.line(cursor.line)?;
+    let characters = line.chars().collect::<Vec<_>>();
+    let cursor_col = cursor.column.min(characters.len());
+    let token_col =
+        if cursor_col < characters.len() && is_completion_word_char(characters[cursor_col]) {
+            cursor_col
+        } else if cursor_col > 0 && is_completion_word_char(characters[cursor_col - 1]) {
+            cursor_col - 1
+        } else {
+            return None;
+        };
+    let mut start = token_col;
+    while start > 0 && is_completion_word_char(characters[start - 1]) {
+        start -= 1;
+    }
+    let mut end = token_col + 1;
+    while end < characters.len() && is_completion_word_char(characters[end]) {
+        end += 1;
+    }
+    let token = characters[start..end].iter().collect::<String>();
+    Some((
+        TextRange::new(
+            TextPoint::new(cursor.line, start),
+            TextPoint::new(cursor.line, end),
+        ),
+        token,
+    ))
+}
+
+fn autocomplete_request_for_buffer(
+    buffer_id: BufferId,
+    buffer: &ShellBuffer,
+    root: Option<PathBuf>,
+    registry: &AutocompleteRegistry,
+    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+    allow_empty_query: bool,
+) -> Option<AutocompleteBufferRequest> {
+    if registry.providers.is_empty() {
+        return None;
+    }
+    let text = buffer.text.snapshot();
+    let query = autocomplete_query(&text, allow_empty_query)?;
+    Some(AutocompleteBufferRequest {
+        buffer_id,
+        buffer_revision: buffer.text.revision(),
+        text,
+        path: buffer.path().map(Path::to_path_buf),
+        root,
+        cursor: buffer.cursor_point(),
+        query,
+        providers: registry.providers.clone(),
+        result_limit: registry.result_limit,
+        lsp_client,
+    })
+}
+
+fn hover_overlay_for_buffer(
+    buffer_id: BufferId,
+    buffer: &ShellBuffer,
+    registry: &HoverRegistry,
+    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+) -> Option<HoverOverlay> {
+    if registry.providers.is_empty() {
+        return None;
+    }
+    let anchor = buffer.cursor_point();
+    let token_info = completion_token_at_cursor(buffer);
+    let token = token_info
+        .as_ref()
+        .map(|(_, token)| token.clone())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| "Cursor".to_owned());
+    let providers = registry
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            let lines = match provider.kind {
+                HoverProviderKind::TestHover => {
+                    hover_test_provider_lines(buffer, token_info.as_ref())
+                }
+                HoverProviderKind::Lsp => hover_lsp_provider_lines(buffer, lsp_client),
+                HoverProviderKind::Diagnostics => hover_diagnostic_provider_lines(buffer),
+            };
+            (!lines.is_empty()).then(|| HoverProviderContent {
+                provider_label: provider.label.clone(),
+                provider_icon: provider.icon.clone(),
+                lines,
+            })
+        })
+        .collect::<Vec<_>>();
+    let providers = if providers.is_empty() {
+        vec![HoverProviderContent {
+            provider_label: "Hover".to_owned(),
+            provider_icon: user::hover::TOKEN_ICON.to_owned(),
+            lines: hover_empty_provider_lines(buffer, token_info.as_ref()),
+        }]
+    } else {
+        providers
+    };
+    Some(HoverOverlay {
+        buffer_id,
+        anchor,
+        token,
+        providers,
+        provider_index: 0,
+        scroll_offset: 0,
+        focused: false,
+        line_limit: registry.line_limit,
+    })
+}
+
+fn hover_test_provider_lines(
+    buffer: &ShellBuffer,
+    token_info: Option<&(TextRange, String)>,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("Buffer: {}", buffer.display_name()),
+        format!(
+            "Line: {}, Column: {}",
+            buffer.cursor_row() + 1,
+            buffer.cursor_col() + 1
+        ),
+    ];
+    if let Some((range, token)) = token_info {
+        lines.extend([
+            format!("Token: {token}"),
+            format!(
+                "Range: {}:{}-{}:{}",
+                range.start().line + 1,
+                range.start().column + 1,
+                range.end().line + 1,
+                range.end().column + 1
+            ),
+            format!("Characters: {}", token.chars().count()),
+            format!("Uppercase: {}", token.to_uppercase()),
+            format!("Lowercase: {}", token.to_lowercase()),
+        ]);
+    } else {
+        lines.extend([
+            "No symbol under the cursor yet.".to_owned(),
+            "Move onto an identifier to inspect token details.".to_owned(),
+        ]);
+    }
+    lines
+}
+
+fn hover_empty_provider_lines(
+    buffer: &ShellBuffer,
+    token_info: Option<&(TextRange, String)>,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("Buffer: {}", buffer.display_name()),
+        format!(
+            "Line: {}, Column: {}",
+            buffer.cursor_row() + 1,
+            buffer.cursor_col() + 1
+        ),
+    ];
+    if let Some((_, token)) = token_info {
+        lines.push(format!("No hover details are available for `{token}` yet."));
+    } else {
+        lines.push("No symbol is under the cursor.".to_owned());
+    }
+    lines.push(
+        "Try moving onto an identifier or waiting for LSP/diagnostics to refresh.".to_owned(),
+    );
+    lines
+}
+
+fn hover_lsp_provider_lines(
+    buffer: &ShellBuffer,
+    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+) -> Vec<String> {
+    let Some(path) = buffer.path() else {
+        return Vec::new();
+    };
+    let Some(lsp_client) = lsp_client else {
+        return Vec::new();
+    };
+    let hovers = lsp_client
+        .lock()
+        .ok()
+        .and_then(|manager| manager.hover(path, buffer.cursor_point()).ok())
+        .unwrap_or_default();
+    let show_server_labels = hovers.len() > 1;
+    let mut lines = Vec::new();
+    for hover in hovers {
+        if show_server_labels {
+            lines.push(format!(
+                "{} {}",
+                user::autocomplete::DOCUMENTATION_ICON,
+                hover.server_id()
+            ));
+        }
+        lines.extend(hover.lines().iter().cloned());
+    }
+    lines
+}
+
+fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
+    let cursor = buffer.cursor_point();
+    let matching = buffer
+        .lsp_diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic_matches_cursor_line(diagnostic, cursor))
+        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
+        .map(|diagnostic| {
+            let source = diagnostic.source();
+            if source.is_empty() {
+                format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message())
+            } else {
+                format!(
+                    "{} {} ({source})",
+                    user::lsp::DIAGNOSTIC_ICON,
+                    diagnostic.message()
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    if !matching.is_empty() {
+        return matching;
+    }
+    buffer
+        .lsp_diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.range().start().line == cursor.line)
+        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
+        .map(|diagnostic| format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message()))
+        .collect()
+}
+
+fn diagnostic_matches_cursor_line(diagnostic: &LspDiagnostic, cursor: TextPoint) -> bool {
+    let range = diagnostic.range().normalized();
+    if cursor.line < range.start().line || cursor.line > range.end().line {
+        return false;
+    }
+    if range.start().line == range.end().line {
+        return cursor.column >= range.start().column && cursor.column <= range.end().column;
+    }
+    if cursor.line == range.start().line {
+        return cursor.column >= range.start().column;
+    }
+    if cursor.line == range.end().line {
+        return cursor.column <= range.end().column;
+    }
+    true
+}
+
+const fn diagnostic_severity_rank(severity: LspDiagnosticSeverity) -> u8 {
+    match severity {
+        LspDiagnosticSeverity::Error => 0,
+        LspDiagnosticSeverity::Warning => 1,
+        LspDiagnosticSeverity::Information => 2,
+    }
 }
 
 struct PendingVimSearchRequest {
@@ -9279,6 +11710,9 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     if buffer_is_acp(&kind) {
         return acp::submit_acp_prompt(runtime, buffer_id, &prompt, &text);
     }
+    if buffer_is_browser(&kind) {
+        return navigate_browser_buffer(runtime, buffer_id, &text);
+    }
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&[format!("{prompt}{text}")]);
@@ -9289,9 +11723,174 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn clear_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
+    let is_acp = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer_is_acp(&buffer.kind)
+    };
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     buffer.clear_input();
+    if is_acp {
+        acp::refresh_acp_input_hint(runtime, buffer_id)?;
+    }
     Ok(())
+}
+
+fn navigate_browser_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    raw_url: &str,
+) -> Result<(), String> {
+    let url = normalize_browser_url(raw_url);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    set_browser_buffer_location(buffer, &url, true);
+    Ok(())
+}
+
+fn normalize_browser_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if trimmed.contains("://")
+        || trimmed.starts_with("about:")
+        || trimmed.starts_with("file:")
+        || trimmed.starts_with("data:")
+    {
+        return trimmed.to_owned();
+    }
+    format!("https://{trimmed}")
+}
+
+fn open_detected_browser_url(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let Some(url) = shell_buffer(runtime, buffer_id)
+        .ok()
+        .and_then(detect_browser_url)
+    else {
+        record_runtime_error(
+            runtime,
+            "browser.url",
+            "no URL found at the cursor or on the current line",
+        );
+        return Ok(());
+    };
+    open_browser_popup_with_url(runtime, &url)
+}
+
+fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = runtime
+        .model_mut()
+        .create_popup_buffer(
+            workspace_id,
+            user::browser::BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .open_popup_buffer(workspace_id, "Browser", buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.ensure_popup_buffer(
+        buffer_id,
+        user::browser::BUFFER_NAME,
+        BufferKind::Plugin(BROWSER_KIND.to_owned()),
+    );
+    shell_ui_mut(runtime)?.set_popup_focus(true);
+    enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
+    navigate_browser_buffer(runtime, buffer_id, raw_url)
+}
+
+fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input: bool) {
+    let state = buffer
+        .browser_state
+        .get_or_insert_with(BrowserBufferState::default);
+    let changed = state.current_url.as_deref() != Some(url);
+    if changed {
+        state.current_url = Some(url.to_owned());
+        buffer.replace_with_lines(user::browser::buffer_lines(Some(url)));
+    }
+    if let Some(input) = buffer.input_field_mut() {
+        if clear_input {
+            input.clear();
+        }
+        input.set_hint(Some(user::browser::input_hint(Some(url))));
+    }
+}
+
+fn apply_browser_location_updates(
+    runtime: &mut EditorRuntime,
+    updates: &[BrowserLocationUpdate],
+) -> Result<(), String> {
+    let ui = shell_ui_mut(runtime)?;
+    for update in updates {
+        if let Some(buffer) = ui.buffer_mut(update.buffer_id) {
+            set_browser_buffer_location(buffer, &update.current_url, false);
+        }
+    }
+    Ok(())
+}
+
+fn detect_browser_url(buffer: &ShellBuffer) -> Option<String> {
+    let cursor = buffer.cursor_point();
+    let line = buffer.text.line(cursor.line)?;
+    let candidates = browser_url_candidates(&line);
+    if candidates.is_empty() {
+        return None;
+    }
+    let cursor_col = cursor.column.min(line.chars().count());
+    candidates
+        .iter()
+        .find(|(start, end, _)| cursor_col >= *start && cursor_col <= *end)
+        .map(|(_, _, url)| url.clone())
+        .or_else(|| (candidates.len() == 1).then(|| candidates[0].2.clone()))
+}
+
+fn browser_url_candidates(line: &str) -> Vec<(usize, usize, String)> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut index = 0usize;
+    while index < characters.len() {
+        let suffix = characters[index..].iter().collect::<String>();
+        let Some(_) = browser_url_prefix_len(&suffix) else {
+            index += 1;
+            continue;
+        };
+        let mut end = index;
+        while end < characters.len() && !is_browser_url_terminator(characters[end]) {
+            end += 1;
+        }
+        let mut candidate = characters[index..end].iter().collect::<String>();
+        while candidate
+            .chars()
+            .last()
+            .is_some_and(is_browser_url_trailing_punctuation)
+        {
+            candidate.pop();
+            end = end.saturating_sub(1);
+        }
+        if !candidate.is_empty() {
+            candidates.push((index, end, candidate));
+        }
+        index = end.max(index + 1);
+    }
+    candidates
+}
+
+fn browser_url_prefix_len(text: &str) -> Option<usize> {
+    ["https://", "http://", "file://", "www."]
+        .iter()
+        .find(|prefix| text.starts_with(**prefix))
+        .map(|prefix| prefix.len())
+}
+
+fn is_browser_url_terminator(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'')
+}
+
+fn is_browser_url_trailing_punctuation(character: char) -> bool {
+    matches!(character, ')' | ']' | '}' | ',' | '.' | ';' | '!' | '?')
 }
 
 fn save_buffer(
@@ -9365,6 +11964,13 @@ fn save_buffer_inner(
                 .with_detail(path.display().to_string()),
         )
         .map_err(|error| error.to_string())?;
+    if let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() {
+        lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?
+            .save_buffer(path)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -9405,12 +12011,56 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
+    if let Some(path) = shell_ui(runtime)?
+        .buffer(buffer_id)
+        .and_then(|buffer| buffer.path().map(Path::to_path_buf))
+        && let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>()
+    {
+        lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?
+            .close_buffer(&path)
+            .map_err(|error| error.to_string())?;
+    }
     runtime
         .model_mut()
         .close_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.remove_buffer(buffer_id);
     sync_active_buffer(runtime)?;
+    Ok(())
+}
+
+fn close_lsp_buffers_for_workspace(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+) -> Result<(), String> {
+    let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() else {
+        return Ok(());
+    };
+    let paths = {
+        let ui = shell_ui(runtime)?;
+        ui.workspace_views
+            .get(&workspace_id)
+            .map(|view| {
+                view.buffer_ids
+                    .iter()
+                    .filter_map(|buffer_id| {
+                        ui.buffer(*buffer_id)
+                            .and_then(|buffer| buffer.path().map(Path::to_path_buf))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let manager = lsp_client
+        .lock()
+        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+    for path in paths {
+        manager
+            .close_buffer(&path)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -10646,11 +13296,21 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let is_git_status = buffer_is_git_status(&buffer_kind);
     let is_directory = buffer_is_directory(&buffer_kind);
 
-    let previous_buffer = shell_ui(runtime)?.active_buffer_id();
-    {
+    let (previous_pane, previous_buffer) = {
+        let ui = shell_ui(runtime)?;
+        (ui.active_pane_id(), ui.active_buffer_id())
+    };
+    let should_enter_insert = {
         let ui = shell_ui_mut(runtime)?;
-        ui.focus_pane(pane_id);
-        ui.ensure_buffer(buffer_id, &buffer_name, buffer_kind);
+        if previous_pane != Some(pane_id) {
+            ui.focus_pane(pane_id);
+        } else if previous_buffer != Some(buffer_id) {
+            ui.close_autocomplete();
+            ui.close_hover();
+        }
+        let has_input = ui
+            .ensure_buffer(buffer_id, &buffer_name, buffer_kind)
+            .has_input_field();
         ui.focus_buffer_in_active_pane(buffer_id);
         if !is_git_commit {
             ui.pending_ctrl_c = None;
@@ -10661,6 +13321,10 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         if !is_directory {
             ui.pending_directory_prefix = None;
         }
+        previous_buffer != Some(buffer_id) && has_input
+    };
+    if should_enter_insert {
+        shell_ui_mut(runtime)?.enter_insert_mode();
     }
     if previous_buffer != Some(buffer_id) {
         let workspace_id = runtime
@@ -10680,6 +13344,10 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn active_runtime_surface(runtime: &EditorRuntime) -> Result<Option<(PaneId, BufferId)>, String> {
+    Ok(active_runtime_buffer(runtime)?.map(|(pane_id, buffer_id, _, _)| (pane_id, buffer_id)))
 }
 
 fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -11126,13 +13794,13 @@ fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
         if line_index == 0 && trimmed.starts_with("Directory ") {
             continue;
         }
-        lines.push(trimmed.to_owned());
+        lines.push(user::oil::strip_entry_icon_prefix(trimmed).to_owned());
     }
     lines
 }
 
 fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
-    let trimmed = line.trim();
+    let trimmed = user::oil::strip_entry_icon_prefix(line.trim());
     let is_dir = trimmed.ends_with('/');
     let raw = trimmed.trim_end_matches('/');
     if raw.is_empty() {
@@ -11153,6 +13821,31 @@ fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
         rel_path,
         is_dir,
     })
+}
+
+#[cfg(test)]
+mod directory_line_tests {
+    use super::parse_directory_line;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_directory_line_strips_file_icons() {
+        let line = format!("{} Cargo.toml", user::icon_font::symbols::seti::CUSTOM_TOML);
+        let parsed = parse_directory_line(&line).expect("icon-prefixed file line should parse");
+        assert_eq!(parsed.label, "Cargo.toml");
+        assert_eq!(parsed.rel_path, PathBuf::from("Cargo.toml"));
+        assert!(!parsed.is_dir);
+    }
+
+    #[test]
+    fn parse_directory_line_strips_directory_icons() {
+        let line = format!("{} src/", user::icon_font::symbols::seti::CUSTOM_FOLDER);
+        let parsed =
+            parse_directory_line(&line).expect("icon-prefixed directory line should parse");
+        assert_eq!(parsed.label, "src/");
+        assert_eq!(parsed.rel_path, PathBuf::from("src"));
+        assert!(parsed.is_dir);
+    }
 }
 
 fn parse_directory_lines(lines: &[String]) -> Result<Vec<DirectoryLine>, String> {
@@ -13703,6 +16396,145 @@ fn refresh_pending_git(
     Ok(())
 }
 
+#[derive(Debug)]
+struct LspBufferRefreshRequest {
+    path: PathBuf,
+    revision: u64,
+    text: String,
+    root: Option<PathBuf>,
+}
+
+fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let Some(lsp_client) = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+    else {
+        return Ok(false);
+    };
+
+    let requests = {
+        let manager = lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .map(|buffer| {
+                if !buffer.lsp_enabled() {
+                    return Ok(None);
+                }
+                let Some(path) = buffer.path().map(Path::to_path_buf) else {
+                    return Ok(None);
+                };
+                if path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                if !manager.needs_sync(&path, buffer.text.revision()) {
+                    return Ok(None);
+                }
+                Ok(Some(LspBufferRefreshRequest {
+                    path: path.clone(),
+                    revision: buffer.text.revision(),
+                    text: buffer.text.text(),
+                    root: workspace_root_for_path(runtime, &path)?,
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+
+    for request in requests {
+        lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?
+            .sync_buffer(
+                &request.path,
+                &request.text,
+                request.revision,
+                request.root.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    let (diagnostic_updates, active_workspace_id, active_server_label, log_snapshot) = {
+        let manager = lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+        let ui = shell_ui(runtime)?;
+        let updates = ui
+            .buffers
+            .iter()
+            .filter_map(|buffer| {
+                let path = buffer.path()?;
+                Some((buffer.id(), manager.diagnostics_for_path(path)))
+            })
+            .collect::<Vec<_>>();
+        let active_server_label = ui
+            .active_buffer_id()
+            .and_then(|buffer_id| ui.buffer(buffer_id))
+            .and_then(ShellBuffer::path)
+            .map(|path| manager.session_labels_for_path(path))
+            .filter(|labels| !labels.is_empty())
+            .map(|labels| labels.join(", "));
+        (
+            updates,
+            ui.active_workspace(),
+            active_server_label,
+            manager.log_snapshot(),
+        )
+    };
+
+    let mut changed = false;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        for (buffer_id, diagnostics) in diagnostic_updates {
+            if let Some(buffer) = ui.buffer_mut(buffer_id) {
+                changed |= buffer.set_lsp_diagnostics(diagnostics);
+            }
+        }
+        changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
+    }
+    changed |= refresh_lsp_log_buffers(runtime, &log_snapshot)?;
+    Ok(changed)
+}
+
+fn refresh_lsp_log_buffers(
+    runtime: &mut EditorRuntime,
+    snapshot: &LspLogSnapshot,
+) -> Result<bool, String> {
+    let (buffer_ids, applied_revision) = {
+        let Some(state) = runtime.services().get::<LspLogBufferState>() else {
+            return Ok(false);
+        };
+        (
+            state.buffer_ids.values().copied().collect::<Vec<_>>(),
+            state.applied_revision,
+        )
+    };
+    if snapshot.revision() == applied_revision {
+        return Ok(false);
+    }
+    let lines = lsp_log_buffer_lines(snapshot.entries());
+    {
+        let ui = shell_ui_mut(runtime)?;
+        for buffer_id in &buffer_ids {
+            ui.ensure_buffer(*buffer_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
+                .replace_with_lines_follow_output(lines.clone());
+        }
+    }
+    if let Some(state) = runtime.services_mut().get_mut::<LspLogBufferState>() {
+        state.applied_revision = snapshot.revision();
+    }
+    Ok(!buffer_ids.is_empty())
+}
+
 fn refresh_pending_git_fringe(
     runtime: &mut EditorRuntime,
     now: Instant,
@@ -14004,6 +16836,22 @@ fn active_workspace_root(runtime: &EditorRuntime) -> Result<Option<PathBuf>, Str
         .map(Path::to_path_buf))
 }
 
+fn workspace_root_for_path(
+    runtime: &EditorRuntime,
+    path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let window = runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?;
+    Ok(window
+        .workspaces()
+        .filter_map(|workspace| workspace.root())
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .map(Path::to_path_buf))
+}
+
 fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     if let Some(root) = active_workspace_root(runtime)? {
         return Ok(root);
@@ -14105,9 +16953,12 @@ pub(crate) fn open_workspace_from_project(
         )
     };
 
-    let ui = shell_ui_mut(runtime)?;
-    ui.add_workspace(workspace_id, primary_pane_id, scratch, notes, notes_id);
-    ui.switch_workspace(workspace_id);
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.add_workspace(workspace_id, primary_pane_id, scratch, notes, notes_id);
+        ui.switch_workspace(workspace_id);
+    }
+    let _ = ensure_lsp_log_buffer(runtime, workspace_id)?;
 
     runtime
         .emit_hook(
@@ -14142,11 +16993,15 @@ pub(crate) fn delete_runtime_workspace(
     };
 
     let window_id = active_window_id(runtime)?;
+    close_lsp_buffers_for_workspace(runtime, workspace_id)?;
     let removed = runtime
         .model_mut()
         .close_workspace(workspace_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.remove_workspace(workspace_id);
+    if let Some(state) = runtime.services_mut().get_mut::<LspLogBufferState>() {
+        state.remove_workspace(workspace_id);
+    }
     runtime
         .emit_hook(
             builtins::WORKSPACE_CLOSE,
@@ -14976,6 +17831,124 @@ fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
 mod tests {
     use super::*;
 
+    fn install_acp_test_buffer(
+        state: &mut ShellState,
+        output_lines: usize,
+        input_text: &str,
+        hint: Option<&str>,
+    ) -> Result<BufferId, String> {
+        let workspace_id = state
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let buffer_id = state
+            .runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                "*acp test*",
+                BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model_mut()
+            .focus_buffer(workspace_id, buffer_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = state
+            .runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
+        let mut shell_buffer = ShellBuffer::from_runtime_buffer(
+            buffer,
+            (1..=output_lines)
+                .map(|index| format!("line {index}"))
+                .collect(),
+        );
+        if let Some(input) = shell_buffer.input_field_mut() {
+            input.set_text(input_text);
+            input.set_hint(hint.map(str::to_owned));
+        }
+        shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+        shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+        Ok(buffer_id)
+    }
+
+    fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
+        let workspace_id = state
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let buffer_id = state
+            .runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                user::browser::BUFFER_NAME,
+                BufferKind::Plugin(BROWSER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model_mut()
+            .focus_buffer(workspace_id, buffer_id)
+            .map_err(|error| error.to_string())?;
+        shell_ui_mut(&mut state.runtime)?.ensure_buffer(
+            buffer_id,
+            user::browser::BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+        );
+        shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+        Ok(buffer_id)
+    }
+
+    fn install_hover_test_overlay(
+        state: &mut ShellState,
+        focused: bool,
+    ) -> Result<BufferId, String> {
+        let buffer_id = shell_ui(&state.runtime)?
+            .active_buffer_id()
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        let anchor = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .cursor_point();
+        shell_ui_mut(&mut state.runtime)?.set_hover(HoverOverlay {
+            buffer_id,
+            anchor,
+            token: "hover".to_owned(),
+            providers: vec![
+                HoverProviderContent {
+                    provider_label: "Alpha".to_owned(),
+                    provider_icon: "A".to_owned(),
+                    lines: vec!["first".to_owned()],
+                },
+                HoverProviderContent {
+                    provider_label: "Beta".to_owned(),
+                    provider_icon: "B".to_owned(),
+                    lines: vec!["second".to_owned()],
+                },
+                HoverProviderContent {
+                    provider_label: "Gamma".to_owned(),
+                    provider_icon: "G".to_owned(),
+                    lines: vec!["third".to_owned()],
+                },
+            ],
+            provider_index: 0,
+            scroll_offset: 0,
+            focused,
+            line_limit: 8,
+        });
+        Ok(buffer_id)
+    }
+
     #[test]
     fn parse_rg_workspace_search_line_extracts_location() {
         let parsed = parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();")
@@ -15074,6 +18047,485 @@ mod tests {
         assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
         assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
         assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
+    }
+
+    #[test]
+    fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_acp_test_buffer(
+            &mut state,
+            40,
+            "",
+            Some("chat · gpt-5.4 · shift+tab switch mode"),
+        )?;
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let rect = PixelRectToRect::rect(0, 0, 800, 400);
+        let layout = buffer_footer_layout(buffer, rect, 18);
+        let output_bottom = layout.body_y + layout.visible_rows as i32 * 18;
+        let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
+
+        assert!(output_bottom <= layout.input_y);
+        assert!(layout.input_y < hint_y);
+        assert!(hint_y < layout.statusline_y);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_acp_test_buffer(
+            &mut state,
+            40,
+            "first line\nsecond line",
+            Some("chat · gpt-5.4 · shift+tab switch mode"),
+        )?;
+
+        state
+            .sync_active_viewport(400, 18)
+            .map_err(|error| error.to_string())?;
+
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let layout = buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 800, 400), 18);
+        assert_eq!(buffer.viewport_lines(), layout.visible_rows);
+
+        buffer.scroll_output_to_end();
+        buffer.append_output_lines(&["tail".to_owned()]);
+
+        assert!(
+            buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
+                >= buffer.line_count()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
+        let font_path = resolve_bundled_icon_font_dir()
+            .map_err(|error| error.to_string())?
+            .join("NFM.ttf");
+        let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
+        let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+            .map_err(|error| error.to_string())?;
+        let material_icon = user::icon_font_symbols::md::MD_FORMAT_BOLD
+            .chars()
+            .next()
+            .ok_or_else(|| "material icon glyph missing".to_owned())?;
+        let (metrics, bitmap) = font.rasterize(material_icon, 48.0);
+        let occupied_rows = bitmap
+            .chunks(metrics.width)
+            .map(|row| row.iter().filter(|alpha| **alpha > 32).count())
+            .filter(|count| *count > 0)
+            .collect::<Vec<_>>();
+        let unique_row_widths = occupied_rows.iter().copied().collect::<BTreeSet<_>>();
+
+        assert!(material_icon as u32 > 0xFFFF);
+        assert!(metrics.width > 0);
+        assert!(metrics.height > 0);
+        assert!(!occupied_rows.is_empty());
+        assert!(unique_row_widths.len() > 4);
+        Ok(())
+    }
+
+    #[test]
+    fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .text = TextBuffer::from_text("alpha alphabet\nalp");
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .set_cursor(TextPoint::new(1, 3));
+
+        let (buffer_id, buffer_revision, text, cursor, query) = {
+            let ui = state.ui().map_err(|error| error.to_string())?;
+            let buffer_id = ui
+                .active_buffer_id()
+                .ok_or_else(|| "active buffer missing".to_owned())?;
+            let buffer = ui
+                .buffer(buffer_id)
+                .ok_or_else(|| "shell buffer missing".to_owned())?;
+            let text = buffer.text.snapshot();
+            let query = autocomplete_query(&text, true)
+                .ok_or_else(|| "autocomplete query missing".to_owned())?;
+            (
+                buffer_id,
+                buffer.text.revision(),
+                text,
+                buffer.cursor_point(),
+                query,
+            )
+        };
+        let request = AutocompleteWorkerRequest {
+            request_id: 1,
+            buffer_id,
+            buffer_revision,
+            text,
+            path: None,
+            root: None,
+            cursor,
+            query,
+            providers: vec![
+                AutocompleteProviderSpec {
+                    id: "primary".to_owned(),
+                    label: "Primary".to_owned(),
+                    icon: "P".to_owned(),
+                    item_icon: "1".to_owned(),
+                    or_group: Some("source".to_owned()),
+                    kind: AutocompleteProviderKind::Buffer,
+                },
+                AutocompleteProviderSpec {
+                    id: "fallback".to_owned(),
+                    label: "Fallback".to_owned(),
+                    icon: "F".to_owned(),
+                    item_icon: "2".to_owned(),
+                    or_group: Some("source".to_owned()),
+                    kind: AutocompleteProviderKind::Buffer,
+                },
+            ],
+            result_limit: 8,
+            lsp_client: None,
+        };
+
+        let entries = autocomplete_entries(&request);
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|entry| entry.provider_id == "primary"));
+        Ok(())
+    }
+
+    #[test]
+    fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .text = TextBuffer::from_text("alpha beta");
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .set_cursor(TextPoint::new(0, 5));
+
+        let (range, token) = completion_token_at_cursor(
+            state
+                .active_buffer_mut()
+                .map_err(|error| error.to_string())?,
+        )
+        .ok_or_else(|| "completion token missing at cursor edge".to_owned())?;
+
+        assert_eq!(token, "alpha");
+        assert_eq!(range.start(), TextPoint::new(0, 0));
+        assert_eq!(range.end(), TextPoint::new(0, 5));
+        Ok(())
+    }
+
+    #[test]
+    fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let buffer_id = install_browser_test_buffer(&mut state)?;
+        {
+            let buffer = shell_ui_mut(&mut state.runtime)?
+                .buffer_mut(buffer_id)
+                .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+            let input = buffer
+                .input_field_mut()
+                .ok_or_else(|| "browser input field missing".to_owned())?;
+            input.set_text("example.com/docs");
+        }
+
+        submit_input_buffer(&mut state.runtime)?;
+
+        let buffer = shell_ui(&state.runtime)?
+            .buffer(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        let state = buffer
+            .browser_state
+            .as_ref()
+            .ok_or_else(|| "browser state missing".to_owned())?;
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert!(buffer.text.text().contains("https://example.com/docs"));
+        Ok(())
+    }
+
+    #[test]
+    fn hover_next_command_cycles_open_overlay_without_focus() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Alpha".to_owned())
+        );
+
+        cycle_hover_provider(&mut state.runtime, true)?;
+
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Beta".to_owned())
+        );
+        assert!(!state.hover_focused().map_err(|error| error.to_string())?);
+        Ok(())
+    }
+
+    #[test]
+    fn hover_previous_command_wraps_open_overlay_without_focus() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Alpha".to_owned())
+        );
+
+        cycle_hover_provider(&mut state.runtime, false)?;
+
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Gamma".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hover_tab_shortcut_focuses_open_overlay() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+        assert!(state.hover_visible().map_err(|error| error.to_string())?);
+        assert!(!state.hover_focused().map_err(|error| error.to_string())?);
+
+        assert!(
+            state
+                .try_runtime_keybinding(Keycode::Tab, Mod::empty())
+                .map_err(|error| error.to_string())?
+        );
+
+        assert!(state.hover_focused().map_err(|error| error.to_string())?);
+        Ok(())
+    }
+
+    #[test]
+    fn hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Alpha".to_owned())
+        );
+
+        assert!(
+            state
+                .try_runtime_keybinding(Keycode::N, ctrl_mod())
+                .map_err(|error| error.to_string())?
+        );
+
+        assert_eq!(
+            state
+                .hover_provider_label()
+                .map_err(|error| error.to_string())?,
+            Some("Beta".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let buffer_id = install_browser_test_buffer(&mut state)?;
+        let buffer = shell_ui(&state.runtime)?
+            .buffer(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        let rect = PixelRectToRect::rect(0, 0, 800, 400);
+        let layout = buffer_footer_layout(buffer, rect, 18);
+        let viewport = browser_viewport_rect(buffer, rect, 18)
+            .ok_or_else(|| "browser viewport missing".to_owned())?;
+        let viewport_bottom = viewport.y + viewport.height as i32;
+
+        assert!(viewport.width > 0);
+        assert!(viewport.height > 0);
+        assert!(viewport.y >= layout.body_y - 2);
+        assert!(viewport_bottom <= layout.input_y);
+        Ok(())
+    }
+
+    #[test]
+    fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let buffer_id = install_browser_test_buffer(&mut state)?;
+        let plan = browser_sync_plan(
+            state.ui().map_err(|error| error.to_string())?,
+            None,
+            800,
+            400,
+            18,
+        )
+        .map_err(|error| error.to_string())?;
+        let surface = plan
+            .visible_surfaces
+            .iter()
+            .find(|surface| surface.buffer_id == buffer_id)
+            .ok_or_else(|| "browser surface missing".to_owned())?;
+
+        assert_eq!(
+            browser_surface_buffer_at_point(&plan, surface.rect.x + 4, surface.rect.y + 4),
+            Some(buffer_id)
+        );
+        assert_eq!(
+            browser_surface_buffer_at_point(
+                &plan,
+                surface.rect.x + 4,
+                surface.rect.y + surface.rect.height as i32 + 4
+            ),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let _buffer_id = install_browser_test_buffer(&mut state)?;
+        state
+            .ui_mut()
+            .map_err(|error| error.to_string())?
+            .set_picker(PickerOverlay::from_entries("Buffers", Vec::new()));
+
+        let plan = browser_sync_plan(
+            state.ui().map_err(|error| error.to_string())?,
+            None,
+            800,
+            400,
+            18,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(plan.buffers.len(), 1);
+        assert!(plan.visible_surfaces.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn detect_browser_url_uses_cursor_hit_or_single_line_url() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .text = TextBuffer::from_text("See https://example.com/docs.");
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .set_cursor(TextPoint::new(0, 10));
+        let cursor_hit = detect_browser_url(
+            state
+                .active_buffer_mut()
+                .map_err(|error| error.to_string())?,
+        )
+        .ok_or_else(|| "browser URL missing under cursor".to_owned())?;
+        assert_eq!(cursor_hit, "https://example.com/docs");
+
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .set_cursor(TextPoint::new(0, 0));
+        let single_url = detect_browser_url(
+            state
+                .active_buffer_mut()
+                .map_err(|error| error.to_string())?,
+        )
+        .ok_or_else(|| "browser URL missing from single-url line".to_owned())?;
+        assert_eq!(single_url, "https://example.com/docs");
+        Ok(())
+    }
+
+    #[test]
+    fn browser_url_command_opens_popup_browser_with_detected_url() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .text = TextBuffer::from_text("Docs: https://example.com/docs.");
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .set_cursor(TextPoint::new(0, 8));
+
+        open_detected_browser_url(&mut state.runtime)?;
+
+        let popup = active_runtime_popup(&state.runtime)?
+            .ok_or_else(|| "browser popup was not opened".to_owned())?;
+        let buffer = shell_ui(&state.runtime)?
+            .buffer(popup.active_buffer)
+            .ok_or_else(|| "browser popup buffer missing".to_owned())?;
+        assert!(buffer_is_browser(&buffer.kind));
+        assert!(buffer.text.text().contains("https://example.com/docs"));
+        assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let workspace_id = state
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let buffer_id = state
+            .runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                user::browser::BUFFER_NAME,
+                BufferKind::Plugin(BROWSER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model_mut()
+            .focus_buffer(workspace_id, buffer_id)
+            .map_err(|error| error.to_string())?;
+
+        sync_active_buffer(&mut state.runtime)?;
+
+        let ui = shell_ui(&state.runtime)?;
+        assert_eq!(ui.active_buffer_id(), Some(buffer_id));
+        assert_eq!(ui.input_mode(), InputMode::Insert);
+        Ok(())
+    }
+
+    #[test]
+    fn browser_host_focus_parent_event_returns_to_normal_mode() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let buffer_id = install_browser_test_buffer(&mut state)?;
+        state
+            .ui_mut()
+            .map_err(|error| error.to_string())?
+            .enter_insert_mode();
+
+        state
+            .apply_browser_host_events(&[BrowserHostEvent::FocusParentRequested { buffer_id }])
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            state.ui().map_err(|error| error.to_string())?.input_mode(),
+            InputMode::Normal
+        );
+        Ok(())
     }
 }
 
@@ -15304,6 +18756,7 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
         Keycode::F4 => Some("F4".to_owned()),
         Keycode::F5 => Some("F5".to_owned()),
         Keycode::F6 => Some("F6".to_owned()),
+        Keycode::Tab => Some("Tab".to_owned()),
         Keycode::Escape => Some("Escape".to_owned()),
         Keycode::Return | Keycode::KpEnter => Some("Enter".to_owned()),
         _ => None,
@@ -15577,6 +19030,45 @@ fn update_error_buffer(
     Ok(())
 }
 
+fn format_lsp_log_entry_lines(entry: &LspLogEntry) -> Vec<String> {
+    let timestamp = format_timestamp(entry.timestamp());
+    let mut body_lines = entry
+        .body()
+        .lines()
+        .map(str::trim_end)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let prefix = format!(
+        "[{timestamp}] {} {}",
+        entry.direction().label(),
+        entry.server_id()
+    );
+    let mut lines = Vec::with_capacity(body_lines.len().saturating_add(2));
+    if let Some(first) = body_lines.first() {
+        lines.push(format!("{prefix}: {first}"));
+        for line in body_lines.drain(1..) {
+            lines.push(format!("    {line}"));
+        }
+    } else {
+        lines.push(format!("{prefix}: <empty>"));
+    }
+    lines.push(String::new());
+    lines
+}
+
+fn lsp_log_buffer_lines(entries: &[LspLogEntry]) -> Vec<String> {
+    let mut lines = initial_lsp_log_lines();
+    if entries.is_empty() {
+        return lines;
+    }
+    lines.push(String::new());
+    lines.push(format!("Recent transport entries ({})", entries.len()));
+    for entry in entries {
+        lines.extend(format_lsp_log_entry_lines(entry));
+    }
+    lines
+}
+
 fn build_shell_summary(
     state: &mut ShellState,
     frames_rendered: u32,
@@ -15627,6 +19119,14 @@ fn initial_errors_lines(log_path: Option<&Path>) -> Vec<String> {
         lines.push("Log file: <pending>".to_owned());
     }
     lines
+}
+
+fn initial_lsp_log_lines() -> Vec<String> {
+    vec![
+        "*lsp-log* captures live JSON-RPC traffic between Volt and language servers.".to_owned(),
+        "Run `lsp.log` or open the buffer picker (F4) to focus this buffer.".to_owned(),
+        "Requests, notifications, responses, and disconnect events are appended here.".to_owned(),
+    ]
 }
 
 fn initial_scratch_lines() -> Vec<String> {
@@ -15696,6 +19196,9 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
         }
+        BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
+            (true, Some(browser_input_field()))
+        }
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => {
             let mut input = InputField::new("> ");
             input.set_placeholder(Some(ACP_INPUT_PLACEHOLDER.to_owned()));
@@ -15711,6 +19214,17 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Directory => (false, None),
         _ => (false, None),
     }
+}
+
+fn browser_input_field() -> InputField {
+    let mut input = InputField::new(user::browser::URL_PROMPT);
+    input.set_placeholder(Some(user::browser::URL_PLACEHOLDER.to_owned()));
+    input.set_hint(Some(user::browser::input_hint(None)));
+    input
+}
+
+fn browser_state_for_kind(kind: &BufferKind) -> Option<BrowserBufferState> {
+    buffer_is_browser(kind).then(BrowserBufferState::default)
 }
 
 fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
@@ -15757,6 +19271,9 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Type into the prompt to submit commands or text.".to_owned(),
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
+            BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
+                user::browser::buffer_lines(None)
+            }
             BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => vec![
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),
@@ -15925,6 +19442,44 @@ fn render_shell_state(
         )?;
     }
 
+    if let Some(autocomplete) = state.autocomplete()
+        && let Some(active_rect) = pane_rects.get(state.active_pane_index())
+    {
+        render_autocomplete_overlay(
+            target,
+            state,
+            autocomplete,
+            PixelRectToRect::rect(
+                active_rect.x,
+                active_rect.y,
+                active_rect.width,
+                active_rect.height,
+            ),
+            theme_registry,
+            cell_width,
+            line_height,
+        )?;
+    }
+
+    if let Some(hover) = state.hover()
+        && let Some(active_rect) = pane_rects.get(state.active_pane_index())
+    {
+        render_hover_overlay(
+            target,
+            state,
+            hover,
+            PixelRectToRect::rect(
+                active_rect.x,
+                active_rect.y,
+                active_rect.width,
+                active_rect.height,
+            ),
+            theme_registry,
+            cell_width,
+            line_height,
+        )?;
+    }
+
     if let Some(picker) = state.picker() {
         picker::render_picker_overlay(
             target,
@@ -15938,6 +19493,13 @@ fn render_shell_state(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CursorScreenAnchor {
+    x: i32,
+    y: i32,
+    pane_bottom: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16000,6 +19562,732 @@ fn render_runtime_popup_overlay(
     }
 
     Ok(())
+}
+
+fn browser_sync_plan(
+    state: &ShellUiState,
+    runtime_popup: Option<&RuntimePopupSnapshot>,
+    width: u32,
+    height: u32,
+    line_height: i32,
+) -> Result<BrowserSyncPlan, ShellError> {
+    let buffers = state
+        .buffers
+        .iter()
+        .filter(|buffer| buffer_is_browser(&buffer.kind))
+        .map(|buffer| BrowserBufferPlan {
+            buffer_id: buffer.id(),
+            current_url: buffer
+                .browser_state
+                .as_ref()
+                .and_then(|browser| browser.current_url.clone()),
+        })
+        .collect::<Vec<_>>();
+    let overlay_occludes_browsers = state.picker_visible()
+        || runtime_popup
+            .and_then(|popup| state.buffer(popup.active_buffer))
+            .is_some_and(|buffer| !buffer_is_browser(&buffer.kind));
+    if overlay_occludes_browsers {
+        return Ok(BrowserSyncPlan {
+            buffers,
+            visible_surfaces: Vec::new(),
+        });
+    }
+    let popup_height = runtime_popup
+        .map(|_| popup_window_height(height, line_height))
+        .unwrap_or(0);
+    let pane_height = height.saturating_sub(popup_height);
+    let panes = state
+        .panes()
+        .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
+    let pane_rects = match state.pane_split_direction() {
+        PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
+        PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
+    };
+    let mut visible_surfaces = Vec::new();
+    for (pane_index, pane) in panes.iter().enumerate() {
+        let Some(buffer) = state.buffer(pane.buffer_id) else {
+            continue;
+        };
+        if !buffer_is_browser(&buffer.kind) {
+            continue;
+        }
+        let Some(rect) = browser_viewport_rect(
+            buffer,
+            PixelRectToRect::rect(
+                pane_rects[pane_index].x,
+                pane_rects[pane_index].y,
+                pane_rects[pane_index].width,
+                pane_rects[pane_index].height,
+            ),
+            line_height,
+        ) else {
+            continue;
+        };
+        visible_surfaces.push(BrowserSurfacePlan {
+            buffer_id: buffer.id(),
+            rect,
+        });
+    }
+    if let Some(popup) = runtime_popup
+        && let Some(buffer) = state.buffer(popup.active_buffer)
+        && buffer_is_browser(&buffer.kind)
+        && let Some(rect) = browser_viewport_rect(
+            buffer,
+            PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
+            line_height,
+        )
+    {
+        visible_surfaces.push(BrowserSurfacePlan {
+            buffer_id: buffer.id(),
+            rect,
+        });
+    }
+    Ok(BrowserSyncPlan {
+        buffers,
+        visible_surfaces,
+    })
+}
+
+fn render_autocomplete_overlay(
+    target: &mut DrawTarget<'_>,
+    state: &ShellUiState,
+    autocomplete: &AutocompleteOverlay,
+    pane_rect: Rect,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(buffer) = state.buffer(autocomplete.buffer_id) else {
+        return Ok(());
+    };
+    let Some(anchor) =
+        buffer_cursor_screen_anchor(buffer, pane_rect, theme_registry, cell_width, line_height)
+    else {
+        return Ok(());
+    };
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let base_foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let accent = theme_color(
+        theme_registry,
+        "ui.selection",
+        adjust_color(base_background, if is_dark { 48 } else { -48 }),
+    );
+    let panel_background = theme_color(
+        theme_registry,
+        "ui.autocomplete.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let foreground = theme_color(
+        theme_registry,
+        "ui.autocomplete.foreground",
+        base_foreground,
+    );
+    let border = theme_color(
+        theme_registry,
+        "ui.autocomplete.border",
+        adjust_color(base_background, if is_dark { 30 } else { -30 }),
+    );
+    let docs_background = theme_color(
+        theme_registry,
+        "ui.autocomplete.documentation.background",
+        adjust_color(panel_background, if is_dark { 4 } else { -4 }),
+    );
+    let selected_background = theme_color(
+        theme_registry,
+        "ui.autocomplete.selection",
+        blend_color(accent, panel_background, 0.72),
+    );
+    let muted = theme_color(
+        theme_registry,
+        "ui.autocomplete.muted",
+        blend_color(base_foreground, panel_background, 0.46),
+    );
+    let row_height = line_height.max(1);
+    let width = overlay_width(pane_rect.width(), cell_width, 48, 72);
+    let list_width = ((width.saturating_mul(36)) / 100)
+        .max((cell_width.max(1) as u32) * 18)
+        .min((cell_width.max(1) as u32) * 28)
+        .min(width.saturating_sub((cell_width.max(1) as u32) * 18));
+    let docs_width = width.saturating_sub(list_width).saturating_sub(1);
+    let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
+    let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
+        .clamp(4, user::autocomplete::RESULT_LIMIT.max(6) as u32 + 2)
+        as usize;
+    let preview_lines = autocomplete_preview_lines(
+        autocomplete.selected(),
+        &autocomplete.query.token,
+        docs_columns,
+        max_body_rows,
+    );
+    let body_rows = autocomplete
+        .entries()
+        .len()
+        .max(preview_lines.len())
+        .max(1)
+        .min(max_body_rows);
+    let height = row_height as u32 * body_rows as u32 + 18;
+    let preferred_x = anchor.x - (cell_width.max(1) * 3);
+    let max_x = pane_rect.x() + pane_rect.width() as i32 - width as i32 - 8;
+    let x = preferred_x.clamp(pane_rect.x() + 8, max_x.max(pane_rect.x() + 8));
+    let below_y = anchor.y + row_height + 6;
+    let above_y = anchor.y - height as i32 - 6;
+    let y = if below_y + height as i32 <= anchor.pane_bottom {
+        below_y
+    } else {
+        above_y.max(pane_rect.y() + 8)
+    };
+    let outer_rect = PixelRectToRect::rect(x, y, width, height);
+    let inner_rect = PixelRectToRect::rect(
+        x + 1,
+        y + 1,
+        width.saturating_sub(2),
+        height.saturating_sub(2),
+    );
+    fill_rounded_rect(target, outer_rect, 8, border)?;
+    fill_rounded_rect(target, inner_rect, 7, panel_background)?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
+        border,
+    )?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            x + list_width as i32 + 1,
+            y + 1,
+            docs_width.saturating_sub(1),
+            height.saturating_sub(2),
+        ),
+        docs_background,
+    )?;
+    if autocomplete.entries().is_empty() {
+        draw_text(target, x + 10, y + 8, "Loading completions...", muted)?;
+    } else {
+        let list_text_width = list_width.saturating_sub(24);
+        for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
+            let row_y = y + 8 + index as i32 * row_height;
+            if index == autocomplete.selected_index {
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(
+                        x + 6,
+                        row_y - 2,
+                        list_width.saturating_sub(12),
+                        row_height as u32,
+                    ),
+                    selected_background,
+                )?;
+            }
+            let label = truncate_text_to_width(
+                &format!("{} {}", entry.item_icon, entry.label),
+                list_text_width,
+                cell_width,
+            );
+            draw_text(target, x + 10, row_y, &label, foreground)?;
+        }
+    }
+    for (index, line) in preview_lines.iter().take(body_rows).enumerate() {
+        let row_y = y + 8 + index as i32 * row_height;
+        let color = if index == 0 { foreground } else { muted };
+        let clipped = truncate_text_to_width(line, docs_width.saturating_sub(20), cell_width);
+        draw_text(target, x + list_width as i32 + 11, row_y, &clipped, color)?;
+    }
+    Ok(())
+}
+
+fn render_hover_overlay(
+    target: &mut DrawTarget<'_>,
+    state: &ShellUiState,
+    hover: &HoverOverlay,
+    pane_rect: Rect,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(buffer) = state.buffer(hover.buffer_id) else {
+        return Ok(());
+    };
+    let Some(provider) = hover.current_provider() else {
+        return Ok(());
+    };
+    let anchor =
+        buffer_cursor_screen_anchor(buffer, pane_rect, theme_registry, cell_width, line_height)
+            .unwrap_or_else(|| fallback_overlay_anchor(buffer, pane_rect, line_height));
+
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let base_foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let accent = theme_color(
+        theme_registry,
+        "ui.selection",
+        adjust_color(base_background, if is_dark { 48 } else { -48 }),
+    );
+    let background = theme_color(
+        theme_registry,
+        "ui.hover.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let foreground = theme_color(theme_registry, "ui.hover.foreground", base_foreground);
+    let border = theme_color(
+        theme_registry,
+        "ui.hover.border",
+        adjust_color(base_background, if is_dark { 30 } else { -30 }),
+    );
+    let header_background = theme_color(
+        theme_registry,
+        "ui.hover.header.background",
+        adjust_color(background, if is_dark { 6 } else { -6 }),
+    );
+    let focus_border = if hover.focused {
+        theme_color(theme_registry, "ui.hover.focused.border", accent)
+    } else {
+        border
+    };
+    let selected_tab = theme_color(
+        theme_registry,
+        "ui.hover.selection",
+        blend_color(accent, header_background, 0.68),
+    );
+    let muted = theme_color(
+        theme_registry,
+        "ui.hover.muted",
+        blend_color(base_foreground, background, 0.46),
+    );
+    let row_height = line_height.max(1);
+    let width = overlay_width(pane_rect.width(), cell_width, 44, 74);
+    let body_columns = overlay_text_columns(width, 28, cell_width);
+    let body_lines =
+        wrap_overlay_lines(hover.visible_lines(), body_columns, hover.line_limit.max(1));
+    let footer_text = if provider.lines.len() > hover.visible_lines().len() {
+        Some(format!(
+            "Lines {}-{} of {}",
+            hover.scroll_offset + 1,
+            hover.scroll_offset + hover.visible_lines().len(),
+            provider.lines.len()
+        ))
+    } else if hover.focused {
+        Some("Esc returns to the buffer".to_owned())
+    } else {
+        Some("Run hover.focus to enter the panel".to_owned())
+    };
+    let tabs_height = row_height as u32 + 10;
+    let title_rows = 1u32;
+    let body_rows = body_lines.len().max(1) as u32;
+    let footer_rows = u32::from(footer_text.is_some());
+    let height = tabs_height + row_height as u32 * (title_rows + body_rows + footer_rows) + 22;
+    let min_x = pane_rect.x() + 8;
+    let max_x = pane_rect.x() + pane_rect.width() as i32 - width as i32 - 8;
+    let preferred_x = anchor.x - (cell_width.max(1) * 6);
+    let x = preferred_x.clamp(min_x, max_x.max(min_x));
+    let below_y = (anchor.y + row_height + 6)
+        .min(anchor.pane_bottom - height as i32)
+        .max(pane_rect.y() + 8);
+    let above_y = anchor.y - height as i32 - 6;
+    let y = if above_y >= pane_rect.y() + 8 {
+        above_y
+    } else {
+        below_y
+    };
+    let outer_rect = PixelRectToRect::rect(x, y, width, height);
+    let inner_rect = PixelRectToRect::rect(
+        x + 1,
+        y + 1,
+        width.saturating_sub(2),
+        height.saturating_sub(2),
+    );
+    fill_rounded_rect(target, outer_rect, 8, focus_border)?;
+    fill_rounded_rect(target, inner_rect, 7, background)?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(x + 1, y + 1, width.saturating_sub(2), tabs_height),
+        header_background,
+    )?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(x + 1, y + tabs_height as i32, width.saturating_sub(2), 1),
+        border,
+    )?;
+
+    let mut tab_x = x + 10;
+    let tab_y = y + 6;
+    for (index, tab) in hover.providers.iter().enumerate() {
+        let label = format!("{} {}", tab.provider_icon, tab.provider_label);
+        let tab_width = monospace_text_width(&label, cell_width).saturating_add(16);
+        if index == hover.provider_index {
+            fill_rounded_rect(
+                target,
+                PixelRectToRect::rect(tab_x - 4, tab_y - 2, tab_width, row_height as u32 + 4),
+                5,
+                selected_tab,
+            )?;
+        }
+        draw_text(
+            target,
+            tab_x,
+            tab_y,
+            &label,
+            if index == hover.provider_index {
+                foreground
+            } else {
+                muted
+            },
+        )?;
+        tab_x += tab_width as i32 + 4;
+    }
+
+    let title_y = y + tabs_height as i32 + 8;
+    let title = truncate_text_to_width(
+        &format!("{} {}", provider.provider_icon, hover.token),
+        width.saturating_sub(28),
+        cell_width,
+    );
+    draw_text(target, x + 12, title_y, &title, foreground)?;
+    let status = if hover.focused { "Focused" } else { "Preview" };
+    let status_width = monospace_text_width(status, cell_width) as i32;
+    draw_text(
+        target,
+        x + width as i32 - status_width - 12,
+        title_y,
+        status,
+        muted,
+    )?;
+
+    if body_lines.is_empty() {
+        draw_text(
+            target,
+            x + 12,
+            title_y + row_height,
+            "No hover details",
+            muted,
+        )?;
+    } else {
+        for (index, line) in body_lines.iter().enumerate() {
+            let row_y = title_y + row_height + index as i32 * row_height;
+            let line = truncate_text_to_width(line, width.saturating_sub(24), cell_width);
+            draw_text(target, x + 12, row_y, &line, foreground)?;
+        }
+    }
+    if let Some(footer_text) = footer_text {
+        draw_text(
+            target,
+            x + 12,
+            title_y + row_height + body_lines.len() as i32 * row_height,
+            &truncate_text_to_width(&footer_text, width.saturating_sub(20), cell_width),
+            muted,
+        )?;
+    }
+    Ok(())
+}
+
+fn overlay_width(pane_width: u32, cell_width: i32, min_cells: u32, max_cells: u32) -> u32 {
+    let available = pane_width.saturating_sub(16);
+    let min_width = ((cell_width.max(1) as u32) * min_cells).min(available);
+    let max_width = ((cell_width.max(1) as u32) * max_cells)
+        .min(available)
+        .max(min_width);
+    ((pane_width.saturating_mul(3)) / 4).clamp(min_width, max_width)
+}
+
+fn overlay_text_columns(width: u32, horizontal_padding: u32, cell_width: i32) -> usize {
+    (width.saturating_sub(horizontal_padding) / cell_width.max(1) as u32)
+        .max(1)
+        .try_into()
+        .unwrap_or(1)
+}
+
+const BUFFER_BODY_TOP_PADDING: i32 = 10;
+const BUFFER_BODY_BOTTOM_PADDING: i32 = 10;
+const BUFFER_STATUSLINE_BOTTOM_PADDING: i32 = 8;
+const BUFFER_INPUT_BOX_EXTRA_HEIGHT: i32 = 8;
+const BUFFER_INPUT_HINT_GAP: i32 = 4;
+const BUFFER_INPUT_FOOTER_GAP: i32 = 10;
+const BUFFER_OVERLAY_BOTTOM_GAP: i32 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferFooterLayout {
+    body_y: i32,
+    statusline_y: i32,
+    input_y: i32,
+    input_box_height: i32,
+    input_hint_gap: i32,
+    visible_rows: usize,
+    pane_bottom: i32,
+}
+
+fn buffer_footer_layout(buffer: &ShellBuffer, rect: Rect, line_height: i32) -> BufferFooterLayout {
+    let line_height = line_height.max(1);
+    let body_y = rect.y() + BUFFER_BODY_TOP_PADDING;
+    let statusline_y =
+        rect.y() + rect.height() as i32 - line_height - BUFFER_STATUSLINE_BOTTOM_PADDING;
+    let (input_text_lines, has_hint) = buffer
+        .input_field()
+        .map(|input| (input.text_line_count(), input.hint().is_some()))
+        .unwrap_or((0, false));
+    let input_box_height = if input_text_lines > 0 {
+        (line_height * input_text_lines as i32 + BUFFER_INPUT_BOX_EXTRA_HEIGHT).max(line_height)
+    } else {
+        0
+    };
+    let input_hint_gap = if has_hint { BUFFER_INPUT_HINT_GAP } else { 0 };
+    let input_footer_gap = if has_hint { BUFFER_INPUT_FOOTER_GAP } else { 0 };
+    let input_reserved = if input_text_lines > 0 {
+        input_box_height + input_hint_gap + i32::from(has_hint) * line_height + input_footer_gap
+    } else {
+        0
+    };
+    let input_y = statusline_y - input_reserved;
+    let visible_body_height = (input_y - body_y - BUFFER_BODY_BOTTOM_PADDING).max(line_height);
+    let visible_rows = (visible_body_height / line_height).max(1) as usize;
+    BufferFooterLayout {
+        body_y,
+        statusline_y,
+        input_y,
+        input_box_height,
+        input_hint_gap,
+        visible_rows,
+        pane_bottom: input_y - BUFFER_OVERLAY_BOTTOM_GAP,
+    }
+}
+
+fn browser_viewport_rect(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    line_height: i32,
+) -> Option<BrowserViewportRect> {
+    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let x = rect.x().saturating_add(8);
+    let y = layout.body_y.saturating_sub(2);
+    let width = rect.width().saturating_sub(16);
+    let height = layout.pane_bottom.saturating_sub(y).max(line_height.max(1));
+    (width > 0 && height > 0).then_some(BrowserViewportRect {
+        x,
+        y,
+        width,
+        height: height as u32,
+    })
+}
+
+fn browser_viewport_contains_point(rect: BrowserViewportRect, x: i32, y: i32) -> bool {
+    let right = rect.x.saturating_add(rect.width as i32);
+    let bottom = rect.y.saturating_add(rect.height as i32);
+    x >= rect.x && y >= rect.y && x < right && y < bottom
+}
+
+fn browser_surface_buffer_at_point(plan: &BrowserSyncPlan, x: i32, y: i32) -> Option<BufferId> {
+    plan.visible_surfaces.iter().find_map(|surface| {
+        browser_viewport_contains_point(surface.rect, x, y).then_some(surface.buffer_id)
+    })
+}
+
+fn buffer_visible_rows_for_height(buffer: &ShellBuffer, height: u32, line_height: i32) -> usize {
+    buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 1, height), line_height).visible_rows
+}
+
+fn autocomplete_preview_lines(
+    entry: Option<&AutocompleteEntry>,
+    token: &str,
+    max_columns: usize,
+    max_lines: usize,
+) -> Vec<String> {
+    let max_lines = max_lines.max(1);
+    let Some(entry) = entry else {
+        return wrap_overlay_text(
+            &format!(
+                "{} {token}\n\nSelect a completion to preview details.",
+                user::autocomplete::TOKEN_ICON
+            ),
+            max_columns,
+            max_lines,
+        );
+    };
+    let mut lines = Vec::new();
+    lines.extend(wrap_overlay_text(
+        &format!("{} {}", entry.item_icon, entry.label),
+        max_columns,
+        max_lines,
+    ));
+    if lines.len() < max_lines {
+        let meta = entry
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.is_empty())
+            .map(|detail| {
+                format!(
+                    "{} {} · {detail}",
+                    entry.provider_icon, entry.provider_label
+                )
+            })
+            .unwrap_or_else(|| format!("{} {}", entry.provider_icon, entry.provider_label));
+        lines.extend(wrap_overlay_text(
+            &meta,
+            max_columns,
+            max_lines - lines.len(),
+        ));
+    }
+    if lines.len() < max_lines {
+        lines.push(String::new());
+    }
+    if lines.len() < max_lines {
+        let body = entry
+            .documentation
+            .as_deref()
+            .filter(|documentation| !documentation.trim().is_empty())
+            .unwrap_or("No documentation available for this completion.");
+        lines.extend(wrap_overlay_text(
+            body,
+            max_columns,
+            max_lines - lines.len(),
+        ));
+    }
+    lines.truncate(max_lines);
+    lines
+}
+
+fn wrap_overlay_lines(lines: &[String], max_columns: usize, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let mut wrapped = Vec::new();
+    for line in lines {
+        if wrapped.len() >= max_lines {
+            break;
+        }
+        wrapped.extend(wrap_overlay_text(
+            line,
+            max_columns,
+            max_lines.saturating_sub(wrapped.len()),
+        ));
+    }
+    wrapped.truncate(max_lines);
+    wrapped
+}
+
+fn wrap_overlay_text(text: &str, max_columns: usize, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let max_columns = max_columns.max(1);
+    let mut wrapped = Vec::new();
+    for raw_line in text.lines() {
+        if wrapped.len() >= max_lines {
+            break;
+        }
+        if raw_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let mut remaining = raw_line;
+        while !remaining.is_empty() && wrapped.len() < max_lines {
+            if remaining.chars().count() <= max_columns {
+                wrapped.push(remaining.to_owned());
+                break;
+            }
+            let mut split_at = 0usize;
+            let mut last_whitespace = None;
+            let mut columns = 0usize;
+            for (byte_index, character) in remaining.char_indices() {
+                columns += 1;
+                if character.is_whitespace() {
+                    last_whitespace = Some(byte_index);
+                }
+                split_at = byte_index + character.len_utf8();
+                if columns >= max_columns {
+                    break;
+                }
+            }
+            let split_at = last_whitespace
+                .filter(|index| *index > 0)
+                .unwrap_or(split_at);
+            let (head, tail) = remaining.split_at(split_at);
+            wrapped.push(head.trim_end().to_owned());
+            remaining = tail.trim_start();
+        }
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped.truncate(max_lines);
+    wrapped
+}
+
+fn buffer_cursor_screen_anchor(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+) -> Option<CursorScreenAnchor> {
+    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let cell_width = cell_width.max(1);
+    let fringe_width = cell_width;
+    let line_number_width = cell_width * 5;
+    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
+    let cursor_row = buffer.cursor_row();
+    let cursor_col = buffer.cursor_col();
+    let wrapped_lines = collect_wrapped_lines(
+        buffer,
+        buffer.scroll_row,
+        layout.visible_rows,
+        wrap_cols,
+        indent_size,
+    );
+    let mut cursor_row_on_screen = None;
+    let mut cursor_col_on_screen = None;
+    let mut cursor_indent_cols = 0usize;
+    let mut visual_row = 0usize;
+    for wrapped in &wrapped_lines {
+        if wrapped.line_index == cursor_row {
+            let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
+            if let Some(segment) = wrapped.segments.get(segment_index) {
+                cursor_row_on_screen = Some(visual_row + segment_index);
+                cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
+                cursor_indent_cols = if segment_index == 0 {
+                    0
+                } else {
+                    wrapped.continuation_indent_cols
+                };
+            }
+        }
+        visual_row = visual_row.saturating_add(wrapped.segments.len());
+        if visual_row >= layout.visible_rows {
+            break;
+        }
+    }
+    let cursor_row_on_screen = cursor_row_on_screen?;
+    let cursor_col_on_screen = cursor_col_on_screen?;
+    Some(CursorScreenAnchor {
+        x: rect.x()
+            + 12
+            + fringe_width
+            + line_number_width
+            + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
+        y: layout.body_y + cursor_row_on_screen as i32 * line_height,
+        pane_bottom: layout.pane_bottom,
+    })
+}
+
+fn fallback_overlay_anchor(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    line_height: i32,
+) -> CursorScreenAnchor {
+    let layout = buffer_footer_layout(buffer, rect, line_height);
+    CursorScreenAnchor {
+        x: rect.x() + 24,
+        y: layout.body_y + 6,
+        pane_bottom: layout.pane_bottom,
+    }
 }
 
 #[derive(Debug)]
@@ -16132,6 +20420,9 @@ fn render_buffer(
         user::gitfringe::TOKEN_REMOVED,
         git_removed_fallback,
     );
+    let diagnostic_error = Color::RGB(224, 107, 117);
+    let diagnostic_warning = Color::RGB(209, 154, 102);
+    let diagnostic_information = Color::RGB(110, 170, 255);
     let cell_width = cell_width.max(1);
     let git_info = git_summary.and_then(|summary| {
         summary
@@ -16161,27 +20452,7 @@ fn render_buffer(
         cell_width,
     );
 
-    let body_y = rect.y() + 10;
-    let statusline_y = rect.y() + rect.height() as i32 - line_height - 8;
-    let (input_text_lines, input_hint_lines) = buffer
-        .input_field()
-        .map(|input| (input.text_line_count(), usize::from(input.hint().is_some())))
-        .unwrap_or((0, 0));
-    let input_box_height = if input_text_lines > 0 {
-        (line_height * input_text_lines as i32 + 8).max(line_height)
-    } else {
-        0
-    };
-    let input_hint_gap = if input_hint_lines > 0 { 4 } else { 0 };
-    let input_footer_gap = if input_hint_lines > 0 { 10 } else { 0 };
-    let input_reserved = if input_text_lines > 0 {
-        input_box_height + input_hint_gap + input_hint_lines as i32 * line_height + input_footer_gap
-    } else {
-        0
-    };
-    let input_y = statusline_y - input_reserved;
-    let visible_body_height = (input_y - body_y - 10).max(line_height);
-    let visible_rows = (visible_body_height / line_height.max(1)).max(1) as usize;
+    let layout = buffer_footer_layout(buffer, rect, line_height);
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -16191,7 +20462,7 @@ fn render_buffer(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        visible_rows,
+        layout.visible_rows,
         wrap_cols,
         indent_size,
     );
@@ -16213,7 +20484,7 @@ fn render_buffer(
             }
         }
         visual_row = visual_row.saturating_add(wrapped.segments.len());
-        if visual_row >= visible_rows {
+        if visual_row >= layout.visible_rows {
             break;
         }
     }
@@ -16224,7 +20495,7 @@ fn render_buffer(
     if show_text_cursor
         && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
             (cursor_row_on_screen, cursor_col_on_screen)
-        && cursor_row_on_screen < visible_rows
+        && cursor_row_on_screen < layout.visible_rows
     {
         let cursor_width = match input_mode {
             InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
@@ -16238,7 +20509,7 @@ fn render_buffer(
                     + fringe_width
                     + line_number_width
                     + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                body_y + cursor_row_on_screen as i32 * line_height,
+                layout.body_y + cursor_row_on_screen as i32 * line_height,
                 cursor_width,
                 line_height.max(2) as u32,
             ),
@@ -16262,10 +20533,10 @@ fn render_buffer(
             selection_columns_for_visual(selection_state, line_index, line_len)
         });
         for (segment_index, segment) in wrapped.segments.iter().enumerate() {
-            if visual_row >= visible_rows {
+            if visual_row >= layout.visible_rows {
                 break;
             }
-            let y = body_y + visual_row as i32 * line_height;
+            let y = layout.body_y + visual_row as i32 * line_height;
             let segment_indent_cols = if segment_index == 0 {
                 0
             } else {
@@ -16307,7 +20578,17 @@ fn render_buffer(
                 }
             }
             if segment_index == 0 {
-                if let Some(kind) = buffer.git_fringe_kind(line_index) {
+                let diagnostic_severity = user::lsp::SHOW_BUFFER_DIAGNOSTICS
+                    .then(|| buffer.lsp_diagnostic_severity(line_index))
+                    .flatten();
+                if let Some(severity) = diagnostic_severity {
+                    let color = match severity {
+                        LspDiagnosticSeverity::Error => diagnostic_error,
+                        LspDiagnosticSeverity::Warning => diagnostic_warning,
+                        LspDiagnosticSeverity::Information => diagnostic_information,
+                    };
+                    draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
+                } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
                     let color = match kind {
                         GitFringeKind::Added => git_fringe_added,
                         GitFringeKind::Modified => git_fringe_modified,
@@ -16324,12 +20605,19 @@ fn render_buffer(
                 } else {
                     line_index + 1
                 };
+                let line_number_color = diagnostic_severity
+                    .map(|severity| match severity {
+                        LspDiagnosticSeverity::Error => diagnostic_error,
+                        LspDiagnosticSeverity::Warning => diagnostic_warning,
+                        LspDiagnosticSeverity::Information => diagnostic_information,
+                    })
+                    .unwrap_or(muted);
                 draw_text(
                     target,
                     line_number_x,
                     y,
                     &format!("{:>4}", line_number),
-                    muted,
+                    line_number_color,
                 )?;
             }
             draw_buffer_text(
@@ -16346,7 +20634,7 @@ fn render_buffer(
             )?;
             visual_row = visual_row.saturating_add(1);
         }
-        if visual_row >= visible_rows {
+        if visual_row >= layout.visible_rows {
             break;
         }
     }
@@ -16363,9 +20651,9 @@ fn render_buffer(
             target,
             PixelRectToRect::rect(
                 rect.x() + 8,
-                input_y - 4,
+                layout.input_y - 4,
                 rect.width().saturating_sub(16),
-                input_box_height.max(line_height) as u32,
+                layout.input_box_height as u32,
             ),
             input_background,
         )?;
@@ -16379,7 +20667,7 @@ fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
-                    input_y - 4,
+                    layout.input_y - 4,
                     rect.width().saturating_sub(16),
                     1,
                 ),
@@ -16389,7 +20677,7 @@ fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
-                    input_y - 4 + input_box_height.max(line_height),
+                    layout.input_y - 4 + layout.input_box_height,
                     rect.width().saturating_sub(16),
                     1,
                 ),
@@ -16403,9 +20691,9 @@ fn render_buffer(
         if input.text().is_empty() {
             if let Some(placeholder) = input.placeholder() {
                 let line = format!("{prompt}{placeholder}");
-                draw_text(target, input_x, input_y, &line, placeholder_color)?;
+                draw_text(target, input_x, layout.input_y, &line, placeholder_color)?;
             } else {
-                draw_text(target, input_x, input_y, prompt, input_foreground)?;
+                draw_text(target, input_x, layout.input_y, prompt, input_foreground)?;
             }
         } else {
             for (index, line) in input.text().split('\n').enumerate() {
@@ -16414,14 +20702,14 @@ fn render_buffer(
                 draw_text(
                     target,
                     input_x,
-                    input_y + index as i32 * line_height,
+                    layout.input_y + index as i32 * line_height,
                     &rendered,
                     input_foreground,
                 )?;
             }
         }
         if let Some(hint) = input.hint() {
-            let hint_y = input_y + input_box_height + input_hint_gap;
+            let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
             if let Some((mode_label, rest)) = hint.split_once(" · ") {
                 let prefix = format!("{prompt_padding}{mode_label}");
                 draw_text(target, input_x, hint_y, &prefix, git_added_fallback)?;
@@ -16447,7 +20735,7 @@ fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     input_x + (input_col as i32 * cell_width),
-                    input_y + input_row as i32 * line_height,
+                    layout.input_y + input_row as i32 * line_height,
                     cursor_width,
                     line_height.max(2) as u32,
                 ),
@@ -16461,31 +20749,49 @@ fn render_buffer(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
-            statusline_y - 6,
+            layout.statusline_y - 6,
             rect.width().saturating_sub(16),
             1,
         ),
         border_color,
     )?;
     let statusline_x = rect.x() + 12;
-    let acp_icon = user::nerd_font::symbols::fa::FA_CONNECTDEVELOP;
+    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
     if acp_connected && statusline.contains(acp_icon) {
         if let Some((before, rest)) = statusline.split_once(acp_icon) {
             let mut draw_x = statusline_x;
             if !before.is_empty() {
-                draw_text(target, draw_x, statusline_y, before, title_color)?;
+                draw_text(target, draw_x, layout.statusline_y, before, title_color)?;
                 draw_x += monospace_text_width(before, cell_width) as i32;
             }
-            draw_text(target, draw_x, statusline_y, acp_icon, git_added_fallback)?;
+            draw_text(
+                target,
+                draw_x,
+                layout.statusline_y,
+                acp_icon,
+                git_added_fallback,
+            )?;
             draw_x += monospace_text_width(acp_icon, cell_width) as i32;
             if !rest.is_empty() {
-                draw_text(target, draw_x, statusline_y, rest, title_color)?;
+                draw_text(target, draw_x, layout.statusline_y, rest, title_color)?;
             }
         } else {
-            draw_text(target, statusline_x, statusline_y, &statusline, title_color)?;
+            draw_text(
+                target,
+                statusline_x,
+                layout.statusline_y,
+                &statusline,
+                title_color,
+            )?;
         }
     } else {
-        draw_text(target, statusline_x, statusline_y, &statusline, title_color)?;
+        draw_text(
+            target,
+            statusline_x,
+            layout.statusline_y,
+            &statusline,
+            title_color,
+        )?;
     }
 
     let _ = ascent;
@@ -16705,7 +21011,7 @@ fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontRole {
     Primary,
-    Fallback,
+    Icon(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -16715,23 +21021,25 @@ struct FontRun {
 }
 
 fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
-    let Some(fallback) = fonts.fallback() else {
-        return FontRole::Primary;
-    };
+    if fonts.prefers_icon_font(character)
+        && let Some(index) = fonts.icon_font_index_for_char(character)
+    {
+        return FontRole::Icon(index);
+    }
     if fonts.primary().find_glyph(character).is_some() {
         return FontRole::Primary;
     }
-    if fallback.find_glyph(character).is_some() {
-        return FontRole::Fallback;
-    }
-    FontRole::Primary
+    fonts
+        .icon_font_index_for_char(character)
+        .map(FontRole::Icon)
+        .unwrap_or(FontRole::Primary)
 }
 
 fn font_runs(text: &str, fonts: &FontSet<'_>) -> Vec<FontRun> {
     if text.is_empty() {
         return Vec::new();
     }
-    if fonts.fallback().is_none() || text.is_ascii() {
+    if fonts.icon_fonts().is_empty() || text.is_ascii() {
         return vec![FontRun {
             role: FontRole::Primary,
             text: text.to_owned(),
@@ -16817,6 +21125,73 @@ fn present_scene_to_canvas(
     Ok(())
 }
 
+fn blit_surface_to_canvas(
+    canvas: &mut Canvas<Window>,
+    surface: &Surface<'_>,
+    x: i32,
+    y: i32,
+) -> Result<i32, ShellError> {
+    let texture_creator = canvas.texture_creator();
+    let texture = texture_creator
+        .create_texture_from_surface(surface)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    canvas
+        .copy(
+            &texture,
+            None,
+            Rect::new(x, y, surface.width(), surface.height()),
+        )
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    Ok(surface.width() as i32)
+}
+
+#[derive(Clone, Copy)]
+struct IconGlyphRenderStyle<'a> {
+    icon_font: &'a IconFont<'a>,
+    icon_pixel_size: f32,
+    primary_ascent: i32,
+    color: RenderColor,
+}
+
+fn render_icon_glyph_with_fontdue(
+    canvas: &mut Canvas<Window>,
+    style: IconGlyphRenderStyle<'_>,
+    x: i32,
+    y: i32,
+    character: char,
+) -> Result<i32, ShellError> {
+    let (metrics, bitmap) = style
+        .icon_font
+        .raster_font
+        .rasterize(character, style.icon_pixel_size);
+    let advance = metrics.advance_width.ceil().max(0.0) as i32;
+    if metrics.width == 0 || metrics.height == 0 {
+        return Ok(advance);
+    }
+
+    let mut pixels = vec![0u8; metrics.width * metrics.height * 4];
+    for (alpha, rgba) in bitmap.iter().zip(pixels.chunks_exact_mut(4)) {
+        let alpha = ((*alpha as u16 * style.color.a as u16) / 255) as u8;
+        rgba[0] = style.color.r;
+        rgba[1] = style.color.g;
+        rgba[2] = style.color.b;
+        rgba[3] = alpha;
+    }
+
+    let surface = Surface::from_data(
+        pixels.as_mut_slice(),
+        metrics.width as u32,
+        metrics.height as u32,
+        (metrics.width * 4) as u32,
+        PixelFormat::RGBA32,
+    )
+    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let draw_x = x + metrics.xmin;
+    let draw_y = y + style.primary_ascent - metrics.height as i32 - metrics.ymin;
+    blit_surface_to_canvas(canvas, &surface, draw_x, draw_y)?;
+    Ok(advance.max(metrics.xmin + metrics.width as i32))
+}
+
 fn render_text_with_fonts(
     canvas: &mut Canvas<Window>,
     fonts: &FontSet<'_>,
@@ -16829,8 +21204,8 @@ fn render_text_with_fonts(
         return Ok(());
     }
     let mut draw_x = x;
-    let fallback = fonts.fallback();
-    let runs = if fallback.is_none() || text.is_ascii() {
+    let primary_ascent = fonts.primary().ascent();
+    let runs = if fonts.icon_fonts().is_empty() || text.is_ascii() {
         vec![FontRun {
             role: FontRole::Primary,
             text: text.to_owned(),
@@ -16842,29 +21217,28 @@ fn render_text_with_fonts(
         if run.text.is_empty() {
             continue;
         }
-        let (font, y_offset) = match run.role {
-            FontRole::Primary => (fonts.primary(), 0),
-            FontRole::Fallback => (
-                fallback.expect("fallback font missing"),
-                fonts.fallback_baseline_offset(),
-            ),
-        };
-        let surface = font
-            .render(&run.text)
-            .blended(from_render_color(color))
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        let texture_creator = canvas.texture_creator();
-        let texture = texture_creator
-            .create_texture_from_surface(&surface)
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        canvas
-            .copy(
-                &texture,
-                None,
-                Rect::new(draw_x, y + y_offset, surface.width(), surface.height()),
-            )
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        draw_x += surface.width() as i32;
+        match run.role {
+            FontRole::Primary => {
+                let surface = fonts
+                    .primary()
+                    .render(&run.text)
+                    .blended(from_render_color(color))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                draw_x += blit_surface_to_canvas(canvas, &surface, draw_x, y)?;
+            }
+            FontRole::Icon(index) => {
+                let icon_font = fonts.icon_font(index).expect("icon font missing");
+                let style = IconGlyphRenderStyle {
+                    icon_font,
+                    icon_pixel_size: fonts.icon_pixel_size(),
+                    primary_ascent,
+                    color,
+                };
+                for character in run.text.chars() {
+                    draw_x += render_icon_glyph_with_fontdue(canvas, style, draw_x, y, character)?;
+                }
+            }
+        }
     }
     Ok(())
 }

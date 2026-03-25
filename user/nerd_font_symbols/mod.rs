@@ -1,8 +1,8 @@
-//! Nerd Font Symbols
+//! Bundled icon-font symbols
 //!
 //! # Example
 //! ```
-//! assert_eq!(user::nerd_font_symbols::md::MD_PERIODIC_TABLE, "󰢶");
+//! assert_eq!(user::icon_font_symbols::md::MD_PERIODIC_TABLE, "󰢶");
 //! ```
 
 /// Codicons

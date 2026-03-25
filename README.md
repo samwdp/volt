@@ -62,7 +62,7 @@ The repository now has a validated multi-crate foundation that covers the major 
 - an `editor-syntax` registry with tree-sitter language registration and Rust capture-to-theme-token mappings from `user/lang/rust.rs`
 - an `editor-theme` registry with themes loaded from `user/themes/*.toml`
 - `editor-fs` and `editor-git` models for oil-style directory buffers and magit-style status parsing
-- the SDL shell prefers a system-installed Berkeley Mono Nerd Font when present, with cross-platform monospace fallbacks otherwise
+- the SDL shell prefers a system-installed Berkeley Mono Nerd Font when present, with cross-platform monospace fallbacks otherwise, and now always loads the bundled icon fonts from `crates/volt/assets/font`
 
 You can run the current shell and bootstrap demos with:
 
@@ -91,4 +91,5 @@ Inside the SDL shell, the default user package wiring now gives you:
 - `workspace.new`, `workspace.switch`, `workspace.delete`, and `workspace.list-files` commands backed by `user/workspace.rs`
 
 Theme files live under `user/themes/*.toml` and support UI options like font, font size, and
-cursor/picker roundness.
+cursor/picker roundness. Bundled icon fonts are loaded automatically at startup and are no longer
+gated behind a theme option.

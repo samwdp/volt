@@ -1,9 +1,9 @@
-//! Nerd font symbols and metadata.
+//! Bundled icon-font symbols and metadata.
 
-pub use crate::nerd_font_symbols as symbols;
+pub use crate::icon_font_symbols as symbols;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NerdFontCategory {
+pub enum IconFontCategory {
     Cod,
     Dev,
     Fa,
@@ -18,7 +18,7 @@ pub enum NerdFontCategory {
     Weather,
 }
 
-impl NerdFontCategory {
+impl IconFontCategory {
     pub fn id(self) -> &'static str {
         match self {
             Self::Cod => "cod",
@@ -55,13 +55,13 @@ impl NerdFontCategory {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NerdFontSymbol {
+pub struct IconFontSymbol {
     pub name: &'static str,
     pub glyph: &'static str,
-    pub category: NerdFontCategory,
+    pub category: IconFontCategory,
 }
 
-impl NerdFontSymbol {
+impl IconFontSymbol {
     pub fn id(&self) -> String {
         format!("{}:{}", self.category.id(), self.name)
     }
@@ -76,14 +76,14 @@ impl NerdFontSymbol {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/nerd_font_data.rs"));
+include!(concat!(env!("OUT_DIR"), "/icon_font_data.rs"));
 
-pub fn symbols() -> &'static [NerdFontSymbol] {
-    NERD_FONT_SYMBOLS
+pub fn symbols() -> &'static [IconFontSymbol] {
+    ICON_FONT_SYMBOLS
 }
 
-pub fn find(name: &str) -> Option<&'static NerdFontSymbol> {
-    NERD_FONT_SYMBOLS
+pub fn find(name: &str) -> Option<&'static IconFontSymbol> {
+    ICON_FONT_SYMBOLS
         .iter()
         .find(|symbol| symbol.name.eq_ignore_ascii_case(name))
 }

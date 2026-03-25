@@ -14,16 +14,16 @@ pub fn syntax_language() -> LanguageConfiguration {
         ),
         [
             CaptureThemeMapping::new("comment", "syntax.comment"),
-            CaptureThemeMapping::new("markup.heading", "syntax.keyword"),
-            CaptureThemeMapping::new("markup.link", "syntax.string"),
+            CaptureThemeMapping::new("markup.heading", "syntax.markup.heading"),
+            CaptureThemeMapping::new("markup.link", "syntax.markup.link"),
             CaptureThemeMapping::new("keyword", "syntax.keyword"),
-            CaptureThemeMapping::new("string.special.url", "syntax.string"),
+            CaptureThemeMapping::new("string.special.url", "syntax.string.special.url"),
             CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
             CaptureThemeMapping::new("function", "syntax.function"),
-            CaptureThemeMapping::new("variable.parameter", "syntax.variable"),
-            CaptureThemeMapping::new("punctuation.special", "syntax.punctuation.delimiter"),
+            CaptureThemeMapping::new("variable.parameter", "syntax.variable.parameter"),
+            CaptureThemeMapping::new("punctuation.special", "syntax.punctuation.special"),
             CaptureThemeMapping::new("label", "syntax.label"),
-            CaptureThemeMapping::new("comment.error", "syntax.label"),
+            CaptureThemeMapping::new("comment.error", "syntax.comment.error"),
         ],
     )
 }

@@ -140,9 +140,9 @@ pub fn commit_buffer_template() -> Vec<String> {
 
 fn status_header_section(snapshot: &GitStatusSnapshot) -> Section {
     let mut items = Vec::new();
-    let branch_icon = crate::nerd_font::symbols::dev::DEV_GIT_BRANCH;
-    let incoming_icon = crate::nerd_font::symbols::cod::COD_ARROW_DOWN;
-    let outgoing_icon = crate::nerd_font::symbols::cod::COD_ARROW_UP;
+    let branch_icon = crate::icon_font::symbols::dev::DEV_GIT_BRANCH;
+    let incoming_icon = crate::icon_font::symbols::cod::COD_ARROW_DOWN;
+    let outgoing_icon = crate::icon_font::symbols::cod::COD_ARROW_UP;
     let head_line = match (snapshot.branch(), snapshot.head()) {
         (Some(branch), Some(head)) => format!(
             "{branch_icon} Head: {branch} {} {}",
@@ -181,7 +181,7 @@ fn in_progress_section(snapshot: &GitStatusSnapshot) -> Section {
         .map(|line| {
             SectionItem::new(format!(
                 "{} {line}",
-                crate::nerd_font::symbols::cod::COD_LOADING
+                crate::icon_font::symbols::cod::COD_LOADING
             ))
         })
         .collect::<Vec<_>>();
@@ -238,7 +238,7 @@ fn untracked_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
             let action = SectionAction::new(ACTION_STAGE_FILE).with_detail(path);
             SectionItem::new(format!(
                 "{} untracked {path}",
-                crate::nerd_font::symbols::cod::COD_SYMBOL_FILE
+                crate::icon_font::symbols::cod::COD_SYMBOL_FILE
             ))
             .with_action(action)
         })
@@ -261,7 +261,7 @@ fn stashes_section(snapshot: &GitStatusSnapshot) -> Section {
             let action = SectionAction::new(ACTION_SHOW_STASH).with_detail(entry.name());
             SectionItem::new(format!(
                 "{} {} {}",
-                crate::nerd_font::symbols::cod::COD_HISTORY,
+                crate::icon_font::symbols::cod::COD_HISTORY,
                 entry.name(),
                 entry.summary()
             ))
@@ -300,7 +300,7 @@ fn unpulled_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
             let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
             SectionItem::new(format!(
                 "{} {} {}",
-                crate::nerd_font::symbols::cod::COD_ARROW_DOWN,
+                crate::icon_font::symbols::cod::COD_ARROW_DOWN,
                 entry.hash(),
                 entry.summary()
             ))
@@ -336,7 +336,7 @@ fn unpushed_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
             let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
             SectionItem::new(format!(
                 "{} {} {}",
-                crate::nerd_font::symbols::cod::COD_ARROW_UP,
+                crate::icon_font::symbols::cod::COD_ARROW_UP,
                 entry.hash(),
                 entry.summary()
             ))
@@ -354,12 +354,12 @@ fn commit_section(snapshot: &GitStatusSnapshot) -> Section {
     let item = if snapshot.staged().is_empty() {
         SectionItem::new(format!(
             "{} No staged changes to commit.",
-            crate::nerd_font::symbols::cod::COD_GIT_COMMIT
+            crate::icon_font::symbols::cod::COD_GIT_COMMIT
         ))
     } else {
         SectionItem::new(format!(
             "{} Press c to commit staged changes.",
-            crate::nerd_font::symbols::cod::COD_GIT_COMMIT
+            crate::icon_font::symbols::cod::COD_GIT_COMMIT
         ))
         .with_action(SectionAction::new(ACTION_COMMIT_OPEN))
     };
@@ -373,32 +373,32 @@ fn status_entry_label(entry: &StatusEntry, staged: bool) -> String {
         entry.worktree_status()
     };
     let (icon, label) = match code {
-        'A' => (crate::nerd_font::symbols::cod::COD_DIFF_ADDED, "added"),
-        'D' => (crate::nerd_font::symbols::cod::COD_DIFF_REMOVED, "deleted"),
+        'A' => (crate::icon_font::symbols::cod::COD_DIFF_ADDED, "added"),
+        'D' => (crate::icon_font::symbols::cod::COD_DIFF_REMOVED, "deleted"),
         'M' => (
-            crate::nerd_font::symbols::cod::COD_DIFF_MODIFIED,
+            crate::icon_font::symbols::cod::COD_DIFF_MODIFIED,
             "modified",
         ),
-        'R' => (crate::nerd_font::symbols::cod::COD_DIFF_RENAMED, "renamed"),
-        'C' => (crate::nerd_font::symbols::cod::COD_ARROW_SWAP, "copied"),
-        'U' => (crate::nerd_font::symbols::cod::COD_SYNC, "updated"),
-        _ => (crate::nerd_font::symbols::cod::COD_DIFF_MODIFIED, "changed"),
+        'R' => (crate::icon_font::symbols::cod::COD_DIFF_RENAMED, "renamed"),
+        'C' => (crate::icon_font::symbols::cod::COD_ARROW_SWAP, "copied"),
+        'U' => (crate::icon_font::symbols::cod::COD_SYNC, "updated"),
+        _ => (crate::icon_font::symbols::cod::COD_DIFF_MODIFIED, "changed"),
     };
     format!("{icon} {label} {}", entry.path())
 }
 
 fn git_section_title(id: &str, title: impl AsRef<str>) -> String {
     let icon = match id {
-        SECTION_HEADERS => crate::nerd_font::symbols::dev::DEV_GIT_BRANCH,
-        SECTION_IN_PROGRESS => crate::nerd_font::symbols::cod::COD_LOADING,
-        SECTION_STAGED => crate::nerd_font::symbols::cod::COD_CHECK,
-        SECTION_UNSTAGED => crate::nerd_font::symbols::cod::COD_DIFF_MODIFIED,
-        SECTION_UNTRACKED => crate::nerd_font::symbols::cod::COD_SYMBOL_FILE,
-        SECTION_STASHES => crate::nerd_font::symbols::cod::COD_HISTORY,
-        SECTION_UNPULLED => crate::nerd_font::symbols::cod::COD_ARROW_DOWN,
-        SECTION_UNPUSHED => crate::nerd_font::symbols::cod::COD_ARROW_UP,
-        SECTION_COMMIT => crate::nerd_font::symbols::cod::COD_GIT_COMMIT,
-        _ => crate::nerd_font::symbols::cod::COD_GIT_COMMIT,
+        SECTION_HEADERS => crate::icon_font::symbols::dev::DEV_GIT_BRANCH,
+        SECTION_IN_PROGRESS => crate::icon_font::symbols::cod::COD_LOADING,
+        SECTION_STAGED => crate::icon_font::symbols::cod::COD_CHECK,
+        SECTION_UNSTAGED => crate::icon_font::symbols::cod::COD_DIFF_MODIFIED,
+        SECTION_UNTRACKED => crate::icon_font::symbols::cod::COD_SYMBOL_FILE,
+        SECTION_STASHES => crate::icon_font::symbols::cod::COD_HISTORY,
+        SECTION_UNPULLED => crate::icon_font::symbols::cod::COD_ARROW_DOWN,
+        SECTION_UNPUSHED => crate::icon_font::symbols::cod::COD_ARROW_UP,
+        SECTION_COMMIT => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
+        _ => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
     };
     format!("{icon} {}", title.as_ref())
 }
@@ -419,7 +419,7 @@ mod tests {
     fn section_titles_include_expected_icons() {
         let staged = git_section_title(SECTION_STAGED, "Staged changes (1)");
         let commit = git_section_title(SECTION_COMMIT, "Commit");
-        assert!(staged.starts_with(crate::nerd_font::symbols::cod::COD_CHECK));
-        assert!(commit.starts_with(crate::nerd_font::symbols::cod::COD_GIT_COMMIT));
+        assert!(staged.starts_with(crate::icon_font::symbols::cod::COD_CHECK));
+        assert!(commit.starts_with(crate::icon_font::symbols::cod::COD_GIT_COMMIT));
     }
 }

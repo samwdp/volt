@@ -545,6 +545,11 @@ pub fn package() -> PluginPackage {
 
     let key_bindings = vec![
         // Left-right motions
+        normal_binding(
+            crate::hover::TOGGLE_CHORD,
+            "hover.toggle",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("h", "vim.move-left", PluginKeymapScope::Workspace),
         normal_binding("l", "vim.move-right", PluginKeymapScope::Workspace),
         normal_binding("0", "vim.move-line-start", PluginKeymapScope::Workspace),
@@ -906,7 +911,7 @@ pub fn package() -> PluginPackage {
         leader_binding("g s", "git.status-open", PluginKeymapScope::Workspace),
         leader_binding(
             "f n",
-            "picker.open-nerd-fonts",
+            "picker.open-icon-fonts",
             PluginKeymapScope::Workspace,
         ),
         leader_binding("s g", "workspace.search", PluginKeymapScope::Workspace),
@@ -919,7 +924,9 @@ pub fn package() -> PluginPackage {
             "picker.toggle-popup-window",
             PluginKeymapScope::Workspace,
         ),
+        leader_binding("o b", "browser.open", PluginKeymapScope::Workspace),
         leader_binding("o t", "terminal.popup", PluginKeymapScope::Workspace),
+        leader_binding("o u", "browser.url", PluginKeymapScope::Workspace),
     ];
 
     PluginPackage::new(

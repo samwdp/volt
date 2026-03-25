@@ -6,6 +6,10 @@
 
 /// Agent Client Protocol integrations.
 pub mod acp;
+/// Provider-backed autocomplete commands and configuration.
+pub mod autocomplete;
+/// Slim browser buffer groundwork.
+pub mod browser;
 /// Buffer management and save commands.
 pub mod buffer;
 /// Debug adapter integration hooks and commands.
@@ -14,6 +18,13 @@ pub mod dap;
 pub mod git;
 /// Git fringe configuration.
 pub mod gitfringe;
+/// Cursor-anchored hover commands and provider ordering.
+pub mod hover;
+/// Bundled icon-font symbols and metadata.
+pub mod icon_font;
+/// Bundled icon-font symbol modules.
+#[path = "nerd_font_symbols/mod.rs"]
+pub mod icon_font_symbols;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
 /// Language-specific registrations.
@@ -22,10 +33,6 @@ pub mod lang;
 pub mod lsp;
 /// Multiple cursor workflows.
 pub mod multicursor;
-/// Nerd font symbols and metadata.
-pub mod nerd_font;
-/// Vendored Nerd Font symbol modules.
-pub mod nerd_font_symbols;
 /// Directory editing and navigation workflows.
 pub mod oil;
 /// Pane layout management.
@@ -58,8 +65,11 @@ pub fn packages() -> Vec<PluginPackage> {
     vec![
         buffer::package(),
         acp::package(),
+        autocomplete::package(),
+        browser::package(),
         interactive::package(),
         pane::package(),
+        hover::package(),
         lsp::package(),
         dap::package(),
         oil::package(),
@@ -99,6 +109,18 @@ pub fn themes() -> Vec<Theme> {
 #[cfg(test)]
 mod tests {
     use super::{debug_adapters, language_servers, packages, syntax_languages, themes};
+    use editor_syntax::LanguageConfiguration;
+
+    fn mapped_theme_token<'a>(
+        language: &'a LanguageConfiguration,
+        capture: &str,
+    ) -> Option<&'a str> {
+        language
+            .capture_mappings()
+            .iter()
+            .find(|mapping| mapping.capture_name() == capture)
+            .map(|mapping| mapping.theme_token())
+    }
 
     #[test]
     fn user_library_contains_auto_loaded_packages() {
@@ -159,8 +181,9 @@ mod tests {
         let servers = language_servers();
         let adapters = debug_adapters();
 
-        assert_eq!(servers.len(), 1);
+        assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].id(), "rust-analyzer");
+        assert_eq!(servers[1].id(), "marksman");
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].id(), "codelldb");
     }
@@ -185,6 +208,92 @@ mod tests {
             themes
                 .iter()
                 .any(|theme| theme.color("ui.yank-flash").is_some())
+        );
+    }
+
+    #[test]
+    fn user_library_themes_cover_extended_capture_families() {
+        let themes = themes();
+        const TOKENS: &[&str] = &[
+            "syntax.none",
+            "syntax.preproc",
+            "syntax.string.escape",
+            "syntax.number",
+            "syntax.method",
+            "syntax.parameter",
+            "syntax.keyword.directive",
+            "syntax.markup.heading",
+            "syntax.markup.list.checked",
+            "syntax.comment.error",
+            "syntax.diff.plus",
+            "syntax.text.title",
+            "syntax.text.diff.add",
+            "syntax.tag.attribute",
+            "syntax.punctuation.special",
+            "syntax.lsp.type.function",
+        ];
+        for theme in themes {
+            for token in TOKENS {
+                assert!(
+                    theme.color(token).is_some(),
+                    "theme `{}` is missing `{token}`",
+                    theme.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rich_markdown_and_gitcommit_captures_preserve_exact_theme_tokens() {
+        let languages = syntax_languages();
+        let markdown = languages
+            .iter()
+            .find(|language| language.id() == "markdown")
+            .expect("markdown language missing");
+        let markdown_inline = languages
+            .iter()
+            .find(|language| language.id() == "markdown-inline")
+            .expect("markdown-inline language missing");
+        let gitcommit = languages
+            .iter()
+            .find(|language| language.id() == "gitcommit")
+            .expect("gitcommit language missing");
+
+        assert_eq!(
+            mapped_theme_token(markdown, "text.title"),
+            Some("syntax.text.title")
+        );
+        assert_eq!(
+            mapped_theme_token(markdown, "punctuation.special"),
+            Some("syntax.punctuation.special")
+        );
+        assert_eq!(
+            mapped_theme_token(markdown, "string.escape"),
+            Some("syntax.string.escape")
+        );
+        assert_eq!(
+            mapped_theme_token(markdown_inline, "text.emphasis"),
+            Some("syntax.text.emphasis")
+        );
+        assert_eq!(
+            mapped_theme_token(markdown_inline, "text.strong"),
+            Some("syntax.text.strong")
+        );
+        assert_eq!(
+            mapped_theme_token(gitcommit, "markup.heading"),
+            Some("syntax.markup.heading")
+        );
+        assert_eq!(
+            mapped_theme_token(gitcommit, "markup.link"),
+            Some("syntax.markup.link")
+        );
+        assert_eq!(
+            mapped_theme_token(gitcommit, "comment.error"),
+            Some("syntax.comment.error")
+        );
+        assert_eq!(
+            mapped_theme_token(gitcommit, "variable.parameter"),
+            Some("syntax.variable.parameter")
         );
     }
 }

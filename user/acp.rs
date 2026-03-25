@@ -115,12 +115,6 @@ pub fn package() -> PluginPackage {
     ];
 
     let key_bindings = vec![
-        PluginKeyBinding::new(
-            "Ctrl+Space",
-            "acp.complete-slash",
-            PluginKeymapScope::Global,
-        )
-        .with_vim_mode(PluginVimMode::Insert),
         PluginKeyBinding::new("Shift+Tab", "acp.cycle-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
     ];

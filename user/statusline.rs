@@ -77,7 +77,7 @@ fn acp_segment(context: &StatuslineContext<'_>) -> Option<String> {
     if !context.acp_connected {
         return None;
     }
-    Some(crate::nerd_font::symbols::fa::FA_CONNECTDEVELOP.to_owned())
+    Some(crate::icon_font::symbols::fa::FA_CONNECTDEVELOP.to_owned())
 }
 
 fn workspace_segment(context: &StatuslineContext<'_>) -> Option<String> {
@@ -87,7 +87,7 @@ fn workspace_segment(context: &StatuslineContext<'_>) -> Option<String> {
 fn buffer_segment(context: &StatuslineContext<'_>) -> Option<String> {
     let name = context.buffer_name;
     if context.buffer_modified {
-        let modified = crate::nerd_font::symbols::cod::COD_DIFF_MODIFIED;
+        let modified = crate::icon_font::symbols::cod::COD_DIFF_MODIFIED;
         Some(format!("{modified} {name}"))
     } else {
         Some(name.to_owned())
@@ -97,19 +97,19 @@ fn buffer_segment(context: &StatuslineContext<'_>) -> Option<String> {
 fn filetype_segment(context: &StatuslineContext<'_>) -> Option<String> {
     let language_id = context.language_id?;
     let symbol = match language_id {
-        "rust" => crate::nerd_font::symbols::seti::SETI_RUST,
-        "markdown" | "markdown-inline" => crate::nerd_font::symbols::seti::SETI_MARKDOWN,
-        "gitcommit" => crate::nerd_font::symbols::cod::COD_GIT_COMMIT,
-        _ => crate::nerd_font::symbols::cod::COD_FILE,
+        "rust" => crate::icon_font::symbols::seti::SETI_RUST,
+        "markdown" | "markdown-inline" => crate::icon_font::symbols::seti::SETI_MARKDOWN,
+        "gitcommit" => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
+        _ => crate::icon_font::symbols::cod::COD_FILE,
     };
     Some(symbol.to_owned())
 }
 
 fn git_segment(context: &StatuslineContext<'_>) -> Option<String> {
     let git = context.git?;
-    let branch = crate::nerd_font::symbols::dev::DEV_GIT_BRANCH;
-    let up = crate::nerd_font::symbols::cod::COD_ARROW_UP;
-    let down = crate::nerd_font::symbols::cod::COD_ARROW_DOWN;
+    let branch = crate::icon_font::symbols::dev::DEV_GIT_BRANCH;
+    let up = crate::icon_font::symbols::cod::COD_ARROW_UP;
+    let down = crate::icon_font::symbols::cod::COD_ARROW_DOWN;
     Some(format!(
         "{branch} {} {up} {} {down} {}",
         git.branch, git.added, git.removed
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn compose_joins_the_default_user_segments() {
-        let file_icon = crate::nerd_font::symbols::seti::SETI_RUST;
+        let file_icon = crate::icon_font::symbols::seti::SETI_RUST;
         let statusline = compose(&StatuslineContext {
             vim_mode: "NORMAL",
             recording_macro: None,
@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn compose_includes_filetype_and_modified_icon() {
-        let file_icon = crate::nerd_font::symbols::seti::SETI_MARKDOWN;
-        let modified = crate::nerd_font::symbols::cod::COD_DIFF_MODIFIED;
+        let file_icon = crate::icon_font::symbols::seti::SETI_MARKDOWN;
+        let modified = crate::icon_font::symbols::cod::COD_DIFF_MODIFIED;
         let statusline = compose(&StatuslineContext {
             vim_mode: "NORMAL",
             recording_macro: None,
@@ -218,10 +218,10 @@ mod tests {
 
     #[test]
     fn compose_includes_git_segment() {
-        let file_icon = crate::nerd_font::symbols::seti::SETI_RUST;
-        let branch = crate::nerd_font::symbols::dev::DEV_GIT_BRANCH;
-        let up = crate::nerd_font::symbols::cod::COD_ARROW_UP;
-        let down = crate::nerd_font::symbols::cod::COD_ARROW_DOWN;
+        let file_icon = crate::icon_font::symbols::seti::SETI_RUST;
+        let branch = crate::icon_font::symbols::dev::DEV_GIT_BRANCH;
+        let up = crate::icon_font::symbols::cod::COD_ARROW_UP;
+        let down = crate::icon_font::symbols::cod::COD_ARROW_DOWN;
         let statusline = compose(&StatuslineContext {
             vim_mode: "NORMAL",
             recording_macro: None,

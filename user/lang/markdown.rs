@@ -51,13 +51,13 @@ pub fn syntax_language() -> LanguageConfiguration {
             "tree_sitter_markdown",
         ),
         [
-            CaptureThemeMapping::new("text.title", "syntax.keyword"),
-            CaptureThemeMapping::new("text.literal", "syntax.string"),
-            CaptureThemeMapping::new("text.uri", "syntax.string"),
-            CaptureThemeMapping::new("text.reference", "syntax.variable"),
-            CaptureThemeMapping::new("punctuation.special", "syntax.punctuation.delimiter"),
+            CaptureThemeMapping::new("text.title", "syntax.text.title"),
+            CaptureThemeMapping::new("text.literal", "syntax.text.literal"),
+            CaptureThemeMapping::new("text.uri", "syntax.text.uri"),
+            CaptureThemeMapping::new("text.reference", "syntax.text.reference"),
+            CaptureThemeMapping::new("punctuation.special", "syntax.punctuation.special"),
             CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
-            CaptureThemeMapping::new("string.escape", "syntax.string"),
+            CaptureThemeMapping::new("string.escape", "syntax.string.escape"),
         ],
     )
     .with_additional_highlight_languages(["markdown-inline"])
@@ -76,13 +76,13 @@ pub fn inline_syntax_language() -> LanguageConfiguration {
             "tree_sitter_markdown_inline",
         ),
         [
-            CaptureThemeMapping::new("text.literal", "syntax.string"),
-            CaptureThemeMapping::new("text.emphasis", "syntax.keyword"),
-            CaptureThemeMapping::new("text.strong", "syntax.type"),
-            CaptureThemeMapping::new("text.uri", "syntax.string"),
-            CaptureThemeMapping::new("text.reference", "syntax.variable"),
+            CaptureThemeMapping::new("text.literal", "syntax.text.literal"),
+            CaptureThemeMapping::new("text.emphasis", "syntax.text.emphasis"),
+            CaptureThemeMapping::new("text.strong", "syntax.text.strong"),
+            CaptureThemeMapping::new("text.uri", "syntax.text.uri"),
+            CaptureThemeMapping::new("text.reference", "syntax.text.reference"),
             CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
-            CaptureThemeMapping::new("string.escape", "syntax.string"),
+            CaptureThemeMapping::new("string.escape", "syntax.string.escape"),
         ],
     )
 }
