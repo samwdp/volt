@@ -212,6 +212,21 @@ mod tests {
     }
 
     #[test]
+    fn user_library_themes_cover_core_editor_ui_tokens() {
+        let themes = themes();
+        const TOKENS: &[&str] = &["ui.cursor", "ui.selection", "ui.yank-flash"];
+        for theme in themes {
+            for token in TOKENS {
+                assert!(
+                    theme.color(token).is_some(),
+                    "theme `{}` is missing `{token}`",
+                    theme.id()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn user_library_themes_cover_extended_capture_families() {
         let themes = themes();
         const TOKENS: &[&str] = &[

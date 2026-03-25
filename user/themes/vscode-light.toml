@@ -4,6 +4,8 @@ name = "VS Code Light"
 [tokens]
 "ui.background" = "#ffffff"
 "ui.foreground" = "#333333"
+"ui.cursor" = "#6eaaff"
+"ui.selection" = "#374763"
 "ui.input.background" = "#ffffff"
 "ui.input.foreground" = "#333333"
 "ui.autocomplete.background" = "#ededed"

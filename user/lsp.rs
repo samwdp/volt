@@ -8,6 +8,9 @@ pub const HOOK_LSP_START: &str = "lsp.server-start";
 pub const HOOK_LSP_STOP: &str = "lsp.server-stop";
 pub const HOOK_LSP_RESTART: &str = "lsp.server-restart";
 pub const HOOK_LSP_LOG: &str = "lsp.open-log";
+pub const HOOK_LSP_DEFINITION: &str = "lsp.goto-definition";
+pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
+pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
 pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SHOW_BUFFER_DIAGNOSTICS: bool = true;
@@ -47,6 +50,24 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "lsp.definition",
+            "Jumps to the LSP definition under the cursor.",
+            HOOK_LSP_DEFINITION,
+            None,
+        ),
+        hook_command(
+            "lsp.references",
+            "Finds LSP references for the symbol under the cursor.",
+            HOOK_LSP_REFERENCES,
+            None,
+        ),
+        hook_command(
+            "lsp.implementation",
+            "Jumps to LSP implementations for the symbol under the cursor.",
+            HOOK_LSP_IMPLEMENTATION,
+            None,
+        ),
+        hook_command(
             "lsp.start-rust-analyzer",
             "Starts rust-analyzer for the active Rust file.",
             HOOK_LSP_START,
@@ -73,6 +94,18 @@ pub fn package() -> PluginPackage {
             "Runs after an LSP restart command is triggered.",
         ),
         PluginHookDeclaration::new(HOOK_LSP_LOG, "Opens the live LSP transport log buffer."),
+        PluginHookDeclaration::new(
+            HOOK_LSP_DEFINITION,
+            "Navigates to the LSP definition under the cursor.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_REFERENCES,
+            "Lists LSP references for the symbol under the cursor.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_IMPLEMENTATION,
+            "Navigates to LSP implementations for the symbol under the cursor.",
+        ),
     ])
     .with_hook_bindings(vec![
         PluginHookBinding::new(
@@ -144,7 +177,7 @@ mod tests {
 
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 6);
+        assert_eq!(package.commands().len(), 9);
         assert_eq!(package.hook_bindings().len(), 3);
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].id(), SERVER_RUST_ANALYZER);
@@ -180,6 +213,24 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "lsp.log")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "lsp.definition")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "lsp.references")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "lsp.implementation")
         );
     }
 }

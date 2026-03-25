@@ -43,7 +43,8 @@ use editor_git::{
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    LanguageServerRegistry, LspClientManager, LspLogEntry, LspLogSnapshot,
+    LanguageServerRegistry, LspClientError, LspClientManager, LspFormattingOptions, LspLocation,
+    LspLogEntry, LspLogSnapshot, LspTextEdit,
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
@@ -152,6 +153,9 @@ const HOOK_LSP_START: &str = user::lsp::HOOK_LSP_START;
 const HOOK_LSP_STOP: &str = user::lsp::HOOK_LSP_STOP;
 const HOOK_LSP_RESTART: &str = user::lsp::HOOK_LSP_RESTART;
 const HOOK_LSP_LOG: &str = user::lsp::HOOK_LSP_LOG;
+const HOOK_LSP_DEFINITION: &str = user::lsp::HOOK_LSP_DEFINITION;
+const HOOK_LSP_REFERENCES: &str = user::lsp::HOOK_LSP_REFERENCES;
+const HOOK_LSP_IMPLEMENTATION: &str = user::lsp::HOOK_LSP_IMPLEMENTATION;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
 const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
@@ -528,6 +532,17 @@ fn theme_lang_use_tabs(theme_registry: Option<&ThemeRegistry>, language_id: Opti
     };
     let key = format!("langs.{language_id}.use_tabs");
     registry.resolve_bool(&key).unwrap_or(false)
+}
+
+fn lsp_formatting_options(
+    runtime: &EditorRuntime,
+    language_id: Option<&str>,
+) -> LspFormattingOptions {
+    let theme_registry = runtime.services().get::<ThemeRegistry>();
+    let indent_size = theme_lang_indent(theme_registry, language_id);
+    let tab_size = if indent_size == 0 { 4 } else { indent_size } as u32;
+    let insert_spaces = !theme_lang_use_tabs(theme_registry, language_id);
+    LspFormattingOptions::new(tab_size, insert_spaces)
 }
 
 fn theme_color(theme_registry: Option<&ThemeRegistry>, token: &str, fallback: Color) -> Color {
@@ -1539,24 +1554,35 @@ fn git_status_header_item_spans(
     trimmed: &str,
     spans: &mut Vec<LineSyntaxSpan>,
 ) {
-    let Some(colon_index) = trimmed.find(':') else {
+    let (icon_bounds, content_start, content) =
+        split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+    let Some(colon_index) = content.find(':') else {
         return;
     };
     let label_end = colon_index + 1;
+    if let Some((icon_start, icon_end)) = icon_bounds {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + icon_start,
+            indent_bytes + icon_end,
+            TOKEN_GIT_STATUS_HEADER_LABEL,
+        );
+    }
     push_span_bytes(
         spans,
         line,
-        indent_bytes,
-        indent_bytes + label_end,
+        indent_bytes + content_start,
+        indent_bytes + content_start + label_end,
         TOKEN_GIT_STATUS_HEADER_LABEL,
     );
-    let rest_start = skip_whitespace_bytes(trimmed, label_end);
-    if rest_start >= trimmed.len() {
+    let rest_start = skip_whitespace_bytes(content, label_end);
+    if rest_start >= content.len() {
         return;
     }
-    let label = trimmed[..colon_index].trim();
-    let rest = &trimmed[rest_start..];
-    let rest_offset = indent_bytes + rest_start;
+    let label = content[..colon_index].trim();
+    let rest = &content[rest_start..];
+    let rest_offset = indent_bytes + content_start + rest_start;
     match label {
         "Head" => git_status_head_spans(line, rest, rest_offset, spans),
         "Upstream" => git_status_upstream_spans(line, rest, rest_offset, spans),
@@ -1671,25 +1697,36 @@ fn git_status_entry_item_spans(
     trimmed: &str,
     spans: &mut Vec<LineSyntaxSpan>,
 ) {
-    let Some((status_start, status_end)) = next_word_bounds(trimmed, 0) else {
+    let (icon_bounds, content_start, content) =
+        split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+    let Some((status_start, status_end)) = next_word_bounds(content, 0) else {
         return;
     };
-    let status = &trimmed[status_start..status_end];
+    let status = &content[status_start..status_end];
     let token = git_status_entry_token(status);
-    push_span_bytes(
-        spans,
-        line,
-        indent_bytes + status_start,
-        indent_bytes + status_end,
-        token,
-    );
-    let path_start = skip_whitespace_bytes(trimmed, status_end);
-    if path_start < trimmed.len() {
+    if let Some((icon_start, icon_end)) = icon_bounds {
         push_span_bytes(
             spans,
             line,
-            indent_bytes + path_start,
-            indent_bytes + trimmed.len(),
+            indent_bytes + icon_start,
+            indent_bytes + icon_end,
+            token,
+        );
+    }
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + content_start + status_start,
+        indent_bytes + content_start + status_end,
+        token,
+    );
+    let path_start = skip_whitespace_bytes(content, status_end);
+    if path_start < content.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + content_start + path_start,
+            indent_bytes + content_start + content.len(),
             TOKEN_GIT_STATUS_ENTRY_PATH,
         );
     }
@@ -1715,23 +1752,34 @@ fn git_status_stash_item_spans(
     trimmed: &str,
     spans: &mut Vec<LineSyntaxSpan>,
 ) {
-    let Some((name_start, name_end)) = next_word_bounds(trimmed, 0) else {
+    let (icon_bounds, content_start, content) =
+        split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+    let Some((name_start, name_end)) = next_word_bounds(content, 0) else {
         return;
     };
-    push_span_bytes(
-        spans,
-        line,
-        indent_bytes + name_start,
-        indent_bytes + name_end,
-        TOKEN_GIT_STATUS_STASH_NAME,
-    );
-    let summary_start = skip_whitespace_bytes(trimmed, name_end);
-    if summary_start < trimmed.len() {
+    if let Some((icon_start, icon_end)) = icon_bounds {
         push_span_bytes(
             spans,
             line,
-            indent_bytes + summary_start,
-            indent_bytes + trimmed.len(),
+            indent_bytes + icon_start,
+            indent_bytes + icon_end,
+            TOKEN_GIT_STATUS_STASH_NAME,
+        );
+    }
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + content_start + name_start,
+        indent_bytes + content_start + name_end,
+        TOKEN_GIT_STATUS_STASH_NAME,
+    );
+    let summary_start = skip_whitespace_bytes(content, name_end);
+    if summary_start < content.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + content_start + summary_start,
+            indent_bytes + content_start + content.len(),
             TOKEN_GIT_STATUS_STASH_SUMMARY,
         );
     }
@@ -1743,23 +1791,34 @@ fn git_status_commit_item_spans(
     trimmed: &str,
     spans: &mut Vec<LineSyntaxSpan>,
 ) {
-    let Some((hash_start, hash_end)) = next_word_bounds(trimmed, 0) else {
+    let (icon_bounds, content_start, content) =
+        split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+    let Some((hash_start, hash_end)) = next_word_bounds(content, 0) else {
         return;
     };
-    push_span_bytes(
-        spans,
-        line,
-        indent_bytes + hash_start,
-        indent_bytes + hash_end,
-        TOKEN_GIT_STATUS_COMMIT_HASH,
-    );
-    let summary_start = skip_whitespace_bytes(trimmed, hash_end);
-    if summary_start < trimmed.len() {
+    if let Some((icon_start, icon_end)) = icon_bounds {
         push_span_bytes(
             spans,
             line,
-            indent_bytes + summary_start,
-            indent_bytes + trimmed.len(),
+            indent_bytes + icon_start,
+            indent_bytes + icon_end,
+            TOKEN_GIT_STATUS_COMMIT_HASH,
+        );
+    }
+    push_span_bytes(
+        spans,
+        line,
+        indent_bytes + content_start + hash_start,
+        indent_bytes + content_start + hash_end,
+        TOKEN_GIT_STATUS_COMMIT_HASH,
+    );
+    let summary_start = skip_whitespace_bytes(content, hash_end);
+    if summary_start < content.len() {
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + content_start + summary_start,
+            indent_bytes + content_start + content.len(),
             TOKEN_GIT_STATUS_COMMIT_SUMMARY,
         );
     }
@@ -1771,7 +1830,8 @@ fn git_status_commit_message_spans(
     trimmed: &str,
     spans: &mut Vec<LineSyntaxSpan>,
 ) {
-    let token = if trimmed.starts_with("Press ") {
+    let (_, _, content) = split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+    let token = if content.starts_with("Press ") {
         TOKEN_GIT_STATUS_COMMAND
     } else {
         TOKEN_GIT_STATUS_MESSAGE
@@ -1783,6 +1843,21 @@ fn git_status_commit_message_spans(
         indent_bytes + trimmed.len(),
         token,
     );
+}
+
+type IconPrefixedContent<'a> = (Option<(usize, usize)>, usize, &'a str);
+
+fn split_icon_prefixed_content(text: &str) -> Option<IconPrefixedContent<'_>> {
+    let (icon_start, icon_end) = next_word_bounds(text, 0)?;
+    let content_start = skip_whitespace_bytes(text, icon_end);
+    if content_start >= text.len() {
+        return Some((Some((icon_start, icon_end)), text.len(), ""));
+    }
+    Some((
+        Some((icon_start, icon_end)),
+        content_start,
+        &text[content_start..],
+    ))
 }
 
 fn leading_indent_bytes(line: &str) -> usize {
@@ -5587,6 +5662,9 @@ impl ShellState {
                             Some(VimPending::Operator { operator, count });
                     }
                     _ => {
+                        if self.handle_pending_g_sequence(operator, line_target, chord)? {
+                            return Ok(true);
+                        }
                         if operator.is_none() {
                             self.ui_mut()?.vim_mut().pending_change_prefix = None;
                         }
@@ -5782,6 +5860,60 @@ impl ShellState {
         }
 
         Ok(())
+    }
+
+    fn handle_pending_g_sequence(
+        &mut self,
+        operator: Option<VimOperator>,
+        line_target: Option<usize>,
+        chord: &str,
+    ) -> Result<bool, ShellError> {
+        if operator.is_some() {
+            return Ok(false);
+        }
+        let vim_mode = keymap_vim_mode(self.input_mode()?);
+        let prefix = match self.ui()?.vim().pending_change_prefix.clone() {
+            Some(VimRecordedInput::Chord(chord)) => chord,
+            Some(VimRecordedInput::Text(text)) => text,
+            None => "g".to_owned(),
+        };
+        let candidate = format!("{prefix} {chord}");
+        if self
+            .runtime
+            .keymaps()
+            .contains_for_mode(&KeymapScope::Workspace, vim_mode, &candidate)
+        {
+            let runtime_surface_before =
+                active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+            self.ui_mut()?.vim_mut().pending_change_prefix = None;
+            self.ui_mut()?.vim_mut().clear_transient();
+            self.runtime
+                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &candidate)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+            self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+            self.clear_stale_vim_count()?;
+            return Ok(true);
+        }
+
+        let tokens = candidate
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if self.runtime.keymaps().has_sequence_prefix_for_mode(
+            &KeymapScope::Workspace,
+            vim_mode,
+            &tokens,
+        ) {
+            self.ui_mut()?.vim_mut().pending_change_prefix =
+                Some(VimRecordedInput::Chord(candidate));
+            self.ui_mut()?.vim_mut().pending = Some(VimPending::GPrefix {
+                operator,
+                line_target,
+            });
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn handle_key_sequence(
@@ -8948,6 +9080,32 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
     }
 
+    if runtime.hooks().contains(HOOK_LSP_DEFINITION) {
+        runtime
+            .subscribe_hook(HOOK_LSP_DEFINITION, "shell.lsp-definition", |_, runtime| {
+                goto_lsp_definition(runtime)
+            })
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runtime.hooks().contains(HOOK_LSP_REFERENCES) {
+        runtime
+            .subscribe_hook(HOOK_LSP_REFERENCES, "shell.lsp-references", |_, runtime| {
+                goto_lsp_references(runtime)
+            })
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runtime.hooks().contains(HOOK_LSP_IMPLEMENTATION) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_IMPLEMENTATION,
+                "shell.lsp-implementation",
+                |_, runtime| goto_lsp_implementation(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -9093,6 +9251,81 @@ fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
     ui.focus_buffer_in_active_pane(buffer_id);
     ui.enter_normal_mode();
+    Ok(())
+}
+
+fn goto_lsp_definition(runtime: &mut EditorRuntime) -> Result<(), String> {
+    navigate_to_lsp_locations(runtime, "Definitions", LspClientManager::definitions)
+}
+
+fn goto_lsp_references(runtime: &mut EditorRuntime) -> Result<(), String> {
+    navigate_to_lsp_locations(runtime, "References", LspClientManager::references)
+}
+
+fn goto_lsp_implementation(runtime: &mut EditorRuntime) -> Result<(), String> {
+    navigate_to_lsp_locations(
+        runtime,
+        "Implementations",
+        LspClientManager::implementations,
+    )
+}
+
+fn navigate_to_lsp_locations(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<LspLocation>, LspClientError>,
+) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let position = shell_buffer(runtime, context.buffer_id)?.cursor_point();
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let (labels, locations) = {
+        let manager = lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+        let labels = manager
+            .sync_buffer(
+                &context.path,
+                &context.text,
+                context.revision,
+                context.root.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        let locations =
+            request(&manager, &context.path, position).map_err(|error| error.to_string())?;
+        (labels, locations)
+    };
+    {
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+            buffer.set_lsp_enabled(true);
+        }
+        ui.set_attached_lsp_server(
+            context.workspace_id,
+            (!labels.is_empty()).then(|| labels.join(", ")),
+        );
+    }
+    open_lsp_locations(runtime, title, locations)
+}
+
+fn open_lsp_locations(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    locations: Vec<LspLocation>,
+) -> Result<(), String> {
+    let Some(location) = locations.first() else {
+        return Err(format!("no {} found at cursor", title.to_ascii_lowercase()));
+    };
+    if locations.len() == 1 {
+        open_workspace_file_at(runtime, location.path(), location.range().start())?;
+        sync_active_buffer(runtime)?;
+        return Ok(());
+    }
+    let picker = lsp_locations_picker_overlay(runtime, title, &locations);
+    shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
 }
 
@@ -9427,6 +9660,14 @@ fn active_lsp_buffer_context(runtime: &EditorRuntime) -> Result<ActiveLspBufferC
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
     let buffer_id = active_shell_buffer_id(runtime)?;
+    lsp_buffer_context(runtime, workspace_id, buffer_id)
+}
+
+fn lsp_buffer_context(
+    runtime: &EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+) -> Result<ActiveLspBufferContext, String> {
     let ui = shell_ui(runtime)?;
     let buffer = ui
         .buffer(buffer_id)
@@ -11925,7 +12166,8 @@ fn save_buffer(
                 path.display()
             )
         })?;
-        format_buffer_on_save(runtime, buffer_id, &path, &language_id)?;
+        let _ = language_id;
+        format_buffer_on_save(runtime, workspace_id, buffer_id, &path)?;
     }
     save_buffer_inner(runtime, workspace_id, buffer_id, &path)
 }
@@ -12110,6 +12352,10 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
 }
 
 fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let buffer_id = active_shell_buffer_id(runtime)?;
     let (path, extension, original_cursor, selection, buffer_kind) = {
         let ui = shell_ui(runtime)?;
@@ -12149,7 +12395,6 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
         return Err("workspace.format only supports file buffers".to_owned());
     }
 
-    let formatter = formatter_for_path(runtime, &path)?;
     let cwd = path
         .parent()
         .map(Path::to_path_buf)
@@ -12159,7 +12404,19 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
 
     if let Some((selection, anchor, head, kind)) = selection {
         store_last_visual_selection(runtime, anchor, head, kind)?;
-        format_visual_selection(
+        if try_format_visual_selection_with_lsp(
+            runtime,
+            workspace_id,
+            buffer_id,
+            &path,
+            selection,
+            original_cursor,
+        )? {
+            finish_format_command(runtime)?;
+            return Ok(());
+        }
+        let formatter = formatter_for_path(runtime, &path)?;
+        format_visual_selection_with_formatter(
             runtime,
             &formatter,
             selection,
@@ -12168,7 +12425,18 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
             original_cursor,
         )?;
     } else {
-        format_entire_buffer(
+        if try_format_buffer_entire_with_lsp(
+            runtime,
+            workspace_id,
+            buffer_id,
+            &path,
+            original_cursor,
+        )? {
+            finish_format_command(runtime)?;
+            return Ok(());
+        }
+        let formatter = formatter_for_path(runtime, &path)?;
+        format_entire_buffer_with_formatter(
             runtime,
             &formatter,
             extension.as_deref(),
@@ -12182,14 +12450,16 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn format_buffer_on_save(
     runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
     buffer_id: BufferId,
     path: &Path,
-    language_id: &str,
 ) -> Result<(), String> {
-    let formatter = formatter_registry(runtime)?
-        .formatter_for_language(language_id)
-        .ok_or_else(|| format!("no formatter registered for language `{language_id}`"))?
-        .clone();
+    let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
+    if try_format_buffer_entire_with_lsp(runtime, workspace_id, buffer_id, path, original_cursor)? {
+        return Ok(());
+    }
+
+    let formatter = formatter_for_path(runtime, path)?;
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -12198,8 +12468,7 @@ fn format_buffer_on_save(
         .parent()
         .map(Path::to_path_buf)
         .or_else(|| active_workspace_root(runtime).ok().flatten());
-    let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
-    format_buffer_entire(
+    format_buffer_entire_with_formatter(
         runtime,
         buffer_id,
         &formatter,
@@ -12228,7 +12497,12 @@ fn language_id_for_path(runtime: &EditorRuntime, path: &Path) -> Result<String, 
     Ok(language.id().to_owned())
 }
 
-fn format_entire_buffer(
+fn finish_format_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)
+}
+
+fn format_entire_buffer_with_formatter(
     runtime: &mut EditorRuntime,
     formatter: &FormatterSpec,
     extension: Option<&str>,
@@ -12236,7 +12510,7 @@ fn format_entire_buffer(
     original_cursor: TextPoint,
 ) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    format_buffer_entire(
+    format_buffer_entire_with_formatter(
         runtime,
         buffer_id,
         formatter,
@@ -12249,7 +12523,7 @@ fn format_entire_buffer(
     Ok(())
 }
 
-fn format_buffer_entire(
+fn format_buffer_entire_with_formatter(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
     formatter: &FormatterSpec,
@@ -12269,7 +12543,7 @@ fn format_buffer_entire(
     Ok(())
 }
 
-fn format_visual_selection(
+fn format_visual_selection_with_formatter(
     runtime: &mut EditorRuntime,
     formatter: &FormatterSpec,
     selection: VisualSelection,
@@ -12291,6 +12565,141 @@ fn format_visual_selection(
     shell_ui_mut(runtime)?.enter_normal_mode();
     schedule_finish_change(runtime)?;
     Ok(())
+}
+
+fn try_format_buffer_entire_with_lsp(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+    original_cursor: TextPoint,
+) -> Result<bool, String> {
+    let Some(lsp_client) = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
+    let language_id = language_id_for_path(runtime, path).ok();
+    let options = lsp_formatting_options(runtime, language_id.as_deref());
+    let (labels, edits) = {
+        let manager = lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+        if !manager.supports_path(&context.path) {
+            return Ok(false);
+        }
+        let labels = manager
+            .sync_buffer(
+                &context.path,
+                &context.text,
+                context.revision,
+                context.root.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        let edits = manager
+            .formatting(&context.path, options)
+            .map_err(|error| error.to_string())?;
+        (labels, edits)
+    };
+    sync_lsp_buffer_state(runtime, workspace_id, buffer_id, &labels)?;
+    let Some(edits) = edits else {
+        return Ok(false);
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    apply_lsp_text_edits(buffer, &edits);
+    buffer.set_cursor(original_cursor);
+    Ok(true)
+}
+
+fn try_format_visual_selection_with_lsp(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+    selection: VisualSelection,
+    original_cursor: TextPoint,
+) -> Result<bool, String> {
+    let VisualSelection::Range(range) = selection else {
+        return Ok(false);
+    };
+    let Some(lsp_client) = runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
+    let language_id = language_id_for_path(runtime, path).ok();
+    let options = lsp_formatting_options(runtime, language_id.as_deref());
+    let (labels, edits) = {
+        let manager = lsp_client
+            .lock()
+            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+        if !manager.supports_path(&context.path) {
+            return Ok(false);
+        }
+        let labels = manager
+            .sync_buffer(
+                &context.path,
+                &context.text,
+                context.revision,
+                context.root.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        let edits = manager
+            .range_formatting(&context.path, range, options)
+            .map_err(|error| error.to_string())?;
+        (labels, edits)
+    };
+    sync_lsp_buffer_state(runtime, workspace_id, buffer_id, &labels)?;
+    let Some(edits) = edits else {
+        return Ok(false);
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    apply_lsp_text_edits(buffer, &edits);
+    buffer.set_cursor(original_cursor);
+    Ok(true)
+}
+
+fn sync_lsp_buffer_state(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    labels: &[String],
+) -> Result<(), String> {
+    let active_buffer_id = active_shell_buffer_id(runtime).ok();
+    let ui = shell_ui_mut(runtime)?;
+    if let Some(buffer) = ui.buffer_mut(buffer_id) {
+        buffer.set_lsp_enabled(!labels.is_empty());
+    }
+    if active_buffer_id == Some(buffer_id) {
+        ui.set_attached_lsp_server(
+            workspace_id,
+            (!labels.is_empty()).then(|| labels.join(", ")),
+        );
+    }
+    Ok(())
+}
+
+fn apply_lsp_text_edits(buffer: &mut ShellBuffer, edits: &[LspTextEdit]) {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|left, right| {
+        right
+            .range()
+            .start()
+            .cmp(&left.range().start())
+            .then_with(|| right.range().end().cmp(&left.range().end()))
+    });
+    for edit in ordered {
+        buffer.replace_range(edit.range(), edit.new_text());
+    }
+    if !edits.is_empty() {
+        buffer.mark_syntax_dirty();
+    }
 }
 
 fn format_range_with_formatter(
@@ -17819,6 +18228,49 @@ fn workspace_search_status_entry(
     }
 }
 
+fn lsp_locations_picker_overlay(
+    runtime: &EditorRuntime,
+    title: &str,
+    locations: &[LspLocation],
+) -> PickerOverlay {
+    let workspace_root = active_workspace_root(runtime).ok().flatten();
+    let entries = locations
+        .iter()
+        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .map(|location| lsp_location_picker_entry(workspace_root.as_deref(), location))
+        .collect();
+    PickerOverlay::from_entries(title, entries)
+}
+
+fn lsp_location_picker_entry(workspace_root: Option<&Path>, location: &LspLocation) -> PickerEntry {
+    let path = location.path().to_path_buf();
+    let target = location.range().start();
+    let relative_path = workspace_relative_path(workspace_root, &path);
+    let line_number = target.line + 1;
+    let column = target.column + 1;
+    let preview = TextBuffer::load_from_path(&path)
+        .ok()
+        .and_then(|buffer| buffer.line(target.line))
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty());
+    let label = preview
+        .clone()
+        .unwrap_or_else(|| format!("{relative_path}:{line_number}"));
+    let detail = format!(
+        "{relative_path} | Ln {line_number}, Col {column} | {}",
+        location.server_id()
+    );
+    PickerEntry {
+        item: PickerItem::new(
+            format!("lsp:{}:{}:{}", path.display(), line_number, column),
+            label,
+            detail,
+            Some(path.display().to_string()),
+        ),
+        action: PickerAction::OpenFileLocation { path, target },
+    }
+}
+
 fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
     let mut byte_offset = byte_offset.min(line.len());
     while byte_offset > 0 && !line.is_char_boundary(byte_offset) {
@@ -17830,6 +18282,28 @@ fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct CommandLog(Vec<String>);
+
+    fn slice_by_columns(text: &str, start: usize, end: usize) -> String {
+        text.chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect()
+    }
+
+    fn syntax_span_segments(line: &str, spans: &[LineSyntaxSpan]) -> Vec<(String, String)> {
+        spans
+            .iter()
+            .map(|span| {
+                (
+                    span.theme_token.clone(),
+                    slice_by_columns(line, span.start, span.end),
+                )
+            })
+            .collect()
+    }
 
     fn install_acp_test_buffer(
         state: &mut ShellState,
@@ -18047,6 +18521,106 @@ mod tests {
         assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
         assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
         assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
+    }
+
+    #[test]
+    fn git_status_header_spans_skip_leading_icons() {
+        let line = SectionRenderLine {
+            text: format!(
+                "{} Head: master f9d8c15 Added some more keybinds",
+                user::icon_font::symbols::dev::DEV_GIT_BRANCH
+            ),
+            depth: 1,
+            section_id: GIT_SECTION_HEADERS.to_owned(),
+            action: None,
+            kind: SectionRenderLineKind::Item,
+        };
+        let formatted = format_section_line(&line);
+        let spans = git_status_line_spans(&line, &formatted);
+
+        assert_eq!(
+            syntax_span_segments(&formatted, &spans),
+            vec![
+                (
+                    TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
+                    user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+                ),
+                (TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(), "Head:".to_owned()),
+                (
+                    TOKEN_GIT_STATUS_HEADER_VALUE.to_owned(),
+                    "master".to_owned()
+                ),
+                (
+                    TOKEN_GIT_STATUS_HEADER_HASH.to_owned(),
+                    "f9d8c15".to_owned()
+                ),
+                (
+                    TOKEN_GIT_STATUS_HEADER_SUMMARY.to_owned(),
+                    "Added some more keybinds".to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_status_entry_spans_skip_leading_icons() {
+        let line = SectionRenderLine {
+            text: format!(
+                "{} modified crates/editor-sdl/src/shell.rs",
+                user::icon_font::symbols::cod::COD_DIFF_MODIFIED
+            ),
+            depth: 1,
+            section_id: GIT_SECTION_UNSTAGED.to_owned(),
+            action: None,
+            kind: SectionRenderLineKind::Item,
+        };
+        let formatted = format_section_line(&line);
+        let spans = git_status_line_spans(&line, &formatted);
+
+        assert_eq!(
+            syntax_span_segments(&formatted, &spans),
+            vec![
+                (
+                    TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
+                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
+                ),
+                (
+                    TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
+                    "modified".to_owned(),
+                ),
+                (
+                    TOKEN_GIT_STATUS_ENTRY_PATH.to_owned(),
+                    "crates/editor-sdl/src/shell.rs".to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
+        let line = SectionRenderLine {
+            text: format!(
+                "{} Press c to commit staged changes.",
+                user::icon_font::symbols::cod::COD_GIT_COMMIT
+            ),
+            depth: 1,
+            section_id: GIT_SECTION_COMMIT.to_owned(),
+            action: None,
+            kind: SectionRenderLineKind::Item,
+        };
+        let formatted = format_section_line(&line);
+        let spans = git_status_line_spans(&line, &formatted);
+
+        assert_eq!(
+            syntax_span_segments(&formatted, &spans),
+            vec![(
+                TOKEN_GIT_STATUS_COMMAND.to_owned(),
+                format!(
+                    "{} Press c to commit staged changes.",
+                    user::icon_font::symbols::cod::COD_GIT_COMMIT
+                ),
+            )]
+        );
     }
 
     #[test]
@@ -18339,6 +18913,146 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             Some("Beta".to_owned())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state.runtime.services_mut().insert(CommandLog::default());
+        state
+            .runtime
+            .register_command(
+                "tests.g-prefix-exact",
+                "Test exact g-prefix binding",
+                CommandSource::Core,
+                |runtime| {
+                    let log = runtime
+                        .services_mut()
+                        .get_mut::<CommandLog>()
+                        .ok_or_else(|| "command log missing".to_owned())?;
+                    log.0.push("exact".to_owned());
+                    Ok(())
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .register_key_binding_for_mode(
+                "g z",
+                "tests.g-prefix-exact",
+                KeymapScope::Workspace,
+                KeymapVimMode::Normal,
+                CommandSource::Core,
+            )
+            .map_err(|error| error.to_string())?;
+
+        state
+            .handle_text_input("g")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            state.ui().map_err(|error| error.to_string())?.vim().pending,
+            Some(VimPending::GPrefix {
+                operator: None,
+                line_target: None,
+            })
+        );
+
+        state
+            .handle_text_input("z")
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            state
+                .runtime
+                .services()
+                .get::<CommandLog>()
+                .ok_or_else(|| "command log missing".to_owned())?
+                .0,
+            vec!["exact".to_owned()]
+        );
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        assert_eq!(ui.vim().pending, None);
+        assert_eq!(ui.vim().pending_change_prefix, None);
+        Ok(())
+    }
+
+    #[test]
+    fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        state.runtime.services_mut().insert(CommandLog::default());
+        state
+            .runtime
+            .register_command(
+                "tests.g-prefix-sequence",
+                "Test longer g-prefix binding",
+                CommandSource::Core,
+                |runtime| {
+                    let log = runtime
+                        .services_mut()
+                        .get_mut::<CommandLog>()
+                        .ok_or_else(|| "command log missing".to_owned())?;
+                    log.0.push("sequence".to_owned());
+                    Ok(())
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .register_key_binding_for_mode(
+                "g z z",
+                "tests.g-prefix-sequence",
+                KeymapScope::Workspace,
+                KeymapVimMode::Normal,
+                CommandSource::Core,
+            )
+            .map_err(|error| error.to_string())?;
+
+        state
+            .handle_text_input("g")
+            .map_err(|error| error.to_string())?;
+        state
+            .handle_text_input("z")
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            state
+                .runtime
+                .services()
+                .get::<CommandLog>()
+                .ok_or_else(|| "command log missing".to_owned())?
+                .0,
+            Vec::<String>::new()
+        );
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        assert_eq!(
+            ui.vim().pending,
+            Some(VimPending::GPrefix {
+                operator: None,
+                line_target: None,
+            })
+        );
+        assert_eq!(
+            ui.vim().pending_change_prefix,
+            Some(VimRecordedInput::Chord("g z".to_owned()))
+        );
+
+        state
+            .handle_text_input("z")
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            state
+                .runtime
+                .services()
+                .get::<CommandLog>()
+                .ok_or_else(|| "command log missing".to_owned())?
+                .0,
+            vec!["sequence".to_owned()]
+        );
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        assert_eq!(ui.vim().pending, None);
+        assert_eq!(ui.vim().pending_change_prefix, None);
         Ok(())
     }
 
@@ -20377,8 +21091,8 @@ fn render_buffer(
         statusline_inactive
     };
     let text_color = foreground;
-    let cursor = Color::RGB(110, 170, 255);
-    let selection = Color::RGBA(55, 71, 99, 255);
+    let cursor = theme_color(theme_registry, "ui.cursor", Color::RGB(110, 170, 255));
+    let selection = theme_color(theme_registry, "ui.selection", Color::RGBA(55, 71, 99, 255));
     let relative_line_numbers = theme_registry
         .and_then(|registry| registry.resolve_bool(OPTION_LINE_NUMBER_RELATIVE))
         .unwrap_or(false);

@@ -4,6 +4,8 @@ name = "Gruvbox Light"
 [tokens]
 "ui.background" = "#fbf1c7"
 "ui.foreground" = "#3c3836"
+"ui.cursor" = "#6eaaff"
+"ui.selection" = "#374763"
 "ui.input.background" = "#fbf1c7"
 "ui.input.foreground" = "#3c3836"
 "ui.autocomplete.background" = "#e9dfb5"

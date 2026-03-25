@@ -8,8 +8,8 @@ use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
 
 pub use client::{
-    LspClientError, LspClientManager, LspCompletionItem, LspCompletionKind, LspHoverContents,
-    LspLogDirection, LspLogEntry, LspLogSnapshot,
+    LspClientError, LspClientManager, LspCompletionItem, LspCompletionKind, LspFormattingOptions,
+    LspHoverContents, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot, LspTextEdit,
 };
 
 /// Human-readable summary of this crate's responsibility.

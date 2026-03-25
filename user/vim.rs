@@ -598,6 +598,9 @@ pub fn package() -> PluginPackage {
         normal_binding("j", "vim.move-down", PluginKeymapScope::Workspace),
         normal_binding("k", "vim.move-up", PluginKeymapScope::Workspace),
         normal_binding("g", "vim.start-g-prefix", PluginKeymapScope::Workspace),
+        normal_binding("g d", "lsp.definition", PluginKeymapScope::Workspace),
+        normal_binding("g r r", "lsp.references", PluginKeymapScope::Workspace),
+        normal_binding("g i", "lsp.implementation", PluginKeymapScope::Workspace),
         normal_binding("G", "vim.goto-last-line", PluginKeymapScope::Workspace),
         // Text object motions
         normal_binding("w", "vim.move-word-forward", PluginKeymapScope::Workspace),
@@ -903,9 +906,11 @@ pub fn package() -> PluginPackage {
         // Leader bindings
         leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
+        // acp
+        leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
         // buffer
         leader_binding("b b", "picker.open-buffers", PluginKeymapScope::Workspace),
-        leader_binding("b d", "buffer.close", PluginKeymapScope::Workspace),
+        leader_binding("d b", "buffer.close", PluginKeymapScope::Workspace),
         leader_binding("b k", "buffer.close-picker", PluginKeymapScope::Workspace),
         // Git
         leader_binding("g s", "git.status-open", PluginKeymapScope::Workspace),
@@ -957,4 +962,26 @@ fn leader_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> 
 
 fn visual_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
     PluginKeyBinding::new(chord, command_name, scope).with_vim_mode(PluginVimMode::Visual)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_exports_lsp_navigation_bindings() {
+        let package = package();
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == "g d" && binding.command_name() == "lsp.definition"));
+        assert!(package.key_bindings().iter().any(
+            |binding| binding.chord() == "g r r" && binding.command_name() == "lsp.references"
+        ));
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == "g i"
+                && binding.command_name() == "lsp.implementation"));
+    }
 }

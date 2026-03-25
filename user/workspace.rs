@@ -39,6 +39,11 @@ pub fn package() -> PluginPackage {
             "Saves all modified file buffers in the active workspace.",
             vec![PluginAction::emit_hook("workspace.save", None::<&str>)],
         ),
+        PluginCommand::new(
+            "workspace.format",
+            "Formats the active file buffer, preferring LSP formatting when available.",
+            vec![PluginAction::emit_hook("workspace.format", None::<&str>)],
+        ),
         hook_command(
             "workspace.window-left",
             "Moves focus to the window on the left (wraps).",
@@ -70,6 +75,7 @@ pub fn project_search_roots() -> Vec<ProjectSearchRoot> {
     vec![
         ProjectSearchRoot::new(r"P:\", 4),
         ProjectSearchRoot::new(r"W:\", 4),
+        ProjectSearchRoot::new(r"C:\Users\sam\", 4),
     ]
     .into_iter()
     .filter(|search_root| search_root.root().exists())
@@ -90,4 +96,18 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
         description,
         vec![PluginAction::emit_hook(hook_name, None::<&str>)],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_exports_format_command() {
+        let package = package();
+        assert!(package
+            .commands()
+            .iter()
+            .any(|command| command.name() == "workspace.format"));
+    }
 }

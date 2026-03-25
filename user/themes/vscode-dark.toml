@@ -4,6 +4,8 @@ name = "VS Code Dark"
 [tokens]
 "ui.background" = "#1e1e1e"
 "ui.foreground" = "#d4d4d4"
+"ui.cursor" = "#6eaaff"
+"ui.selection" = "#374763"
 "ui.input.background" = "#1e1e1e"
 "ui.input.foreground" = "#d4d4d4"
 "ui.autocomplete.background" = "#303030"

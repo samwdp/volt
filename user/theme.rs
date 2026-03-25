@@ -6,7 +6,7 @@ use std::{
 
 const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
 const THEME_EXTENSION: &str = "toml";
-const DEFAULT_THEME_ID: &str = "volt-dark";
+const DEFAULT_THEME_ID: &str = "gruvbox-dark";
 // Maximum number of ancestor directories to check when resolving user/themes from current_exe.
 const THEME_SEARCH_DEPTH: usize = 6;
 

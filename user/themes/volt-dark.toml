@@ -4,6 +4,8 @@ name = "Volt Dark"
 [tokens]
 "ui.background" = "#181b22"
 "ui.foreground" = "#d7dde8"
+"ui.cursor" = "#6eaaff"
+"ui.selection" = "#374763"
 "ui.input.background" = "#181b22"
 "ui.input.foreground" = "#d7dde8"
 "ui.autocomplete.background" = "#2a2d34"

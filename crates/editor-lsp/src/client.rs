@@ -15,16 +15,21 @@ use std::{
 use editor_buffer::{TextPoint, TextRange};
 use lsp_types::{
     ClientCapabilities, ClientInfo, CompletionParams, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, HoverParams,
-    InitializeParams, InitializedParams, PartialResultParams, Position,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentFormattingParams, DocumentRangeFormattingParams, FormattingOptions,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InitializedParams,
+    Location, LocationLink, PartialResultParams, Position, ReferenceContext, ReferenceParams,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TraceValue, Uri, VersionedTextDocumentIdentifier,
+    TextDocumentPositionParams, TextEdit, TraceValue, Uri, VersionedTextDocumentIdentifier,
     WorkDoneProgressParams, WorkspaceFolder,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
         Initialized, Notification,
     },
-    request::{Completion, HoverRequest, Initialize, Request},
+    request::{
+        Completion, Formatting, GotoDefinition, GotoImplementation, HoverRequest, Initialize,
+        RangeFormatting, References, Request,
+    },
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -147,6 +152,81 @@ impl LspHoverContents {
 
     pub fn lines(&self) -> &[String] {
         &self.lines
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspLocation {
+    server_id: String,
+    path: PathBuf,
+    range: TextRange,
+}
+
+impl LspLocation {
+    fn new(server_id: impl Into<String>, path: PathBuf, range: TextRange) -> Self {
+        Self {
+            server_id: server_id.into(),
+            path,
+            range,
+        }
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub const fn range(&self) -> TextRange {
+        self.range
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspTextEdit {
+    range: TextRange,
+    new_text: String,
+}
+
+impl LspTextEdit {
+    fn new(range: TextRange, new_text: impl Into<String>) -> Self {
+        Self {
+            range,
+            new_text: new_text.into(),
+        }
+    }
+
+    pub const fn range(&self) -> TextRange {
+        self.range
+    }
+
+    pub fn new_text(&self) -> &str {
+        &self.new_text
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LspFormattingOptions {
+    tab_size: u32,
+    insert_spaces: bool,
+}
+
+impl LspFormattingOptions {
+    pub const fn new(tab_size: u32, insert_spaces: bool) -> Self {
+        Self {
+            tab_size,
+            insert_spaces,
+        }
+    }
+
+    pub const fn tab_size(&self) -> u32 {
+        self.tab_size
+    }
+
+    pub const fn insert_spaces(&self) -> bool {
+        self.insert_spaces
     }
 }
 
@@ -542,6 +622,77 @@ impl LspClientManager {
         Ok(items)
     }
 
+    pub fn definitions(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let mut locations = Vec::new();
+        for session in sessions {
+            locations.extend(session.definitions(path, position)?);
+        }
+        sort_locations(&mut locations);
+        Ok(locations)
+    }
+
+    pub fn references(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let mut locations = Vec::new();
+        for session in sessions {
+            locations.extend(session.references(path, position)?);
+        }
+        sort_locations(&mut locations);
+        Ok(locations)
+    }
+
+    pub fn implementations(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let mut locations = Vec::new();
+        for session in sessions {
+            locations.extend(session.implementations(path, position)?);
+        }
+        sort_locations(&mut locations);
+        Ok(locations)
+    }
+
+    pub fn formatting(
+        &self,
+        path: &Path,
+        options: LspFormattingOptions,
+    ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        for session in sessions {
+            if let Some(edits) = session.formatting(path, options)? {
+                return Ok(Some(edits));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn range_formatting(
+        &self,
+        path: &Path,
+        range: TextRange,
+        options: LspFormattingOptions,
+    ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        for session in sessions {
+            if let Some(edits) = session.range_formatting(path, range, options)? {
+                return Ok(Some(edits));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn session_labels_for_path(&self, path: &Path) -> Vec<String> {
         let mut labels = self
             .state
@@ -865,6 +1016,12 @@ impl LspSessionHandle {
                         "snippetSupport": false
                     }
                 },
+                "formatting": {
+                    "dynamicRegistration": false
+                },
+                "rangeFormatting": {
+                    "dynamicRegistration": false
+                },
                 "publishDiagnostics": {
                     "relatedInformation": false
                 },
@@ -956,6 +1113,84 @@ impl LspSessionHandle {
             context: None,
         })?;
         Ok(parse_completion_response(self.server_id(), &response))
+    }
+
+    fn definitions(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let response = self.request_typed::<GotoDefinition>(GotoDefinitionParams {
+            text_document_position_params: text_document_position_params(path, position)?,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })?;
+        parse_definition_response(self.server_id(), &response)
+    }
+
+    fn references(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let response = self.request_typed::<References>(ReferenceParams {
+            text_document_position: text_document_position_params(path, position)?,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: ReferenceContext {
+                include_declaration: false,
+            },
+        })?;
+        parse_reference_response(self.server_id(), &response)
+    }
+
+    fn implementations(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let response = self.request_typed::<GotoImplementation>(GotoDefinitionParams {
+            text_document_position_params: text_document_position_params(path, position)?,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })?;
+        parse_definition_response(self.server_id(), &response)
+    }
+
+    fn formatting(
+        &self,
+        path: &Path,
+        options: LspFormattingOptions,
+    ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
+        let response = match self.request_typed::<Formatting>(DocumentFormattingParams {
+            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            options: lsp_formatting_options(options),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        }) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        parse_text_edit_response(self.server_id(), "formatting", &response)
+    }
+
+    fn range_formatting(
+        &self,
+        path: &Path,
+        range: TextRange,
+        options: LspFormattingOptions,
+    ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
+        let response = match self.request_typed::<RangeFormatting>(DocumentRangeFormattingParams {
+            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            range: lsp_range_from_text_range(range),
+            options: lsp_formatting_options(options),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        }) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        parse_text_edit_response(self.server_id(), "range formatting", &response)
     }
 
     fn diagnostics_for_path(&self, path: &Path) -> Vec<Diagnostic> {
@@ -1362,6 +1597,66 @@ fn parse_hover_response(server_id: &str, value: &Value) -> Option<LspHoverConten
     (!lines.is_empty()).then(|| LspHoverContents::new(server_id, lines))
 }
 
+fn parse_definition_response(
+    server_id: &str,
+    value: &Value,
+) -> Result<Vec<LspLocation>, LspClientError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let response =
+        serde_json::from_value::<GotoDefinitionResponse>(value.clone()).map_err(|error| {
+            LspClientError::Protocol(format!(
+                "failed to decode location response from `{server_id}`: {error}"
+            ))
+        })?;
+    Ok(match response {
+        GotoDefinitionResponse::Scalar(location) => location_from_lsp(server_id, &location)
+            .into_iter()
+            .collect(),
+        GotoDefinitionResponse::Array(locations) => locations
+            .iter()
+            .filter_map(|location| location_from_lsp(server_id, location))
+            .collect(),
+        GotoDefinitionResponse::Link(links) => links
+            .iter()
+            .filter_map(|link| location_from_link(server_id, link))
+            .collect(),
+    })
+}
+
+fn parse_reference_response(
+    server_id: &str,
+    value: &Value,
+) -> Result<Vec<LspLocation>, LspClientError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let locations = serde_json::from_value::<Vec<Location>>(value.clone()).map_err(|error| {
+        LspClientError::Protocol(format!(
+            "failed to decode reference response from `{server_id}`: {error}"
+        ))
+    })?;
+    Ok(locations
+        .iter()
+        .filter_map(|location| location_from_lsp(server_id, location))
+        .collect())
+}
+
+fn parse_text_edit_response(
+    server_id: &str,
+    format_kind: &str,
+    value: &Value,
+) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
+    let edits =
+        serde_json::from_value::<Option<Vec<TextEdit>>>(value.clone()).map_err(|error| {
+            LspClientError::Protocol(format!(
+                "failed to decode {format_kind} response from `{server_id}`: {error}"
+            ))
+        })?;
+    Ok(edits.map(|edits| edits.iter().map(lsp_text_edit_from_lsp).collect::<Vec<_>>()))
+}
+
 fn hover_lines(value: &Value) -> Vec<String> {
     match value {
         Value::String(text) => normalize_lines(text),
@@ -1381,6 +1676,83 @@ fn hover_lines(value: &Value) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+fn location_from_lsp(server_id: &str, location: &Location) -> Option<LspLocation> {
+    let path = file_uri_to_path(location.uri.as_str())?;
+    Some(LspLocation::new(
+        server_id,
+        path,
+        text_range_from_lsp_range(&location.range),
+    ))
+}
+
+fn location_from_link(server_id: &str, link: &LocationLink) -> Option<LspLocation> {
+    let path = file_uri_to_path(link.target_uri.as_str())?;
+    Some(LspLocation::new(
+        server_id,
+        path,
+        text_range_from_lsp_range(&link.target_selection_range),
+    ))
+}
+
+fn lsp_text_edit_from_lsp(edit: &TextEdit) -> LspTextEdit {
+    LspTextEdit::new(
+        text_range_from_lsp_range(&edit.range),
+        edit.new_text.clone(),
+    )
+}
+
+fn text_range_from_lsp_range(range: &lsp_types::Range) -> TextRange {
+    TextRange::new(
+        text_point_from_lsp_position(range.start),
+        text_point_from_lsp_position(range.end),
+    )
+}
+
+fn text_point_from_lsp_position(position: Position) -> TextPoint {
+    TextPoint::new(position.line as usize, position.character as usize)
+}
+
+fn lsp_range_from_text_range(range: TextRange) -> lsp_types::Range {
+    lsp_types::Range {
+        start: lsp_position_from_text_point(range.start()),
+        end: lsp_position_from_text_point(range.end()),
+    }
+}
+
+fn lsp_position_from_text_point(point: TextPoint) -> Position {
+    Position::new(point.line as u32, point.column as u32)
+}
+
+fn lsp_formatting_options(options: LspFormattingOptions) -> FormattingOptions {
+    FormattingOptions {
+        tab_size: options.tab_size(),
+        insert_spaces: options.insert_spaces(),
+        ..FormattingOptions::default()
+    }
+}
+
+fn unsupported_lsp_request(error: &LspClientError) -> bool {
+    let LspClientError::Protocol(message) = error else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    lower.contains("-32601")
+        || lower.contains("method not found")
+        || lower.contains("method not supported")
+}
+
+fn sort_locations(locations: &mut Vec<LspLocation>) {
+    locations.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.range.start().line.cmp(&right.range.start().line))
+            .then_with(|| left.range.start().column.cmp(&right.range.start().column))
+            .then_with(|| left.range.end().line.cmp(&right.range.end().line))
+            .then_with(|| left.range.end().column.cmp(&right.range.end().column))
+    });
+    locations.dedup_by(|left, right| left.path == right.path && left.range == right.range);
 }
 
 fn parse_completion_response(server_id: &str, value: &Value) -> Vec<LspCompletionItem> {
@@ -1636,6 +2008,97 @@ mod tests {
         let path = PathBuf::from(r"P:\volt\src\main.rs");
         let uri = path_to_file_uri(&path);
         assert_eq!(file_uri_to_path(&uri), Some(path));
+    }
+
+    #[test]
+    fn formatting_parser_maps_text_edits() {
+        let response = json!([
+            {
+                "range": {
+                    "start": { "line": 2, "character": 4 },
+                    "end": { "line": 2, "character": 9 }
+                },
+                "newText": "value"
+            }
+        ]);
+
+        let edits = parse_text_edit_response("rust-analyzer", "formatting", &response)
+            .expect("formatting response")
+            .expect("text edits");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range().start(), TextPoint::new(2, 4));
+        assert_eq!(edits[0].range().end(), TextPoint::new(2, 9));
+        assert_eq!(edits[0].new_text(), "value");
+    }
+
+    #[test]
+    fn definition_parser_supports_location_links() {
+        let response = json!([
+            {
+                "targetUri": "file:///P:/volt/src/lib.rs",
+                "targetRange": {
+                    "start": { "line": 10, "character": 0 },
+                    "end": { "line": 12, "character": 1 }
+                },
+                "targetSelectionRange": {
+                    "start": { "line": 11, "character": 4 },
+                    "end": { "line": 11, "character": 10 }
+                }
+            }
+        ]);
+
+        let locations = parse_definition_response("rust-analyzer", &response).expect("locations");
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].server_id(), "rust-analyzer");
+        assert!(
+            locations[0]
+                .path()
+                .ends_with(Path::new("src").join("lib.rs"))
+        );
+        assert_eq!(locations[0].range().start(), TextPoint::new(11, 4));
+        assert_eq!(locations[0].range().end(), TextPoint::new(11, 10));
+    }
+
+    #[test]
+    fn location_sorting_deduplicates_reference_results() {
+        let response = json!([
+            {
+                "uri": "file:///P:/volt/src/main.rs",
+                "range": {
+                    "start": { "line": 7, "character": 3 },
+                    "end": { "line": 7, "character": 8 }
+                }
+            },
+            {
+                "uri": "file:///P:/volt/src/lib.rs",
+                "range": {
+                    "start": { "line": 2, "character": 1 },
+                    "end": { "line": 2, "character": 6 }
+                }
+            },
+            {
+                "uri": "file:///P:/volt/src/main.rs",
+                "range": {
+                    "start": { "line": 7, "character": 3 },
+                    "end": { "line": 7, "character": 8 }
+                }
+            }
+        ]);
+
+        let mut locations =
+            parse_reference_response("rust-analyzer", &response).expect("locations");
+        sort_locations(&mut locations);
+        assert_eq!(locations.len(), 2);
+        assert!(
+            locations[0]
+                .path()
+                .ends_with(Path::new("src").join("lib.rs"))
+        );
+        assert!(
+            locations[1]
+                .path()
+                .ends_with(Path::new("src").join("main.rs"))
+        );
     }
 
     #[test]

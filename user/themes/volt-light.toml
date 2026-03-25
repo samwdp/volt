@@ -4,6 +4,8 @@ name = "Volt Light"
 [tokens]
 "ui.background" = "#f5f6f7"
 "ui.foreground" = "#383a42"
+"ui.cursor" = "#6eaaff"
+"ui.selection" = "#374763"
 "ui.input.background" = "#f5f6f7"
 "ui.input.foreground" = "#383a42"
 "ui.autocomplete.background" = "#e3e4e5"
