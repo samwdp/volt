@@ -1017,11 +1017,6 @@ pub(super) fn render_picker_overlay(
         .map(|value| value.clamp(0.0, 64.0).round() as u32)
         .unwrap_or(16);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
-    let picker_hightlight = theme_color(
-        theme_registry,
-        "ui.picker.hightlight",
-        Color::RGB(110, 170, 255),
-    );
     let foreground = theme_color(
         theme_registry,
         "ui.foreground",
@@ -1030,6 +1025,15 @@ pub(super) fn render_picker_overlay(
     let is_dark = is_dark_color(base_background);
     let popup_background = adjust_color(base_background, if is_dark { 8 } else { -8 });
     let highlight_background = adjust_color(popup_background, if is_dark { 16 } else { -16 });
+    let picker_highlight = theme_color(
+        theme_registry,
+        "ui.picker.highlight",
+        theme_color(
+            theme_registry,
+            "ui.statusline.active",
+            Color::RGB(110, 170, 255),
+        ),
+    );
     let muted = blend_color(foreground, base_background, 0.5);
     let subtle = blend_color(foreground, base_background, 0.7);
     fill_rounded_rect(
@@ -1051,7 +1055,7 @@ pub(super) fn render_picker_overlay(
             popup_rect.width.saturating_sub(28),
             2,
         ),
-        picker_hightlight,
+        picker_highlight,
     )?;
 
     draw_text(

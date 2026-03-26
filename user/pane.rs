@@ -18,6 +18,11 @@ pub fn package() -> PluginPackage {
             "Closes the currently focused split.",
             "ui.pane.close",
         ),
+        hook_command(
+            "pane.switch-split",
+            "Swaps the current split positions.",
+            "ui.pane.switch-split",
+        ),
     ])
 }
 
@@ -34,7 +39,7 @@ mod tests {
     use super::package;
 
     #[test]
-    fn package_exports_split_and_close_commands() {
+    fn package_exports_split_close_and_switch_commands() {
         let package = package();
         assert!(
             package
@@ -53,6 +58,12 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "pane.close")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "pane.switch-split")
         );
     }
 }

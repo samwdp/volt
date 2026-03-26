@@ -758,6 +758,7 @@ fn init_git_repo_with_commit(label: &str) -> Result<std::path::PathBuf, String> 
     run_git_in_dir(&repo, &["init", "-q"])?;
     run_git_in_dir(&repo, &["config", "user.email", "volt-tests@example.com"])?;
     run_git_in_dir(&repo, &["config", "user.name", "Volt Tests"])?;
+    run_git_in_dir(&repo, &["config", "commit.gpgsign", "false"])?;
     std::fs::write(repo.join("README.md"), "seed\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "README.md"])?;
     run_git_in_dir(&repo, &["commit", "-qm", "initial"])?;
@@ -876,6 +877,68 @@ fn set_git_status_visual_line_selection(
     shell_ui_mut(&mut state.runtime)?
         .enter_visual_mode(TextPoint::new(start_line, 0), VisualSelectionKind::Line);
     shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(end_line, 0));
+    Ok(())
+}
+
+fn set_git_status_visual_block_selection_with_ctrl_v(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(), String> {
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(start_line, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::V, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+
+    state
+        .handle_text_input("v")
+        .map_err(|error| error.to_string())?;
+
+    let motion = if end_line >= start_line { "j" } else { "k" };
+    for _ in 0..start_line.abs_diff(end_line) {
+        state
+            .handle_text_input(motion)
+            .map_err(|error| error.to_string())?;
+    }
+
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Visual);
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().visual_kind,
+        VisualSelectionKind::Block
+    );
+    Ok(())
+}
+
+fn set_git_status_visual_line_selection_with_shift_v(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(), String> {
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(start_line, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    state
+        .handle_text_input("V")
+        .map_err(|error| error.to_string())?;
+
+    let motion = if end_line >= start_line { "j" } else { "k" };
+    for _ in 0..start_line.abs_diff(end_line) {
+        state
+            .handle_text_input(motion)
+            .map_err(|error| error.to_string())?;
+    }
+
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Visual);
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().visual_kind,
+        VisualSelectionKind::Line
+    );
     Ok(())
 }
 
@@ -1333,6 +1396,230 @@ fn git_status_visual_u_unstages_selected_items() -> Result<(), String> {
 }
 
 #[test]
+fn git_status_ctrl_v_visual_s_stages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-ctrl-v-stage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "beta.txt")?;
+    set_git_status_visual_block_selection_with_ctrl_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("s")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(
+        staged,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert!(unstaged.is_empty());
+    assert_eq!(untracked, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_ctrl_v_visual_u_unstages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-ctrl-v-unstage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "beta.txt")?;
+    set_git_status_visual_block_selection_with_ctrl_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("u")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(staged, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert!(unstaged.is_empty());
+    assert_eq!(
+        untracked,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_ctrl_v_visual_x_deletes_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-ctrl-v-delete")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "beta.txt")?;
+    set_git_status_visual_block_selection_with_ctrl_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("x")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert!(staged.is_empty());
+    assert!(unstaged.is_empty());
+    assert_eq!(untracked, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert!(!repo.join("alpha.txt").exists());
+    assert!(!repo.join("beta.txt").exists());
+    assert!(repo.join("gamma.txt").exists());
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_shift_v_visual_s_stages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-shift-v-stage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "beta.txt")?;
+    set_git_status_visual_line_selection_with_shift_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("s")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(
+        staged,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert!(unstaged.is_empty());
+    assert_eq!(untracked, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_shift_v_visual_u_unstages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-shift-v-unstage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "beta.txt")?;
+    set_git_status_visual_line_selection_with_shift_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("u")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(staged, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert!(unstaged.is_empty());
+    assert_eq!(
+        untracked,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_shift_v_visual_x_deletes_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-shift-v-delete")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "beta.txt")?;
+    set_git_status_visual_line_selection_with_shift_v(&mut state, buffer_id, alpha, beta)?;
+
+    assert_eq!(
+        git_status_selected_lines(&state.runtime, buffer_id)?,
+        ((alpha..=beta).collect(), true)
+    );
+
+    state
+        .handle_text_input("x")
+        .map_err(|error| error.to_string())?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert!(staged.is_empty());
+    assert!(unstaged.is_empty());
+    assert_eq!(untracked, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert!(!repo.join("alpha.txt").exists());
+    assert!(!repo.join("beta.txt").exists());
+    assert!(repo.join("gamma.txt").exists());
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_line_is_untracked_uses_section_metadata() {
     let meta = SectionLineMeta {
         section_id: GIT_SECTION_UNTRACKED.to_owned(),
@@ -1630,6 +1917,80 @@ fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Resul
 
     assert_eq!(buffer.viewport_lines(), pane_layout.visible_rows);
     assert!(pane_layout.visible_rows < full_layout.visible_rows);
+    Ok(())
+}
+
+#[test]
+fn sync_visible_buffer_layouts_use_split_width_for_vertical_splits() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let line = format!(
+        "const wrapped_line = {};",
+        "abcdefghijklmnopqrstuvwxyz".repeat(8)
+    );
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*split-wrap*",
+        (0..120).map(|_| line.clone()).collect(),
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(80, 80));
+
+    state
+        .sync_active_viewport_for_render_size(render_width, render_height, line_height)
+        .map_err(|error| error.to_string())?;
+    {
+        let visible_rows = shell_buffer(&state.runtime, buffer_id)?.viewport_lines();
+        let indent_size = theme_lang_indent(
+            state.runtime.services().get::<ThemeRegistry>(),
+            shell_buffer(&state.runtime, buffer_id)?.language_id(),
+        );
+        shell_buffer_mut(&mut state.runtime, buffer_id)?.ensure_visible(
+            visible_rows,
+            wrap_columns_for_width(render_width, cell_width),
+            indent_size,
+        );
+    }
+    shell_ui_mut(&mut state.runtime)?
+        .workspace_view_mut()
+        .ok_or_else(|| "workspace view is missing".to_owned())?
+        .split_buffer_id = buffer_id;
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    install_acp_test_buffer(
+        &mut state,
+        40,
+        "",
+        Some("chat · gpt-5.4 · shift+tab switch mode"),
+    )?;
+
+    let pane_rect = vertical_pane_rects(render_width, render_height, 2)
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| "vertical split did not produce a right pane rect".to_owned())?;
+    let before_sync = buffer_cursor_screen_anchor(
+        shell_buffer(&state.runtime, buffer_id)?,
+        PixelRectToRect::rect(pane_rect.x, pane_rect.y, pane_rect.width, pane_rect.height),
+        state.runtime.services().get::<ThemeRegistry>(),
+        cell_width,
+        line_height,
+    );
+
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let after_sync = buffer_cursor_screen_anchor(
+        buffer,
+        PixelRectToRect::rect(pane_rect.x, pane_rect.y, pane_rect.width, pane_rect.height),
+        state.runtime.services().get::<ThemeRegistry>(),
+        cell_width,
+        line_height,
+    );
+    assert!(before_sync.is_none());
+    assert!(after_sync.is_some());
     Ok(())
 }
 
@@ -1967,6 +2328,32 @@ fn hover_previous_command_wraps_open_overlay_without_focus() -> Result<(), Strin
             .map_err(|error| error.to_string())?,
         Some("Gamma".to_owned())
     );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn system_symbol_fallback_font_covers_starship_prompt_glyphs() -> Result<(), String> {
+    let fallback = resolve_system_icon_font_paths()
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("seguisym.ttf"))
+        })
+        .ok_or_else(|| "Segoe UI Symbol fallback font was not found".to_owned())?;
+    let bytes = fs::read(&fallback).map_err(|error| error.to_string())?;
+    let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())?;
+
+    for glyph in ['◎', '⎪', '▴', '●', '◦', '◃', '◈', '⎥', '⎈', '◨', '⊃'] {
+        let (metrics, _) = font.rasterize(glyph, 48.0);
+        assert!(
+            metrics.width > 0 && metrics.height > 0,
+            "fallback font did not cover `{glyph}` (U+{:04X})",
+            glyph as u32
+        );
+    }
     Ok(())
 }
 
@@ -2867,6 +3254,45 @@ fn pane_close_hook_closes_the_focused_split() -> Result<(), String> {
         shell_ui(&state.runtime)?.active_pane_id(),
         Some(initial_pane_id)
     );
+    Ok(())
+}
+
+#[test]
+fn switch_split_hook_reverses_pane_order_and_preserves_the_active_pane() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+
+    let (active_pane_id, before) = {
+        let ui = shell_ui(&state.runtime)?;
+        assert_eq!(ui.active_pane_index(), 0);
+        let active_pane_id = ui
+            .active_pane_id()
+            .ok_or_else(|| "active pane is missing".to_owned())?;
+        let before = ui
+            .panes()
+            .ok_or_else(|| "pane list is missing".to_owned())?
+            .iter()
+            .map(|pane| pane.buffer_id)
+            .collect::<Vec<_>>();
+        (active_pane_id, before)
+    };
+
+    state
+        .runtime
+        .emit_hook(HOOK_PANE_SWITCH_SPLIT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let after = ui
+        .panes()
+        .ok_or_else(|| "pane list is missing after switch".to_owned())?
+        .iter()
+        .map(|pane| pane.buffer_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(after, before.into_iter().rev().collect::<Vec<_>>());
+    assert_eq!(ui.active_pane_id(), Some(active_pane_id));
+    assert_eq!(ui.active_pane_index(), 1);
     Ok(())
 }
 

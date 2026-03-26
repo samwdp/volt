@@ -148,6 +148,7 @@ const HOOK_ACP_COMPLETE_SLASH: &str = "ui.acp.complete-slash";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
 const HOOK_PANE_CLOSE: &str = "ui.pane.close";
+const HOOK_PANE_SWITCH_SPLIT: &str = "ui.pane.switch-split";
 const HOOK_WORKSPACE_WINDOW_LEFT: &str = "ui.workspace.window-left";
 const HOOK_WORKSPACE_WINDOW_DOWN: &str = "ui.workspace.window-down";
 const HOOK_WORKSPACE_WINDOW_UP: &str = "ui.workspace.window-up";
@@ -248,6 +249,20 @@ const BUNDLED_ICON_FONT_FILES: &[&str] = &[
     "material-design-icons.ttf",
     "octicons.ttf",
     "weathericons.ttf",
+];
+#[cfg(target_os = "windows")]
+const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[r"C:\Windows\Fonts\seguisym.ttf"];
+#[cfg(target_os = "macos")]
+const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+];
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ];
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -4062,6 +4077,32 @@ impl ShellUiState {
         self.close_hover();
     }
 
+    fn switch_split(&mut self) -> bool {
+        let active_pane_id = if let Some(view) = self.workspace_view_mut()
+            && view.panes.len() > 1
+        {
+            let active_pane_id = view.panes.get(view.active_pane).map(|pane| pane.pane_id);
+            view.panes.reverse();
+            if let Some(active_pane_id) = active_pane_id
+                && let Some(index) = view
+                    .panes
+                    .iter()
+                    .position(|pane| pane.pane_id == active_pane_id)
+            {
+                view.active_pane = index;
+            }
+            active_pane_id
+        } else {
+            None
+        };
+        if active_pane_id.is_none() {
+            return false;
+        }
+        self.close_autocomplete();
+        self.close_hover();
+        true
+    }
+
     fn shift_active_pane(&mut self, delta: isize) -> Option<PaneId> {
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
@@ -4750,7 +4791,7 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime
             .services_mut()
-            .insert(Arc::new(Mutex::new(LspClientManager::new(lsp_registry))));
+            .insert(Arc::new(LspClientManager::new(lsp_registry)));
         let mut syntax_registry = SyntaxRegistry::new();
         syntax_registry
             .register_all(user::syntax_languages())
@@ -6296,6 +6337,26 @@ impl ShellState {
             }
             let vim_mode = keymap_vim_mode(self.input_mode()?);
             if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && active_buffer.is_git_status
+                && chord == "V"
+                && self.runtime.keymaps().contains_for_mode(
+                    &KeymapScope::Workspace,
+                    vim_mode,
+                    &chord,
+                )
+            {
+                let runtime_surface_before =
+                    active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+                self.runtime
+                    .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+                    .map_err(|error| ShellError::Runtime(error.to_string()))?;
+                self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+                self.clear_stale_vim_count()?;
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
                 && handle_git_status_chord(&mut self.runtime, &chord)
                     .map_err(ShellError::Runtime)?
             {
@@ -6496,7 +6557,7 @@ impl ShellState {
         let lsp_client = self
             .runtime
             .services()
-            .get::<Arc<Mutex<LspClientManager>>>()
+            .get::<Arc<LspClientManager>>()
             .cloned();
         let request = {
             let ui = self.ui()?;
@@ -7117,20 +7178,7 @@ impl ShellState {
         Ok(())
     }
 
-    fn ensure_visible(&mut self, wrap_cols: usize) -> Result<(), ShellError> {
-        let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-        let (language_id, visible_rows) = shell_ui(&self.runtime)
-            .map_err(ShellError::Runtime)?
-            .buffer(buffer_id)
-            .map(|buffer| (buffer.language_id(), buffer.viewport_lines()))
-            .unwrap_or((None, 1));
-        let indent_size =
-            theme_lang_indent(self.runtime.services().get::<ThemeRegistry>(), language_id);
-        self.active_buffer_mut()?
-            .ensure_visible(visible_rows, wrap_cols, indent_size);
-        Ok(())
-    }
-
+    #[cfg(test)]
     fn sync_active_viewport(
         &mut self,
         viewport_height: u32,
@@ -7145,6 +7193,7 @@ impl ShellState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn active_viewport_height(
         &mut self,
         render_width: u32,
@@ -7180,6 +7229,7 @@ impl ShellState {
         Ok(rect.height.max(1))
     }
 
+    #[cfg(test)]
     fn sync_active_viewport_for_render_size(
         &mut self,
         render_width: u32,
@@ -7189,6 +7239,64 @@ impl ShellState {
         let viewport_height =
             self.active_viewport_height(render_width, render_height, line_height)?;
         self.sync_active_viewport(viewport_height, line_height)
+    }
+
+    fn sync_visible_buffer_layouts(
+        &mut self,
+        render_width: u32,
+        render_height: u32,
+        cell_width: i32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let runtime_popup = self.runtime_popup()?;
+        let ui = self.ui()?;
+        let popup_height = runtime_popup
+            .as_ref()
+            .map(|_| popup_window_height(render_height, line_height))
+            .unwrap_or(0);
+        let pane_height = render_height.saturating_sub(popup_height);
+        let panes = ui
+            .panes()
+            .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
+        let pane_rects = match ui.pane_split_direction() {
+            PaneSplitDirection::Vertical => {
+                vertical_pane_rects(render_width, pane_height, panes.len())
+            }
+            PaneSplitDirection::Horizontal => {
+                horizontal_pane_rects(render_width, pane_height, panes.len())
+            }
+        };
+        let mut visible_buffers = panes
+            .iter()
+            .zip(pane_rects.iter())
+            .map(|(pane, rect)| (pane.buffer_id, rect.width, rect.height))
+            .collect::<Vec<_>>();
+        if let Some(popup) = runtime_popup.as_ref() {
+            visible_buffers.push((popup.active_buffer, render_width, popup_height.max(1)));
+        }
+        for (buffer_id, width, height) in visible_buffers {
+            let (language_id, visible_rows) = {
+                let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
+                    ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
+                })?;
+                (
+                    buffer.language_id().map(str::to_owned),
+                    buffer_visible_rows_for_height(buffer, height, line_height),
+                )
+            };
+            let wrap_cols = wrap_columns_for_width(width, cell_width);
+            let indent_size = theme_lang_indent(
+                self.runtime.services().get::<ThemeRegistry>(),
+                language_id.as_deref(),
+            );
+            let buffer = self
+                .ui_mut()?
+                .buffer_mut(buffer_id)
+                .ok_or_else(|| ShellError::Runtime(format!("buffer `{buffer_id}` is missing")))?;
+            buffer.set_viewport_lines(visible_rows);
+            buffer.ensure_visible(visible_rows, wrap_cols, indent_size);
+        }
+        Ok(())
     }
 
     fn runtime_popup(&mut self) -> Result<Option<RuntimePopupSnapshot>, ShellError> {
@@ -7249,8 +7357,9 @@ impl ShellState {
         render_width: u32,
         render_height: u32,
         line_height: i32,
+        cell_width: i32,
     ) -> Result<bool, ShellError> {
-        self.sync_active_viewport_for_render_size(render_width, render_height, line_height)?;
+        self.sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)?;
         let active_buffer_id =
             active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
         let followed_output = {
@@ -7259,7 +7368,7 @@ impl ShellState {
             buffer.has_input_field() && buffer.should_follow_output()
         };
         let changed = acp::refresh_pending_acp(&mut self.runtime).map_err(ShellError::Runtime)?;
-        self.sync_active_viewport_for_render_size(render_width, render_height, line_height)?;
+        self.sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)?;
         if changed
             && followed_output
             && active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?
@@ -7317,8 +7426,7 @@ fn active_lsp_workspace_loaded(runtime: &EditorRuntime, ui: &ShellUiState) -> bo
     };
     runtime
         .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .and_then(|manager| manager.lock().ok())
+        .get::<Arc<LspClientManager>>()
         .map(|manager| manager.has_live_sessions_for_path(path))
         .unwrap_or(false)
 }
@@ -7457,13 +7565,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         return FrameOutcome::Continue;
                     }
                 };
-                let wrap_cols = wrap_columns_for_width(render_width, cell_width);
-                if let Err(error) = state.sync_active_viewport_for_render_size(
+                if let Err(error) = state.sync_visible_buffer_layouts(
                     render_width,
                     render_height,
+                    cell_width,
                     line_height as i32,
                 ) {
-                    state.record_shell_error("shell.sync-active-viewport", error);
+                    state.record_shell_error("shell.sync-visible-buffer-layouts", error);
                 }
                 let mut had_events = false;
                 let event_batch_started = Instant::now();
@@ -7510,16 +7618,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     }
                 }
                 if had_events
-                    && let Err(error) = state.sync_active_viewport_for_render_size(
+                    && let Err(error) = state.sync_visible_buffer_layouts(
                         render_width,
                         render_height,
+                        cell_width,
                         line_height as i32,
                     )
                 {
-                    state.record_shell_error("shell.sync-active-viewport", error);
-                }
-                if had_events && let Err(error) = state.ensure_visible(wrap_cols) {
-                    state.record_shell_error("shell.ensure-visible", error);
+                    state.record_shell_error("shell.sync-visible-buffer-layouts", error);
                 }
 
                 let refresh_now = Instant::now();
@@ -7602,6 +7708,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     render_width,
                     render_height,
                     line_height as i32,
+                    cell_width,
                 ) {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -7868,6 +7975,25 @@ fn resolve_bundled_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
         .collect()
 }
 
+fn resolve_system_icon_font_paths() -> Vec<PathBuf> {
+    SYSTEM_ICON_FONT_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn resolve_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
+    let mut paths = resolve_bundled_icon_font_paths()?;
+    let mut seen = paths.iter().cloned().collect::<BTreeSet<_>>();
+    for path in resolve_system_icon_font_paths() {
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
 fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
     let mut missing_count = 0usize;
     let mut examples = Vec::new();
@@ -7912,7 +8038,7 @@ fn load_font_set<'ttf>(
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
         .max(1) as i32;
-    let icon_fonts = resolve_bundled_icon_font_paths()?
+    let icon_fonts = resolve_icon_font_paths()?
         .into_iter()
         .map(|path| {
             let name = path
@@ -8234,6 +8360,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_PANE_CLOSE,
         "Closes the currently focused split.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PANE_SWITCH_SPLIT,
+        "Swaps the current split positions.",
     )?;
     register_hook(
         runtime,
@@ -9083,6 +9214,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_PANE_SWITCH_SPLIT,
+            "shell.pane-switch-split",
+            |_, runtime| {
+                switch_runtime_split(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_WORKSPACE_WINDOW_LEFT,
             "shell.workspace-window-left",
             |_, runtime| {
@@ -9576,12 +9717,10 @@ fn start_lsp_for_active_buffer(
     let context = active_lsp_buffer_context(runtime)?;
     let lsp_client = runtime
         .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
+        .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    let manager = lsp_client
-        .lock()
-        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+    let manager = lsp_client;
     if let Some(server_id) = preferred_server_id {
         let supported = manager
             .registered_server_ids_for_path(&context.path)
@@ -9616,7 +9755,6 @@ fn start_lsp_for_active_buffer(
         )
     }
     .map_err(|error| error.to_string())?;
-    drop(manager);
     if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(context.buffer_id) {
         buffer.set_lsp_enabled(true);
     }
@@ -9629,12 +9767,10 @@ fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String>
     let context = active_lsp_buffer_context(runtime)?;
     let lsp_client = runtime
         .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
+        .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     lsp_client
-        .lock()
-        .map_err(|_| "LSP client mutex poisoned".to_owned())?
         .stop_buffer(&context.path)
         .map_err(|error| error.to_string())?;
     let ui = shell_ui_mut(runtime)?;
@@ -9653,12 +9789,10 @@ fn restart_lsp_for_active_buffer(
     let context = active_lsp_buffer_context(runtime)?;
     let lsp_client = runtime
         .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
+        .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    let manager = lsp_client
-        .lock()
-        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
+    let manager = lsp_client;
     if let Some(server_id) = preferred_server_id {
         let supported = manager
             .registered_server_ids_for_path(&context.path)
@@ -9685,7 +9819,6 @@ fn restart_lsp_for_active_buffer(
             preferred_server_id,
         )
         .map_err(|error| error.to_string())?;
-    drop(manager);
     let ui = shell_ui_mut(runtime)?;
     if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
         buffer.set_lsp_enabled(true);
@@ -9741,14 +9874,11 @@ fn navigate_to_lsp_locations(
     let position = shell_buffer(runtime, context.buffer_id)?.cursor_point();
     let lsp_client = runtime
         .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
+        .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     let (labels, locations) = {
-        let manager = lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
-        let labels = manager
+        let labels = lsp_client
             .sync_buffer(
                 &context.path,
                 &context.text,
@@ -9757,7 +9887,7 @@ fn navigate_to_lsp_locations(
             )
             .map_err(|error| error.to_string())?;
         let locations =
-            request(&manager, &context.path, position).map_err(|error| error.to_string())?;
+            request(&lsp_client, &context.path, position).map_err(|error| error.to_string())?;
         (labels, locations)
     };
     {
@@ -9825,13 +9955,10 @@ fn ensure_lsp_log_buffer(
 }
 
 fn current_lsp_log_snapshot(runtime: &EditorRuntime) -> Result<LspLogSnapshot, String> {
-    let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() else {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>() else {
         return Ok(LspLogSnapshot::default());
     };
-    lsp_client
-        .lock()
-        .map(|manager| manager.log_snapshot())
-        .map_err(|_| "LSP client mutex poisoned".to_owned())
+    Ok(lsp_client.log_snapshot())
 }
 
 fn preferred_lsp_log_server(
@@ -9839,8 +9966,7 @@ fn preferred_lsp_log_server(
     workspace_id: WorkspaceId,
 ) -> Result<Option<String>, String> {
     if let Ok(context) = active_lsp_buffer_context(runtime)
-        && let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>()
-        && let Ok(manager) = lsp_client.lock()
+        && let Some(manager) = runtime.services().get::<Arc<LspClientManager>>()
         && let Some(server_id) = manager
             .session_labels_for_path(&context.path)
             .into_iter()
@@ -9886,10 +10012,7 @@ fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         .get::<AutocompleteRegistry>()
         .cloned()
         .ok_or_else(|| "autocomplete registry service missing".to_owned())?;
-    let lsp_client = runtime
-        .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .cloned();
+    let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
     let request = {
         let ui = shell_ui(runtime)?;
         let Some(buffer) = ui.buffer(buffer_id) else {
@@ -9996,10 +10119,7 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
         .get::<HoverRegistry>()
         .cloned()
         .ok_or_else(|| "hover registry service missing".to_owned())?;
-    let lsp_client = runtime
-        .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .cloned();
+    let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
     let lsp_context = active_lsp_buffer_context(runtime).ok();
     let overlay = {
         let ui = shell_ui(runtime)?;
@@ -10673,7 +10793,7 @@ struct AutocompleteBufferRequest {
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
     result_limit: usize,
-    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<Arc<LspClientManager>>,
 }
 
 struct PendingAutocompleteRequest {
@@ -10692,7 +10812,7 @@ struct AutocompleteWorkerRequest {
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
     result_limit: usize,
-    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<Arc<LspClientManager>>,
 }
 
 struct AutocompleteWorkerResult {
@@ -10898,21 +11018,16 @@ fn lsp_autocomplete_entries(
     let Some(lsp_client) = request.lsp_client.as_ref() else {
         return Vec::new();
     };
+    let text = request.text.text();
     let completions = lsp_client
-        .lock()
+        .sync_buffer(
+            path,
+            &text,
+            request.buffer_revision,
+            request.root.as_deref(),
+        )
         .ok()
-        .and_then(|manager| {
-            let text = request.text.text();
-            manager
-                .sync_buffer(
-                    path,
-                    &text,
-                    request.buffer_revision,
-                    request.root.as_deref(),
-                )
-                .ok()?;
-            manager.completions(path, request.cursor).ok()
-        })
+        .and_then(|_| lsp_client.completions(path, request.cursor).ok())
         .unwrap_or_default();
     let prefix_lower = query.prefix.to_ascii_lowercase();
     completions
@@ -11047,7 +11162,7 @@ fn autocomplete_request_for_buffer(
     buffer: &ShellBuffer,
     root: Option<PathBuf>,
     registry: &AutocompleteRegistry,
-    lsp_client: Option<Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<Arc<LspClientManager>>,
     allow_empty_query: bool,
 ) -> Option<AutocompleteBufferRequest> {
     if registry.providers.is_empty() {
@@ -11073,7 +11188,7 @@ fn hover_overlay_for_buffer(
     buffer_id: BufferId,
     buffer: &ShellBuffer,
     registry: &HoverRegistry,
-    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Option<HoverOverlay> {
     if registry.providers.is_empty() {
@@ -11215,7 +11330,7 @@ fn hover_empty_provider_lines(
 
 fn hover_lsp_provider_lines(
     buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Vec<String> {
     let hovers = synced_hover_lsp_request(buffer, lsp_client, lsp_context, LspClientManager::hover);
@@ -11236,7 +11351,7 @@ fn hover_lsp_provider_lines(
 
 fn hover_signature_provider_lines(
     buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Vec<String> {
     let signatures = synced_hover_lsp_request(
@@ -11262,7 +11377,7 @@ fn hover_signature_provider_lines(
 
 fn synced_hover_lsp_request<T>(
     buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
     request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
 ) -> Vec<T> {
@@ -11273,19 +11388,14 @@ fn synced_hover_lsp_request<T>(
         return Vec::new();
     };
     lsp_client
-        .lock()
+        .sync_buffer(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+        )
         .ok()
-        .and_then(|manager| {
-            manager
-                .sync_buffer(
-                    &context.path,
-                    &context.text,
-                    context.revision,
-                    context.root.as_deref(),
-                )
-                .ok()?;
-            request(&manager, &context.path, buffer.cursor_point()).ok()
-        })
+        .and_then(|_| request(lsp_client, &context.path, buffer.cursor_point()).ok())
         .unwrap_or_default()
 }
 
@@ -13036,10 +13146,8 @@ fn save_buffer_inner(
                 .with_detail(path.display().to_string()),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() {
+    if let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>() {
         lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?
             .save_buffer(path)
             .map_err(|error| error.to_string())?;
     }
@@ -13086,11 +13194,9 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
     if let Some(path) = shell_ui(runtime)?
         .buffer(buffer_id)
         .and_then(|buffer| buffer.path().map(Path::to_path_buf))
-        && let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>()
+        && let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>()
     {
         lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
     }
@@ -13109,7 +13215,7 @@ fn close_lsp_buffers_for_workspace(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
 ) -> Result<(), String> {
-    let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>() else {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>() else {
         return Ok(());
     };
     let paths = {
@@ -13127,11 +13233,8 @@ fn close_lsp_buffers_for_workspace(
             })
             .unwrap_or_default()
     };
-    let manager = lsp_client
-        .lock()
-        .map_err(|_| "LSP client mutex poisoned".to_owned())?;
     for path in paths {
-        manager
+        lsp_client
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
     }
@@ -13423,24 +13526,17 @@ fn try_format_buffer_entire_with_lsp(
     path: &Path,
     original_cursor: TextPoint,
 ) -> Result<bool, String> {
-    let Some(lsp_client) = runtime
-        .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .cloned()
-    else {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
         return Ok(false);
     };
     let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     let (labels, edits) = {
-        let manager = lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
-        if !manager.supports_path(&context.path) {
+        if !lsp_client.supports_path(&context.path) {
             return Ok(false);
         }
-        let labels = manager
+        let labels = lsp_client
             .sync_buffer(
                 &context.path,
                 &context.text,
@@ -13448,7 +13544,7 @@ fn try_format_buffer_entire_with_lsp(
                 context.root.as_deref(),
             )
             .map_err(|error| error.to_string())?;
-        let edits = manager
+        let edits = lsp_client
             .formatting(&context.path, options)
             .map_err(|error| error.to_string())?;
         (labels, edits)
@@ -13474,24 +13570,17 @@ fn try_format_visual_selection_with_lsp(
     let VisualSelection::Range(range) = selection else {
         return Ok(false);
     };
-    let Some(lsp_client) = runtime
-        .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .cloned()
-    else {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
         return Ok(false);
     };
     let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     let (labels, edits) = {
-        let manager = lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
-        if !manager.supports_path(&context.path) {
+        if !lsp_client.supports_path(&context.path) {
             return Ok(false);
         }
-        let labels = manager
+        let labels = lsp_client
             .sync_buffer(
                 &context.path,
                 &context.text,
@@ -13499,7 +13588,7 @@ fn try_format_visual_selection_with_lsp(
                 context.root.as_deref(),
             )
             .map_err(|error| error.to_string())?;
-        let edits = manager
+        let edits = lsp_client
             .range_formatting(&context.path, range, options)
             .map_err(|error| error.to_string())?;
         (labels, edits)
@@ -18354,18 +18443,11 @@ struct LspBufferRefreshRequest {
 
 fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
     let now = Instant::now();
-    let Some(lsp_client) = runtime
-        .services()
-        .get::<Arc<Mutex<LspClientManager>>>()
-        .cloned()
-    else {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
         return Ok(false);
     };
 
     let requests = {
-        let manager = lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
         let ui = shell_ui(runtime)?;
         ui.buffers
             .iter()
@@ -18383,7 +18465,7 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
                 {
                     return Ok(None);
                 }
-                if !manager.needs_sync(&path, buffer.text.revision()) {
+                if !lsp_client.needs_sync(&path, buffer.text.revision()) {
                     return Ok(None);
                 }
                 Ok(Some(LspBufferRefreshRequest {
@@ -18401,8 +18483,6 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
 
     for request in requests {
         lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?
             .sync_buffer(
                 &request.path,
                 &request.text,
@@ -18419,31 +18499,29 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
         log_snapshot,
         notification_snapshot,
     ) = {
-        let manager = lsp_client
-            .lock()
-            .map_err(|_| "LSP client mutex poisoned".to_owned())?;
         let ui = shell_ui(runtime)?;
         let updates = ui
             .buffers
             .iter()
+            .filter(|buffer| buffer.lsp_enabled())
             .filter_map(|buffer| {
                 let path = buffer.path()?;
-                Some((buffer.id(), manager.diagnostics_for_path(path)))
+                Some((buffer.id(), lsp_client.diagnostics_for_path(path)))
             })
             .collect::<Vec<_>>();
         let active_server_label = ui
             .active_buffer_id()
             .and_then(|buffer_id| ui.buffer(buffer_id))
             .and_then(ShellBuffer::path)
-            .map(|path| manager.session_labels_for_path(path))
+            .map(|path| lsp_client.session_labels_for_path(path))
             .filter(|labels| !labels.is_empty())
             .map(|labels| labels.join(", "));
         (
             updates,
             ui.active_workspace(),
             active_server_label,
-            manager.log_snapshot(),
-            manager.notification_snapshot(),
+            lsp_client.log_snapshot(),
+            lsp_client.notification_snapshot(),
         )
     };
 
@@ -19200,6 +19278,13 @@ fn close_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn switch_runtime_split(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui_mut(runtime)?.switch_split() {
+        return Ok(());
+    }
+    Err("switch split requires an active split".to_owned())
 }
 
 fn cycle_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
