@@ -363,6 +363,7 @@ fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dy
 
     state.handle_text_input("i")?;
     assert!(state.try_runtime_keybinding(Keycode::Space, Mod::LCTRLMOD)?);
+    assert!(!state.autocomplete_visible()?);
     state.wait_for_autocomplete_results()?;
     assert!(state.autocomplete_visible()?);
     assert_eq!(
@@ -381,7 +382,9 @@ fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dy
     assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
 
     state.handle_text_input("h")?;
+    assert!(!state.autocomplete_visible()?);
     state.wait_for_autocomplete_results()?;
+    assert!(state.autocomplete_visible()?);
     assert_eq!(
         state.autocomplete_entries()?,
         vec!["alpha".to_owned(), "alphabet".to_owned()]
@@ -403,9 +406,11 @@ fn autocomplete_opens_while_typing_buffer_tokens() -> Result<(), Box<dyn std::er
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nal");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 2));
 
+    state.handle_text_input("i")?;
     state.handle_text_input("p")?;
-    assert!(state.autocomplete_visible()?);
+    assert!(!state.autocomplete_visible()?);
     state.wait_for_autocomplete_results()?;
+    assert!(state.autocomplete_visible()?);
     assert_eq!(
         state.autocomplete_entries()?,
         vec![
@@ -431,6 +436,7 @@ fn ctrl_space_triggers_autocomplete_without_inserting_space()
     state.handle_text_input("i")?;
     assert!(state.try_runtime_keybinding(Keycode::Space, Mod::LCTRLMOD)?);
     state.handle_text_input(" ")?;
+    assert!(!state.autocomplete_visible()?);
     state.wait_for_autocomplete_results()?;
 
     assert!(state.autocomplete_visible()?);

@@ -16,9 +16,10 @@ use editor_buffer::{TextPoint, TextRange};
 use lsp_types::{
     ClientCapabilities, ClientInfo, CompletionParams, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentFormattingParams, DocumentRangeFormattingParams, FormattingOptions,
+    DocumentFormattingParams, DocumentRangeFormattingParams, Documentation, FormattingOptions,
     GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InitializedParams,
-    Location, LocationLink, PartialResultParams, Position, ReferenceContext, ReferenceParams,
+    Location, LocationLink, NumberOrString, ParameterLabel, PartialResultParams, Position,
+    ReferenceContext, ReferenceParams, SignatureHelp, SignatureHelpParams,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextEdit, TraceValue, Uri, VersionedTextDocumentIdentifier,
     WorkDoneProgressParams, WorkspaceFolder,
@@ -28,7 +29,7 @@ use lsp_types::{
     },
     request::{
         Completion, Formatting, GotoDefinition, GotoImplementation, HoverRequest, Initialize,
-        RangeFormatting, References, Request,
+        RangeFormatting, References, Request, SignatureHelpRequest,
     },
 };
 use serde::Serialize;
@@ -39,7 +40,9 @@ use crate::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
+const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
+const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -48,6 +51,7 @@ type PendingResponseTx = Sender<Result<Value, LspClientError>>;
 type PendingResponseMap = Arc<Mutex<BTreeMap<u64, PendingResponseTx>>>;
 type DiagnosticsByPath = Arc<Mutex<BTreeMap<PathBuf, Vec<Diagnostic>>>>;
 type TransportLog = Arc<Mutex<LspTransportLog>>;
+type NotificationLog = Arc<Mutex<LspNotificationLog>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspCompletionItem {
@@ -139,6 +143,29 @@ pub struct LspHoverContents {
 }
 
 impl LspHoverContents {
+    fn new(server_id: impl Into<String>, lines: Vec<String>) -> Self {
+        Self {
+            server_id: server_id.into(),
+            lines,
+        }
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspSignatureHelpContents {
+    server_id: String,
+    lines: Vec<String>,
+}
+
+impl LspSignatureHelpContents {
     fn new(server_id: impl Into<String>, lines: Vec<String>) -> Self {
         Self {
             server_id: server_id.into(),
@@ -302,6 +329,143 @@ impl LspLogSnapshot {
     }
 }
 
+/// Notification severity surfaced to the shell UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspNotificationLevel {
+    /// Informational update.
+    Info,
+    /// Successful completion update.
+    Success,
+    /// Warning update.
+    Warning,
+    /// Error update.
+    Error,
+}
+
+/// Optional progress metadata attached to an LSP notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LspNotificationProgress {
+    percentage: Option<u32>,
+}
+
+impl LspNotificationProgress {
+    fn new(percentage: Option<u32>) -> Self {
+        Self { percentage }
+    }
+
+    /// Returns the latest reported completion percentage, if available.
+    pub const fn percentage(self) -> Option<u32> {
+        self.percentage
+    }
+}
+
+/// UI-facing LSP notification entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspNotification {
+    key: String,
+    server_id: String,
+    level: LspNotificationLevel,
+    title: String,
+    body_lines: Vec<String>,
+    progress: Option<LspNotificationProgress>,
+    active: bool,
+}
+
+impl LspNotification {
+    fn new(
+        key: impl Into<String>,
+        server_id: impl Into<String>,
+        level: LspNotificationLevel,
+        title: impl Into<String>,
+        body_lines: Vec<String>,
+        progress: Option<LspNotificationProgress>,
+        active: bool,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            server_id: server_id.into(),
+            level,
+            title: title.into(),
+            body_lines,
+            progress,
+            active,
+        }
+    }
+
+    /// Returns the deduplication key for this notification.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Returns the originating language server id.
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    /// Returns the notification severity level.
+    pub const fn level(&self) -> LspNotificationLevel {
+        self.level
+    }
+
+    /// Returns the notification title.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the body lines to display under the title.
+    pub fn body_lines(&self) -> &[String] {
+        &self.body_lines
+    }
+
+    /// Returns progress metadata, if the notification represents in-flight work.
+    pub const fn progress(&self) -> Option<LspNotificationProgress> {
+        self.progress
+    }
+
+    /// Returns whether the notification is still active and should stay pinned.
+    pub const fn active(&self) -> bool {
+        self.active
+    }
+}
+
+/// Revision-tagged notification update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspNotificationEntry {
+    revision: u64,
+    notification: LspNotification,
+}
+
+impl LspNotificationEntry {
+    /// Returns the monotonically increasing revision for this update.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the notification payload.
+    pub fn notification(&self) -> &LspNotification {
+        &self.notification
+    }
+}
+
+/// Snapshot of recent UI-facing LSP notifications.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LspNotificationSnapshot {
+    revision: u64,
+    entries: Vec<LspNotificationEntry>,
+}
+
+impl LspNotificationSnapshot {
+    /// Returns the latest notification revision seen by the manager.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the buffered notification updates.
+    pub fn entries(&self) -> &[LspNotificationEntry] {
+        &self.entries
+    }
+}
+
 #[derive(Debug)]
 struct LspTransportLog {
     revision: u64,
@@ -333,6 +497,49 @@ impl LspTransportLog {
             entries: self.entries.clone(),
         }
     }
+}
+
+#[derive(Debug)]
+struct LspNotificationLog {
+    revision: u64,
+    entries: Vec<LspNotificationEntry>,
+    max_entries: usize,
+}
+
+impl LspNotificationLog {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            revision: 0,
+            entries: Vec::new(),
+            max_entries,
+        }
+    }
+
+    fn record(&mut self, notification: LspNotification) {
+        self.revision = self.revision.saturating_add(1);
+        self.entries.push(LspNotificationEntry {
+            revision: self.revision,
+            notification,
+        });
+        if self.entries.len() > self.max_entries {
+            let overflow = self.entries.len() - self.max_entries;
+            self.entries.drain(0..overflow);
+        }
+    }
+
+    fn snapshot(&self) -> LspNotificationSnapshot {
+        LspNotificationSnapshot {
+            revision: self.revision,
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProgressTrack {
+    title: Option<String>,
+    message: Option<String>,
+    percentage: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -380,6 +587,7 @@ pub struct LspClientManager {
     registry: LanguageServerRegistry,
     state: Arc<Mutex<LspClientState>>,
     transport_log: TransportLog,
+    notifications: NotificationLog,
 }
 
 #[derive(Debug, Default)]
@@ -411,6 +619,7 @@ struct LspSessionHandle {
     diagnostics: DiagnosticsByPath,
     transport_log: TransportLog,
     next_request_id: AtomicU64,
+    next_progress_token: AtomicU64,
     disconnected: Arc<AtomicBool>,
 }
 
@@ -444,11 +653,22 @@ impl LspClientManager {
             registry,
             state: Arc::new(Mutex::new(LspClientState::default())),
             transport_log: Arc::new(Mutex::new(LspTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
+            notifications: Arc::new(Mutex::new(LspNotificationLog::new(
+                NOTIFICATION_LOG_MAX_ENTRIES,
+            ))),
         }
     }
 
     pub fn log_snapshot(&self) -> LspLogSnapshot {
         self.transport_log
+            .lock()
+            .map(|log| log.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// Returns a snapshot of recent UI-facing notifications emitted by the LSP client.
+    pub fn notification_snapshot(&self) -> LspNotificationSnapshot {
+        self.notifications
             .lock()
             .map(|log| log.snapshot())
             .unwrap_or_default()
@@ -609,6 +829,21 @@ impl LspClientManager {
         Ok(results)
     }
 
+    pub fn signature_help(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Vec<LspSignatureHelpContents>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let mut results = Vec::new();
+        for session in sessions {
+            if let Some(signature_help) = session.signature_help(path, position)? {
+                results.push(signature_help);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn completions(
         &self,
         path: &Path,
@@ -695,21 +930,20 @@ impl LspClientManager {
 
     pub fn session_labels_for_path(&self, path: &Path) -> Vec<String> {
         let mut labels = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.tracked_buffers.get(path).cloned())
-            .map(|tracked| {
-                tracked
-                    .sessions
-                    .into_iter()
-                    .map(|key| key.server_id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+            .tracked_sessions_for_path(path)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| session.server_id().to_owned())
+            .collect::<Vec<_>>();
         labels.sort();
         labels.dedup();
         labels
+    }
+
+    pub fn has_live_sessions_for_path(&self, path: &Path) -> bool {
+        self.tracked_sessions_for_path(path)
+            .map(|sessions| !sessions.is_empty())
+            .unwrap_or(false)
     }
 
     fn sync_buffer_to_sessions(
@@ -798,21 +1032,13 @@ impl LspClientManager {
         preferred_server_id: Option<&str>,
         force_retry: bool,
     ) -> Result<Vec<Arc<LspSessionHandle>>, LspClientError> {
-        let root = root.map(Path::to_path_buf);
         let session_plans = if let Some(server_id) = preferred_server_id {
-            vec![self.registry.prepare_session(server_id, root.clone())?]
+            vec![
+                self.registry
+                    .prepare_session_for_path(server_id, path, root)?,
+            ]
         } else {
-            let extension = path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .ok_or_else(|| {
-                    LspClientError::Protocol(format!(
-                        "buffer `{}` does not have a file extension for LSP lookup",
-                        path.display()
-                    ))
-                })?;
-            self.registry
-                .prepare_sessions_for_extension(extension, root.clone())?
+            self.registry.prepare_sessions_for_path(path, root)?
         };
 
         let mut handles = Vec::new();
@@ -856,7 +1082,11 @@ impl LspClientManager {
                     continue;
                 }
             }
-            match LspSessionHandle::start(session, Arc::clone(&self.transport_log)) {
+            match LspSessionHandle::start(
+                session,
+                Arc::clone(&self.transport_log),
+                Arc::clone(&self.notifications),
+            ) {
                 Ok(handle) => {
                     self.state
                         .lock()
@@ -872,6 +1102,19 @@ impl LspClientManager {
                         &self.transport_log,
                         &key.server_id,
                         format!("failed to start language server: {error}"),
+                    );
+                    record_notification(
+                        &self.notifications,
+                        session_lifecycle_notification(
+                            &key.server_id,
+                            key.root.as_deref(),
+                            LspNotificationLevel::Error,
+                            vec![
+                                "Failed to start language server".to_owned(),
+                                error.to_string(),
+                            ],
+                            false,
+                        ),
                     );
                     self.state
                         .lock()
@@ -894,25 +1137,20 @@ impl LspSessionHandle {
     fn start(
         session: LanguageServerSession,
         transport_log: TransportLog,
+        notifications: NotificationLog,
     ) -> Result<Arc<Self>, LspClientError> {
         let launch = session.launch();
         let launch_program = launch.program().to_owned();
         let launch_args = launch.args().to_vec();
         let launch_cwd = launch.cwd().cloned();
-        let mut command = Command::new(launch.program());
-        configure_lsp_command(&mut command);
-        command
-            .args(launch.args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(cwd) = launch_cwd.as_deref() {
-            command.current_dir(cwd);
-        }
-        for (key, value) in launch.env() {
-            command.env(key, value);
-        }
-        let mut child = command.spawn().map_err(|error| {
+        let launch_env = launch.env().to_vec();
+        let mut child = spawn_lsp_command(
+            &launch_program,
+            &launch_args,
+            launch_cwd.as_deref(),
+            &launch_env,
+        )
+        .map_err(|error| {
             LspClientError::Protocol(format!(
                 "failed to start language server `{}`: {error}",
                 session.server_id()
@@ -949,6 +1187,7 @@ impl LspSessionHandle {
             diagnostics: Arc::clone(&diagnostics),
             transport_log: Arc::clone(&transport_log),
             next_request_id: AtomicU64::new(1),
+            next_progress_token: AtomicU64::new(1),
             disconnected: Arc::clone(&disconnected),
         });
         record_transport_event(
@@ -962,6 +1201,16 @@ impl LspSessionHandle {
                 handle.key.root.as_deref(),
             ),
         );
+        record_notification(
+            &notifications,
+            session_lifecycle_notification(
+                handle.server_id(),
+                handle.key.root.as_deref(),
+                LspNotificationLevel::Info,
+                vec!["Starting language server".to_owned()],
+                true,
+            ),
+        );
         spawn_reader_thread(
             handle.server_id().to_owned(),
             stdout,
@@ -970,8 +1219,19 @@ impl LspSessionHandle {
             diagnostics,
             disconnected,
             transport_log,
+            Arc::clone(&notifications),
         );
         handle.initialize()?;
+        record_notification(
+            &notifications,
+            session_lifecycle_notification(
+                handle.server_id(),
+                handle.key.root.as_deref(),
+                LspNotificationLevel::Success,
+                vec!["Ready".to_owned()],
+                false,
+            ),
+        );
         Ok(handle)
     }
 
@@ -1001,38 +1261,7 @@ impl LspSessionHandle {
                     .to_owned(),
             }]
         });
-        let capabilities = serde_json::from_value::<ClientCapabilities>(json!({
-            "workspace": {
-                "configuration": true,
-                "workspaceFolders": true
-            },
-            "textDocument": {
-                "hover": {
-                    "contentFormat": ["markdown", "plaintext"]
-                },
-                "completion": {
-                    "completionItem": {
-                        "documentationFormat": ["markdown", "plaintext"],
-                        "snippetSupport": false
-                    }
-                },
-                "formatting": {
-                    "dynamicRegistration": false
-                },
-                "rangeFormatting": {
-                    "dynamicRegistration": false
-                },
-                "publishDiagnostics": {
-                    "relatedInformation": false
-                },
-                "synchronization": {
-                    "didSave": true
-                }
-            }
-        }))
-        .map_err(|error| {
-            LspClientError::Protocol(format!("failed to build LSP client capabilities: {error}"))
-        })?;
+        let capabilities = client_capabilities()?;
         #[allow(deprecated)]
         let initialize_params = InitializeParams {
             process_id: Some(std::process::id()),
@@ -1047,7 +1276,7 @@ impl LspSessionHandle {
                 version: None,
             }),
             locale: None,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(Initialize::METHOD),
         };
         let _ = self.request_typed::<Initialize>(initialize_params)?;
         self.notify_typed::<Initialized>(InitializedParams {})?;
@@ -1058,7 +1287,7 @@ impl LspSessionHandle {
         self.notify_typed::<DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem::new(
                 path_to_uri(path)?,
-                self.session.language_id().to_owned(),
+                self.session.document_language_id_for_path(path).to_owned(),
                 version,
                 text.to_owned(),
             ),
@@ -1096,9 +1325,26 @@ impl LspSessionHandle {
     ) -> Result<Option<LspHoverContents>, LspClientError> {
         let response = self.request_typed::<HoverRequest>(HoverParams {
             text_document_position_params: text_document_position_params(path, position)?,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(HoverRequest::METHOD),
         })?;
         Ok(parse_hover_response(self.server_id(), &response))
+    }
+
+    fn signature_help(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<Option<LspSignatureHelpContents>, LspClientError> {
+        let response = match self.request_typed::<SignatureHelpRequest>(SignatureHelpParams {
+            context: None,
+            text_document_position_params: text_document_position_params(path, position)?,
+            work_done_progress_params: self.work_done_progress_params(SignatureHelpRequest::METHOD),
+        }) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        parse_signature_help_response(self.server_id(), &response)
     }
 
     fn completions(
@@ -1108,7 +1354,7 @@ impl LspSessionHandle {
     ) -> Result<Vec<LspCompletionItem>, LspClientError> {
         let response = self.request_typed::<Completion>(CompletionParams {
             text_document_position: text_document_position_params(path, position)?,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(Completion::METHOD),
             partial_result_params: PartialResultParams::default(),
             context: None,
         })?;
@@ -1122,7 +1368,7 @@ impl LspSessionHandle {
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<GotoDefinition>(GotoDefinitionParams {
             text_document_position_params: text_document_position_params(path, position)?,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(GotoDefinition::METHOD),
             partial_result_params: PartialResultParams::default(),
         })?;
         parse_definition_response(self.server_id(), &response)
@@ -1135,7 +1381,7 @@ impl LspSessionHandle {
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<References>(ReferenceParams {
             text_document_position: text_document_position_params(path, position)?,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(References::METHOD),
             partial_result_params: PartialResultParams::default(),
             context: ReferenceContext {
                 include_declaration: false,
@@ -1151,7 +1397,7 @@ impl LspSessionHandle {
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<GotoImplementation>(GotoDefinitionParams {
             text_document_position_params: text_document_position_params(path, position)?,
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(GotoImplementation::METHOD),
             partial_result_params: PartialResultParams::default(),
         })?;
         parse_definition_response(self.server_id(), &response)
@@ -1165,7 +1411,7 @@ impl LspSessionHandle {
         let response = match self.request_typed::<Formatting>(DocumentFormattingParams {
             text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
             options: lsp_formatting_options(options),
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(Formatting::METHOD),
         }) {
             Ok(response) => response,
             Err(error) if unsupported_lsp_request(&error) => return Ok(None),
@@ -1184,7 +1430,7 @@ impl LspSessionHandle {
             text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
             range: lsp_range_from_text_range(range),
             options: lsp_formatting_options(options),
-            work_done_progress_params: WorkDoneProgressParams::default(),
+            work_done_progress_params: self.work_done_progress_params(RangeFormatting::METHOD),
         }) {
             Ok(response) => response,
             Err(error) if unsupported_lsp_request(&error) => return Ok(None),
@@ -1229,6 +1475,10 @@ impl LspSessionHandle {
         self.request(R::METHOD, params)
     }
 
+    fn work_done_progress_params(&self, method: &str) -> WorkDoneProgressParams {
+        work_done_progress_params(&self.next_progress_token, method)
+    }
+
     fn notify(&self, method: &str, params: Value) -> Result<(), LspClientError> {
         self.send_message(&json!({
             "jsonrpc": "2.0",
@@ -1238,6 +1488,16 @@ impl LspSessionHandle {
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, LspClientError> {
+        let timeout = request_timeout_for_method(method);
+        self.request_with_timeout(method, params, timeout)
+    }
+
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, LspClientError> {
         let id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending
@@ -1256,7 +1516,7 @@ impl LspSessionHandle {
             }
             return Err(error);
         }
-        match receiver.recv_timeout(REQUEST_TIMEOUT) {
+        match receiver.recv_timeout(timeout) {
             Ok(result) => result,
             Err(_) => {
                 if let Ok(mut pending) = self.pending.lock() {
@@ -1314,6 +1574,7 @@ fn cleanup_unused_sessions(state: &mut LspClientState, removed_keys: &BTreeSet<S
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     server_id: String,
     stdout: impl Read + Send + 'static,
@@ -1322,9 +1583,11 @@ fn spawn_reader_thread(
     diagnostics: DiagnosticsByPath,
     disconnected: Arc<AtomicBool>,
     transport_log: TransportLog,
+    notifications: NotificationLog,
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
+        let mut progress_tracks = BTreeMap::<String, ProgressTrack>::new();
         loop {
             let message = match read_message(&mut reader) {
                 Ok(Some(message)) => message,
@@ -1389,13 +1652,30 @@ fn spawn_reader_thread(
                 }
                 continue;
             }
-            if object.get("method").and_then(Value::as_str)
-                == Some("textDocument/publishDiagnostics")
-                && let Some(params) = object.get("params")
-                && let Some((path, parsed)) = parse_publish_diagnostics(params)
-                && let Ok(mut guard) = diagnostics.lock()
-            {
-                guard.insert(path, parsed);
+            if let Some(method) = object.get("method").and_then(Value::as_str) {
+                if method == "textDocument/publishDiagnostics"
+                    && let Some(params) = object.get("params")
+                    && let Some((path, parsed)) = parse_publish_diagnostics(params)
+                    && let Ok(mut guard) = diagnostics.lock()
+                {
+                    guard.insert(path, parsed);
+                    continue;
+                }
+                if method == "$/progress"
+                    && let Some(params) = object.get("params")
+                    && let Some(notification) =
+                        parse_progress_notification(&server_id, params, &mut progress_tracks)
+                {
+                    record_notification(&notifications, notification);
+                    continue;
+                }
+                if method == "window/showMessage"
+                    && let Some(params) = object.get("params")
+                    && let Some(notification) = parse_show_message_notification(&server_id, params)
+                {
+                    record_notification(&notifications, notification);
+                    continue;
+                }
             }
         }
         disconnected.store(true, Ordering::Release);
@@ -1416,6 +1696,230 @@ fn configure_lsp_command(command: &mut Command) {
 
         command.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+fn spawn_lsp_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> std::io::Result<Child> {
+    let mut spawn_result = build_lsp_command(program, args, cwd, env, None).spawn();
+    #[cfg(windows)]
+    {
+        let should_retry = matches!(
+            &spawn_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry {
+            for candidate in windows_launch_program_candidates(program) {
+                spawn_result = build_lsp_command(&candidate, args, cwd, env, None).spawn();
+                match &spawn_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        let should_retry_with_fnm = matches!(
+            &spawn_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry_with_fnm && let Some(fnm_env) = windows_fnm_environment(cwd, env) {
+            for candidate in windows_fnm_launch_program_candidates(program, &fnm_env) {
+                spawn_result =
+                    build_lsp_command(&candidate, args, cwd, env, Some(&fnm_env)).spawn();
+                match &spawn_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    spawn_result
+}
+
+fn build_lsp_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
+    #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
+) -> Command {
+    let mut command = Command::new(program);
+    configure_lsp_command(&mut command);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    if let Some(fnm_env) = fnm_env {
+        apply_windows_fnm_environment(&mut command, env, fnm_env);
+    } else {
+        apply_command_environment(&mut command, env);
+    }
+    #[cfg(not(windows))]
+    apply_command_environment(&mut command, env);
+    command
+}
+
+fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+#[cfg(windows)]
+fn windows_launch_program_candidates(program: &str) -> Vec<String> {
+    if Path::new(program).extension().is_some() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for extension in windows_command_extensions() {
+        let candidate = format!("{program}{extension}");
+        if candidate != program && !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
+}
+
+#[cfg(windows)]
+fn windows_command_extensions() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .ok()
+        .map(|value| {
+            value
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".com", ".exe", ".bat", ".cmd"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+#[cfg(windows)]
+fn windows_fnm_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let mut command = Command::new("fnm");
+    configure_lsp_command(&mut command);
+    command
+        .args(["env", "--shell", "cmd"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    apply_command_environment(&mut command, env);
+    let output = command.output().ok()?;
+    output.status.success().then_some(())?;
+    parse_windows_cmd_environment(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(windows)]
+fn windows_fnm_launch_program_candidates(
+    program: &str,
+    fnm_env: &[(String, String)],
+) -> Vec<String> {
+    if Path::new(program).components().count() != 1 {
+        return Vec::new();
+    }
+
+    let names = windows_launch_program_candidates(program)
+        .into_iter()
+        .chain(std::iter::once(program.to_owned()))
+        .collect::<Vec<_>>();
+    let Some(path_value) = explicit_windows_env_value(fnm_env, "PATH") else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for directory in path_value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        for name in &names {
+            let candidate = Path::new(directory).join(name);
+            if candidate.is_file() {
+                let candidate = candidate.to_string_lossy().into_owned();
+                if !candidates.iter().any(|existing| existing == &candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> {
+    let vars = output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("SET ")?;
+            let (key, value) = rest.split_once('=')?;
+            (!key.is_empty()).then_some((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(windows)]
+fn apply_windows_fnm_environment(
+    command: &mut Command,
+    env: &[(String, String)],
+    fnm_env: &[(String, String)],
+) {
+    let explicit_path = explicit_windows_env_value(env, "PATH");
+    let mut applied_path = false;
+    for (key, value) in fnm_env {
+        if key.eq_ignore_ascii_case("PATH") {
+            let merged_path = explicit_path
+                .map(|path| format!("{value};{path}"))
+                .unwrap_or_else(|| value.clone());
+            command.env(key, merged_path);
+            applied_path = true;
+            continue;
+        }
+        command.env(key, value);
+    }
+    for (key, value) in env {
+        if !key.eq_ignore_ascii_case("PATH") {
+            command.env(key, value);
+        }
+    }
+    if !applied_path && let Some(path) = explicit_path {
+        command.env("PATH", path);
+    }
+}
+
+#[cfg(windows)]
+fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a String> {
+    env.iter()
+        .find_map(|(entry_key, value)| entry_key.eq_ignore_ascii_case(key).then_some(value))
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, LspClientError> {
@@ -1524,6 +2028,266 @@ fn record_transport_entry(transport_log: &TransportLog, entry: LspLogEntry) {
     }
 }
 
+fn record_notification(notifications: &NotificationLog, notification: LspNotification) {
+    if let Ok(mut log) = notifications.lock() {
+        log.record(notification);
+    }
+}
+
+fn session_notification_key(server_id: &str, root: Option<&Path>) -> String {
+    match root {
+        Some(root) => format!("session:{server_id}:{}", root.display()),
+        None => format!("session:{server_id}:global"),
+    }
+}
+
+fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
+    serde_json::from_value::<ClientCapabilities>(json!({
+        "workspace": {
+            "configuration": true,
+            "workspaceFolders": true
+        },
+        "window": {
+            "workDoneProgress": true
+        },
+        "textDocument": {
+            "hover": {
+                "contentFormat": ["markdown", "plaintext"]
+            },
+            "signatureHelp": {
+                "signatureInformation": {
+                    "documentationFormat": ["markdown", "plaintext"],
+                    "parameterInformation": {
+                        "labelOffsetSupport": true
+                    },
+                    "activeParameterSupport": true
+                }
+            },
+            "completion": {
+                "completionItem": {
+                    "documentationFormat": ["markdown", "plaintext"],
+                    "snippetSupport": false
+                }
+            },
+            "formatting": {
+                "dynamicRegistration": false
+            },
+            "rangeFormatting": {
+                "dynamicRegistration": false
+            },
+            "publishDiagnostics": {
+                "relatedInformation": false
+            },
+            "synchronization": {
+                "didSave": true
+            }
+        }
+    }))
+    .map_err(|error| {
+        LspClientError::Protocol(format!("failed to build LSP client capabilities: {error}"))
+    })
+}
+
+fn work_done_progress_params(
+    next_progress_token: &AtomicU64,
+    method: &str,
+) -> WorkDoneProgressParams {
+    let token = next_progress_token.fetch_add(1, Ordering::AcqRel);
+    WorkDoneProgressParams {
+        work_done_token: Some(NumberOrString::String(format!("progress:{method}:{token}"))),
+    }
+}
+
+fn request_timeout_for_method(method: &str) -> Duration {
+    if method == Initialize::METHOD {
+        INITIALIZE_REQUEST_TIMEOUT
+    } else {
+        REQUEST_TIMEOUT
+    }
+}
+
+fn session_lifecycle_notification(
+    server_id: &str,
+    root: Option<&Path>,
+    level: LspNotificationLevel,
+    body_lines: Vec<String>,
+    active: bool,
+) -> LspNotification {
+    let mut lines = body_lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if let Some(root) = root {
+        lines.push(root.display().to_string());
+    }
+    LspNotification::new(
+        session_notification_key(server_id, root),
+        server_id,
+        level,
+        format!("LSP · {server_id}"),
+        lines,
+        None,
+        active,
+    )
+}
+
+fn progress_notification_key(server_id: &str, token: &str) -> String {
+    format!("progress:{server_id}:{token}")
+}
+
+fn parse_progress_token_key(value: Option<&Value>) -> Option<String> {
+    let token = value?;
+    if let Some(token) = token.as_str() {
+        return Some(token.to_owned());
+    }
+    token.as_u64().map(|token| token.to_string())
+}
+
+fn parse_optional_progress_text(value: Option<&Value>) -> Option<Option<String>> {
+    value.map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn parse_progress_percentage(value: Option<&Value>) -> Option<Option<u32>> {
+    value.map(|value| {
+        value
+            .as_u64()
+            .and_then(|percentage| u32::try_from(percentage.min(100)).ok())
+    })
+}
+
+fn progress_body_lines(track: &ProgressTrack) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(title) = track.title.as_deref() {
+        lines.push(title.to_owned());
+    }
+    if let Some(message) = track.message.as_deref()
+        && lines.last().is_none_or(|title| title != message)
+    {
+        lines.push(message.to_owned());
+    }
+    if lines.is_empty() {
+        lines.push("Working".to_owned());
+    }
+    lines
+}
+
+fn completion_level_for_message(message: Option<&str>) -> LspNotificationLevel {
+    let Some(message) = message else {
+        return LspNotificationLevel::Success;
+    };
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("fail") || normalized.contains("error") {
+        LspNotificationLevel::Error
+    } else if normalized.contains("warn") {
+        LspNotificationLevel::Warning
+    } else {
+        LspNotificationLevel::Success
+    }
+}
+
+fn parse_progress_notification(
+    server_id: &str,
+    params: &Value,
+    progress_tracks: &mut BTreeMap<String, ProgressTrack>,
+) -> Option<LspNotification> {
+    let token = parse_progress_token_key(params.get("token"))?;
+    let value = params.get("value")?;
+    let kind = value.get("kind")?.as_str()?;
+    match kind {
+        "begin" => {
+            let title = parse_optional_progress_text(value.get("title")).flatten();
+            let message = parse_optional_progress_text(value.get("message")).flatten();
+            let percentage = parse_progress_percentage(value.get("percentage")).flatten();
+            let track = ProgressTrack {
+                title,
+                message,
+                percentage,
+            };
+            let progress = track.percentage.map(Some).unwrap_or(None);
+            let body_lines = progress_body_lines(&track);
+            progress_tracks.insert(token.clone(), track);
+            Some(LspNotification::new(
+                progress_notification_key(server_id, &token),
+                server_id,
+                LspNotificationLevel::Info,
+                format!("LSP · {server_id}"),
+                body_lines,
+                Some(LspNotificationProgress::new(progress)),
+                true,
+            ))
+        }
+        "report" => {
+            let track = progress_tracks.entry(token.clone()).or_default();
+            if let Some(title) = parse_optional_progress_text(value.get("title")) {
+                track.title = title;
+            }
+            if let Some(message) = parse_optional_progress_text(value.get("message")) {
+                track.message = message;
+            }
+            if let Some(percentage) = parse_progress_percentage(value.get("percentage")) {
+                track.percentage = percentage;
+            }
+            Some(LspNotification::new(
+                progress_notification_key(server_id, &token),
+                server_id,
+                LspNotificationLevel::Info,
+                format!("LSP · {server_id}"),
+                progress_body_lines(track),
+                Some(LspNotificationProgress::new(track.percentage)),
+                true,
+            ))
+        }
+        "end" => {
+            let mut track = progress_tracks.remove(&token).unwrap_or_default();
+            if let Some(message) = parse_optional_progress_text(value.get("message")) {
+                track.message = message;
+            }
+            Some(LspNotification::new(
+                progress_notification_key(server_id, &token),
+                server_id,
+                completion_level_for_message(track.message.as_deref()),
+                format!("LSP · {server_id}"),
+                progress_body_lines(&track),
+                track
+                    .percentage
+                    .map(|percentage| LspNotificationProgress::new(Some(percentage))),
+                false,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn parse_show_message_notification(server_id: &str, params: &Value) -> Option<LspNotification> {
+    let level = match params.get("type").and_then(Value::as_u64) {
+        Some(1) => LspNotificationLevel::Error,
+        Some(2) => LspNotificationLevel::Warning,
+        Some(3) | Some(4) => LspNotificationLevel::Info,
+        _ => LspNotificationLevel::Info,
+    };
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())?
+        .to_owned();
+    Some(LspNotification::new(
+        format!("message:{server_id}:{level:?}:{message}"),
+        server_id,
+        level,
+        format!("LSP · {server_id}"),
+        vec![message],
+        None,
+        false,
+    ))
+}
+
 fn server_request_response(method: Option<&Value>, params: Option<&Value>) -> Value {
     match method.and_then(Value::as_str) {
         Some("workspace/configuration") => {
@@ -1595,6 +2359,23 @@ fn parse_hover_response(server_id: &str, value: &Value) -> Option<LspHoverConten
     let contents = value.get("contents")?;
     let lines = hover_lines(contents);
     (!lines.is_empty()).then(|| LspHoverContents::new(server_id, lines))
+}
+
+fn parse_signature_help_response(
+    server_id: &str,
+    value: &Value,
+) -> Result<Option<LspSignatureHelpContents>, LspClientError> {
+    let signature_help =
+        serde_json::from_value::<Option<SignatureHelp>>(value.clone()).map_err(|error| {
+            LspClientError::Protocol(format!(
+                "failed to decode signature help response from `{server_id}`: {error}"
+            ))
+        })?;
+    let Some(signature_help) = signature_help else {
+        return Ok(None);
+    };
+    let lines = signature_help_lines(&signature_help);
+    Ok((!lines.is_empty()).then(|| LspSignatureHelpContents::new(server_id, lines)))
 }
 
 fn parse_definition_response(
@@ -1676,6 +2457,96 @@ fn hover_lines(value: &Value) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+fn signature_help_lines(signature_help: &SignatureHelp) -> Vec<String> {
+    if signature_help.signatures.is_empty() {
+        return Vec::new();
+    }
+    let active_signature_index = signature_help
+        .active_signature
+        .map(|index| index as usize)
+        .filter(|index| *index < signature_help.signatures.len())
+        .unwrap_or(0);
+    let active_signature = &signature_help.signatures[active_signature_index];
+    let active_parameter_index = active_signature
+        .active_parameter
+        .or(signature_help.active_parameter)
+        .map(|index| index as usize);
+    let mut lines = vec![active_signature.label.clone()];
+    if signature_help.signatures.len() > 1 {
+        lines.push(format!(
+            "Overload {}/{}",
+            active_signature_index + 1,
+            signature_help.signatures.len()
+        ));
+    }
+    if let Some(parameter_label) =
+        active_parameter_index.and_then(|index| active_parameter_label(active_signature, index))
+    {
+        lines.push(format!("Parameter: {parameter_label}"));
+    }
+    if let Some(parameter_documentation) = active_parameter_index
+        .and_then(|index| {
+            active_signature
+                .parameters
+                .as_ref()
+                .and_then(|parameters| parameters.get(index))
+        })
+        .and_then(|parameter| parameter.documentation.as_ref())
+    {
+        lines.extend(documentation_lines(parameter_documentation));
+    }
+    if let Some(documentation) = active_signature.documentation.as_ref() {
+        lines.extend(documentation_lines(documentation));
+    }
+    lines
+}
+
+fn active_parameter_label(
+    signature: &lsp_types::SignatureInformation,
+    active_parameter_index: usize,
+) -> Option<String> {
+    let parameter = signature.parameters.as_ref()?.get(active_parameter_index)?;
+    parameter_label_text(&parameter.label, &signature.label)
+}
+
+fn parameter_label_text(label: &ParameterLabel, signature_label: &str) -> Option<String> {
+    match label {
+        ParameterLabel::Simple(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        ParameterLabel::LabelOffsets([start, end]) => {
+            let label = string_slice_by_chars(signature_label, *start as usize, *end as usize)?
+                .trim()
+                .to_owned();
+            (!label.is_empty()).then_some(label)
+        }
+    }
+}
+
+fn documentation_lines(documentation: &Documentation) -> Vec<String> {
+    match documentation {
+        Documentation::String(text) => normalize_lines(text),
+        Documentation::MarkupContent(content) => normalize_lines(&content.value),
+    }
+}
+
+fn string_slice_by_chars(text: &str, start: usize, end: usize) -> Option<&str> {
+    if start > end {
+        return None;
+    }
+    let start_byte = char_to_byte_offset(text, start)?;
+    let end_byte = char_to_byte_offset(text, end)?;
+    text.get(start_byte..end_byte)
+}
+
+fn char_to_byte_offset(text: &str, char_index: usize) -> Option<usize> {
+    if char_index == text.chars().count() {
+        return Some(text.len());
+    }
+    text.char_indices().nth(char_index).map(|(index, _)| index)
 }
 
 fn location_from_lsp(server_id: &str, location: &Location) -> Option<LspLocation> {
@@ -1940,6 +2811,15 @@ fn percent_decode(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn temp_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("volt-fnm-lsp-{unique}"))
+    }
+
     #[test]
     fn completion_parser_handles_lists_and_docs() {
         let response = json!({
@@ -1977,6 +2857,103 @@ mod tests {
                 .lines()
                 .iter()
                 .any(|line| line.contains("Sample docs"))
+        );
+    }
+
+    #[test]
+    fn signature_help_parser_surfaces_active_parameter_and_docs() {
+        let response = json!({
+            "signatures": [
+                {
+                    "label": "do_thing(value: String)",
+                    "documentation": "Fallback overload"
+                },
+                {
+                    "label": "do_thing(value: String, count: usize)",
+                    "documentation": {
+                        "kind": "markdown",
+                        "value": "Formats the value multiple times."
+                    },
+                    "parameters": [
+                        {
+                            "label": "value: String",
+                            "documentation": "Value to format."
+                        },
+                        {
+                            "label": "count: usize",
+                            "documentation": {
+                                "kind": "markdown",
+                                "value": "Number of repetitions."
+                            }
+                        }
+                    ],
+                    "activeParameter": 1
+                }
+            ],
+            "activeSignature": 1,
+            "activeParameter": 0
+        });
+        let signature_help = parse_signature_help_response("rust-analyzer", &response)
+            .expect("signature help response")
+            .expect("signature help");
+        assert_eq!(signature_help.server_id(), "rust-analyzer");
+        assert_eq!(
+            signature_help.lines()[0],
+            "do_thing(value: String, count: usize)"
+        );
+        assert!(
+            signature_help
+                .lines()
+                .iter()
+                .any(|line| line == "Overload 2/2")
+        );
+        assert!(
+            signature_help
+                .lines()
+                .iter()
+                .any(|line| line == "Parameter: count: usize")
+        );
+        assert!(
+            signature_help
+                .lines()
+                .iter()
+                .any(|line| line.contains("Number of repetitions"))
+        );
+        assert!(
+            signature_help
+                .lines()
+                .iter()
+                .any(|line| line.contains("Formats the value multiple times"))
+        );
+    }
+
+    #[test]
+    fn signature_help_parser_supports_label_offsets() {
+        let response = json!({
+            "signatures": [
+                {
+                    "label": "call(alpha, beta)",
+                    "parameters": [
+                        {
+                            "label": [5, 10]
+                        },
+                        {
+                            "label": [12, 16]
+                        }
+                    ]
+                }
+            ],
+            "activeSignature": 0,
+            "activeParameter": 1
+        });
+        let signature_help = parse_signature_help_response("rust-analyzer", &response)
+            .expect("signature help response")
+            .expect("signature help");
+        assert!(
+            signature_help
+                .lines()
+                .iter()
+                .any(|line| line == "Parameter: beta")
         );
     }
 
@@ -2125,5 +3102,311 @@ mod tests {
         assert_eq!(snapshot.entries().len(), 2);
         assert_eq!(snapshot.entries()[0].direction(), LspLogDirection::Outgoing);
         assert_eq!(snapshot.entries()[1].direction(), LspLogDirection::Incoming);
+    }
+
+    #[test]
+    fn notification_log_snapshot_is_bounded_and_tracks_revision() {
+        let mut log = LspNotificationLog::new(2);
+        log.record(LspNotification::new(
+            "session:rust-analyzer:global",
+            "rust-analyzer",
+            LspNotificationLevel::Info,
+            "LSP · rust-analyzer",
+            vec!["Starting".to_owned()],
+            None,
+            true,
+        ));
+        log.record(LspNotification::new(
+            "progress:rust-analyzer:token-1",
+            "rust-analyzer",
+            LspNotificationLevel::Info,
+            "LSP · rust-analyzer",
+            vec!["Indexing".to_owned()],
+            Some(LspNotificationProgress::new(Some(25))),
+            true,
+        ));
+        log.record(LspNotification::new(
+            "session:rust-analyzer:global",
+            "rust-analyzer",
+            LspNotificationLevel::Success,
+            "LSP · rust-analyzer",
+            vec!["Ready".to_owned()],
+            None,
+            false,
+        ));
+
+        let snapshot = log.snapshot();
+        assert_eq!(snapshot.revision(), 3);
+        assert_eq!(snapshot.entries().len(), 2);
+        assert_eq!(
+            snapshot.entries()[0].notification().key(),
+            "progress:rust-analyzer:token-1"
+        );
+        assert_eq!(
+            snapshot.entries()[1].notification().level(),
+            LspNotificationLevel::Success
+        );
+    }
+
+    #[test]
+    fn progress_notifications_update_existing_track() {
+        let begin = json!({
+            "token": "rust-analyzer/index",
+            "value": {
+                "kind": "begin",
+                "title": "Indexing",
+                "message": "Scanning workspace",
+                "percentage": 12
+            }
+        });
+        let report = json!({
+            "token": "rust-analyzer/index",
+            "value": {
+                "kind": "report",
+                "message": "Building symbol graph",
+                "percentage": 58
+            }
+        });
+        let end = json!({
+            "token": "rust-analyzer/index",
+            "value": {
+                "kind": "end",
+                "message": "Indexed workspace"
+            }
+        });
+        let mut tracks = BTreeMap::new();
+
+        let begin = parse_progress_notification("rust-analyzer", &begin, &mut tracks)
+            .expect("begin progress notification");
+        assert!(begin.active());
+        assert_eq!(begin.body_lines(), ["Indexing", "Scanning workspace"]);
+        assert_eq!(
+            begin
+                .progress()
+                .and_then(LspNotificationProgress::percentage),
+            Some(12)
+        );
+
+        let report = parse_progress_notification("rust-analyzer", &report, &mut tracks)
+            .expect("report progress notification");
+        assert!(report.active());
+        assert_eq!(report.body_lines(), ["Indexing", "Building symbol graph"]);
+        assert_eq!(
+            report
+                .progress()
+                .and_then(LspNotificationProgress::percentage),
+            Some(58)
+        );
+
+        let end = parse_progress_notification("rust-analyzer", &end, &mut tracks)
+            .expect("end progress notification");
+        assert!(!end.active());
+        assert_eq!(
+            end.progress().and_then(LspNotificationProgress::percentage),
+            Some(58)
+        );
+        assert_eq!(end.body_lines(), ["Indexing", "Indexed workspace"]);
+        assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn client_capabilities_enable_window_work_done_progress() {
+        let capabilities = client_capabilities().expect("client capabilities");
+        assert_eq!(
+            capabilities
+                .window
+                .and_then(|window| window.work_done_progress),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn work_done_progress_params_generate_unique_tokens() {
+        let next_progress_token = std::sync::atomic::AtomicU64::new(1);
+        let hover = work_done_progress_params(&next_progress_token, HoverRequest::METHOD);
+        let signature =
+            work_done_progress_params(&next_progress_token, SignatureHelpRequest::METHOD);
+
+        assert_eq!(
+            hover.work_done_token,
+            Some(lsp_types::NumberOrString::String(format!(
+                "progress:{}:1",
+                HoverRequest::METHOD
+            )))
+        );
+        assert_eq!(
+            signature.work_done_token,
+            Some(lsp_types::NumberOrString::String(format!(
+                "progress:{}:2",
+                SignatureHelpRequest::METHOD
+            )))
+        );
+    }
+
+    #[test]
+    fn initialize_request_timeout_is_extended() {
+        assert_eq!(
+            request_timeout_for_method(Initialize::METHOD),
+            INITIALIZE_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            request_timeout_for_method(HoverRequest::METHOD),
+            REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn session_labels_ignore_stale_tracked_session_keys() {
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        let path = PathBuf::from("src\\main.rs");
+        let mut tracked = TrackedBufferState {
+            revision: 1,
+            version: 1,
+            ..TrackedBufferState::default()
+        };
+        tracked.sessions.insert(SessionKey {
+            server_id: "rust-analyzer".to_owned(),
+            root: None,
+        });
+        manager
+            .state
+            .lock()
+            .expect("state lock")
+            .tracked_buffers
+            .insert(path.clone(), tracked);
+
+        assert!(manager.session_labels_for_path(&path).is_empty());
+        assert!(!manager.has_live_sessions_for_path(&path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launch_program_candidates_include_command_shims() {
+        let candidates = windows_launch_program_candidates("vscode-json-language-server");
+        assert!(candidates.contains(&"vscode-json-language-server.cmd".to_owned()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_parse_cmd_environment_extracts_variables() {
+        let env = parse_windows_cmd_environment(
+            "SET PATH=C:\\fnm;C:\\tools\r\nSET FNM_DIR=C:\\Users\\sam\\AppData\\Roaming\\fnm\r\n",
+        )
+        .expect("fnm env should parse");
+        assert_eq!(
+            env,
+            vec![
+                ("PATH".to_owned(), "C:\\fnm;C:\\tools".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fnm_environment_keeps_fnm_path_ahead_of_explicit_path() {
+        let command = build_lsp_command(
+            "node",
+            &["--version".to_owned()],
+            None,
+            &[
+                ("PATH".to_owned(), "C:\\custom".to_owned()),
+                ("NODE_OPTIONS".to_owned(), "--trace-warnings".to_owned()),
+            ],
+            Some(&[
+                ("PATH".to_owned(), "C:\\fnm".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned(),
+                ),
+            ]),
+        );
+        let vars = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            vars.get("PATH").map(String::as_str),
+            Some("C:\\fnm;C:\\custom")
+        );
+        assert_eq!(
+            vars.get("FNM_DIR").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\fnm")
+        );
+        assert_eq!(
+            vars.get("NODE_OPTIONS").map(String::as_str),
+            Some("--trace-warnings")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_should_retry_invalid_exe_format() {
+        let error = std::io::Error::from_raw_os_error(193);
+        assert!(windows_should_retry_spawn_error(&error));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fnm_launch_program_candidates_resolve_absolute_command_shims() {
+        let temp_dir = temp_dir();
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let candidate_path = temp_dir.join("vscode-json-language-server.cmd");
+        std::fs::write(&candidate_path, "@echo off\r\n").expect("candidate");
+
+        let candidates = windows_fnm_launch_program_candidates(
+            "vscode-json-language-server",
+            &[("PATH".to_owned(), temp_dir.to_string_lossy().into_owned())],
+        );
+        assert!(candidates.contains(&candidate_path.to_string_lossy().into_owned()));
+
+        let _ = std::fs::remove_file(candidate_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fnm_launch_program_candidates_prefer_windows_shims_over_extensionless_scripts() {
+        let temp_dir = temp_dir();
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let script_path = temp_dir.join("typescript-language-server");
+        let shim_path = temp_dir.join("typescript-language-server.cmd");
+        std::fs::write(&script_path, "#!/bin/sh\n").expect("script");
+        std::fs::write(&shim_path, "@echo off\r\n").expect("shim");
+
+        let candidates = windows_fnm_launch_program_candidates(
+            "typescript-language-server",
+            &[("PATH".to_owned(), temp_dir.to_string_lossy().into_owned())],
+        );
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some(shim_path.to_string_lossy().as_ref())
+        );
+        assert!(candidates.contains(&script_path.to_string_lossy().into_owned()));
+
+        let _ = std::fs::remove_file(script_path);
+        let _ = std::fs::remove_file(shim_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn show_message_notifications_map_severity_levels() {
+        let params = json!({
+            "type": 1,
+            "message": "failed to load workspace"
+        });
+        let notification =
+            parse_show_message_notification("rust-analyzer", &params).expect("notification");
+        assert_eq!(notification.level(), LspNotificationLevel::Error);
+        assert_eq!(notification.body_lines(), ["failed to load workspace"]);
+        assert!(!notification.active());
     }
 }

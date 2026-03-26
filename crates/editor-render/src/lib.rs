@@ -77,6 +77,14 @@ pub enum DrawCommand {
         radius: u32,
         color: RenderColor,
     },
+    /// Draws a diagnostic undercurl at the given text baseline.
+    Undercurl {
+        x: i32,
+        y: i32,
+        width: u32,
+        line_height: u32,
+        color: RenderColor,
+    },
     /// Draws a text run at the given origin.
     Text {
         x: i32,

@@ -81,8 +81,14 @@ pub fn packages() -> Vec<PluginPackage> {
         git::package(),
         terminal::package(),
         vim::package(),
-        lang::rust::package(),
+        lang::csharp::package(),
+        lang::javascript::package(),
+        lang::json::package(),
         lang::markdown::package(),
+        lang::rust::package(),
+        lang::toml::package(),
+        lang::typescript::package(),
+        lang::yaml::package(),
     ]
 }
 
@@ -108,8 +114,16 @@ pub fn themes() -> Vec<Theme> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{debug_adapters, language_servers, packages, syntax_languages, themes};
-    use editor_syntax::LanguageConfiguration;
+    use crate::lsp::{
+        SERVER_CSHARP_LS, SERVER_MARKSMAN, SERVER_RUST_ANALYZER, SERVER_TOMBI,
+        SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
+        SERVER_YAML_LANGUAGE_SERVER,
+    };
+    use editor_buffer::TextBuffer;
+    use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
 
     fn mapped_theme_token<'a>(
         language: &'a LanguageConfiguration,
@@ -120,6 +134,16 @@ mod tests {
             .iter()
             .find(|mapping| mapping.capture_name() == capture)
             .map(|mapping| mapping.theme_token())
+    }
+
+    fn language_extensions(
+        languages: &[LanguageConfiguration],
+        language_id: &str,
+    ) -> Option<Vec<String>> {
+        languages
+            .iter()
+            .find(|language| language.id() == language_id)
+            .map(|language| language.file_extensions().to_vec())
     }
 
     #[test]
@@ -141,51 +165,111 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 4);
+        assert!(languages.len() >= 12);
         let ids = languages
             .iter()
             .map(|language| language.id())
             .collect::<Vec<_>>();
+        assert!(ids.contains(&"csharp"));
         assert!(ids.contains(&"rust"));
         assert!(ids.contains(&"gitcommit"));
+        assert!(ids.contains(&"javascript"));
+        assert!(ids.contains(&"jsx"));
+        assert!(ids.contains(&"json"));
         assert!(ids.contains(&"markdown"));
         assert!(ids.contains(&"markdown-inline"));
-        let rust = languages.iter().find(|language| language.id() == "rust");
+        assert!(ids.contains(&"toml"));
+        assert!(ids.contains(&"typescript"));
+        assert!(ids.contains(&"tsx"));
+        assert!(ids.contains(&"yaml"));
+
         assert_eq!(
-            rust.map(|language| {
-                language
-                    .file_extensions()
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-            }),
-            Some(vec!["rs"])
+            language_extensions(&languages, "csharp"),
+            Some(vec!["cs".to_owned()])
         );
-        let markdown = languages
-            .iter()
-            .find(|language| language.id() == "markdown");
         assert_eq!(
-            markdown.map(|language| {
-                language
-                    .file_extensions()
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-            }),
-            Some(vec!["md", "markdown"])
+            language_extensions(&languages, "rust"),
+            Some(vec!["rs".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "javascript"),
+            Some(vec!["js".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "jsx"),
+            Some(vec!["jsx".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "json"),
+            Some(vec!["json".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "markdown"),
+            Some(vec!["md".to_owned(), "markdown".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "toml"),
+            Some(vec!["toml".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "typescript"),
+            Some(vec!["ts".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "tsx"),
+            Some(vec!["tsx".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "yaml"),
+            Some(vec!["yaml".to_owned(), "yml".to_owned()])
         );
     }
 
     #[test]
     fn user_library_exports_lsp_and_dap_defaults() {
         let servers = language_servers();
+        let server_ids = servers.iter().map(|server| server.id()).collect::<Vec<_>>();
         let adapters = debug_adapters();
 
-        assert_eq!(servers.len(), 2);
-        assert_eq!(servers[0].id(), "rust-analyzer");
-        assert_eq!(servers[1].id(), "marksman");
+        assert_eq!(servers.len(), 7);
+        assert!(server_ids.contains(&SERVER_RUST_ANALYZER));
+        assert!(server_ids.contains(&SERVER_MARKSMAN));
+        assert!(server_ids.contains(&SERVER_CSHARP_LS));
+        assert!(server_ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_TOMBI));
+        assert!(server_ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].id(), "codelldb");
+
+        let typescript = servers
+            .iter()
+            .find(|server| server.id() == SERVER_TYPESCRIPT_LANGUAGE_SERVER)
+            .expect("typescript-language-server missing");
+        assert_eq!(
+            typescript
+                .file_extensions()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["ts", "tsx", "js", "jsx"]
+        );
+        assert_eq!(
+            typescript.document_language_id_for_extension(".ts"),
+            "typescript"
+        );
+        assert_eq!(
+            typescript.document_language_id_for_extension(".tsx"),
+            "typescriptreact"
+        );
+        assert_eq!(
+            typescript.document_language_id_for_extension(".js"),
+            "javascript"
+        );
+        assert_eq!(
+            typescript.document_language_id_for_extension(".jsx"),
+            "javascriptreact"
+        );
     }
 
     #[test]
@@ -214,7 +298,22 @@ mod tests {
     #[test]
     fn user_library_themes_cover_core_editor_ui_tokens() {
         let themes = themes();
-        const TOKENS: &[&str] = &["ui.cursor", "ui.selection", "ui.yank-flash"];
+        const TOKENS: &[&str] = &[
+            "ui.cursor",
+            "ui.selection",
+            "ui.yank-flash",
+            "ui.notification.background",
+            "ui.notification.foreground",
+            "ui.notification.title",
+            "ui.notification.muted",
+            "ui.notification.border",
+            "ui.notification.progress.background",
+            "ui.notification.progress.fill",
+            "ui.notification.info",
+            "ui.notification.success",
+            "ui.notification.warning",
+            "ui.notification.error",
+        ];
         for theme in themes {
             for token in TOKENS {
                 assert!(
@@ -279,12 +378,16 @@ mod tests {
             Some("syntax.text.title")
         );
         assert_eq!(
-            mapped_theme_token(markdown, "punctuation.special"),
-            Some("syntax.punctuation.special")
+            mapped_theme_token(markdown, "text.literal"),
+            Some("syntax.text.literal")
         );
         assert_eq!(
-            mapped_theme_token(markdown, "string.escape"),
-            Some("syntax.string.escape")
+            mapped_theme_token(markdown, "text.uri"),
+            Some("syntax.text.uri")
+        );
+        assert_eq!(
+            mapped_theme_token(markdown, "punctuation.special"),
+            Some("syntax.punctuation.special")
         );
         assert_eq!(
             mapped_theme_token(markdown_inline, "text.emphasis"),
@@ -310,5 +413,43 @@ mod tests {
             mapped_theme_token(gitcommit, "variable.parameter"),
             Some("syntax.variable.parameter")
         );
+    }
+
+    #[test]
+    fn tsx_highlight_query_compiles() {
+        let install_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("lang")
+            .join("grammars");
+        let mut registry = SyntaxRegistry::with_install_root(install_root);
+        for language in syntax_languages()
+            .into_iter()
+            .filter(|language| matches!(language.id(), "typescript" | "tsx"))
+        {
+            registry
+                .register(language)
+                .expect("registering TypeScript language");
+        }
+
+        if registry
+            .is_installed("typescript")
+            .expect("checking TypeScript install")
+        {
+            registry
+                .highlight_buffer_for_language(
+                    "typescript",
+                    &TextBuffer::from_text(
+                        "const describe = ({ title }: { title: string }) => title;\n",
+                    ),
+                )
+                .expect("typescript query should compile");
+        }
+        registry
+            .highlight_buffer_for_language(
+                "tsx",
+                &TextBuffer::from_text(
+                    "const App = ({ title }: { title: string }) => <div>{title}</div>;\n",
+                ),
+            )
+            .expect("tsx query should compile");
     }
 }

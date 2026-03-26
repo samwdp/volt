@@ -1,0 +1,2800 @@
+use super::*;
+use editor_lsp::LspLogDirection;
+use sdl3::mouse::MouseState;
+
+#[derive(Debug, Default)]
+struct CommandLog(Vec<String>);
+
+fn slice_by_columns(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
+}
+
+fn syntax_span_segments(line: &str, spans: &[LineSyntaxSpan]) -> Vec<(String, String)> {
+    spans
+        .iter()
+        .map(|span| {
+            (
+                span.theme_token.clone(),
+                slice_by_columns(line, span.start, span.end),
+            )
+        })
+        .collect()
+}
+
+fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!(
+        "volt-shell-tests-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to create temp dir `{}`: {error}", dir.display()));
+    dir
+}
+
+#[test]
+fn keydown_chord_maps_alt_x() {
+    assert_eq!(
+        keydown_chord(Keycode::X, Mod::LALTMOD).as_deref(),
+        Some("Alt+x")
+    );
+}
+
+#[test]
+fn terminal_key_for_event_maps_special_keys() {
+    assert_eq!(
+        terminal_key_for_event(Keycode::Tab, Mod::LSHIFTMOD),
+        Some(TerminalKey::BackTab)
+    );
+    assert_eq!(
+        terminal_key_for_event(Keycode::C, ctrl_mod()),
+        Some(TerminalKey::CtrlC)
+    );
+    assert_eq!(
+        terminal_key_for_event(Keycode::PageDown, Mod::NOMOD),
+        Some(TerminalKey::PageDown)
+    );
+}
+
+#[test]
+fn terminal_buffers_are_read_only_without_prompt_input() {
+    let (read_only, input) = buffer_interaction(&BufferKind::Terminal);
+    assert!(read_only);
+    assert!(input.is_none());
+}
+
+#[test]
+fn directory_view_state_uses_user_oil_defaults() {
+    let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new());
+    let defaults = user::oil::defaults();
+
+    assert_eq!(state.show_hidden, defaults.show_hidden);
+    assert_eq!(state.sort_mode, defaults.sort_mode);
+    assert_eq!(state.trash_enabled, defaults.trash_enabled);
+}
+
+#[test]
+fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
+    let root = unique_temp_dir("oil-normal-delete");
+    let file_path = root.join("alpha.txt");
+    std::fs::write(&file_path, "alpha\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+
+    assert!(!file_path.exists());
+    assert_eq!(shell_buffer(&state.runtime, buffer_id)?.line_count(), 1);
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn terminal_placeholder_lines_describe_shell_launch_not_vertical_slice() {
+    let lines = placeholder_lines("*terminal*", &BufferKind::Terminal);
+    let body = lines.join("\n");
+
+    assert!(body.contains("*terminal* is launching the configured shell."));
+    assert!(body.contains("Press i to enter terminal input mode"));
+    assert!(!body.contains("vertical slice"));
+    assert!(!body.contains("compiled terminal package"));
+}
+
+#[test]
+fn lsp_log_buffer_name_includes_server_name() {
+    assert_eq!(lsp_log_buffer_name("csharp-ls"), "*lsp-log csharp-ls*");
+}
+
+#[test]
+fn lsp_log_buffer_lines_only_include_entries_for_requested_server() {
+    let entries = vec![
+        LspLogEntry::new(LspLogDirection::Outgoing, "csharp-ls", "{\"id\":1}"),
+        LspLogEntry::new(LspLogDirection::Incoming, "rust-analyzer", "{\"id\":2}"),
+    ];
+    let filtered = lsp_log_entries_for_server(&entries, "csharp-ls");
+    let lines = lsp_log_buffer_lines("csharp-ls", &filtered);
+    let body = lines.join("\n");
+
+    assert!(body.contains("*lsp-log csharp-ls* captures live JSON-RPC traffic for `csharp-ls`."));
+    assert!(body.contains("OUT csharp-ls"));
+    assert!(!body.contains("rust-analyzer"));
+}
+
+#[test]
+fn saved_theme_selection_round_trips() {
+    let dir = unique_temp_dir("theme-save");
+    let path = dir.join("active-theme.txt");
+    write_saved_theme_selection(&path, "volt-dark")
+        .unwrap_or_else(|error| panic!("unexpected save error: {error}"));
+
+    assert_eq!(
+        read_saved_theme_selection(&path)
+            .unwrap_or_else(|error| panic!("unexpected read error: {error}")),
+        Some("volt-dark".to_owned())
+    );
+
+    std::fs::remove_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to remove temp dir `{}`: {error}", dir.display()));
+}
+
+#[test]
+fn restore_saved_theme_selection_activates_saved_theme() {
+    let dir = unique_temp_dir("theme-restore");
+    let path = dir.join("active-theme.txt");
+    write_saved_theme_selection(&path, "amber")
+        .unwrap_or_else(|error| panic!("unexpected save error: {error}"));
+
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(editor_theme::Theme::new("volt-dark", "Volt Dark"))
+        .unwrap_or_else(|error| panic!("unexpected register error: {error}"));
+    registry
+        .register(editor_theme::Theme::new("amber", "Amber"))
+        .unwrap_or_else(|error| panic!("unexpected register error: {error}"));
+
+    restore_saved_theme_selection(&mut registry, &path)
+        .unwrap_or_else(|error| panic!("unexpected restore error: {error}"));
+
+    assert_eq!(
+        registry.active_theme().map(|theme| theme.id()),
+        Some("amber")
+    );
+
+    std::fs::remove_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to remove temp dir `{}`: {error}", dir.display()));
+}
+
+#[test]
+fn restore_saved_theme_selection_clears_unknown_theme() {
+    let dir = unique_temp_dir("theme-stale");
+    let path = dir.join("active-theme.txt");
+    write_saved_theme_selection(&path, "missing-theme")
+        .unwrap_or_else(|error| panic!("unexpected save error: {error}"));
+
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(editor_theme::Theme::new("gruvbox-dark", "Gruvbox Dark"))
+        .unwrap_or_else(|error| panic!("unexpected register error: {error}"));
+
+    let error = restore_saved_theme_selection(&mut registry, &path)
+        .expect_err("unknown saved theme should surface an error");
+    assert!(error.contains("missing-theme"));
+    assert!(!path.exists());
+    assert_eq!(
+        registry.active_theme().map(|theme| theme.id()),
+        Some("gruvbox-dark")
+    );
+
+    std::fs::remove_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to remove temp dir `{}`: {error}", dir.display()));
+}
+
+#[test]
+fn draw_buffer_text_inverts_the_cursor_glyph_color() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let inverted_color = Color::RGB(16, 18, 24);
+    let line = "abc";
+    let char_map = LineCharMap::new(line);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: 3,
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+        Some(TextColorOverride {
+            start: 1,
+            end: 2,
+            color: inverted_color,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![
+            DrawCommand::Text {
+                x: 0,
+                y: 0,
+                text: "a".to_owned(),
+                color: to_render_color(default_color),
+            },
+            DrawCommand::Text {
+                x: 8,
+                y: 0,
+                text: "b".to_owned(),
+                color: to_render_color(inverted_color),
+            },
+            DrawCommand::Text {
+                x: 16,
+                y: 0,
+                text: "c".to_owned(),
+                color: to_render_color(default_color),
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Result<(), String> {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} Head: master f9d8c15 Added some more keybinds",
+            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_HEADERS.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+    let char_map = LineCharMap::new(&formatted);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        &formatted,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: formatted.chars().count(),
+        },
+        &char_map,
+        Some(&spans),
+        None,
+        Color::RGB(240, 240, 240),
+        8,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let text_segments = scene
+        .into_iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        text_segments,
+        vec![
+            "  ".to_owned(),
+            user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+            " ".to_owned(),
+            "Head:".to_owned(),
+            " ".to_owned(),
+            "master".to_owned(),
+            " ".to_owned(),
+            "f9d8c15".to_owned(),
+            " ".to_owned(),
+            "Added some more keybinds".to_owned(),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn block_cursor_text_override_uses_segment_relative_utf8_offsets() {
+    let line = "aéz";
+    let char_map = LineCharMap::new(line);
+    let override_info = block_cursor_text_override(
+        &char_map,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: 3,
+        },
+        0,
+        0,
+        1,
+        Some(Color::RGB(1, 2, 3)),
+    )
+    .expect("cursor on a multibyte character should produce an override");
+
+    assert_eq!(override_info.start, 1);
+    assert_eq!(override_info.end, 3);
+}
+
+#[test]
+fn statusline_lsp_diagnostics_counts_errors_and_warnings() {
+    let diagnostics = vec![
+        LspDiagnostic::new(
+            "rust-analyzer",
+            "error",
+            LspDiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(0, 1), TextPoint::new(0, 2)),
+        ),
+        LspDiagnostic::new(
+            "rust-analyzer",
+            "warning",
+            LspDiagnosticSeverity::Warning,
+            TextRange::new(TextPoint::new(1, 3), TextPoint::new(1, 5)),
+        ),
+        LspDiagnostic::new(
+            "rust-analyzer",
+            "info",
+            LspDiagnosticSeverity::Information,
+            TextRange::new(TextPoint::new(2, 0), TextPoint::new(2, 1)),
+        ),
+    ];
+
+    assert_eq!(
+        statusline_lsp_diagnostics(&diagnostics),
+        Some(user::statusline::LspDiagnosticsInfo {
+            errors: 1,
+            warnings: 1,
+        })
+    );
+}
+
+#[test]
+fn diagnostic_underlines_clip_to_wrapped_segment_and_draw_errors_last() {
+    let diagnostics = vec![
+        LspDiagnostic::new(
+            "rust-analyzer",
+            "info",
+            LspDiagnosticSeverity::Information,
+            TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 4)),
+        ),
+        LspDiagnostic::new(
+            "rust-analyzer",
+            "error",
+            LspDiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(0, 1), TextPoint::new(0, 3)),
+        ),
+    ];
+    let line_spans = diagnostic_line_spans_for_diagnostics(&diagnostics);
+
+    assert_eq!(
+        diagnostic_underlines_for_segment(
+            line_spans.get(&0).map(Box::as_ref).unwrap_or(&[]),
+            None,
+            6,
+            LineWrapSegment {
+                start_col: 0,
+                end_col: 4,
+            },
+        ),
+        vec![
+            DiagnosticUnderlineSpan {
+                start_col: 0,
+                end_col: 4,
+                severity: LspDiagnosticSeverity::Information,
+            },
+            DiagnosticUnderlineSpan {
+                start_col: 1,
+                end_col: 3,
+                severity: LspDiagnosticSeverity::Error,
+            },
+        ]
+    );
+}
+
+#[test]
+fn diagnostic_underlines_expand_to_cover_narrowest_syntax_token() {
+    let diagnostics = vec![LspDiagnostic::new(
+        "rust-analyzer",
+        "warning",
+        LspDiagnosticSeverity::Warning,
+        TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 2)),
+    )];
+    let line_spans = diagnostic_line_spans_for_diagnostics(&diagnostics);
+    let syntax_spans = vec![
+        LineSyntaxSpan {
+            start: 0,
+            end: 10,
+            capture_name: "source_file".to_owned(),
+            theme_token: "syntax.source".to_owned(),
+        },
+        LineSyntaxSpan {
+            start: 0,
+            end: 3,
+            capture_name: "keyword".to_owned(),
+            theme_token: "syntax.keyword".to_owned(),
+        },
+    ];
+
+    assert_eq!(
+        diagnostic_underlines_for_segment(
+            line_spans.get(&0).map(Box::as_ref).unwrap_or(&[]),
+            Some(syntax_spans.as_slice()),
+            10,
+            LineWrapSegment {
+                start_col: 0,
+                end_col: 10,
+            },
+        ),
+        vec![DiagnosticUnderlineSpan {
+            start_col: 0,
+            end_col: 3,
+            severity: LspDiagnosticSeverity::Warning,
+        }]
+    );
+}
+
+#[test]
+fn diagnostic_line_spans_cache_multiline_ranges_by_line() {
+    let diagnostics = vec![LspDiagnostic::new(
+        "rust-analyzer",
+        "warning",
+        LspDiagnosticSeverity::Warning,
+        TextRange::new(TextPoint::new(1, 3), TextPoint::new(3, 2)),
+    )];
+    let line_spans = diagnostic_line_spans_for_diagnostics(&diagnostics);
+
+    assert_eq!(
+        line_spans.get(&1).map(Box::as_ref),
+        Some(
+            [DiagnosticLineSpan {
+                start_col: Some(3),
+                end_col: None,
+                severity: LspDiagnosticSeverity::Warning,
+            }]
+            .as_slice()
+        )
+    );
+    assert_eq!(
+        line_spans.get(&2).map(Box::as_ref),
+        Some(
+            [DiagnosticLineSpan {
+                start_col: None,
+                end_col: None,
+                severity: LspDiagnosticSeverity::Warning,
+            }]
+            .as_slice()
+        )
+    );
+    assert_eq!(
+        line_spans.get(&3).map(Box::as_ref),
+        Some(
+            [DiagnosticLineSpan {
+                start_col: None,
+                end_col: Some(2),
+                severity: LspDiagnosticSeverity::Warning,
+            }]
+            .as_slice()
+        )
+    );
+}
+
+#[test]
+fn draw_diagnostic_undercurl_emits_single_scene_command() -> Result<(), String> {
+    let color = Color::RGB(224, 107, 117);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_diagnostic_undercurl(&mut target, 10, 20, 6, 10, color)
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Undercurl {
+            x: 10,
+            y: 20,
+            width: 6,
+            line_height: 10,
+            color: to_render_color(color),
+        }]
+    );
+    Ok(())
+}
+
+fn install_acp_test_buffer(
+    state: &mut ShellState,
+    output_lines: usize,
+    input_text: &str,
+    hint: Option<&str>,
+) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            "*acp test*",
+            BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(
+        buffer,
+        (1..=output_lines)
+            .map(|index| format!("line {index}"))
+            .collect(),
+    );
+    if let Some(input) = shell_buffer.input_field_mut() {
+        input.set_text(input_text);
+        input.set_hint(hint.map(str::to_owned));
+    }
+    shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            user::browser::BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(
+        buffer_id,
+        user::browser::BUFFER_NAME,
+        BufferKind::Plugin(BROWSER_KIND.to_owned()),
+    );
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_terminal_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(workspace_id, "*terminal*", BufferKind::Terminal, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_git_status_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            "*git-status*",
+            BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(
+        buffer_id,
+        "*git-status*",
+        BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+    );
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn run_git_in_dir(root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("failed to run git {:?}: {error}", args))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let message = if stderr.is_empty() {
+            format!("git {:?} failed with status {}", args, output.status)
+        } else {
+            format!("git {:?} failed: {stderr}", args)
+        };
+        return Err(message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn init_git_repo_with_commit(label: &str) -> Result<std::path::PathBuf, String> {
+    let repo = unique_temp_dir(label);
+    run_git_in_dir(&repo, &["init", "-q"])?;
+    run_git_in_dir(&repo, &["config", "user.email", "volt-tests@example.com"])?;
+    run_git_in_dir(&repo, &["config", "user.name", "Volt Tests"])?;
+    std::fs::write(repo.join("README.md"), "seed\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "README.md"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "initial"])?;
+    Ok(repo)
+}
+
+fn open_repo_git_status_buffer(
+    state: &mut ShellState,
+    root: &std::path::Path,
+) -> Result<BufferId, String> {
+    open_workspace_from_project(&mut state.runtime, "git-test", root)?;
+    let buffer_id = install_git_status_test_buffer(state)?;
+    refresh_git_status_buffer(&mut state.runtime, buffer_id)?;
+    Ok(buffer_id)
+}
+
+fn open_oil_test_buffer(
+    state: &mut ShellState,
+    root: &std::path::Path,
+) -> Result<BufferId, String> {
+    open_workspace_from_project(&mut state.runtime, "oil-test", root)?;
+    open_oil_directory(&mut state.runtime, root.to_path_buf())?;
+    active_shell_buffer_id(&state.runtime)
+}
+
+fn install_text_test_buffer(
+    state: &mut ShellState,
+    name: &str,
+    lines: Vec<String>,
+) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(workspace_id, name, BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| "text test buffer is missing".to_owned())?;
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn screen_point_for_buffer_point(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    point: TextPoint,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(f32, f32), String> {
+    let original_cursor = shell_buffer(&state.runtime, buffer_id)?.cursor_point();
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(point);
+    let anchor = {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        buffer_cursor_screen_anchor(
+            buffer,
+            PixelRectToRect::rect(0, 0, render_width, render_height),
+            state.runtime.services().get::<ThemeRegistry>(),
+            cell_width,
+            line_height,
+        )
+        .ok_or_else(|| "buffer cursor screen anchor was missing".to_owned())?
+    };
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(original_cursor);
+    Ok((
+        (anchor.x + (cell_width / 2).max(1)) as f32,
+        (anchor.y + (line_height / 2).max(1)) as f32,
+    ))
+}
+
+fn git_status_line_for_action_detail(
+    state: &ShellState,
+    buffer_id: BufferId,
+    action_id: &str,
+    detail: &str,
+) -> Result<usize, String> {
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    (0..buffer.line_count())
+        .find(|line_index| {
+            git_action_detail(buffer.section_line_meta(*line_index), action_id).as_deref()
+                == Some(detail)
+        })
+        .ok_or_else(|| format!("git status line for `{detail}` and `{action_id}` was not found"))
+}
+
+fn set_git_status_visual_line_selection(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(), String> {
+    let (start_line, end_line) = if start_line <= end_line {
+        (start_line, end_line)
+    } else {
+        (end_line, start_line)
+    };
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(start_line, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(start_line, 0), VisualSelectionKind::Line);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(end_line, 0));
+    Ok(())
+}
+
+type GitSnapshotPaths = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
+
+fn git_status_snapshot_paths(
+    state: &ShellState,
+    buffer_id: BufferId,
+) -> Result<GitSnapshotPaths, String> {
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let snapshot = buffer
+        .git_snapshot()
+        .ok_or_else(|| "git snapshot missing".to_owned())?;
+    let staged = snapshot
+        .staged()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect();
+    let unstaged = snapshot
+        .unstaged()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect();
+    let untracked = snapshot.untracked().iter().cloned().collect();
+    Ok((staged, unstaged, untracked))
+}
+
+fn install_hover_test_overlay(state: &mut ShellState, focused: bool) -> Result<BufferId, String> {
+    let buffer_id = shell_ui(&state.runtime)?
+        .active_buffer_id()
+        .ok_or_else(|| "active buffer missing".to_owned())?;
+    let anchor = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+    shell_ui_mut(&mut state.runtime)?.set_hover(HoverOverlay {
+        buffer_id,
+        anchor,
+        token: "hover".to_owned(),
+        providers: vec![
+            HoverProviderContent {
+                provider_label: "Alpha".to_owned(),
+                provider_icon: "A".to_owned(),
+                lines: vec!["first".to_owned()],
+            },
+            HoverProviderContent {
+                provider_label: "Beta".to_owned(),
+                provider_icon: "B".to_owned(),
+                lines: vec!["second".to_owned()],
+            },
+            HoverProviderContent {
+                provider_label: "Gamma".to_owned(),
+                provider_icon: "G".to_owned(),
+                lines: vec!["third".to_owned()],
+            },
+        ],
+        provider_index: 0,
+        scroll_offset: 0,
+        focused,
+        line_limit: 8,
+        pending_g_prefix: false,
+        count: None,
+    });
+    Ok(buffer_id)
+}
+
+fn install_scrollable_hover_test_overlay(
+    state: &mut ShellState,
+    focused: bool,
+) -> Result<BufferId, String> {
+    let buffer_id = shell_ui(&state.runtime)?
+        .active_buffer_id()
+        .ok_or_else(|| "active buffer missing".to_owned())?;
+    let anchor = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+    let lines = (1..=12)
+        .map(|line| format!("Line {line}"))
+        .collect::<Vec<_>>();
+    shell_ui_mut(&mut state.runtime)?.set_hover(HoverOverlay {
+        buffer_id,
+        anchor,
+        token: "hover".to_owned(),
+        providers: vec![HoverProviderContent {
+            provider_label: "Scrollable".to_owned(),
+            provider_icon: "S".to_owned(),
+            lines,
+        }],
+        provider_index: 0,
+        scroll_offset: 0,
+        focused,
+        line_limit: 4,
+        pending_g_prefix: false,
+        count: None,
+    });
+    Ok(buffer_id)
+}
+
+fn hover_scroll_offset(state: &ShellState) -> Result<usize, String> {
+    shell_ui(&state.runtime)?
+        .hover()
+        .map(|hover| hover.scroll_offset)
+        .ok_or_else(|| "hover overlay missing".to_owned())
+}
+
+fn test_notification_update(
+    key: &str,
+    severity: NotificationSeverity,
+    title: &str,
+    body_lines: &[&str],
+    progress: Option<u8>,
+    active: bool,
+) -> NotificationUpdate {
+    NotificationUpdate {
+        key: key.to_owned(),
+        severity,
+        title: title.to_owned(),
+        body_lines: body_lines.iter().map(|line| (*line).to_owned()).collect(),
+        progress: progress.map(|percentage| NotificationProgress {
+            percentage: Some(percentage),
+        }),
+        active,
+    }
+}
+
+#[test]
+fn parse_rg_workspace_search_line_extracts_location() {
+    let parsed = parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();")
+        .expect("rg output should parse into a workspace search match");
+    assert_eq!(parsed.0, r"src\main.rs");
+    assert_eq!(parsed.1, 12);
+    assert_eq!(parsed.2, 7);
+    assert_eq!(parsed.3, "let answer = compute();");
+}
+
+#[test]
+fn parse_grep_workspace_search_line_finds_case_insensitive_column() {
+    let parsed = parse_grep_workspace_search_line(r"src\lib.rs:3:Hello Workspace", "workspace")
+        .expect("grep output should parse into a workspace search match");
+    assert_eq!(parsed.0, r"src\lib.rs");
+    assert_eq!(parsed.1, 3);
+    assert_eq!(parsed.2, 7);
+    assert_eq!(parsed.3, "Hello Workspace");
+}
+
+#[test]
+fn workspace_search_char_column_handles_utf8_offsets() {
+    assert_eq!(workspace_search_char_column("aébc", 0), 0);
+    assert_eq!(workspace_search_char_column("aébc", 1), 1);
+    assert_eq!(workspace_search_char_column("aébc", 3), 2);
+}
+
+#[test]
+fn frame_pacing_remaining_clamps_to_120fps_budget() {
+    let now = Instant::now();
+    let remaining = frame_pacing_remaining(now - Duration::from_millis(2), now);
+    assert!(remaining >= Duration::from_micros(6_000));
+    assert_eq!(
+        frame_pacing_remaining(now - Duration::from_millis(10), now),
+        Duration::from_secs(0)
+    );
+}
+
+#[test]
+fn git_refresh_is_deferred_while_typing() {
+    let now = Instant::now();
+    assert!(git_refresh_deferred_for_typing(Some(now), now));
+    assert!(git_refresh_deferred_for_typing(
+        Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
+        now
+    ));
+    assert!(!git_refresh_deferred_for_typing(
+        Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD),
+        now
+    ));
+    assert!(!git_refresh_deferred_for_typing(None, now));
+}
+
+#[test]
+fn frame_pacing_is_deferred_while_typing() {
+    let now = Instant::now();
+    assert!(frame_pacing_deferred_for_typing(Some(now), now));
+    assert!(frame_pacing_deferred_for_typing(
+        Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
+        now
+    ));
+    assert!(!frame_pacing_deferred_for_typing(
+        Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD),
+        now
+    ));
+    assert!(!frame_pacing_deferred_for_typing(None, now));
+}
+
+#[test]
+fn typing_event_batches_yield_once_budget_is_exhausted() {
+    let now = Instant::now();
+    assert!(!should_yield_after_typing_batch(
+        0,
+        TYPING_EVENT_BATCH_LIMIT,
+        now
+    ));
+    assert!(!should_yield_after_typing_batch(
+        1,
+        TYPING_EVENT_BATCH_LIMIT - 1,
+        now
+    ));
+    assert!(should_yield_after_typing_batch(
+        1,
+        TYPING_EVENT_BATCH_LIMIT,
+        now
+    ));
+    assert!(should_yield_after_typing_batch(
+        1,
+        1,
+        now - TYPING_EVENT_BATCH_TIME_BUDGET
+    ));
+}
+
+#[test]
+fn truncate_text_to_width_uses_cell_budget() {
+    assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
+    assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
+    assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
+}
+
+#[test]
+fn git_status_header_spans_skip_leading_icons() {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} Head: master f9d8c15 Added some more keybinds",
+            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_HEADERS.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+
+    assert_eq!(
+        syntax_span_segments(&formatted, &spans),
+        vec![
+            (
+                TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
+                user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+            ),
+            (TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(), "Head:".to_owned()),
+            (
+                TOKEN_GIT_STATUS_HEADER_VALUE.to_owned(),
+                "master".to_owned()
+            ),
+            (
+                TOKEN_GIT_STATUS_HEADER_HASH.to_owned(),
+                "f9d8c15".to_owned()
+            ),
+            (
+                TOKEN_GIT_STATUS_HEADER_SUMMARY.to_owned(),
+                "Added some more keybinds".to_owned(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn git_status_entry_spans_skip_leading_icons() {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} crates/editor-sdl/src/shell.rs",
+            user::icon_font::symbols::cod::COD_DIFF_MODIFIED
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_UNSTAGED.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+
+    assert_eq!(
+        syntax_span_segments(&formatted, &spans),
+        vec![
+            (
+                TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
+                user::icon_font::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
+            ),
+            (
+                TOKEN_GIT_STATUS_ENTRY_PATH.to_owned(),
+                "crates/editor-sdl/src/shell.rs".to_owned(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn git_status_stash_spans_handle_compact_stash_names() {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} stash[0] WIP on master: overnight todo",
+            user::icon_font::symbols::cod::COD_HISTORY
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_STASHES.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+
+    assert_eq!(
+        syntax_span_segments(&formatted, &spans),
+        vec![
+            (
+                TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
+                user::icon_font::symbols::cod::COD_HISTORY.to_owned(),
+            ),
+            (
+                TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
+                "stash[0]".to_owned(),
+            ),
+            (
+                TOKEN_GIT_STATUS_STASH_SUMMARY.to_owned(),
+                "WIP on master: overnight todo".to_owned(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn git_status_uppercase_f_starts_pull_prefix() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_git_status_test_buffer(&mut state)?;
+
+    assert!(handle_git_status_chord(&mut state.runtime, "F")?);
+    assert_eq!(take_git_prefix(&mut state.runtime)?, Some(GitPrefix::Pull));
+    Ok(())
+}
+
+#[test]
+fn git_status_sequence_commands_are_registered() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+
+    for &(name, _, _) in GIT_STATUS_COMMANDS {
+        assert!(
+            state.runtime.commands().contains(name),
+            "missing command `{name}`"
+        );
+    }
+    for name in ["git.diff", "git.log", "git.stash-list"] {
+        assert!(
+            state.runtime.commands().contains(name),
+            "missing command `{name}`"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn git_status_command_name_maps_sequences_to_picker_commands() {
+    assert_eq!(
+        git_status_command_name(None, "S"),
+        Some("git.status.stage-all")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Pull), "u"),
+        Some("git.status.pull-upstream")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Branch), "b"),
+        Some("git.status.branches")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Diff), "w"),
+        Some("git.diff")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Log), "l"),
+        Some("git.log")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Stash), "l"),
+        Some("git.stash-list")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Rebase), "f"),
+        Some("git.status.rebase-autosquash")
+    );
+    assert_eq!(
+        git_status_command_name(Some(GitPrefix::Reset), "f"),
+        Some("git.status.checkout-file")
+    );
+}
+
+#[test]
+fn git_status_visual_s_stages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-visual-stage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "beta.txt")?;
+    set_git_status_visual_line_selection(&mut state, buffer_id, alpha, beta)?;
+
+    assert!(handle_git_status_chord(&mut state.runtime, "s")?);
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(
+        staged,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert!(unstaged.is_empty());
+    assert_eq!(untracked, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_visual_u_unstages_selected_items() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-visual-unstage")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
+    let beta =
+        git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "beta.txt")?;
+    set_git_status_visual_line_selection(&mut state, buffer_id, alpha, beta)?;
+
+    assert!(handle_git_status_chord(&mut state.runtime, "u")?);
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(staged, BTreeSet::from(["gamma.txt".to_owned()]));
+    assert!(unstaged.is_empty());
+    assert_eq!(
+        untracked,
+        BTreeSet::from(["alpha.txt".to_owned(), "beta.txt".to_owned()])
+    );
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_line_is_untracked_uses_section_metadata() {
+    let meta = SectionLineMeta {
+        section_id: GIT_SECTION_UNTRACKED.to_owned(),
+        kind: SectionRenderLineKind::Item,
+        action: None,
+    };
+    let staged_meta = SectionLineMeta {
+        section_id: GIT_SECTION_UNSTAGED.to_owned(),
+        kind: SectionRenderLineKind::Item,
+        action: None,
+    };
+
+    assert!(git_line_is_untracked(Some(&meta)));
+    assert!(!git_line_is_untracked(Some(&staged_meta)));
+    assert!(!git_line_is_untracked(None));
+}
+
+#[test]
+fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} Press c to commit staged changes.",
+            user::icon_font::symbols::cod::COD_GIT_COMMIT
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_COMMIT.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+
+    assert_eq!(
+        syntax_span_segments(&formatted, &spans),
+        vec![(
+            TOKEN_GIT_STATUS_COMMAND.to_owned(),
+            format!(
+                "{} Press c to commit staged changes.",
+                user::icon_font::symbols::cod::COD_GIT_COMMIT
+            ),
+        )]
+    );
+}
+
+#[test]
+fn hover_registry_includes_signature_help_provider() {
+    let registry = HoverRegistry::from_user_config();
+    assert!(matches!(registry.providers[0].kind, HoverProviderKind::Lsp));
+    assert!(matches!(
+        registry.providers[1].kind,
+        HoverProviderKind::SignatureHelp
+    ));
+    assert_eq!(registry.providers[1].label, "Signature");
+    assert_eq!(registry.providers[1].icon, user::hover::SIGNATURE_ICON);
+    assert!(matches!(
+        registry.providers[2].kind,
+        HoverProviderKind::Diagnostics
+    ));
+}
+
+#[test]
+fn statusline_icon_segments_split_acp_and_lsp_icons() {
+    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
+    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
+    let statusline = format!("NORMAL | {acp_icon} | Ln 3, Col 9 | {lsp_icon} rust-analyzer");
+    assert_eq!(
+        statusline_icon_segments(&statusline, &[acp_icon, lsp_icon]),
+        vec![
+            ("NORMAL | ", false),
+            (acp_icon, true),
+            (" | Ln 3, Col 9 | ", false),
+            (lsp_icon, true),
+            (" rust-analyzer", false),
+        ]
+    );
+}
+
+#[test]
+fn statusline_icon_segments_split_diagnostic_icons() {
+    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
+    let error_icon = user::statusline::LSP_ERROR_ICON;
+    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let prefix = format!("NORMAL | {lsp_icon} rust-analyzer ");
+    let statusline = format!("NORMAL | {lsp_icon} rust-analyzer {error_icon} 2 {warning_icon} 4");
+    assert_eq!(
+        statusline_icon_segments(&statusline, &[error_icon, warning_icon]),
+        vec![
+            (prefix.as_str(), false),
+            (error_icon, true),
+            (" 2 ", false),
+            (warning_icon, true),
+            (" 4", false),
+        ]
+    );
+}
+
+#[test]
+fn notification_center_updates_entries_and_expires_completed_toasts() {
+    let now = Instant::now();
+    let mut center = NotificationCenter::default();
+    assert!(center.apply(
+        test_notification_update(
+            "progress",
+            NotificationSeverity::Info,
+            "LSP · rust-analyzer",
+            &["Indexing", "Scanning workspace"],
+            Some(24),
+            true,
+        ),
+        now,
+    ));
+    assert_eq!(center.visible(now).len(), 1);
+    assert!(center.visible(now)[0].active);
+
+    assert!(center.apply(
+        test_notification_update(
+            "progress",
+            NotificationSeverity::Success,
+            "LSP · rust-analyzer",
+            &["Indexed workspace"],
+            Some(100),
+            false,
+        ),
+        now + Duration::from_millis(25),
+    ));
+    let visible = center.visible(now + Duration::from_millis(25));
+    assert_eq!(visible.len(), 1);
+    assert!(!visible[0].active);
+    assert_eq!(visible[0].severity, NotificationSeverity::Success);
+
+    assert!(!center.prune_expired(now + NOTIFICATION_AUTO_DISMISS - Duration::from_millis(1)));
+    assert!(center.prune_expired(now + NOTIFICATION_AUTO_DISMISS + Duration::from_millis(50)));
+    assert!(
+        center
+            .visible(now + NOTIFICATION_AUTO_DISMISS + Duration::from_millis(50))
+            .is_empty()
+    );
+}
+
+#[test]
+fn notification_center_prioritizes_active_toasts_with_visible_limit() {
+    let now = Instant::now();
+    let mut center = NotificationCenter::default();
+    assert!(center.apply(
+        test_notification_update(
+            "old-complete",
+            NotificationSeverity::Success,
+            "Done",
+            &["Completed task"],
+            None,
+            false,
+        ),
+        now,
+    ));
+    assert!(center.apply(
+        test_notification_update(
+            "active-a",
+            NotificationSeverity::Info,
+            "Active A",
+            &["Working"],
+            Some(10),
+            true,
+        ),
+        now + Duration::from_millis(10),
+    ));
+    assert!(center.apply(
+        test_notification_update(
+            "active-b",
+            NotificationSeverity::Info,
+            "Active B",
+            &["Working"],
+            Some(40),
+            true,
+        ),
+        now + Duration::from_millis(20),
+    ));
+    assert!(center.apply(
+        test_notification_update(
+            "active-c",
+            NotificationSeverity::Warning,
+            "Active C",
+            &["Working"],
+            None,
+            true,
+        ),
+        now + Duration::from_millis(30),
+    ));
+    assert!(center.apply(
+        test_notification_update(
+            "new-complete",
+            NotificationSeverity::Success,
+            "Done",
+            &["Completed task"],
+            None,
+            false,
+        ),
+        now + Duration::from_millis(40),
+    ));
+
+    let visible = center.visible(now + Duration::from_millis(40));
+    assert_eq!(visible.len(), NOTIFICATION_VISIBLE_LIMIT);
+    assert!(visible.iter().all(|notification| notification.active));
+    assert_eq!(visible[0].key, "active-c");
+    assert_eq!(visible[1].key, "active-b");
+    assert_eq!(visible[2].key, "active-a");
+}
+
+#[test]
+fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(
+        &mut state,
+        40,
+        "",
+        Some("chat · gpt-5.4 · shift+tab switch mode"),
+    )?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18);
+    let output_bottom = layout.body_y + layout.visible_rows as i32 * 18;
+    let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
+
+    assert!(output_bottom <= layout.input_y);
+    assert!(layout.input_y < hint_y);
+    assert!(hint_y < layout.statusline_y);
+    Ok(())
+}
+
+#[test]
+fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(
+        &mut state,
+        40,
+        "first line\nsecond line",
+        Some("chat · gpt-5.4 · shift+tab switch mode"),
+    )?;
+
+    state
+        .sync_active_viewport(400, 18)
+        .map_err(|error| error.to_string())?;
+
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let layout = buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 800, 400), 18);
+    assert_eq!(buffer.viewport_lines(), layout.visible_rows);
+
+    buffer.scroll_output_to_end();
+    buffer.append_output_lines(&["tail".to_owned()]);
+
+    assert!(
+        buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
+            >= buffer.line_count()
+    );
+    Ok(())
+}
+
+#[test]
+fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
+    let font_path = resolve_bundled_icon_font_dir()
+        .map_err(|error| error.to_string())?
+        .join("NFM.ttf");
+    let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
+    let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())?;
+    let material_icon = user::icon_font_symbols::md::MD_FORMAT_BOLD
+        .chars()
+        .next()
+        .ok_or_else(|| "material icon glyph missing".to_owned())?;
+    let (metrics, bitmap) = font.rasterize(material_icon, 48.0);
+    let occupied_rows = bitmap
+        .chunks(metrics.width)
+        .map(|row| row.iter().filter(|alpha| **alpha > 32).count())
+        .filter(|count| *count > 0)
+        .collect::<Vec<_>>();
+    let unique_row_widths = occupied_rows.iter().copied().collect::<BTreeSet<_>>();
+
+    assert!(material_icon as u32 > 0xFFFF);
+    assert!(metrics.width > 0);
+    assert!(metrics.height > 0);
+    assert!(!occupied_rows.is_empty());
+    assert!(unique_row_widths.len() > 4);
+    Ok(())
+}
+
+#[test]
+fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
+    let font_path = resolve_bundled_icon_font_dir()
+        .map_err(|error| error.to_string())?
+        .join("NFM.ttf");
+    let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
+    let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())?;
+    let codicon = user::icon_font_symbols::cod::COD_DIFF_ADDED
+        .chars()
+        .next()
+        .ok_or_else(|| "codicon glyph missing".to_owned())?;
+    let requested_pixel_size = 18.0;
+    let (raw_metrics, _) = font.rasterize(codicon, requested_pixel_size);
+    let cell_width = raw_metrics.width.saturating_sub(1).max(1) as i32;
+    let (fitted_metrics, _) =
+        rasterize_icon_glyph_for_cell(&font, codicon, requested_pixel_size, cell_width);
+    let layout = icon_glyph_cell_layout(&fitted_metrics, cell_width);
+
+    assert!(raw_metrics.width > cell_width as usize);
+    assert!(fitted_metrics.width as i32 <= cell_width);
+    assert_eq!(layout.advance, cell_width);
+    assert!(layout.draw_offset_x >= 0);
+    assert!(layout.draw_offset_x + fitted_metrics.width as i32 <= cell_width);
+    Ok(())
+}
+
+#[test]
+fn font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint() -> Result<(), String> {
+    let _sdl = sdl3::init().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let font_path = resolve_bundled_icon_font_dir()
+        .map_err(|error| error.to_string())?
+        .join("NFM.ttf");
+    let primary = ttf
+        .load_font(&font_path, 18.0)
+        .map_err(|error| error.to_string())?;
+    let icon_font = ttf
+        .load_font(&font_path, 18.0)
+        .map_err(|error| error.to_string())?;
+    let cell_width = primary
+        .size_of_char('M')
+        .map_err(|error| error.to_string())?
+        .0
+        .max(1) as i32;
+    let bytes = std::fs::read(&font_path).map_err(|error| error.to_string())?;
+    let raster_font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())?;
+    let fonts = FontSet {
+        primary,
+        icon_fonts: vec![IconFont {
+            name: "NFM.ttf".to_owned(),
+            font: icon_font,
+            raster_font,
+        }],
+        icon_chars: BTreeSet::new(),
+        icon_pixel_size: 18.0,
+        cell_width,
+    };
+    let branch = user::icon_font_symbols::ple::PL_BRANCH
+        .chars()
+        .next()
+        .ok_or_else(|| "powerline branch glyph missing".to_owned())?;
+
+    assert!(is_private_use_character(branch));
+    assert!(!fonts.prefers_icon_font(branch));
+    assert!(fonts.primary().find_glyph(branch).is_some());
+    assert_eq!(font_role_for_char(&fonts, branch), FontRole::Icon(0));
+    Ok(())
+}
+
+#[test]
+fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("alpha alphabet\nalp");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(1, 3));
+
+    let (buffer_id, buffer_revision, text, cursor, query) = {
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        let buffer_id = ui
+            .active_buffer_id()
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        let buffer = ui
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let text = buffer.text.snapshot();
+        let query = autocomplete_query(&text, true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        (
+            buffer_id,
+            buffer.text.revision(),
+            text,
+            buffer.cursor_point(),
+            query,
+        )
+    };
+    let request = AutocompleteWorkerRequest {
+        request_id: 1,
+        buffer_id,
+        buffer_revision,
+        text,
+        path: None,
+        root: None,
+        cursor,
+        query,
+        providers: vec![
+            AutocompleteProviderSpec {
+                id: "primary".to_owned(),
+                label: "Primary".to_owned(),
+                icon: "P".to_owned(),
+                item_icon: "1".to_owned(),
+                or_group: Some("source".to_owned()),
+                kind: AutocompleteProviderKind::Buffer,
+            },
+            AutocompleteProviderSpec {
+                id: "fallback".to_owned(),
+                label: "Fallback".to_owned(),
+                icon: "F".to_owned(),
+                item_icon: "2".to_owned(),
+                or_group: Some("source".to_owned()),
+                kind: AutocompleteProviderKind::Buffer,
+            },
+        ],
+        result_limit: 8,
+        lsp_client: None,
+    };
+
+    let entries = autocomplete_entries(&request);
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry.provider_id == "primary"));
+    Ok(())
+}
+
+#[test]
+fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("alpha beta");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, 5));
+
+    let (range, token) = completion_token_at_cursor(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+    )
+    .ok_or_else(|| "completion token missing at cursor edge".to_owned())?;
+
+    assert_eq!(token, "alpha");
+    assert_eq!(range.start(), TextPoint::new(0, 0));
+    assert_eq!(range.end(), TextPoint::new(0, 5));
+    Ok(())
+}
+
+#[test]
+fn hover_test_provider_lines_include_theme_and_treesitter_tokens() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer.text = TextBuffer::from_text("alpha");
+        buffer.set_cursor(TextPoint::new(0, 2));
+        buffer.syntax_lines.insert(
+            0,
+            vec![LineSyntaxSpan {
+                start: 0,
+                end: 5,
+                capture_name: "function".to_owned(),
+                theme_token: "syntax.function".to_owned(),
+            }],
+        );
+    }
+
+    let lines = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let token_info = completion_token_at_cursor(buffer);
+        hover_test_provider_lines(buffer, token_info.as_ref())
+    };
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Theme color: syntax.function")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Tree-sitter token: @function")
+    );
+    Ok(())
+}
+
+#[test]
+fn index_syntax_lines_preserves_capture_names() {
+    let lines = index_syntax_lines(editor_syntax::SyntaxSnapshot {
+        language_id: "rust".to_owned(),
+        root_kind: "source_file".to_owned(),
+        has_errors: false,
+        highlight_spans: vec![editor_syntax::HighlightSpan {
+            start_byte: 0,
+            end_byte: 5,
+            start_position: editor_syntax::SyntaxPoint::new(0, 0),
+            end_position: editor_syntax::SyntaxPoint::new(0, 5),
+            capture_name: "function".to_owned(),
+            theme_token: "syntax.function".to_owned(),
+        }],
+    });
+
+    let spans = lines.get(&0).expect("expected indexed syntax line");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].capture_name, "function");
+    assert_eq!(spans[0].theme_token, "syntax.function");
+}
+
+#[test]
+fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?;
+        input.set_text("example.com/docs");
+    }
+
+    submit_input_buffer(&mut state.runtime)?;
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let state = buffer
+        .browser_state
+        .as_ref()
+        .ok_or_else(|| "browser state missing".to_owned())?;
+    assert_eq!(
+        state.current_url.as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(buffer.display_name(), "*browser* https://example.com/docs");
+    assert!(buffer.text.text().contains("https://example.com/docs"));
+    Ok(())
+}
+
+#[test]
+fn browser_location_updates_rename_buffer_with_current_url() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+
+    apply_browser_location_updates(
+        &mut state.runtime,
+        &[BrowserLocationUpdate {
+            buffer_id,
+            current_url: "https://docs.rs/volt".to_owned(),
+        }],
+    )?;
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    assert_eq!(buffer.display_name(), "*browser* https://docs.rs/volt");
+    assert!(buffer.text.text().contains("https://docs.rs/volt"));
+    Ok(())
+}
+
+#[test]
+fn hover_next_command_cycles_open_overlay_without_focus() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Alpha".to_owned())
+    );
+
+    cycle_hover_provider(&mut state.runtime, true)?;
+
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Beta".to_owned())
+    );
+    assert!(!state.hover_focused().map_err(|error| error.to_string())?);
+    Ok(())
+}
+
+#[test]
+fn hover_previous_command_wraps_open_overlay_without_focus() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Alpha".to_owned())
+    );
+
+    cycle_hover_provider(&mut state.runtime, false)?;
+
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Gamma".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn hover_tab_shortcut_focuses_open_overlay() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+    assert!(state.hover_visible().map_err(|error| error.to_string())?);
+    assert!(!state.hover_focused().map_err(|error| error.to_string())?);
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::Tab, Mod::empty())
+            .map_err(|error| error.to_string())?
+    );
+
+    assert!(state.hover_focused().map_err(|error| error.to_string())?);
+    Ok(())
+}
+
+#[test]
+fn hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_hover_test_overlay(&mut state, false)?;
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Alpha".to_owned())
+    );
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::N, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+
+    assert_eq!(
+        state
+            .hover_provider_label()
+            .map_err(|error| error.to_string())?,
+        Some("Beta".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn focused_hover_text_motions_scroll_without_moving_buffer_cursor() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_scrollable_hover_test_overlay(&mut state, true)?;
+    let cursor_before = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+
+    state
+        .handle_text_input("3")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 3);
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 4);
+
+    state
+        .handle_text_input("k")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 3);
+    assert_eq!(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .cursor_point(),
+        cursor_before
+    );
+    Ok(())
+}
+
+#[test]
+fn focused_hover_gg_and_g_scroll_to_expected_bounds() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_scrollable_hover_test_overlay(&mut state, true)?;
+    let cursor_before = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+
+    state
+        .handle_text_input("G")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 8);
+
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 0);
+
+    state
+        .handle_text_input("5")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 4);
+
+    state
+        .handle_text_input("2")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("0")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("G")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 8);
+    assert_eq!(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .cursor_point(),
+        cursor_before
+    );
+    Ok(())
+}
+
+#[test]
+fn focused_hover_ctrl_scroll_motions_are_bounded() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_scrollable_hover_test_overlay(&mut state, true)?;
+    let cursor_before = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::D, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 2);
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::F, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 6);
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::E, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 7);
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::Y, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 6);
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::B, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 2);
+
+    assert!(
+        state
+            .handle_focused_hover_keydown(Keycode::U, ctrl_mod())
+            .map_err(|error| error.to_string())?
+    );
+    assert_eq!(hover_scroll_offset(&state)?, 0);
+    assert_eq!(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?
+            .cursor_point(),
+        cursor_before
+    );
+    Ok(())
+}
+
+#[test]
+fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state.runtime.services_mut().insert(CommandLog::default());
+    state
+        .runtime
+        .register_command(
+            "tests.g-prefix-exact",
+            "Test exact g-prefix binding",
+            CommandSource::Core,
+            |runtime| {
+                let log = runtime
+                    .services_mut()
+                    .get_mut::<CommandLog>()
+                    .ok_or_else(|| "command log missing".to_owned())?;
+                log.0.push("exact".to_owned());
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .register_key_binding_for_mode(
+            "g z",
+            "tests.g-prefix-exact",
+            KeymapScope::Workspace,
+            KeymapVimMode::Normal,
+            CommandSource::Core,
+        )
+        .map_err(|error| error.to_string())?;
+
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        state.ui().map_err(|error| error.to_string())?.vim().pending,
+        Some(VimPending::GPrefix {
+            operator: None,
+            line_target: None,
+        })
+    );
+
+    state
+        .handle_text_input("z")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        state
+            .runtime
+            .services()
+            .get::<CommandLog>()
+            .ok_or_else(|| "command log missing".to_owned())?
+            .0,
+        vec!["exact".to_owned()]
+    );
+    let ui = state.ui().map_err(|error| error.to_string())?;
+    assert_eq!(ui.vim().pending, None);
+    assert_eq!(ui.vim().pending_change_prefix, None);
+    Ok(())
+}
+
+#[test]
+fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state.runtime.services_mut().insert(CommandLog::default());
+    state
+        .runtime
+        .register_command(
+            "tests.g-prefix-sequence",
+            "Test longer g-prefix binding",
+            CommandSource::Core,
+            |runtime| {
+                let log = runtime
+                    .services_mut()
+                    .get_mut::<CommandLog>()
+                    .ok_or_else(|| "command log missing".to_owned())?;
+                log.0.push("sequence".to_owned());
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .register_key_binding_for_mode(
+            "g z z",
+            "tests.g-prefix-sequence",
+            KeymapScope::Workspace,
+            KeymapVimMode::Normal,
+            CommandSource::Core,
+        )
+        .map_err(|error| error.to_string())?;
+
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("z")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        state
+            .runtime
+            .services()
+            .get::<CommandLog>()
+            .ok_or_else(|| "command log missing".to_owned())?
+            .0,
+        Vec::<String>::new()
+    );
+    let ui = state.ui().map_err(|error| error.to_string())?;
+    assert_eq!(
+        ui.vim().pending,
+        Some(VimPending::GPrefix {
+            operator: None,
+            line_target: None,
+        })
+    );
+    assert_eq!(
+        ui.vim().pending_change_prefix,
+        Some(VimRecordedInput::Chord("g z".to_owned()))
+    );
+
+    state
+        .handle_text_input("z")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        state
+            .runtime
+            .services()
+            .get::<CommandLog>()
+            .ok_or_else(|| "command log missing".to_owned())?
+            .0,
+        vec!["sequence".to_owned()]
+    );
+    let ui = state.ui().map_err(|error| error.to_string())?;
+    assert_eq!(ui.vim().pending, None);
+    assert_eq!(ui.vim().pending_change_prefix, None);
+    Ok(())
+}
+
+#[test]
+fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18);
+    let viewport = browser_viewport_rect(buffer, rect, 18)
+        .ok_or_else(|| "browser viewport missing".to_owned())?;
+    let viewport_bottom = viewport.y + viewport.height as i32;
+
+    assert!(viewport.width > 0);
+    assert!(viewport.height > 0);
+    assert!(viewport.y >= layout.body_y - 2);
+    assert!(viewport_bottom <= layout.input_y);
+    Ok(())
+}
+
+#[test]
+fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    let plan = browser_sync_plan(
+        state.ui().map_err(|error| error.to_string())?,
+        None,
+        800,
+        400,
+        8,
+        18,
+        Instant::now(),
+    )
+    .map_err(|error| error.to_string())?;
+    let surface = plan
+        .visible_surfaces
+        .iter()
+        .find(|surface| surface.buffer_id == buffer_id)
+        .ok_or_else(|| "browser surface missing".to_owned())?;
+
+    assert_eq!(
+        browser_surface_buffer_at_point(&plan, surface.rect.x + 4, surface.rect.y + 4),
+        Some(buffer_id)
+    );
+    assert_eq!(
+        browser_surface_buffer_at_point(
+            &plan,
+            surface.rect.x + 4,
+            surface.rect.y + surface.rect.height as i32 + 4
+        ),
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_browser_test_buffer(&mut state)?;
+    state
+        .ui_mut()
+        .map_err(|error| error.to_string())?
+        .set_picker(PickerOverlay::from_entries("Buffers", Vec::new()));
+
+    let plan = browser_sync_plan(
+        state.ui().map_err(|error| error.to_string())?,
+        None,
+        800,
+        400,
+        8,
+        18,
+        Instant::now(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(plan.buffers.len(), 1);
+    assert!(plan.visible_surfaces.is_empty());
+    Ok(())
+}
+
+#[test]
+fn browser_sync_plan_hides_surfaces_when_notifications_overlap() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_browser_test_buffer(&mut state)?;
+    state
+        .ui_mut()
+        .map_err(|error| error.to_string())?
+        .apply_notification(
+            test_notification_update(
+                "progress",
+                NotificationSeverity::Info,
+                "LSP · rust-analyzer",
+                &["Indexing workspace", "Scanning project"],
+                Some(32),
+                true,
+            ),
+            Instant::now(),
+        );
+
+    let plan = browser_sync_plan(
+        state.ui().map_err(|error| error.to_string())?,
+        None,
+        800,
+        400,
+        8,
+        18,
+        Instant::now(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(plan.buffers.len(), 1);
+    assert!(plan.visible_surfaces.is_empty());
+    Ok(())
+}
+
+#[test]
+fn detect_browser_url_uses_cursor_hit_or_single_line_url() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("See https://example.com/docs.");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, 10));
+    let cursor_hit = detect_browser_url(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+    )
+    .ok_or_else(|| "browser URL missing under cursor".to_owned())?;
+    assert_eq!(cursor_hit, "https://example.com/docs");
+
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, 0));
+    let single_url = detect_browser_url(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+    )
+    .ok_or_else(|| "browser URL missing from single-url line".to_owned())?;
+    assert_eq!(single_url, "https://example.com/docs");
+    Ok(())
+}
+
+#[test]
+fn browser_url_command_opens_popup_browser_with_detected_url() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("Docs: https://example.com/docs.");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, 8));
+
+    open_detected_browser_url(&mut state.runtime)?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "browser popup was not opened".to_owned())?;
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(popup.active_buffer)
+        .ok_or_else(|| "browser popup buffer missing".to_owned())?;
+    assert!(buffer_is_browser(&buffer.kind));
+    assert!(buffer.text.text().contains("https://example.com/docs"));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            user::browser::BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+
+    sync_active_buffer(&mut state.runtime)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_id));
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn browser_host_focus_parent_event_returns_to_normal_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    state
+        .ui_mut()
+        .map_err(|error| error.to_string())?
+        .enter_insert_mode();
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::FocusParentRequested { buffer_id }])
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        state.ui().map_err(|error| error.to_string())?.input_mode(),
+        InputMode::Normal
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_scroll_for_motion_maps_terminal_viewport_navigation() {
+    assert_eq!(
+        terminal_scroll_for_motion(ShellMotion::Down, None),
+        Some(TerminalViewportScroll::LineDelta(-1))
+    );
+    assert_eq!(
+        terminal_scroll_for_motion(ShellMotion::Up, Some(3)),
+        Some(TerminalViewportScroll::LineDelta(3))
+    );
+    assert_eq!(
+        terminal_scroll_for_motion(ShellMotion::FirstLine, Some(42)),
+        Some(TerminalViewportScroll::Top)
+    );
+    assert_eq!(
+        terminal_scroll_for_motion(ShellMotion::LastLine, None),
+        Some(TerminalViewportScroll::Bottom)
+    );
+    assert_eq!(terminal_scroll_for_motion(ShellMotion::Left, None), None);
+}
+
+#[test]
+fn mouse_wheel_scrolls_the_buffer_under_the_pointer() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 240;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*mouse-scroll*",
+        (0..20).map(|index| format!("line {index}")).collect(),
+    )?;
+    state
+        .sync_active_viewport(render_height, line_height)
+        .map_err(|error| error.to_string())?;
+
+    let handled = state
+        .handle_event(
+            Event::MouseWheel {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                x: 0.0,
+                y: -1.0,
+                direction: MouseWheelDirection::Normal,
+                mouse_x: 24.0,
+                mouse_y: 24.0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.scroll_row, MOUSE_WHEEL_SCROLL_LINES as usize);
+    assert_eq!(buffer.cursor_row(), MOUSE_WHEEL_SCROLL_LINES as usize);
+    Ok(())
+}
+
+#[test]
+fn mouse_drag_creates_a_character_visual_selection() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 240;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*mouse-drag*",
+        vec!["alpha beta".to_owned(), "gamma delta".to_owned()],
+    )?;
+    state
+        .sync_active_viewport(render_height, line_height)
+        .map_err(|error| error.to_string())?;
+    let start = TextPoint::new(0, 1);
+    let end = TextPoint::new(1, 3);
+    let (start_x, start_y) = screen_point_for_buffer_point(
+        &mut state,
+        buffer_id,
+        start,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    let (end_x, end_y) = screen_point_for_buffer_point(
+        &mut state,
+        buffer_id,
+        end,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+
+    state
+        .handle_event(
+            Event::MouseButtonDown {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 1,
+                x: start_x,
+                y: start_y,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_event(
+            Event::MouseMotion {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mousestate: MouseState::from_sdl_state(0),
+                x: end_x,
+                y: end_y,
+                xrel: end_x - start_x,
+                yrel: end_y - start_y,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_event(
+            Event::MouseButtonUp {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 1,
+                x: end_x,
+                y: end_y,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_anchor, Some(start));
+    assert_eq!(ui.vim().visual_kind, VisualSelectionKind::Character);
+    assert_eq!(buffer.cursor_point(), end);
+    assert_eq!(
+        visual_selection(buffer, start, VisualSelectionKind::Character),
+        Some(VisualSelection::Range(TextRange::new(
+            start,
+            buffer.point_after(end).unwrap_or(end)
+        )))
+    );
+    assert!(state.mouse_drag.is_none());
+    Ok(())
+}
+
+#[test]
+fn mouse_double_click_selects_the_whole_line() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 240;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*mouse-double-click*",
+        vec!["alpha beta".to_owned(), "gamma delta".to_owned()],
+    )?;
+    state
+        .sync_active_viewport(render_height, line_height)
+        .map_err(|error| error.to_string())?;
+    let point = TextPoint::new(1, 2);
+    let (x, y) = screen_point_for_buffer_point(
+        &mut state,
+        buffer_id,
+        point,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+
+    state
+        .handle_event(
+            Event::MouseButtonDown {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 2,
+                x,
+                y,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_event(
+            Event::MouseButtonUp {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 2,
+                x,
+                y,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_anchor, Some(point));
+    assert_eq!(ui.vim().visual_kind, VisualSelectionKind::Line);
+    assert_eq!(buffer.cursor_point(), point);
+    assert_eq!(
+        visual_selection(buffer, point, VisualSelectionKind::Line),
+        buffer.line_span_range(1, 1).map(VisualSelection::Range)
+    );
+    assert!(state.mouse_drag.is_none());
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            2,
+            12,
+            vec![
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        11,
+                        "echo hello",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+                editor_terminal::TerminalRenderLine::new(vec![]),
+            ],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                0,
+                0,
+                1,
+                editor_terminal::TerminalCursorShape::Beam,
+                "e",
+            )),
+            None,
+        ));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_terminal_buffer(
+        &mut target,
+        buffer,
+        buffer
+            .terminal_render()
+            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+        rect,
+        layout,
+        true,
+        InputMode::Normal,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(110, 170, 255),
+        Color::RGB(215, 221, 232),
+        Color::RGB(40, 44, 52),
+        "status".to_owned(),
+        Color::RGB(110, 170, 255),
+        Color::RGB(140, 144, 152),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let rendered_text = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(rendered_text.contains(&"echo hello"));
+    assert!(
+        !rendered_text
+            .iter()
+            .any(|text| text.contains("launching the configured shell"))
+    );
+    assert!(
+        scene
+            .iter()
+            .any(|command| matches!(command, DrawCommand::FillRoundedRect { .. }))
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_host_open_devtools_event_is_ignored_without_a_live_webview() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::OpenDevtoolsRequested { buffer_id }])
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[test]
+fn browser_devtools_shortcut_requested_recognizes_f12_and_ctrl_shift_i() {
+    assert!(browser_devtools_shortcut_requested(
+        Keycode::F12,
+        Mod::NOMOD
+    ));
+    assert!(browser_devtools_shortcut_requested(
+        Keycode::F12,
+        shift_mod()
+    ));
+    assert!(browser_devtools_shortcut_requested(
+        Keycode::I,
+        ctrl_mod() | shift_mod()
+    ));
+}
+
+#[test]
+fn browser_devtools_shortcut_requested_rejects_other_modifiers() {
+    assert!(!browser_devtools_shortcut_requested(Keycode::I, ctrl_mod()));
+    assert!(!browser_devtools_shortcut_requested(
+        Keycode::I,
+        ctrl_mod() | shift_mod() | Mod::LALTMOD
+    ));
+    assert!(!browser_devtools_shortcut_requested(
+        Keycode::F11,
+        Mod::NOMOD
+    ));
+}

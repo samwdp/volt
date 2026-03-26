@@ -8,4 +8,4 @@ pub const TOKEN_MODIFIED: &str = "git.fringe.modified";
 pub const TOKEN_REMOVED: &str = "git.fringe.removed";
 
 /// Glyph used to draw the git fringe marker.
-pub const SYMBOL: &str = "|";
+pub const SYMBOL: &str = "⏽";

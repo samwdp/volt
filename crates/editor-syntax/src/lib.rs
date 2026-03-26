@@ -770,6 +770,10 @@ impl SyntaxRegistry {
         if queries_dir.exists() {
             copy_dir_all(&queries_dir, &install_dir.join("queries"))?;
         }
+        ensure_installed_highlight_query_path(
+            &config,
+            &grammar.installed_highlight_query_path(&self.install_root),
+        )?;
         build_shared_library(
             language_id,
             &grammar,
@@ -1631,6 +1635,24 @@ fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), SyntaxError> {
     Ok(())
 }
 
+fn ensure_installed_highlight_query_path(
+    config: &LanguageConfiguration,
+    query_path: &Path,
+) -> Result<(), SyntaxError> {
+    if query_path.exists() || config.extra_highlight_query().is_none() {
+        return Ok(());
+    }
+    let parent = query_path.parent().ok_or_else(|| SyntaxError::Io {
+        operation: "locate highlight query parent".to_owned(),
+        path: query_path.to_path_buf(),
+        message: "installed highlight query path has no parent directory".to_owned(),
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| io_error("create highlight query directory", parent, error))?;
+    fs::write(query_path, "")
+        .map_err(|error| io_error("create placeholder highlight query", query_path, error))
+}
+
 fn io_error(operation: &str, path: &Path, error: std::io::Error) -> SyntaxError {
     SyntaxError::Io {
         operation: operation.to_owned(),
@@ -1711,11 +1733,14 @@ impl Drop for TempCloneGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
-        SyntaxParseSession, SyntaxRegistry,
+        SyntaxParseSession, SyntaxRegistry, ensure_installed_highlight_query_path,
     };
     use editor_buffer::TextBuffer;
 
@@ -2003,6 +2028,29 @@ fn main() {
                 assert_eq!(install_dir, install_root.join("tree-sitter-rust"));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_highlight_query_can_seed_missing_installed_query_file() {
+        let query_path = std::env::temp_dir().join(format!(
+            "volt-extra-query-{}-{}.scm",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        let config =
+            installable_rust_configuration().with_extra_highlight_query("(identifier) @function");
+
+        must(ensure_installed_highlight_query_path(&config, &query_path));
+
+        assert!(query_path.exists());
+        assert_eq!(std::fs::read_to_string(&query_path).unwrap_or_default(), "");
+
+        if query_path.exists() {
+            let _ = std::fs::remove_file(&query_path);
         }
     }
 }

@@ -6,7 +6,7 @@ pub const BUFFER_NAME: &str = "*browser*";
 pub const HOOK_BROWSER_URL: &str = "ui.browser.url";
 pub const URL_PROMPT: &str = "URL > ";
 pub const URL_PLACEHOLDER: &str = "https://example.com";
-pub const INPUT_HINT: &str = "Ctrl+Enter navigate · click page to browse";
+pub const INPUT_HINT: &str = "Ctrl+Enter navigate · F12 devtools · click page to browse";
 
 /// Returns the metadata for the browser buffer package.
 pub fn package() -> PluginPackage {
@@ -50,6 +50,7 @@ pub fn buffer_lines(url: Option<&str>) -> Vec<String> {
             format!("{} Current URL: {url}", md::MD_WEB),
             String::new(),
             "Click inside the page viewport to interact with the embedded browser.".to_owned(),
+            "Press F12 or Ctrl+Shift+I to open DevTools.".to_owned(),
             format!(
                 "{} Use the URL prompt below and press Ctrl+Enter to navigate again.",
                 cod::COD_DEBUG_START
@@ -67,6 +68,7 @@ pub fn buffer_lines(url: Option<&str>) -> Vec<String> {
             ),
             String::new(),
             "Once a page loads, click inside it to interact directly in the buffer body.".to_owned(),
+            "Press F12 or Ctrl+Shift+I to open DevTools.".to_owned(),
             "Use browser.open for a full buffer or browser.open-popup/browser.url for popup browsing."
                 .to_owned(),
         ],
@@ -117,17 +119,18 @@ mod tests {
                 .any(|line| line.contains("https://example.com"))
         );
         assert!(lines.iter().any(|line| line.contains("Browser buffer")));
+        assert!(lines.iter().any(|line| line.contains("DevTools")));
     }
 
     #[test]
     fn input_hint_includes_current_url_when_present() {
         assert_eq!(
             input_hint(Some("https://example.com")),
-            "current https://example.com · Ctrl+Enter navigate · click page to browse"
+            "current https://example.com · Ctrl+Enter navigate · F12 devtools · click page to browse"
         );
         assert_eq!(
             input_hint(None),
-            "Ctrl+Enter navigate · click page to browse"
+            "Ctrl+Enter navigate · F12 devtools · click page to browse"
         );
     }
 }

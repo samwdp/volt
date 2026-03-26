@@ -92,4 +92,3 @@ Inside the SDL shell, the default user package wiring now gives you:
 
 Theme files live under `user/themes/*.toml` and support UI options like font, font size, and
 cursor/picker roundness. Bundled icon fonts are loaded automatically at startup and are no longer
-gated behind a theme option.

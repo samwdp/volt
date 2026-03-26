@@ -24,3 +24,6 @@ editor-plugin-api = { path = "../crates/editor-plugin-api" }
 editor-syntax = { path = "../crates/editor-syntax" }
 editor-theme = { path = "../crates/editor-theme" }
 toml = "0.8.23"
+
+[dev-dependencies]
+editor-buffer = { path = "../crates/editor-buffer" }

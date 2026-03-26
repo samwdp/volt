@@ -43,6 +43,7 @@ pub(crate) struct BrowserLocationUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BrowserHostEvent {
     FocusParentRequested { buffer_id: BufferId },
+    OpenDevtoolsRequested { buffer_id: BufferId },
 }
 
 pub(crate) struct BrowserHostService {
@@ -96,6 +97,19 @@ impl BrowserHostService {
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn open_devtools(&mut self, buffer_id: BufferId) -> Result<(), String> {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        {
+            self.inner.open_devtools(buffer_id)
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            let _ = buffer_id;
             Ok(())
         }
     }
@@ -173,8 +187,26 @@ const BROWSER_HOME_HTML: &str = r#"<!doctype html>
 const BROWSER_WEBVIEW_FOCUS_PARENT_IPC: &str = "__volt.focus_parent__";
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+const BROWSER_WEBVIEW_OPEN_DEVTOOLS_IPC: &str = "__volt.open_devtools__";
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 const BROWSER_WEBVIEW_INIT_SCRIPT: &str = r#"
 window.addEventListener('keydown', (event) => {
+  if (
+    !event.defaultPrevented &&
+    !event.altKey &&
+    !event.metaKey &&
+    (
+      event.key === 'F12' ||
+      (event.ctrlKey && event.shiftKey && (event.key === 'I' || event.key === 'i'))
+    )
+  ) {
+    window.ipc.postMessage('__volt.open_devtools__');
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
   if (
     event.key === 'Escape' &&
     !event.defaultPrevented &&
@@ -193,6 +225,19 @@ window.addEventListener('keydown', (event) => {
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn allow_browser_drag_drop(_event: wry::DragDropEvent) -> bool {
     false
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn browser_host_event_for_ipc(buffer_id: BufferId, body: &str) -> Option<BrowserHostEvent> {
+    match body {
+        BROWSER_WEBVIEW_FOCUS_PARENT_IPC => {
+            Some(BrowserHostEvent::FocusParentRequested { buffer_id })
+        }
+        BROWSER_WEBVIEW_OPEN_DEVTOOLS_IPC => {
+            Some(BrowserHostEvent::OpenDevtoolsRequested { buffer_id })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -307,6 +352,14 @@ impl DesktopBrowserHostService {
         Ok(())
     }
 
+    fn open_devtools(&mut self, buffer_id: BufferId) -> Result<(), String> {
+        let Some(instance) = self.instances.get(&buffer_id) else {
+            return Ok(());
+        };
+        instance.open_devtools();
+        Ok(())
+    }
+
     fn drain_events(&mut self) -> Result<Vec<BrowserHostEvent>, String> {
         let mut events = Vec::new();
         while let Ok(event) = self.event_rx.try_recv() {
@@ -341,8 +394,8 @@ impl BrowserInstance {
             .with_drag_drop_handler(allow_browser_drag_drop)
             .with_initialization_script(BROWSER_WEBVIEW_INIT_SCRIPT)
             .with_ipc_handler(move |request| {
-                if request.body() == BROWSER_WEBVIEW_FOCUS_PARENT_IPC {
-                    let _ = event_tx.send(BrowserHostEvent::FocusParentRequested { buffer_id });
+                if let Some(event) = browser_host_event_for_ipc(buffer_id, request.body()) {
+                    let _ = event_tx.send(event);
                 }
             });
         #[cfg(target_os = "windows")]
@@ -359,6 +412,10 @@ impl BrowserInstance {
             last_bounds: bounds,
             visible: true,
         })
+    }
+
+    fn open_devtools(&self) {
+        self.webview.open_devtools();
     }
 
     fn sync(
@@ -438,9 +495,54 @@ fn to_wry_rect(rect: BrowserViewportRect) -> wry::Rect {
 mod tests {
     use super::*;
 
+    fn browser_test_buffer_id() -> BufferId {
+        let mut runtime = editor_core::EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("browser-host-test");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "browser-host", None)
+            .expect("workspace should be created for browser host tests");
+        runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                "*browser*",
+                editor_core::BufferKind::Scratch,
+                None,
+            )
+            .expect("buffer id should be created for browser host tests")
+    }
+
     #[test]
     fn browser_drag_drop_handler_preserves_default_webview_behavior() {
         assert!(!allow_browser_drag_drop(wry::DragDropEvent::Leave));
+    }
+
+    #[test]
+    fn browser_host_ipc_event_routes_focus_parent_requests() {
+        let buffer_id = browser_test_buffer_id();
+        assert_eq!(
+            browser_host_event_for_ipc(buffer_id, BROWSER_WEBVIEW_FOCUS_PARENT_IPC),
+            Some(BrowserHostEvent::FocusParentRequested { buffer_id })
+        );
+    }
+
+    #[test]
+    fn browser_host_ipc_event_routes_open_devtools_requests() {
+        let buffer_id = browser_test_buffer_id();
+        assert_eq!(
+            browser_host_event_for_ipc(buffer_id, BROWSER_WEBVIEW_OPEN_DEVTOOLS_IPC),
+            Some(BrowserHostEvent::OpenDevtoolsRequested { buffer_id })
+        );
+    }
+
+    #[test]
+    fn browser_host_ipc_event_ignores_unknown_messages() {
+        let buffer_id = browser_test_buffer_id();
+        assert_eq!(
+            browser_host_event_for_ipc(buffer_id, "__volt.unknown__"),
+            None
+        );
     }
 
     #[test]

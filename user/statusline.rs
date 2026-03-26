@@ -19,6 +19,8 @@ pub struct StatuslineContext<'a> {
     pub column: usize,
     /// Attached language server name, if any.
     pub lsp_server: Option<&'a str>,
+    /// Active buffer diagnostic summary, if any.
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
     /// Whether an ACP client is connected.
     pub acp_connected: bool,
     /// Git statusline info, if available.
@@ -33,8 +35,19 @@ pub struct GitStatuslineInfo<'a> {
     pub removed: usize,
 }
 
+/// LSP diagnostics surfaced to the statusline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LspDiagnosticsInfo {
+    pub errors: usize,
+    pub warnings: usize,
+}
+
 /// Function signature used by user-defined statusline segments.
 pub type StatuslineSegment = for<'a> fn(&StatuslineContext<'a>) -> Option<String>;
+
+pub const LSP_CONNECTED_ICON: &str = crate::icon_font::symbols::md::MD_LAN_CONNECT;
+pub const LSP_ERROR_ICON: &str = crate::icon_font::symbols::cod::COD_ERROR;
+pub const LSP_WARNING_ICON: &str = crate::icon_font::symbols::cod::COD_WARNING;
 
 /// Returns the ordered statusline segment list.
 ///
@@ -97,8 +110,13 @@ fn buffer_segment(context: &StatuslineContext<'_>) -> Option<String> {
 fn filetype_segment(context: &StatuslineContext<'_>) -> Option<String> {
     let language_id = context.language_id?;
     let symbol = match language_id {
+        "csharp" => crate::icon_font::symbols::seti::SETI_C_SHARP,
+        "javascript" | "jsx" => crate::icon_font::symbols::seti::SETI_JAVASCRIPT,
+        "json" => crate::icon_font::symbols::seti::SETI_JSON,
         "rust" => crate::icon_font::symbols::seti::SETI_RUST,
         "markdown" | "markdown-inline" => crate::icon_font::symbols::seti::SETI_MARKDOWN,
+        "toml" => crate::icon_font::symbols::seti::CUSTOM_TOML,
+        "typescript" | "tsx" => crate::icon_font::symbols::seti::SETI_TYPESCRIPT,
         "gitcommit" => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
         _ => crate::icon_font::symbols::cod::COD_FILE,
     };
@@ -121,7 +139,27 @@ fn position_segment(context: &StatuslineContext<'_>) -> Option<String> {
 }
 
 fn lsp_segment(context: &StatuslineContext<'_>) -> Option<String> {
-    context.lsp_server.map(str::to_owned)
+    let server = context.lsp_server?;
+    let mut segment = String::new();
+    segment.push(' ');
+    segment.push_str(LSP_CONNECTED_ICON);
+    segment.push(' ');
+    segment.push_str(server);
+    if let Some(diagnostics) = context.lsp_diagnostics {
+        if diagnostics.errors > 0 {
+            segment.push(' ');
+            segment.push_str(LSP_ERROR_ICON);
+            segment.push(' ');
+            segment.push_str(&diagnostics.errors.to_string());
+        }
+        if diagnostics.warnings > 0 {
+            segment.push(' ');
+            segment.push_str(LSP_WARNING_ICON);
+            segment.push(' ');
+            segment.push_str(&diagnostics.warnings.to_string());
+        }
+    }
+    Some(segment)
 }
 
 #[cfg(test)]
@@ -131,6 +169,7 @@ mod tests {
     #[test]
     fn compose_joins_the_default_user_segments() {
         let file_icon = crate::icon_font::symbols::seti::SETI_RUST;
+        let lsp_icon = super::LSP_CONNECTED_ICON;
         let statusline = compose(&StatuslineContext {
             vim_mode: "NORMAL",
             recording_macro: None,
@@ -141,13 +180,16 @@ mod tests {
             line: 3,
             column: 9,
             lsp_server: Some("rust-analyzer"),
+            lsp_diagnostics: None,
             acp_connected: false,
             git: None,
         });
 
         assert_eq!(
             statusline,
-            format!("NORMAL | default | {file_icon} | *scratch* | Ln 3, Col 9 | rust-analyzer")
+            format!(
+                "NORMAL | default | {file_icon} | *scratch* | Ln 3, Col 9 |  {lsp_icon} rust-analyzer"
+            )
         );
     }
 
@@ -163,6 +205,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            lsp_diagnostics: None,
             acp_connected: false,
             git: None,
         });
@@ -182,6 +225,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            lsp_diagnostics: None,
             acp_connected: false,
             git: None,
         });
@@ -206,6 +250,7 @@ mod tests {
             line: 1,
             column: 1,
             lsp_server: None,
+            lsp_diagnostics: None,
             acp_connected: false,
             git: None,
         });
@@ -232,6 +277,7 @@ mod tests {
             line: 10,
             column: 2,
             lsp_server: None,
+            lsp_diagnostics: None,
             acp_connected: false,
             git: Some(super::GitStatuslineInfo {
                 branch: "main",
@@ -244,6 +290,38 @@ mod tests {
             statusline,
             format!(
                 "NORMAL | default | {file_icon} | main.rs | {branch} main {up} 12 {down} 3 | Ln 10, Col 2"
+            )
+        );
+    }
+
+    #[test]
+    fn compose_includes_lsp_diagnostic_counts() {
+        let file_icon = crate::icon_font::symbols::seti::SETI_RUST;
+        let lsp_icon = super::LSP_CONNECTED_ICON;
+        let error_icon = super::LSP_ERROR_ICON;
+        let warning_icon = super::LSP_WARNING_ICON;
+        let statusline = compose(&StatuslineContext {
+            vim_mode: "NORMAL",
+            recording_macro: None,
+            workspace_name: "default",
+            buffer_name: "main.rs",
+            buffer_modified: false,
+            language_id: Some("rust"),
+            line: 10,
+            column: 2,
+            lsp_server: Some("rust-analyzer"),
+            lsp_diagnostics: Some(super::LspDiagnosticsInfo {
+                errors: 3,
+                warnings: 1,
+            }),
+            acp_connected: false,
+            git: None,
+        });
+
+        assert_eq!(
+            statusline,
+            format!(
+                "NORMAL | default | {file_icon} | main.rs | Ln 10, Col 2 |  {lsp_icon} rust-analyzer {error_icon} 3 {warning_icon} 1"
             )
         );
     }

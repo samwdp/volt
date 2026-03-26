@@ -757,6 +757,7 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Insert),
         // Command-line editing
         normal_binding(":", "vim.command-line", PluginKeymapScope::Workspace),
+        normal_binding("Alt+x", "vim.command-line", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+.", "workspace.list-files", PluginKeymapScope::Global),
         // Visual mode
         visual_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
@@ -971,17 +972,30 @@ mod tests {
     #[test]
     fn package_exports_lsp_navigation_bindings() {
         let package = package();
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == "g d" && binding.command_name() == "lsp.definition"));
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == "g d"
+                    && binding.command_name() == "lsp.definition")
+        );
         assert!(package.key_bindings().iter().any(
             |binding| binding.chord() == "g r r" && binding.command_name() == "lsp.references"
         ));
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == "g i"
-                && binding.command_name() == "lsp.implementation"));
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == "g i"
+                    && binding.command_name() == "lsp.implementation")
+        );
+    }
+
+    #[test]
+    fn package_exports_alt_x_for_command_line() {
+        let package = package();
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Alt+x" && binding.command_name() == "vim.command-line"
+        }));
     }
 }

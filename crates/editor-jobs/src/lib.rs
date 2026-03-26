@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -330,19 +330,43 @@ impl CompilationRunner {
 
 fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
     let started = Instant::now();
-    let mut command = Command::new(spec.program());
-    configure_background_command(&mut command);
-    command.args(spec.args());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    if let Some(cwd) = spec.cwd() {
-        command.current_dir(cwd);
+    let mut output_result = build_job_command(&spec, spec.program(), None).output();
+    #[cfg(windows)]
+    {
+        let should_retry = matches!(
+            &output_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry {
+            for candidate in windows_launch_program_candidates(spec.program()) {
+                output_result = build_job_command(&spec, &candidate, None).output();
+                match &output_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        let should_retry_with_fnm = matches!(
+            &output_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry_with_fnm
+            && let Some(fnm_env) =
+                windows_fnm_environment(spec.cwd().map(PathBuf::as_path), spec.env())
+        {
+            for candidate in windows_fnm_launch_program_candidates(spec.program(), &fnm_env) {
+                output_result = build_job_command(&spec, &candidate, Some(&fnm_env)).output();
+                match &output_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
     }
-    for (key, value) in spec.env() {
-        command.env(key, value);
-    }
 
-    let output = command.output()?;
+    let output = output_result?;
     Ok(JobResult {
         id,
         spec,
@@ -353,8 +377,188 @@ fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
     })
 }
 
+fn build_job_command(
+    spec: &JobSpec,
+    program: &str,
+    #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
+    #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
+) -> Command {
+    let mut command = Command::new(program);
+    configure_background_command(&mut command);
+    command.args(spec.args());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    if let Some(cwd) = spec.cwd() {
+        command.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    if let Some(fnm_env) = fnm_env {
+        apply_windows_fnm_environment(&mut command, spec.env(), fnm_env);
+    } else {
+        apply_command_environment(&mut command, spec.env());
+    }
+    #[cfg(not(windows))]
+    apply_command_environment(&mut command, spec.env());
+    command
+}
+
+fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+#[cfg(windows)]
+fn windows_launch_program_candidates(program: &str) -> Vec<String> {
+    if Path::new(program).extension().is_some() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for extension in windows_command_extensions() {
+        let candidate = format!("{program}{extension}");
+        if candidate != program && !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn windows_command_extensions() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .ok()
+        .map(|value| {
+            value
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".com", ".exe", ".bat", ".cmd"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+#[cfg(windows)]
+fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
+}
+
+#[cfg(windows)]
+fn windows_fnm_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let mut command = Command::new("fnm");
+    configure_background_command(&mut command);
+    command
+        .args(["env", "--shell", "cmd"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    apply_command_environment(&mut command, env);
+    let output = command.output().ok()?;
+    output.status.success().then_some(())?;
+    parse_windows_cmd_environment(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(windows)]
+fn windows_fnm_launch_program_candidates(
+    program: &str,
+    fnm_env: &[(String, String)],
+) -> Vec<String> {
+    if Path::new(program).components().count() != 1 {
+        return Vec::new();
+    }
+
+    let names = windows_launch_program_candidates(program)
+        .into_iter()
+        .chain(std::iter::once(program.to_owned()))
+        .collect::<Vec<_>>();
+    let Some(path_value) = explicit_windows_env_value(fnm_env, "PATH") else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for directory in path_value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        for name in &names {
+            let candidate = Path::new(directory).join(name);
+            if candidate.is_file() {
+                let candidate = candidate.to_string_lossy().into_owned();
+                if !candidates.iter().any(|existing| existing == &candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> {
+    let vars = output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("SET ")?;
+            let (key, value) = rest.split_once('=')?;
+            (!key.is_empty()).then_some((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(windows)]
+fn apply_windows_fnm_environment(
+    command: &mut Command,
+    env: &[(String, String)],
+    fnm_env: &[(String, String)],
+) {
+    let explicit_path = explicit_windows_env_value(env, "PATH");
+    let mut applied_path = false;
+    for (key, value) in fnm_env {
+        if key.eq_ignore_ascii_case("PATH") {
+            let merged_path = explicit_path
+                .map(|path| format!("{value};{path}"))
+                .unwrap_or_else(|| value.clone());
+            command.env(key, merged_path);
+            applied_path = true;
+            continue;
+        }
+        command.env(key, value);
+    }
+    for (key, value) in env {
+        if !key.eq_ignore_ascii_case("PATH") {
+            command.env(key, value);
+        }
+    }
+    if !applied_path && let Some(path) = explicit_path {
+        command.env("PATH", path);
+    }
+}
+
+#[cfg(windows)]
+fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a String> {
+    env.iter()
+        .find_map(|(entry_key, value)| entry_key.eq_ignore_ascii_case(key).then_some(value))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::{CompilationRunner, JobKind, JobManager, JobSpec};
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -362,6 +566,15 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("unexpected error: {error:?}"),
         }
+    }
+
+    #[cfg(windows)]
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
     }
 
     #[test]
@@ -387,5 +600,114 @@ mod tests {
         assert_eq!(compilation.job().spec().kind(), JobKind::Compilation);
         assert!(compilation.succeeded());
         assert!(compilation.transcript().contains("rustc"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_parse_cmd_environment_extracts_variables() {
+        let env = super::parse_windows_cmd_environment(
+            "SET PATH=C:\\fnm;C:\\tools\r\nSET FNM_DIR=C:\\Users\\sam\\AppData\\Roaming\\fnm\r\n",
+        )
+        .expect("fnm env should parse");
+        assert_eq!(
+            env,
+            vec![
+                ("PATH".to_owned(), "C:\\fnm;C:\\tools".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_job_command_keeps_fnm_path_ahead_of_explicit_path() {
+        let spec = JobSpec::command("node-version", "node", ["--version"])
+            .with_env("PATH", "C:\\custom")
+            .with_env("NODE_OPTIONS", "--trace-warnings");
+        let command = super::build_job_command(
+            &spec,
+            "node",
+            Some(&[
+                ("PATH".to_owned(), "C:\\fnm".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned(),
+                ),
+            ]),
+        );
+        let vars = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            vars.get("PATH").map(String::as_str),
+            Some("C:\\fnm;C:\\custom")
+        );
+        assert_eq!(
+            vars.get("FNM_DIR").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\fnm")
+        );
+        assert_eq!(
+            vars.get("NODE_OPTIONS").map(String::as_str),
+            Some("--trace-warnings")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_should_retry_invalid_exe_format() {
+        let error = std::io::Error::from_raw_os_error(193);
+        assert!(super::windows_should_retry_spawn_error(&error));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fnm_launch_program_candidates_resolve_absolute_command_shims() {
+        let temp_dir = temp_dir("volt-fnm-jobs");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let candidate_path = temp_dir.join("prettier.cmd");
+        std::fs::write(&candidate_path, "@echo off\r\n").expect("candidate");
+
+        let candidates = super::windows_fnm_launch_program_candidates(
+            "prettier",
+            &[("PATH".to_owned(), temp_dir.to_string_lossy().into_owned())],
+        );
+        assert!(candidates.contains(&candidate_path.to_string_lossy().into_owned()));
+
+        let _ = std::fs::remove_file(candidate_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fnm_launch_program_candidates_prefer_windows_shims_over_extensionless_scripts() {
+        let temp_dir = temp_dir("volt-fnm-jobs");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let script_path = temp_dir.join("prettier");
+        let shim_path = temp_dir.join("prettier.cmd");
+        std::fs::write(&script_path, "#!/bin/sh\n").expect("script");
+        std::fs::write(&shim_path, "@echo off\r\n").expect("shim");
+
+        let candidates = super::windows_fnm_launch_program_candidates(
+            "prettier",
+            &[("PATH".to_owned(), temp_dir.to_string_lossy().into_owned())],
+        );
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some(shim_path.to_string_lossy().as_ref())
+        );
+        assert!(candidates.contains(&script_path.to_string_lossy().into_owned()));
+
+        let _ = std::fs::remove_file(script_path);
+        let _ = std::fs::remove_file(shim_path);
+        let _ = std::fs::remove_dir(temp_dir);
     }
 }

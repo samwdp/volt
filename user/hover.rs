@@ -9,12 +9,14 @@ pub const HOOK_HOVER_NEXT: &str = "ui.hover.next";
 pub const HOOK_HOVER_PREVIOUS: &str = "ui.hover.previous";
 pub const PROVIDER_TEST_HOVER: &str = "test-hover";
 pub const PROVIDER_LSP: &str = "lsp";
+pub const PROVIDER_SIGNATURE_HELP: &str = "signature-help";
 pub const PROVIDER_DIAGNOSTICS: &str = "diagnostics";
 pub const TOGGLE_CHORD: &str = "K";
 pub const NEXT_CHORD: &str = "Ctrl+n";
 pub const PREVIOUS_CHORD: &str = "Ctrl+p";
 pub const LINE_LIMIT: usize = 10;
 pub const TOKEN_ICON: &str = md::MD_HELP_CIRCLE_OUTLINE;
+pub const SIGNATURE_ICON: &str = md::MD_SIGNATURE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverProviderConfig {
@@ -36,6 +38,7 @@ impl HoverProviderConfig {
 pub fn providers() -> Vec<HoverProviderConfig> {
     vec![
         HoverProviderConfig::new(PROVIDER_LSP, "LSP", md::MD_COMMENT_TEXT_OUTLINE),
+        HoverProviderConfig::new(PROVIDER_SIGNATURE_HELP, "Signature", SIGNATURE_ICON),
         HoverProviderConfig::new(
             PROVIDER_DIAGNOSTICS,
             "Diagnostics",
@@ -153,7 +156,8 @@ mod tests {
     fn provider_order_matches_current_source_of_truth() {
         let providers = providers();
         assert_eq!(providers[0].id, PROVIDER_LSP);
-        assert_eq!(providers[1].id, PROVIDER_DIAGNOSTICS);
-        assert_eq!(providers[2].id, PROVIDER_TEST_HOVER);
+        assert_eq!(providers[1].id, PROVIDER_SIGNATURE_HELP);
+        assert_eq!(providers[2].id, PROVIDER_DIAGNOSTICS);
+        assert_eq!(providers[3].id, PROVIDER_TEST_HOVER);
     }
 }

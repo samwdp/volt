@@ -1017,6 +1017,11 @@ pub(super) fn render_picker_overlay(
         .map(|value| value.clamp(0.0, 64.0).round() as u32)
         .unwrap_or(16);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
+    let picker_hightlight = theme_color(
+        theme_registry,
+        "ui.picker.hightlight",
+        Color::RGB(110, 170, 255),
+    );
     let foreground = theme_color(
         theme_registry,
         "ui.foreground",
@@ -1046,7 +1051,7 @@ pub(super) fn render_picker_overlay(
             popup_rect.width.saturating_sub(28),
             2,
         ),
-        Color::RGB(110, 170, 255),
+        picker_hightlight,
     )?;
 
     draw_text(

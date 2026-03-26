@@ -2,14 +2,21 @@
 
 mod client;
 
-use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
 
 pub use client::{
     LspClientError, LspClientManager, LspCompletionItem, LspCompletionKind, LspFormattingOptions,
-    LspHoverContents, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot, LspTextEdit,
+    LspHoverContents, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot, LspNotification,
+    LspNotificationEntry, LspNotificationLevel, LspNotificationProgress, LspNotificationSnapshot,
+    LspSignatureHelpContents, LspTextEdit,
 };
 
 /// Human-readable summary of this crate's responsibility.
@@ -83,10 +90,23 @@ pub struct LanguageServerSpec {
     id: String,
     language_id: String,
     file_extensions: Vec<String>,
+    document_language_ids: BTreeMap<String, String>,
     program: String,
     args: Vec<String>,
     root_markers: Vec<String>,
+    root_strategy: LanguageServerRootStrategy,
     env: Vec<(String, String)>,
+}
+
+/// Strategy used to choose the LSP workspace root for a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LanguageServerRootStrategy {
+    /// Reuse the editor workspace root as-is.
+    #[default]
+    Workspace,
+    /// Prefer the nearest configured root marker for the current file and fall back to the editor
+    /// workspace root when no marker matches.
+    MarkersOrWorkspace,
 }
 
 impl LanguageServerSpec {
@@ -105,9 +125,11 @@ impl LanguageServerSpec {
                 .into_iter()
                 .map(|extension| normalize_extension(&extension.into()))
                 .collect(),
+            document_language_ids: BTreeMap::new(),
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             root_markers: Vec::new(),
+            root_strategy: LanguageServerRootStrategy::Workspace,
             env: Vec::new(),
         }
     }
@@ -118,6 +140,30 @@ impl LanguageServerSpec {
         markers: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.root_markers = markers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the workspace-root strategy for this server.
+    pub fn with_root_strategy(mut self, strategy: LanguageServerRootStrategy) -> Self {
+        self.root_strategy = strategy;
+        self
+    }
+
+    /// Overrides the LSP document language id for specific file extensions.
+    pub fn with_document_language_ids<I, E, L>(mut self, mappings: I) -> Self
+    where
+        I: IntoIterator<Item = (E, L)>,
+        E: Into<String>,
+        L: Into<String>,
+    {
+        for (extension, language_id) in mappings {
+            let extension = normalize_extension(&extension.into());
+            let language_id = language_id.into();
+            if extension.is_empty() || language_id.is_empty() {
+                continue;
+            }
+            self.document_language_ids.insert(extension, language_id);
+        }
         self
     }
 
@@ -142,6 +188,15 @@ impl LanguageServerSpec {
         &self.file_extensions
     }
 
+    /// Returns the LSP document language id for a file extension.
+    pub fn document_language_id_for_extension(&self, extension: &str) -> &str {
+        let extension = normalize_extension(extension);
+        self.document_language_ids
+            .get(&extension)
+            .map(String::as_str)
+            .unwrap_or(&self.language_id)
+    }
+
     /// Returns the program executable.
     pub fn program(&self) -> &str {
         &self.program
@@ -155,6 +210,11 @@ impl LanguageServerSpec {
     /// Returns root markers for workspace discovery.
     pub fn root_markers(&self) -> &[String] {
         &self.root_markers
+    }
+
+    /// Returns the workspace-root strategy for this server.
+    pub const fn root_strategy(&self) -> LanguageServerRootStrategy {
+        self.root_strategy
     }
 
     /// Returns the launch spec used to start the server.
@@ -172,6 +232,16 @@ impl LanguageServerSpec {
         }
         job
     }
+
+    fn planned_root_for_path(&self, path: &Path, workspace_root: Option<&Path>) -> Option<PathBuf> {
+        match self.root_strategy {
+            LanguageServerRootStrategy::Workspace => workspace_root.map(Path::to_path_buf),
+            LanguageServerRootStrategy::MarkersOrWorkspace => {
+                find_root_for_path(path, workspace_root, &self.root_markers)
+                    .or_else(|| workspace_root.map(Path::to_path_buf))
+            }
+        }
+    }
 }
 
 /// Prepared session plan for an LSP server.
@@ -179,6 +249,7 @@ impl LanguageServerSpec {
 pub struct LanguageServerSession {
     server_id: String,
     language_id: String,
+    document_language_ids: BTreeMap<String, String>,
     root: Option<PathBuf>,
     launch: JobSpec,
     diagnostics: Vec<Diagnostic>,
@@ -193,6 +264,20 @@ impl LanguageServerSession {
     /// Returns the language identifier.
     pub fn language_id(&self) -> &str {
         &self.language_id
+    }
+
+    /// Returns the document language id that should be sent for a file path.
+    pub fn document_language_id_for_path(&self, path: &Path) -> &str {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| {
+                let extension = normalize_extension(extension);
+                self.document_language_ids
+                    .get(&extension)
+                    .map(String::as_str)
+                    .unwrap_or(&self.language_id)
+            })
+            .unwrap_or(&self.language_id)
     }
 
     /// Returns the planned workspace root.
@@ -341,6 +426,29 @@ impl LanguageServerRegistry {
         Ok(LanguageServerSession {
             server_id: spec.id().to_owned(),
             language_id: spec.language_id().to_owned(),
+            document_language_ids: spec.document_language_ids.clone(),
+            launch: spec.launch_job(root.clone()),
+            root,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Prepares a session for a file path, resolving the root from the server strategy.
+    pub fn prepare_session_for_path(
+        &self,
+        server_id: &str,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Result<LanguageServerSession, LspError> {
+        let spec = self
+            .servers
+            .get(server_id)
+            .ok_or_else(|| LspError::UnknownServer(server_id.to_owned()))?;
+        let root = spec.planned_root_for_path(path, workspace_root);
+        Ok(LanguageServerSession {
+            server_id: spec.id().to_owned(),
+            language_id: spec.language_id().to_owned(),
+            document_language_ids: spec.document_language_ids.clone(),
             launch: spec.launch_job(root.clone()),
             root,
             diagnostics: Vec::new(),
@@ -377,6 +485,28 @@ impl LanguageServerRegistry {
         }
         Ok(sessions)
     }
+
+    /// Prepares sessions for a file path, resolving roots from each server strategy.
+    pub fn prepare_sessions_for_path(
+        &self,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Result<Vec<LanguageServerSession>, LspError> {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .ok_or_else(|| LspError::UnknownExtension(path.display().to_string()))?;
+        let extension = normalize_extension(extension);
+        let servers = self.servers_for_extension(&extension);
+        if servers.is_empty() {
+            return Err(LspError::UnknownExtension(extension));
+        }
+        let mut sessions = Vec::with_capacity(servers.len());
+        for server in servers {
+            sessions.push(self.prepare_session_for_path(server.id(), path, workspace_root)?);
+        }
+        Ok(sessions)
+    }
 }
 
 fn normalize_extension(extension: &str) -> String {
@@ -386,13 +516,70 @@ fn normalize_extension(extension: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn find_root_for_path(
+    path: &Path,
+    workspace_root: Option<&Path>,
+    root_markers: &[String],
+) -> Option<PathBuf> {
+    if root_markers.is_empty() {
+        return None;
+    }
+    let workspace_root = workspace_root.filter(|root| path.starts_with(root));
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory_matches_root_markers(directory, root_markers) {
+            return Some(directory.to_path_buf());
+        }
+        if workspace_root.is_some_and(|root| root == directory) {
+            break;
+        }
+        current = directory.parent();
+    }
+    None
+}
+
+fn directory_matches_root_markers(directory: &Path, root_markers: &[String]) -> bool {
+    root_markers
+        .iter()
+        .any(|marker| directory_matches_root_marker(directory, marker))
+}
+
+fn directory_matches_root_marker(directory: &Path, marker: &str) -> bool {
+    if let Some(extension) = marker.strip_prefix("*.") {
+        return directory_contains_extension(directory, extension);
+    }
+    fs::metadata(directory.join(marker)).is_ok()
+}
+
+fn directory_contains_extension(directory: &Path, extension: &str) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case(&extension))
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use editor_buffer::{TextPoint, TextRange};
 
-    use super::{Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerSpec};
+    use super::{
+        Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerRootStrategy,
+        LanguageServerSpec,
+    };
 
     fn rust_analyzer() -> LanguageServerSpec {
         LanguageServerSpec::new(
@@ -405,11 +592,46 @@ mod tests {
         .with_root_markers(["Cargo.toml", "rust-project.json"])
     }
 
+    fn typescript_language_server() -> LanguageServerSpec {
+        LanguageServerSpec::new(
+            "typescript-language-server",
+            "typescript",
+            ["ts", "tsx", "js", "jsx"],
+            "typescript-language-server",
+            ["--stdio"],
+        )
+        .with_document_language_ids([
+            ("tsx", "typescriptreact"),
+            ("js", "javascript"),
+            ("jsx", "javascriptreact"),
+        ])
+    }
+
+    fn csharp_language_server() -> LanguageServerSpec {
+        LanguageServerSpec::new(
+            "csharp-ls",
+            "csharp",
+            ["cs"],
+            "csharp-ls",
+            ["--features", "razor-support,metadata-uris"],
+        )
+        .with_root_markers(["*.sln", "*.csproj", "global.json"])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+    }
+
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
             Err(error) => panic!("unexpected error: {error:?}"),
         }
+    }
+
+    fn temp_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("volt-editor-lsp-{unique}"))
     }
 
     #[test]
@@ -469,6 +691,72 @@ mod tests {
         assert_eq!(session.launch().program(), "rust-analyzer");
         assert_eq!(session.launch().args(), ["--stdio"]);
         assert_eq!(session.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn prepared_session_resolves_document_language_ids_per_extension() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(typescript_language_server()));
+
+        let session = must(registry.prepare_session(
+            "typescript-language-server",
+            Some(PathBuf::from("P:\\volt")),
+        ));
+
+        assert_eq!(session.language_id(), "typescript");
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("app.ts")),
+            "typescript"
+        );
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("app.tsx")),
+            "typescriptreact"
+        );
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("app.js")),
+            "javascript"
+        );
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("app.jsx")),
+            "javascriptreact"
+        );
+    }
+
+    #[test]
+    fn prepared_session_for_path_prefers_nearest_matching_root_marker() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("AssetFusion.Api");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(root.join("af-platform-api.sln"), "").expect("solution");
+        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session =
+            must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
+        assert_eq!(session.root(), Some(&project_dir));
+        assert_eq!(session.launch().cwd(), Some(&project_dir));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_falls_back_to_workspace_root_when_markers_do_not_match() {
+        let root = temp_dir();
+        let file_path = root.join("src").join("Program.cs");
+        fs::create_dir_all(file_path.parent().expect("parent")).expect("dir");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session =
+            must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
+        assert_eq!(session.root(), Some(&root));
+        assert_eq!(session.launch().cwd(), Some(&root));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

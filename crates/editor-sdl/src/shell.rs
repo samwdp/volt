@@ -1,10 +1,14 @@
 mod acp;
+mod clipboard;
 mod picker;
+mod ui_overlays;
+
+#[cfg(test)]
+mod tests;
 
 use std::{
     any::Any,
     borrow::Cow,
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
@@ -17,6 +21,9 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use clipboard::*;
+use ui_overlays::*;
 
 use crate::browser_host::{
     BrowserBufferPlan, BrowserHostEvent, BrowserHostService, BrowserLocationUpdate,
@@ -44,7 +51,7 @@ use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
     LanguageServerRegistry, LspClientError, LspClientManager, LspFormattingOptions, LspLocation,
-    LspLogEntry, LspLogSnapshot, LspTextEdit,
+    LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_host::load_auto_loaded_packages;
@@ -56,14 +63,19 @@ use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
     SyntaxSnapshot,
 };
+use editor_terminal::{
+    LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalRenderSnapshot,
+    TerminalViewportScroll,
+};
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
 use fontdue::Font as RasterFont;
 use sdl3::{
     event::Event,
     keyboard::{Keycode, Mod},
+    mouse::{MouseButton, MouseWheelDirection},
     pixels::{Color, PixelFormat},
     rect::Rect,
-    render::{Canvas, RenderTarget},
+    render::{Canvas, FPoint, RenderTarget},
     surface::Surface,
     ttf::Font,
     video::Window,
@@ -148,6 +160,7 @@ const AUTOCOMPLETE_BUFFER_PROVIDER: &str = user::autocomplete::PROVIDER_BUFFER;
 const AUTOCOMPLETE_LSP_PROVIDER: &str = user::autocomplete::PROVIDER_LSP;
 const HOVER_PROVIDER_TEST: &str = user::hover::PROVIDER_TEST_HOVER;
 const HOVER_PROVIDER_LSP: &str = user::hover::PROVIDER_LSP;
+const HOVER_PROVIDER_SIGNATURE_HELP: &str = user::hover::PROVIDER_SIGNATURE_HELP;
 const HOVER_PROVIDER_DIAGNOSTICS: &str = user::hover::PROVIDER_DIAGNOSTICS;
 const HOOK_LSP_START: &str = user::lsp::HOOK_LSP_START;
 const HOOK_LSP_STOP: &str = user::lsp::HOOK_LSP_STOP;
@@ -206,10 +219,11 @@ const TOKEN_GIT_STATUS_COMMAND: &str = "git.status.command";
 const TOKEN_GIT_STATUS_MESSAGE: &str = "git.status.message";
 const TOKEN_STATUSLINE_ACTIVE: &str = "ui.statusline.active";
 const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
+const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
-const LSP_LOG_BUFFER_NAME: &str = "*lsp-log*";
+const LSP_LOG_BUFFER_PREFIX: &str = "*lsp-log ";
 const OIL_PREVIEW_KIND: &str = "oil-preview";
 const OIL_HELP_KIND: &str = "oil-help";
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
@@ -240,6 +254,7 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
 ));
 const ERROR_LOG_MAX_ENTRIES: usize = 200;
 const ERROR_LOG_FILE_NAME: &str = "errors.log";
+const ACTIVE_THEME_STATE_FILE_NAME: &str = "active-theme.txt";
 const TYPING_PROFILE_LOG_FILE_NAME: &str = "typing-profile.log";
 const TYPING_PROFILE_MAX_FRAMES: usize = 10_000;
 const TYPING_PROFILE_SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(8);
@@ -253,83 +268,14 @@ const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 const SYNTAX_WINDOW_MIN_LINES: usize = 256;
 const SYNTAX_WINDOW_MARGIN_LINES: usize = 96;
+const NOTIFICATION_AUTO_DISMISS: Duration = Duration::from_secs(5);
+const NOTIFICATION_VISIBLE_LIMIT: usize = 3;
+const NOTIFICATION_MAX_STORED: usize = 12;
+const NOTIFICATION_STACK_GAP: i32 = 10;
+const NOTIFICATION_MAX_BODY_LINES: usize = 4;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-struct ClipboardContext {
-    video: sdl3::VideoSubsystem,
-}
-
-thread_local! {
-    static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
-}
-
-fn register_clipboard_context(video: sdl3::VideoSubsystem) {
-    CLIPBOARD_CONTEXT.with(|context| {
-        *context.borrow_mut() = Some(ClipboardContext { video });
-    });
-}
-
-fn with_clipboard_util<T>(f: impl FnOnce(&sdl3::clipboard::ClipboardUtil) -> T) -> Option<T> {
-    CLIPBOARD_CONTEXT.with(|context| {
-        context.borrow().as_ref().map(|context| {
-            let clipboard = context.video.clipboard();
-            f(&clipboard)
-        })
-    })
-}
-
-fn configure_background_command(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-}
-
-fn write_system_clipboard(text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(Err(error)) = with_clipboard_util(|clipboard| clipboard.set_clipboard_text(text)) {
-        eprintln!("Failed to write clipboard text: {error}.");
-    }
-}
-
-fn read_system_clipboard() -> Option<String> {
-    with_clipboard_util(|clipboard| {
-        if !clipboard.has_clipboard_text() {
-            return None;
-        }
-        clipboard.clipboard_text().ok()
-    })
-    .flatten()
-    .filter(|text| !text.is_empty())
-}
-
-fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {
-    match yank {
-        YankRegister::Character(text) => Cow::Borrowed(text),
-        YankRegister::Line(text) => {
-            if text.ends_with('\n') {
-                Cow::Borrowed(text)
-            } else {
-                Cow::Owned(format!("{text}\n"))
-            }
-        }
-        YankRegister::Block(lines) => Cow::Owned(lines.join("\n")),
-    }
-}
-
-fn yank_from_clipboard_text(text: &str) -> Option<YankRegister> {
-    if text.ends_with('\n') {
-        Some(YankRegister::Line(text.to_owned()))
-    } else {
-        Some(YankRegister::Character(text.to_owned()))
-    }
-}
 
 enum DrawTarget<'a> {
     Scene(&'a mut Vec<DrawCommand>),
@@ -362,6 +308,7 @@ struct FontSet<'ttf> {
     icon_fonts: Vec<IconFont<'ttf>>,
     icon_chars: BTreeSet<char>,
     icon_pixel_size: f32,
+    cell_width: i32,
 }
 
 impl<'ttf> FontSet<'ttf> {
@@ -369,6 +316,7 @@ impl<'ttf> FontSet<'ttf> {
         primary: Font<'ttf>,
         icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
         icon_pixel_size: f32,
+        cell_width: i32,
     ) -> Self {
         let icon_chars = user::icon_font::symbols()
             .iter()
@@ -387,6 +335,7 @@ impl<'ttf> FontSet<'ttf> {
             icon_fonts,
             icon_chars,
             icon_pixel_size,
+            cell_width: cell_width.max(1),
         }
     }
 
@@ -412,6 +361,10 @@ impl<'ttf> FontSet<'ttf> {
         self.icon_pixel_size
     }
 
+    fn cell_width(&self) -> i32 {
+        self.cell_width
+    }
+
     fn prefers_icon_font(&self, character: char) -> bool {
         self.icon_chars.contains(&character)
     }
@@ -421,6 +374,7 @@ impl<'ttf> FontSet<'ttf> {
 struct LineSyntaxSpan {
     start: usize,
     end: usize,
+    capture_name: String,
     theme_token: String,
 }
 
@@ -1258,6 +1212,7 @@ impl InputField {
 
 #[derive(Debug, Clone)]
 struct SectionLineMeta {
+    section_id: String,
     kind: SectionRenderLineKind,
     action: Option<SectionAction>,
 }
@@ -1400,6 +1355,8 @@ struct ActiveBufferEventContext {
     is_git_commit: bool,
     is_acp: bool,
     is_directory: bool,
+    is_browser: bool,
+    is_terminal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1436,27 +1393,7 @@ impl GitViewState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectorySortMode {
-    TypeThenName,
-    TypeThenNameDesc,
-}
-
-impl DirectorySortMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::TypeThenName => "type+name",
-            Self::TypeThenNameDesc => "type+name desc",
-        }
-    }
-
-    fn cycle(self) -> Self {
-        match self {
-            Self::TypeThenName => Self::TypeThenNameDesc,
-            Self::TypeThenNameDesc => Self::TypeThenName,
-        }
-    }
-}
+type DirectorySortMode = user::oil::OilSortMode;
 
 #[derive(Debug, Clone)]
 struct DirectoryViewState {
@@ -1470,12 +1407,13 @@ struct DirectoryViewState {
 
 impl DirectoryViewState {
     fn new(root: PathBuf, entries: Vec<DirectoryEntry>) -> Self {
+        let defaults = user::oil::defaults();
         Self {
             root,
             entries,
-            show_hidden: false,
-            sort_mode: DirectorySortMode::TypeThenName,
-            trash_enabled: false,
+            show_hidden: defaults.show_hidden,
+            sort_mode: defaults.sort_mode,
+            trash_enabled: defaults.trash_enabled,
             edit_snapshot: Vec::new(),
         }
     }
@@ -1699,12 +1637,9 @@ fn git_status_entry_item_spans(
 ) {
     let (icon_bounds, content_start, content) =
         split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
-    let Some((status_start, status_end)) = next_word_bounds(content, 0) else {
-        return;
-    };
-    let status = &content[status_start..status_end];
-    let token = git_status_entry_token(status);
     if let Some((icon_start, icon_end)) = icon_bounds {
+        let icon = &trimmed[icon_start..icon_end];
+        let token = git_status_entry_token_from_icon(icon);
         push_span_bytes(
             spans,
             line,
@@ -1712,7 +1647,20 @@ fn git_status_entry_item_spans(
             indent_bytes + icon_end,
             token,
         );
+        push_span_bytes(
+            spans,
+            line,
+            indent_bytes + content_start,
+            indent_bytes + content_start + content.len(),
+            TOKEN_GIT_STATUS_ENTRY_PATH,
+        );
+        return;
     }
+    let Some((status_start, status_end)) = next_word_bounds(content, 0) else {
+        return;
+    };
+    let status = &content[status_start..status_end];
+    let token = git_status_entry_token(status);
     push_span_bytes(
         spans,
         line,
@@ -1742,6 +1690,19 @@ fn git_status_entry_token(label: &str) -> &'static str {
         "updated" => TOKEN_GIT_STATUS_ENTRY_UPDATED,
         "untracked" => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
         "changed" => TOKEN_GIT_STATUS_ENTRY_CHANGED,
+        _ => TOKEN_GIT_STATUS_ENTRY_CHANGED,
+    }
+}
+
+fn git_status_entry_token_from_icon(icon: &str) -> &'static str {
+    match icon {
+        user::icon_font::symbols::cod::COD_DIFF_ADDED => TOKEN_GIT_STATUS_ENTRY_ADDED,
+        user::icon_font::symbols::cod::COD_DIFF_MODIFIED => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
+        user::icon_font::symbols::cod::COD_DIFF_REMOVED => TOKEN_GIT_STATUS_ENTRY_DELETED,
+        user::icon_font::symbols::cod::COD_DIFF_RENAMED => TOKEN_GIT_STATUS_ENTRY_RENAMED,
+        user::icon_font::symbols::cod::COD_ARROW_SWAP => TOKEN_GIT_STATUS_ENTRY_COPIED,
+        user::icon_font::symbols::cod::COD_SYNC => TOKEN_GIT_STATUS_ENTRY_UPDATED,
+        user::icon_font::symbols::cod::COD_SYMBOL_FILE => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
         _ => TOKEN_GIT_STATUS_ENTRY_CHANGED,
     }
 }
@@ -1888,6 +1849,7 @@ fn push_span_bytes(
         spans.push(LineSyntaxSpan {
             start: start_col,
             end: end_col,
+            capture_name: token.to_owned(),
             theme_token: token.to_owned(),
         });
     }
@@ -1980,6 +1942,7 @@ pub(crate) struct ShellBuffer {
     git_fringe_last_edit_at: Option<Instant>,
     browser_state: Option<BrowserBufferState>,
     directory_state: Option<DirectoryViewState>,
+    terminal_render: Option<TerminalRenderSnapshot>,
     pub(crate) text: TextBuffer,
     undo_tree: UndoTree,
     language_id: Option<String>,
@@ -1994,6 +1957,7 @@ pub(crate) struct ShellBuffer {
     syntax_applied_window: Option<SyntaxLineWindow>,
     lsp_enabled: bool,
     lsp_diagnostics: Vec<LspDiagnostic>,
+    lsp_diagnostic_lines: BTreeMap<usize, Box<[DiagnosticLineSpan]>>,
     lsp_diagnostics_revision: u64,
     last_edit_at: Option<Instant>,
 }
@@ -2065,6 +2029,7 @@ impl ShellBuffer {
             git_fringe_last_edit_at: None,
             browser_state: browser_state_for_kind(buffer.kind()),
             directory_state: None,
+            terminal_render: None,
             text,
             undo_tree,
             language_id: None,
@@ -2079,6 +2044,7 @@ impl ShellBuffer {
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
+            lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
@@ -2108,6 +2074,7 @@ impl ShellBuffer {
             git_fringe_last_edit_at,
             browser_state: browser_state_for_kind(buffer.kind()),
             directory_state: None,
+            terminal_render: None,
             text,
             undo_tree,
             language_id: None,
@@ -2122,6 +2089,7 @@ impl ShellBuffer {
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
+            lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
@@ -2152,6 +2120,7 @@ impl ShellBuffer {
             git_fringe_last_edit_at: None,
             browser_state,
             directory_state: None,
+            terminal_render: None,
             text,
             undo_tree,
             language_id: None,
@@ -2166,6 +2135,7 @@ impl ShellBuffer {
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
+            lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
         }
@@ -2280,6 +2250,18 @@ impl ShellBuffer {
         self.directory_state = None;
     }
 
+    fn terminal_render(&self) -> Option<&TerminalRenderSnapshot> {
+        self.terminal_render.as_ref()
+    }
+
+    fn set_terminal_render(&mut self, snapshot: TerminalRenderSnapshot) {
+        self.terminal_render = Some(snapshot);
+    }
+
+    fn clear_terminal_render(&mut self) {
+        self.terminal_render = None;
+    }
+
     fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
         let is_git_status = buffer_is_git_status(&self.kind);
         let mut text_lines = Vec::with_capacity(lines.len());
@@ -2295,6 +2277,7 @@ impl ShellBuffer {
             }
             text_lines.push(formatted_line);
             meta.push(SectionLineMeta {
+                section_id: line.section_id,
                 kind: line.kind,
                 action: line.action,
             });
@@ -2462,6 +2445,13 @@ impl ShellBuffer {
         self.lsp_enabled
     }
 
+    fn lsp_diagnostic_line_spans(&self, line_index: usize) -> &[DiagnosticLineSpan] {
+        self.lsp_diagnostic_lines
+            .get(&line_index)
+            .map(Box::as_ref)
+            .unwrap_or(&[])
+    }
+
     fn set_lsp_enabled(&mut self, enabled: bool) {
         self.lsp_enabled = enabled;
     }
@@ -2474,6 +2464,7 @@ impl ShellBuffer {
         if self.lsp_diagnostics == diagnostics {
             return false;
         }
+        self.lsp_diagnostic_lines = diagnostic_line_spans_for_diagnostics(&diagnostics);
         self.lsp_diagnostics = diagnostics;
         self.lsp_diagnostics_revision = self.lsp_diagnostics_revision.saturating_add(1);
         true
@@ -3328,261 +3319,6 @@ enum AutocompleteProviderKind {
 }
 
 #[derive(Debug, Clone)]
-struct AutocompleteProviderSpec {
-    id: String,
-    label: String,
-    icon: String,
-    item_icon: String,
-    or_group: Option<String>,
-    kind: AutocompleteProviderKind,
-}
-
-#[derive(Debug, Clone)]
-struct AutocompleteRegistry {
-    result_limit: usize,
-    providers: Vec<AutocompleteProviderSpec>,
-}
-
-impl AutocompleteRegistry {
-    fn from_user_config() -> Self {
-        let providers = user::autocomplete::providers()
-            .into_iter()
-            .filter_map(|provider| match provider.id.as_str() {
-                AUTOCOMPLETE_BUFFER_PROVIDER => Some(AutocompleteProviderSpec {
-                    id: provider.id,
-                    label: provider.label,
-                    icon: provider.icon,
-                    item_icon: provider.item_icon,
-                    or_group: provider.or_group,
-                    kind: AutocompleteProviderKind::Buffer,
-                }),
-                AUTOCOMPLETE_LSP_PROVIDER => Some(AutocompleteProviderSpec {
-                    id: provider.id,
-                    label: provider.label,
-                    icon: provider.icon,
-                    item_icon: provider.item_icon,
-                    or_group: provider.or_group,
-                    kind: AutocompleteProviderKind::Lsp,
-                }),
-                _ => None,
-            })
-            .collect();
-        Self {
-            result_limit: user::autocomplete::RESULT_LIMIT.max(1),
-            providers,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AutocompleteQuery {
-    prefix: String,
-    token: String,
-    replace_range: TextRange,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AutocompleteEntry {
-    provider_id: String,
-    provider_label: String,
-    provider_icon: String,
-    item_icon: String,
-    label: String,
-    replacement: String,
-    detail: Option<String>,
-    documentation: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct AutocompleteOverlay {
-    buffer_id: BufferId,
-    buffer_revision: u64,
-    query: AutocompleteQuery,
-    entries: Vec<AutocompleteEntry>,
-    selected_index: usize,
-}
-
-impl AutocompleteOverlay {
-    fn new(buffer_id: BufferId, buffer_revision: u64, query: AutocompleteQuery) -> Self {
-        Self {
-            buffer_id,
-            buffer_revision,
-            query,
-            entries: Vec::new(),
-            selected_index: 0,
-        }
-    }
-
-    fn selected(&self) -> Option<&AutocompleteEntry> {
-        self.entries.get(self.selected_index)
-    }
-
-    fn entries(&self) -> &[AutocompleteEntry] {
-        &self.entries
-    }
-
-    fn set_entries(&mut self, entries: Vec<AutocompleteEntry>) {
-        let previous = self
-            .selected()
-            .map(|entry| (entry.provider_id.clone(), entry.replacement.clone()));
-        self.entries = entries;
-        self.selected_index = previous
-            .and_then(|(provider_id, replacement)| {
-                self.entries.iter().position(|entry| {
-                    entry.provider_id == provider_id && entry.replacement == replacement
-                })
-            })
-            .unwrap_or(0);
-        if self.entries.is_empty() {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = self.selected_index.min(self.entries.len() - 1);
-        }
-    }
-
-    fn select_next(&mut self) {
-        if self.entries.is_empty() {
-            self.selected_index = 0;
-            return;
-        }
-        self.selected_index = (self.selected_index + 1) % self.entries.len();
-    }
-
-    fn select_previous(&mut self) {
-        if self.entries.is_empty() {
-            self.selected_index = 0;
-            return;
-        }
-        self.selected_index = self
-            .selected_index
-            .checked_sub(1)
-            .unwrap_or(self.entries.len() - 1);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HoverProviderKind {
-    TestHover,
-    Lsp,
-    Diagnostics,
-}
-
-#[derive(Debug, Clone)]
-struct HoverProviderSpec {
-    label: String,
-    icon: String,
-    kind: HoverProviderKind,
-}
-
-#[derive(Debug, Clone)]
-struct HoverRegistry {
-    line_limit: usize,
-    providers: Vec<HoverProviderSpec>,
-}
-
-impl HoverRegistry {
-    fn from_user_config() -> Self {
-        let providers = user::hover::providers()
-            .into_iter()
-            .filter_map(|provider| {
-                let kind = match provider.id.as_str() {
-                    HOVER_PROVIDER_TEST => HoverProviderKind::TestHover,
-                    HOVER_PROVIDER_LSP => HoverProviderKind::Lsp,
-                    HOVER_PROVIDER_DIAGNOSTICS => HoverProviderKind::Diagnostics,
-                    _ => return None,
-                };
-                Some(HoverProviderSpec {
-                    label: provider.label,
-                    icon: provider.icon,
-                    kind,
-                })
-            })
-            .collect();
-        Self {
-            line_limit: user::hover::LINE_LIMIT.max(1),
-            providers,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HoverProviderContent {
-    provider_label: String,
-    provider_icon: String,
-    lines: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HoverOverlay {
-    buffer_id: BufferId,
-    anchor: TextPoint,
-    token: String,
-    providers: Vec<HoverProviderContent>,
-    provider_index: usize,
-    scroll_offset: usize,
-    focused: bool,
-    line_limit: usize,
-}
-
-impl HoverOverlay {
-    fn current_provider(&self) -> Option<&HoverProviderContent> {
-        self.providers.get(self.provider_index)
-    }
-
-    fn select_next_provider(&mut self) {
-        if self.providers.is_empty() {
-            self.provider_index = 0;
-            return;
-        }
-        self.provider_index = (self.provider_index + 1) % self.providers.len();
-        self.scroll_offset = 0;
-    }
-
-    fn select_previous_provider(&mut self) {
-        if self.providers.is_empty() {
-            self.provider_index = 0;
-            return;
-        }
-        self.provider_index = self
-            .provider_index
-            .checked_sub(1)
-            .unwrap_or(self.providers.len() - 1);
-        self.scroll_offset = 0;
-    }
-
-    fn scroll_by(&mut self, delta: i32) {
-        let Some(provider) = self.current_provider() else {
-            self.scroll_offset = 0;
-            return;
-        };
-        let max_offset = provider.lines.len().saturating_sub(self.line_limit);
-        if delta.is_negative() {
-            self.scroll_offset = self
-                .scroll_offset
-                .saturating_sub(delta.unsigned_abs() as usize);
-        } else {
-            self.scroll_offset = (self.scroll_offset + delta as usize).min(max_offset);
-        }
-    }
-
-    fn visible_lines(&self) -> &[String] {
-        let Some(provider) = self.current_provider() else {
-            return &[];
-        };
-        let start = self.scroll_offset.min(provider.lines.len());
-        let end = (start + self.line_limit).min(provider.lines.len());
-        &provider.lines[start..end]
-    }
-}
-
-#[derive(Debug, Clone)]
-enum PickerMode {
-    Static,
-    VimSearch(VimSearchDirection),
-    WorkspaceSearch { root: PathBuf },
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
@@ -3736,21 +3472,7 @@ impl ShellWorkspaceView {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitPrefix {
-    Commit,
-    Push,
-    Fetch,
-    Branch,
-    Diff,
-    Log,
-    Stash,
-    Merge,
-    Rebase,
-    CherryPick,
-    Revert,
-    Reset,
-}
+type GitPrefix = user::git::GitStatusPrefix;
 
 #[derive(Debug, Clone)]
 struct GitPrefixState {
@@ -3785,6 +3507,8 @@ pub(crate) struct ShellUiState {
     picker: Option<PickerOverlay>,
     autocomplete: Option<AutocompleteOverlay>,
     hover: Option<HoverOverlay>,
+    notifications: NotificationCenter,
+    last_lsp_notification_revision: u64,
     popup_focus: bool,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
@@ -3830,6 +3554,8 @@ impl ShellUiState {
             picker: None,
             autocomplete: None,
             hover: None,
+            notifications: NotificationCenter::default(),
+            last_lsp_notification_revision: 0,
             popup_focus: false,
             yank_flash: None,
             git_summary: GitSummaryState::new(),
@@ -4166,6 +3892,34 @@ impl ShellUiState {
         self.hover = None;
     }
 
+    fn apply_notification(&mut self, update: NotificationUpdate, now: Instant) -> bool {
+        self.notifications.apply(update, now)
+    }
+
+    fn prune_notifications(&mut self, now: Instant) -> bool {
+        self.notifications.prune_expired(now)
+    }
+
+    fn visible_notifications(&self, now: Instant) -> Vec<&ShellNotification> {
+        self.notifications.visible(now)
+    }
+
+    fn notification_revision(&self) -> u64 {
+        self.notifications.revision()
+    }
+
+    fn notification_deadline(&self, now: Instant) -> Option<Instant> {
+        self.notifications.next_deadline(now)
+    }
+
+    fn last_lsp_notification_revision(&self) -> u64 {
+        self.last_lsp_notification_revision
+    }
+
+    fn set_last_lsp_notification_revision(&mut self, revision: u64) {
+        self.last_lsp_notification_revision = revision;
+    }
+
     fn configure_syntax_refresh_worker(
         &mut self,
         configs: Vec<LanguageConfiguration>,
@@ -4390,30 +4144,63 @@ impl ErrorLog {
 
 #[derive(Debug, Default)]
 struct LspLogBufferState {
-    buffer_ids: BTreeMap<WorkspaceId, BufferId>,
+    buffer_ids: BTreeMap<WorkspaceId, BTreeMap<String, BufferId>>,
     applied_revision: u64,
 }
 
 impl LspLogBufferState {
-    fn new(workspace_id: WorkspaceId, buffer_id: BufferId) -> Self {
-        let mut buffer_ids = BTreeMap::new();
-        buffer_ids.insert(workspace_id, buffer_id);
-        Self {
-            buffer_ids,
-            applied_revision: 0,
-        }
+    fn buffer_id(&self, workspace_id: WorkspaceId, server_id: &str) -> Option<BufferId> {
+        self.buffer_ids
+            .get(&workspace_id)
+            .and_then(|buffers| buffers.get(server_id))
+            .copied()
     }
 
-    fn buffer_id(&self, workspace_id: WorkspaceId) -> Option<BufferId> {
-        self.buffer_ids.get(&workspace_id).copied()
+    fn insert_buffer(&mut self, workspace_id: WorkspaceId, server_id: String, buffer_id: BufferId) {
+        self.buffer_ids
+            .entry(workspace_id)
+            .or_default()
+            .insert(server_id, buffer_id);
     }
 
-    fn insert_buffer(&mut self, workspace_id: WorkspaceId, buffer_id: BufferId) {
-        self.buffer_ids.insert(workspace_id, buffer_id);
+    fn buffers_for_workspace(&self, workspace_id: WorkspaceId) -> Vec<(String, BufferId)> {
+        self.buffer_ids
+            .get(&workspace_id)
+            .into_iter()
+            .flat_map(|buffers| buffers.iter())
+            .map(|(server_id, buffer_id)| (server_id.clone(), *buffer_id))
+            .collect()
     }
 
     fn remove_workspace(&mut self, workspace_id: WorkspaceId) {
         self.buffer_ids.remove(&workspace_id);
+    }
+}
+
+#[derive(Default)]
+struct TerminalBufferState {
+    sessions: BTreeMap<BufferId, LiveTerminalSession>,
+}
+
+impl TerminalBufferState {
+    fn contains(&self, buffer_id: BufferId) -> bool {
+        self.sessions.contains_key(&buffer_id)
+    }
+
+    fn session_mut(&mut self, buffer_id: BufferId) -> Option<&mut LiveTerminalSession> {
+        self.sessions.get_mut(&buffer_id)
+    }
+
+    fn insert(&mut self, buffer_id: BufferId, session: LiveTerminalSession) {
+        self.sessions.insert(buffer_id, session);
+    }
+
+    fn remove(&mut self, buffer_id: BufferId) -> Option<LiveTerminalSession> {
+        self.sessions.remove(&buffer_id)
+    }
+
+    fn buffer_ids(&self) -> Vec<BufferId> {
+        self.sessions.keys().copied().collect()
     }
 }
 
@@ -4825,6 +4612,9 @@ struct ShellVisualRefreshKey {
     git_fringe_revisions: Vec<(BufferId, u64)>,
     lsp_diagnostics_revisions: Vec<(BufferId, u64)>,
     active_lsp_server: Option<String>,
+    active_lsp_workspace_loaded: bool,
+    notification_revision: u64,
+    notification_deadline: Option<Instant>,
     yank_flash_until: Option<Instant>,
 }
 
@@ -4834,6 +4624,7 @@ pub(crate) struct ShellState {
     last_text_input_profile: Option<Duration>,
     last_text_input_at: Option<Instant>,
     pending_suppressed_text_input: Option<SuppressedTextInput>,
+    mouse_drag: Option<MouseDragState>,
     browser_host: BrowserHostService,
 }
 
@@ -4841,6 +4632,14 @@ pub(crate) struct ShellState {
 struct SuppressedTextInput {
     text: String,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MouseDragState {
+    buffer_id: BufferId,
+    rect: PixelRect,
+    anchor: TextPoint,
+    kind: VisualSelectionKind,
 }
 
 impl ShellState {
@@ -4861,6 +4660,7 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
 
         register_shell_hooks(&mut runtime).map_err(ShellError::Runtime)?;
+        register_git_status_commands(&mut runtime).map_err(ShellError::Runtime)?;
 
         let notes_id = runtime
             .model_mut()
@@ -4874,16 +4674,6 @@ impl ShellState {
             .model_mut()
             .create_buffer(workspace_id, "*errors*", BufferKind::Diagnostics, None)
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
-        let lsp_log_id = runtime
-            .model_mut()
-            .create_buffer(
-                workspace_id,
-                LSP_LOG_BUFFER_NAME,
-                BufferKind::Diagnostics,
-                None,
-            )
-            .map_err(|error| ShellError::Runtime(error.to_string()))?;
-
         let (scratch, notes, primary_pane_id) = {
             let workspace = runtime
                 .model()
@@ -4910,9 +4700,6 @@ impl ShellState {
         ui_state
             .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics)
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
-        ui_state
-            .ensure_buffer(lsp_log_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
-            .replace_with_lines(initial_lsp_log_lines());
         runtime.services_mut().insert(ui_state);
 
         let log_dir_error = ensure_log_directory(&log_file_path).err();
@@ -4924,9 +4711,10 @@ impl ShellState {
         if let Some(error) = log_dir_error {
             record_runtime_error(&mut runtime, "error-log", error);
         }
+        runtime.services_mut().insert(LspLogBufferState::default());
         runtime
             .services_mut()
-            .insert(LspLogBufferState::new(workspace_id, lsp_log_id));
+            .insert(Mutex::new(TerminalBufferState::default()));
         runtime.services_mut().insert(FormatterRegistry::default());
         runtime.services_mut().insert(Mutex::new(JobManager::new()));
         acp::init_acp_manager(&mut runtime)?;
@@ -4953,6 +4741,11 @@ impl ShellState {
         theme_registry
             .register_all(user::themes())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        if let Err(error) =
+            restore_saved_theme_selection(&mut theme_registry, &active_theme_state_path())
+        {
+            record_runtime_error(&mut runtime, "theme.restore", error);
+        }
         runtime.services_mut().insert(theme_registry);
         load_auto_loaded_packages(&mut runtime, &user::packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
@@ -4966,6 +4759,7 @@ impl ShellState {
             last_text_input_profile: None,
             last_text_input_at: None,
             pending_suppressed_text_input: None,
+            mouse_drag: None,
             browser_host: BrowserHostService::new(),
         })
     }
@@ -5018,6 +4812,7 @@ impl ShellState {
         event: Event,
         render_width: u32,
         render_height: u32,
+        cell_width: i32,
         line_height: i32,
     ) -> Result<bool, ShellError> {
         let active_buffer =
@@ -5032,7 +4827,13 @@ impl ShellState {
         };
         match event {
             Event::Quit { .. } => return Ok(true),
-            Event::MouseButtonDown { x, y, .. } => {
+            Event::MouseButtonDown {
+                mouse_btn,
+                clicks,
+                x,
+                y,
+                ..
+            } => {
                 if picker_visible {
                     return Ok(false);
                 }
@@ -5049,11 +4850,14 @@ impl ShellState {
                     runtime_popup.as_ref(),
                     render_width,
                     render_height,
+                    cell_width,
                     line_height,
+                    Instant::now(),
                 )?;
                 let clicked_browser_buffer =
                     browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
                 if runtime_popup.is_some() && mouse_y >= pane_height as i32 {
+                    self.mouse_drag = None;
                     self.ui_mut()?.set_popup_focus(true);
                     if let Some(buffer_id) = clicked_browser_buffer {
                         self.browser_host
@@ -5066,8 +4870,8 @@ impl ShellState {
                     }
                     return Ok(false);
                 }
-                if let Some(pane_id) =
-                    self.pane_id_at_point(render_width, pane_height, mouse_x, mouse_y)?
+                if let Some((pane_id, buffer_id, pane_rect)) =
+                    self.pane_surface_at_point(render_width, pane_height, mouse_x, mouse_y)?
                 {
                     self.focus_runtime_pane(pane_id)?;
                     if let Some(buffer_id) = clicked_browser_buffer {
@@ -5079,6 +4883,108 @@ impl ShellState {
                             .focus_parent()
                             .map_err(ShellError::Runtime)?;
                     }
+                    if mouse_btn == MouseButton::Left {
+                        let kind = shell_buffer(&self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?
+                            .kind
+                            .clone();
+                        if !buffer_is_browser(&kind) && !buffer_is_terminal(&kind) {
+                            self.begin_mouse_selection(
+                                buffer_id,
+                                pane_rect,
+                                mouse_x,
+                                mouse_y,
+                                clicks,
+                                cell_width,
+                                line_height,
+                            )?;
+                        } else {
+                            self.mouse_drag = None;
+                        }
+                    } else {
+                        self.mouse_drag = None;
+                    }
+                } else if mouse_btn == MouseButton::Left {
+                    self.mouse_drag = None;
+                }
+            }
+            Event::MouseMotion { x, y, .. } => {
+                self.update_mouse_selection(x as i32, y as i32, cell_width, line_height)?;
+            }
+            Event::MouseButtonUp { mouse_btn, .. } => {
+                if mouse_btn == MouseButton::Left {
+                    self.finish_mouse_selection()?;
+                }
+            }
+            Event::MouseWheel {
+                y,
+                direction,
+                mouse_x,
+                mouse_y,
+                ..
+            } => {
+                if picker_visible {
+                    return Ok(false);
+                }
+                let wheel_delta = match direction {
+                    MouseWheelDirection::Normal => y.round() as i32,
+                    MouseWheelDirection::Flipped => -(y.round() as i32),
+                    _ => y.round() as i32,
+                };
+                if wheel_delta == 0 {
+                    return Ok(false);
+                }
+                let mouse_x = mouse_x as i32;
+                let mouse_y = mouse_y as i32;
+                let runtime_popup = self.runtime_popup()?;
+                let popup_height = runtime_popup
+                    .as_ref()
+                    .map(|_| popup_window_height(render_height, line_height))
+                    .unwrap_or(0);
+                let pane_height = render_height.saturating_sub(popup_height);
+                if runtime_popup.is_some() && mouse_y >= pane_height as i32 {
+                    return Ok(false);
+                }
+                let browser_plan = browser_sync_plan(
+                    self.ui()?,
+                    runtime_popup.as_ref(),
+                    render_width,
+                    render_height,
+                    cell_width,
+                    line_height,
+                    Instant::now(),
+                )?;
+                if browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y).is_some() {
+                    return Ok(false);
+                }
+                let Some((pane_id, _, _)) =
+                    self.pane_surface_at_point(render_width, pane_height, mouse_x, mouse_y)?
+                else {
+                    return Ok(false);
+                };
+                self.focus_runtime_pane(pane_id)?;
+                self.browser_host
+                    .focus_parent()
+                    .map_err(ShellError::Runtime)?;
+                let scroll_lines = wheel_delta.saturating_mul(MOUSE_WHEEL_SCROLL_LINES);
+                let active_buffer_id =
+                    active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+                let active_kind = shell_buffer(&self.runtime, active_buffer_id)
+                    .map_err(ShellError::Runtime)?
+                    .kind
+                    .clone();
+                if buffer_is_terminal(&active_kind) {
+                    scroll_active_terminal_view(
+                        &mut self.runtime,
+                        TerminalViewportScroll::LineDelta(scroll_lines),
+                    )
+                    .map_err(ShellError::Runtime)?;
+                } else if !buffer_is_browser(&active_kind) {
+                    scroll_buffer_viewport_only(
+                        shell_buffer_mut(&mut self.runtime, active_buffer_id)
+                            .map_err(ShellError::Runtime)?,
+                        -scroll_lines,
+                    );
                 }
             }
             Event::KeyDown {
@@ -5150,6 +5056,15 @@ impl ShellState {
                 {
                     ui.pending_ctrl_c = None;
                 }
+                if !picker_visible
+                    && active_buffer.is_browser
+                    && browser_devtools_shortcut_requested(keycode, keymod)
+                {
+                    self.browser_host
+                        .open_devtools(active_buffer.buffer_id)
+                        .map_err(ShellError::Runtime)?;
+                    return Ok(false);
+                }
                 if keymod.intersects(ctrl_mod())
                     && keycode == Keycode::J
                     && matches!(input_mode, InputMode::Insert | InputMode::Replace)
@@ -5199,6 +5114,16 @@ impl ShellState {
                     return Ok(false);
                 }
 
+                if active_buffer.is_terminal
+                    && matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                    && !active_buffer.has_input
+                    && let Some(terminal_key) = terminal_key_for_event(keycode, keymod)
+                {
+                    write_active_terminal_key(&mut self.runtime, terminal_key)
+                        .map_err(ShellError::Runtime)?;
+                    return Ok(false);
+                }
+
                 let mut refresh_autocomplete = false;
                 let mut close_autocomplete = false;
                 match keycode {
@@ -5235,6 +5160,12 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_up();
                             }
+                        } else if active_buffer.is_terminal {
+                            scroll_active_terminal_view(
+                                &mut self.runtime,
+                                TerminalViewportScroll::LineDelta(1),
+                            )
+                            .map_err(ShellError::Runtime)?;
                         } else {
                             let _ = self.active_buffer_mut()?.move_up();
                             refresh_autocomplete =
@@ -5248,13 +5179,33 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_down();
                             }
+                        } else if active_buffer.is_terminal {
+                            scroll_active_terminal_view(
+                                &mut self.runtime,
+                                TerminalViewportScroll::LineDelta(-1),
+                            )
+                            .map_err(ShellError::Runtime)?;
                         } else {
                             let _ = self.active_buffer_mut()?.move_down();
                             refresh_autocomplete =
                                 matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
+                    Keycode::PageDown if active_buffer.is_terminal => {
+                        scroll_active_terminal_view(
+                            &mut self.runtime,
+                            TerminalViewportScroll::PageDown,
+                        )
+                        .map_err(ShellError::Runtime)?;
+                    }
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(page_rows),
+                    Keycode::PageUp if active_buffer.is_terminal => {
+                        scroll_active_terminal_view(
+                            &mut self.runtime,
+                            TerminalViewportScroll::PageUp,
+                        )
+                        .map_err(ShellError::Runtime)?;
+                    }
                     Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-page_rows),
                     Keycode::Return | Keycode::KpEnter
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
@@ -5399,13 +5350,13 @@ impl ShellState {
             .is_some_and(|pending| Instant::now() <= pending.expires_at && pending.text == text)
     }
 
-    fn pane_id_at_point(
+    fn pane_surface_at_point(
         &self,
         width: u32,
         pane_height: u32,
         x: i32,
         y: i32,
-    ) -> Result<Option<PaneId>, ShellError> {
+    ) -> Result<Option<(PaneId, BufferId, PixelRect)>, ShellError> {
         if x < 0 || y < 0 || y >= pane_height as i32 {
             return Ok(None);
         }
@@ -5423,7 +5374,11 @@ impl ShellState {
             .iter()
             .zip(pane_rects.iter())
             .find_map(|(pane, rect)| {
-                pixel_rect_contains_point(*rect, x, y).then_some(pane.pane_id)
+                pixel_rect_contains_point(*rect, x, y).then_some((
+                    pane.pane_id,
+                    pane.buffer_id,
+                    *rect,
+                ))
             }))
     }
 
@@ -5444,6 +5399,135 @@ impl ShellState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn begin_mouse_selection(
+        &mut self,
+        buffer_id: BufferId,
+        rect: PixelRect,
+        mouse_x: i32,
+        mouse_y: i32,
+        clicks: u8,
+        cell_width: i32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let point = {
+            let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+            let buffer = shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
+            buffer_point_at_screen(
+                buffer,
+                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                theme_registry,
+                mouse_x,
+                mouse_y,
+                cell_width,
+                line_height,
+                false,
+            )
+        };
+        let Some(point) = point else {
+            self.mouse_drag = None;
+            return Ok(());
+        };
+
+        shell_buffer_mut(&mut self.runtime, buffer_id)
+            .map_err(ShellError::Runtime)?
+            .set_cursor(point);
+
+        let kind = if clicks >= 2 {
+            VisualSelectionKind::Line
+        } else {
+            if self.ui()?.input_mode() == InputMode::Visual {
+                self.ui_mut()?.enter_normal_mode();
+            }
+            VisualSelectionKind::Character
+        };
+        if kind == VisualSelectionKind::Line {
+            self.ui_mut()?.enter_visual_mode(point, kind);
+        }
+        self.mouse_drag = Some(MouseDragState {
+            buffer_id,
+            rect,
+            anchor: point,
+            kind,
+        });
+        Ok(())
+    }
+
+    fn update_mouse_selection(
+        &mut self,
+        mouse_x: i32,
+        mouse_y: i32,
+        cell_width: i32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let Some(drag) = self.mouse_drag else {
+            return Ok(());
+        };
+        let point = {
+            let theme_registry = self.runtime.services().get::<ThemeRegistry>();
+            let buffer =
+                shell_buffer(&self.runtime, drag.buffer_id).map_err(ShellError::Runtime)?;
+            buffer_point_at_screen(
+                buffer,
+                PixelRectToRect::rect(drag.rect.x, drag.rect.y, drag.rect.width, drag.rect.height),
+                theme_registry,
+                mouse_x,
+                mouse_y,
+                cell_width,
+                line_height,
+                true,
+            )
+        };
+        let Some(point) = point else {
+            return Ok(());
+        };
+        let (input_mode, visual_anchor, visual_kind) = {
+            let ui = self.ui()?;
+            (
+                ui.input_mode(),
+                ui.vim().visual_anchor,
+                ui.vim().visual_kind,
+            )
+        };
+        if drag.kind == VisualSelectionKind::Character
+            && point == drag.anchor
+            && input_mode != InputMode::Visual
+        {
+            return Ok(());
+        }
+        if input_mode != InputMode::Visual
+            || visual_anchor != Some(drag.anchor)
+            || visual_kind != drag.kind
+        {
+            self.ui_mut()?.enter_visual_mode(drag.anchor, drag.kind);
+        }
+        shell_buffer_mut(&mut self.runtime, drag.buffer_id)
+            .map_err(ShellError::Runtime)?
+            .set_cursor(point);
+        Ok(())
+    }
+
+    fn finish_mouse_selection(&mut self) -> Result<(), ShellError> {
+        let Some(drag) = self.mouse_drag.take() else {
+            return Ok(());
+        };
+        if drag.kind != VisualSelectionKind::Character {
+            return Ok(());
+        }
+        let should_exit_visual = {
+            let ui = self.ui()?;
+            let buffer =
+                shell_buffer(&self.runtime, drag.buffer_id).map_err(ShellError::Runtime)?;
+            ui.input_mode() == InputMode::Visual
+                && ui.vim().visual_anchor == Some(drag.anchor)
+                && buffer.cursor_point() == drag.anchor
+        };
+        if should_exit_visual {
+            self.ui_mut()?.enter_normal_mode();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         target: &mut DrawTarget<'_>,
@@ -5457,6 +5541,7 @@ impl ShellState {
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
         let acp_connected = acp::acp_connected(&self.runtime).unwrap_or(false);
+        let lsp_workspace_loaded = active_lsp_workspace_loaded(&self.runtime, ui);
         let theme_registry = self.runtime.services().get::<ThemeRegistry>();
         let workspace_name = self
             .runtime
@@ -5472,6 +5557,7 @@ impl ShellState {
             runtime_popup.as_ref(),
             &workspace_name,
             ui.attached_lsp_server(),
+            lsp_workspace_loaded,
             acp_connected,
             theme_registry,
             width,
@@ -5488,6 +5574,7 @@ impl ShellState {
         window: &Window,
         width: u32,
         height: u32,
+        cell_width: i32,
         line_height: i32,
     ) -> Result<(), ShellError> {
         let runtime_popup = self.runtime_popup()?;
@@ -5496,7 +5583,9 @@ impl ShellState {
             runtime_popup.as_ref(),
             width,
             height,
+            cell_width,
             line_height,
+            Instant::now(),
         )?;
         let updates = self
             .browser_host
@@ -5524,6 +5613,11 @@ impl ShellState {
                         .focus_parent()
                         .map_err(ShellError::Runtime)?;
                     self.ui_mut()?.enter_normal_mode();
+                }
+                BrowserHostEvent::OpenDevtoolsRequested { buffer_id } => {
+                    self.browser_host
+                        .open_devtools(*buffer_id)
+                        .map_err(ShellError::Runtime)?;
                 }
             }
         }
@@ -6051,10 +6145,17 @@ impl ShellState {
             self.schedule_picker_search_refresh()?;
             return Ok(());
         }
+        let active_buffer =
+            active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
 
         match self.input_mode()? {
             InputMode::Insert => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                if active_buffer.is_terminal {
+                    write_active_terminal_text(&mut self.runtime, text)
+                        .map_err(ShellError::Runtime)?;
+                    return Ok(());
+                }
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
                     let buffer_id =
                         active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
@@ -6108,6 +6209,11 @@ impl ShellState {
             }
             InputMode::Replace => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                if active_buffer.is_terminal {
+                    write_active_terminal_text(&mut self.runtime, text)
+                        .map_err(ShellError::Runtime)?;
+                    return Ok(());
+                }
                 if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
                     let buffer_id =
                         active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
@@ -6163,6 +6269,9 @@ impl ShellState {
         }
 
         if let Some(chord) = text_chord(text) {
+            if self.handle_focused_hover_text_input(&chord)? {
+                return Ok(());
+            }
             let vim_mode = keymap_vim_mode(self.input_mode()?);
             if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
                 && handle_git_status_chord(&mut self.runtime, &chord)
@@ -6403,8 +6512,7 @@ impl ShellState {
                         request.query.clone(),
                     ));
                 } else if let Some(autocomplete) = ui.autocomplete_mut() {
-                    autocomplete.buffer_revision = request.buffer_revision;
-                    autocomplete.query = request.query.clone();
+                    autocomplete.mark_loading(request.buffer_revision, request.query.clone());
                 }
                 ui.autocomplete_worker.schedule(request);
             }
@@ -6484,6 +6592,7 @@ impl ShellState {
             Keycode::Escape => {
                 if let Some(hover) = self.ui_mut()?.hover_mut() {
                     hover.focused = false;
+                    hover.clear_navigation_state();
                 }
                 Ok(true)
             }
@@ -6497,29 +6606,208 @@ impl ShellState {
             }
             Keycode::Down => {
                 if let Some(hover) = self.ui_mut()?.hover_mut() {
-                    hover.scroll_by(1);
+                    let lines = hover.take_count_or_one() as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(lines);
                 }
                 Ok(true)
             }
             Keycode::Up => {
                 if let Some(hover) = self.ui_mut()?.hover_mut() {
-                    hover.scroll_by(-1);
+                    let lines = hover.take_count_or_one() as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(-lines);
                 }
                 Ok(true)
             }
             Keycode::PageDown => {
                 if let Some(hover) = self.ui_mut()?.hover_mut() {
-                    hover.scroll_by(hover.line_limit as i32);
+                    let lines = hover
+                        .page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(lines);
                 }
                 Ok(true)
             }
             Keycode::PageUp => {
                 if let Some(hover) = self.ui_mut()?.hover_mut() {
-                    hover.scroll_by(-(hover.line_limit as i32));
+                    let lines = hover
+                        .page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(-lines);
+                }
+                Ok(true)
+            }
+            Keycode::D if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover
+                        .half_page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(lines);
+                }
+                Ok(true)
+            }
+            Keycode::U if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover
+                        .half_page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(-lines);
+                }
+                Ok(true)
+            }
+            Keycode::F if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover
+                        .page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(lines);
+                }
+                Ok(true)
+            }
+            Keycode::B if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover
+                        .page_scroll_lines()
+                        .saturating_mul(hover.take_count_or_one())
+                        as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(-lines);
+                }
+                Ok(true)
+            }
+            Keycode::E if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover.take_count_or_one() as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(lines);
+                }
+                Ok(true)
+            }
+            Keycode::Y if keymod.intersects(ctrl_mod()) => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    let lines = hover.take_count_or_one() as i32;
+                    hover.pending_g_prefix = false;
+                    hover.scroll_by(-lines);
+                }
+                Ok(true)
+            }
+            Keycode::Home => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_to_start();
+                }
+                Ok(true)
+            }
+            Keycode::End => {
+                if let Some(hover) = self.ui_mut()?.hover_mut() {
+                    hover.scroll_to_end();
                 }
                 Ok(true)
             }
             _ => Ok(false),
+        }
+    }
+
+    fn handle_focused_hover_text_input(&mut self, chord: &str) -> Result<bool, ShellError> {
+        if matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace) {
+            return Ok(false);
+        }
+        if !self
+            .ui()?
+            .hover()
+            .map(|hover| hover.focused)
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        if chord.chars().count() != 1 {
+            return Ok(false);
+        }
+        let Some(character) = chord.chars().next() else {
+            return Ok(false);
+        };
+        let Some(hover) = self.ui_mut()?.hover_mut() else {
+            return Ok(false);
+        };
+        match character {
+            '1'..='9' => {
+                hover.push_count_digit(character.to_digit(10).unwrap_or_default() as usize);
+                Ok(true)
+            }
+            '0' => {
+                if hover.count.is_some() {
+                    hover.push_count_digit(0);
+                } else {
+                    hover.scroll_to_start();
+                }
+                Ok(true)
+            }
+            'j' => {
+                let lines = hover.take_count_or_one() as i32;
+                hover.pending_g_prefix = false;
+                hover.scroll_by(lines);
+                Ok(true)
+            }
+            'k' => {
+                let lines = hover.take_count_or_one() as i32;
+                hover.pending_g_prefix = false;
+                hover.scroll_by(-lines);
+                Ok(true)
+            }
+            'g' => {
+                if hover.pending_g_prefix {
+                    if let Some(line) = hover.take_count().map(|count| count.saturating_sub(1)) {
+                        hover.scroll_to_line(line);
+                    } else {
+                        hover.scroll_to_start();
+                    }
+                } else {
+                    hover.pending_g_prefix = true;
+                }
+                Ok(true)
+            }
+            'G' => {
+                if let Some(line) = hover.take_count().map(|count| count.saturating_sub(1)) {
+                    hover.scroll_to_line(line);
+                } else {
+                    hover.scroll_to_end();
+                }
+                Ok(true)
+            }
+            '{' | '(' | 'H' => {
+                let lines = hover
+                    .page_scroll_lines()
+                    .saturating_mul(hover.take_count_or_one()) as i32;
+                hover.pending_g_prefix = false;
+                hover.scroll_by(-lines);
+                Ok(true)
+            }
+            '}' | ')' | 'L' | '$' => {
+                let lines = hover
+                    .page_scroll_lines()
+                    .saturating_mul(hover.take_count_or_one()) as i32;
+                hover.pending_g_prefix = false;
+                hover.scroll_by(lines);
+                Ok(true)
+            }
+            'h' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '^' | 'M' => {
+                hover.clear_navigation_state();
+                Ok(true)
+            }
+            _ => {
+                hover.clear_navigation_state();
+                Ok(false)
+            }
         }
     }
 
@@ -6535,6 +6823,9 @@ impl ShellState {
             let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() else {
                 return Ok(false);
             };
+            if !autocomplete.is_visible() {
+                return Ok(false);
+            }
             if chord == user::autocomplete::NEXT_CHORD {
                 autocomplete.select_next();
                 true
@@ -6731,7 +7022,10 @@ impl ShellState {
 
     #[cfg(test)]
     pub(crate) fn autocomplete_visible(&self) -> Result<bool, ShellError> {
-        Ok(self.ui()?.autocomplete().is_some())
+        Ok(self
+            .ui()?
+            .autocomplete()
+            .is_some_and(AutocompleteOverlay::is_visible))
     }
 
     #[cfg(test)]
@@ -6739,6 +7033,7 @@ impl ShellState {
         Ok(self
             .ui()?
             .autocomplete()
+            .filter(|autocomplete| autocomplete.is_visible())
             .map(|autocomplete| {
                 autocomplete
                     .entries()
@@ -6751,11 +7046,15 @@ impl ShellState {
 
     #[cfg(test)]
     pub(crate) fn autocomplete_selected(&self) -> Result<Option<String>, ShellError> {
-        Ok(self.ui()?.autocomplete().and_then(|autocomplete| {
-            autocomplete
-                .selected()
-                .map(|entry| entry.replacement.clone())
-        }))
+        Ok(self
+            .ui()?
+            .autocomplete()
+            .filter(|autocomplete| autocomplete.is_visible())
+            .and_then(|autocomplete| {
+                autocomplete
+                    .selected()
+                    .map(|entry| entry.replacement.clone())
+            }))
     }
 
     #[cfg(test)]
@@ -6847,8 +7146,29 @@ impl ShellState {
         refresh_pending_git(&mut self.runtime, now, typing_active).map_err(ShellError::Runtime)
     }
 
+    fn refresh_pending_terminal(
+        &mut self,
+        render_width: u32,
+        render_height: u32,
+        cell_width: i32,
+        line_height: i32,
+    ) -> Result<bool, ShellError> {
+        refresh_pending_terminal(
+            &mut self.runtime,
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(ShellError::Runtime)
+    }
+
     fn refresh_pending_lsp(&mut self) -> Result<bool, ShellError> {
         refresh_pending_lsp(&mut self.runtime).map_err(ShellError::Runtime)
+    }
+
+    fn refresh_notifications(&mut self, now: Instant) -> Result<bool, ShellError> {
+        Ok(self.ui_mut()?.prune_notifications(now))
     }
 
     fn refresh_pending_acp(
@@ -6884,6 +7204,7 @@ impl ShellState {
         now: Instant,
     ) -> Result<ShellVisualRefreshKey, ShellError> {
         let ui = self.ui()?;
+        let active_lsp_workspace_loaded = active_lsp_workspace_loaded(&self.runtime, ui);
         Ok(ShellVisualRefreshKey {
             render_width,
             render_height,
@@ -6904,9 +7225,28 @@ impl ShellState {
                 .map(|buffer| (buffer.id(), buffer.lsp_diagnostics_revision()))
                 .collect(),
             active_lsp_server: ui.attached_lsp_server().map(str::to_owned),
+            active_lsp_workspace_loaded,
+            notification_revision: ui.notification_revision(),
+            notification_deadline: ui.notification_deadline(now),
             yank_flash_until: ui.yank_flash_deadline(now),
         })
     }
+}
+
+fn active_lsp_workspace_loaded(runtime: &EditorRuntime, ui: &ShellUiState) -> bool {
+    let Some(path) = ui
+        .active_buffer_id()
+        .and_then(|buffer_id| ui.buffer(buffer_id))
+        .and_then(ShellBuffer::path)
+    else {
+        return false;
+    };
+    runtime
+        .services()
+        .get::<Arc<Mutex<LspClientManager>>>()
+        .and_then(|manager| manager.lock().ok())
+        .map(|manager| manager.has_live_sessions_for_path(path))
+        .unwrap_or(false)
 }
 
 fn frame_pacing_remaining(frame_started: Instant, now: Instant) -> Duration {
@@ -6996,12 +7336,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     video.text_input().start(&window);
     let mut line_height = fonts.primary().height().max(1) as usize;
     let mut ascent = fonts.primary().ascent();
-    let mut cell_width = fonts
-        .primary()
-        .size_of_char('M')
-        .map_err(|error| ShellError::Sdl(error.to_string()))?
-        .0
-        .max(1) as i32;
+    let mut cell_width = fonts.cell_width();
 
     let mut canvas = window.into_canvas();
     let renderer_name = canvas.renderer_name.clone();
@@ -7083,8 +7418,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         .as_ref()
                         .map(|_| TypingEventMetadata::from_event(&event));
                     let event_started = typing_frame.as_ref().map(|_| Instant::now());
-                    match state.handle_event(event, render_width, render_height, line_height as i32)
-                    {
+                    match state.handle_event(
+                        event,
+                        render_width,
+                        render_height,
+                        cell_width,
+                        line_height as i32,
+                    ) {
                         Ok(true) => return FrameOutcome::Quit,
                         Ok(false) => {}
                         Err(error) => state.record_shell_error("shell.handle-event", error),
@@ -7137,6 +7477,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let notification_changed = match state.refresh_notifications(refresh_now) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.notification-refresh", error);
+                        false
+                    }
+                };
                 let autocomplete_changed = match state.refresh_pending_autocomplete() {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -7148,6 +7495,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     Ok(changed) => changed,
                     Err(error) => {
                         state.record_shell_error("shell.hover-refresh", error);
+                        false
+                    }
+                };
+                let terminal_changed = match state.refresh_pending_terminal(
+                    render_width,
+                    render_height,
+                    cell_width,
+                    line_height as i32,
+                ) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.terminal-refresh", error);
                         false
                     }
                 };
@@ -7205,8 +7564,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || had_events
                     || picker_changed
                     || lsp_changed
+                    || notification_changed
                     || autocomplete_changed
                     || hover_changed
+                    || terminal_changed
                     || syntax_changed
                     || acp_changed
                     || last_visual_key.as_ref() != Some(&visual_key);
@@ -7246,6 +7607,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     canvas.window(),
                     render_width,
                     render_height,
+                    cell_width,
                     line_height as i32,
                 ) {
                     state.record_shell_error("shell.browser-host", error);
@@ -7319,12 +7681,7 @@ fn update_theme_runtime<'ttf>(
         *fonts = next_fonts;
         *line_height = fonts.primary().height().max(1) as usize;
         *ascent = fonts.primary().ascent();
-        *cell_width = fonts
-            .primary()
-            .size_of_char('M')
-            .map_err(|error| ShellError::Sdl(error.to_string()))?
-            .0
-            .max(1) as i32;
+        *cell_width = fonts.cell_width();
     }
 
     *theme_settings = updated;
@@ -7485,6 +7842,11 @@ fn load_font_set<'ttf>(
     let primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let cell_width = primary
+        .size_of_char('M')
+        .map_err(|error| ShellError::Sdl(error.to_string()))?
+        .0
+        .max(1) as i32;
     let icon_fonts = resolve_bundled_icon_font_paths()?
         .into_iter()
         .map(|path| {
@@ -7512,7 +7874,7 @@ fn load_font_set<'ttf>(
             Ok((name, font, raster_font))
         })
         .collect::<Result<Vec<_>, ShellError>>()?;
-    let fonts = FontSet::new(primary, icon_fonts, settings.font_size as f32);
+    let fonts = FontSet::new(primary, icon_fonts, settings.font_size as f32, cell_width);
     validate_bundled_icon_fonts(&fonts)?;
     Ok((fonts, primary_path))
 }
@@ -8526,7 +8888,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_AUTOCOMPLETE_NEXT,
             "shell.autocomplete-next",
             |_, runtime| {
-                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut() {
+                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut()
+                    && autocomplete.is_visible()
+                {
                     autocomplete.select_next();
                 }
                 Ok(())
@@ -8538,7 +8902,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_AUTOCOMPLETE_PREVIOUS,
             "shell.autocomplete-previous",
             |_, runtime| {
-                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut() {
+                if let Some(autocomplete) = shell_ui_mut(runtime)?.autocomplete_mut()
+                    && autocomplete.is_visible()
+                {
                     autocomplete.select_previous();
                 }
                 Ok(())
@@ -8892,13 +9258,20 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::ActivateTheme(theme_id) => {
-                    let registry = runtime
-                        .services_mut()
-                        .get_mut::<ThemeRegistry>()
-                        .ok_or_else(|| "theme registry service missing".to_owned())?;
-                    registry
-                        .activate(&theme_id)
-                        .map_err(|error| error.to_string())?;
+                    {
+                        let registry = runtime
+                            .services_mut()
+                            .get_mut::<ThemeRegistry>()
+                            .ok_or_else(|| "theme registry service missing".to_owned())?;
+                        registry
+                            .activate(&theme_id)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if let Err(error) =
+                        write_saved_theme_selection(&active_theme_state_path(), &theme_id)
+                    {
+                        record_runtime_error(runtime, "theme.save", error);
+                    }
                 }
                 PickerAction::UndoTreeNode { buffer_id, node_id } => {
                     apply_undo_tree_node(runtime, buffer_id, node_id)?;
@@ -9243,7 +9616,9 @@ fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let buffer_id = ensure_lsp_log_buffer(runtime, workspace_id)?;
+    let server_id = preferred_lsp_log_server(runtime, workspace_id)?
+        .ok_or_else(|| "no active LSP server log is available".to_owned())?;
+    let buffer_id = ensure_lsp_log_buffer(runtime, workspace_id, &server_id)?;
     runtime
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
@@ -9332,35 +9707,33 @@ fn open_lsp_locations(
 fn ensure_lsp_log_buffer(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
+    server_id: &str,
 ) -> Result<BufferId, String> {
     if let Some(buffer_id) = runtime
         .services()
         .get::<LspLogBufferState>()
-        .and_then(|state| state.buffer_id(workspace_id))
+        .and_then(|state| state.buffer_id(workspace_id, server_id))
     {
         return Ok(buffer_id);
     }
 
     let snapshot = current_lsp_log_snapshot(runtime)?;
+    let entries = lsp_log_entries_for_server(snapshot.entries(), server_id);
+    let buffer_name = lsp_log_buffer_name(server_id);
     let buffer_id = runtime
         .model_mut()
-        .create_buffer(
-            workspace_id,
-            LSP_LOG_BUFFER_NAME,
-            BufferKind::Diagnostics,
-            None,
-        )
+        .create_buffer(workspace_id, &buffer_name, BufferKind::Diagnostics, None)
         .map_err(|error| error.to_string())?;
     {
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
-            .replace_with_lines_follow_output(lsp_log_buffer_lines(snapshot.entries()));
+        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics)
+            .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
     }
     runtime
         .services_mut()
         .get_mut::<LspLogBufferState>()
         .ok_or_else(|| "LSP log buffer service missing".to_owned())?
-        .insert_buffer(workspace_id, buffer_id);
+        .insert_buffer(workspace_id, server_id.to_owned(), buffer_id);
     Ok(buffer_id)
 }
 
@@ -9372,6 +9745,40 @@ fn current_lsp_log_snapshot(runtime: &EditorRuntime) -> Result<LspLogSnapshot, S
         .lock()
         .map(|manager| manager.log_snapshot())
         .map_err(|_| "LSP client mutex poisoned".to_owned())
+}
+
+fn preferred_lsp_log_server(
+    runtime: &EditorRuntime,
+    workspace_id: WorkspaceId,
+) -> Result<Option<String>, String> {
+    if let Ok(context) = active_lsp_buffer_context(runtime)
+        && let Some(lsp_client) = runtime.services().get::<Arc<Mutex<LspClientManager>>>()
+        && let Ok(manager) = lsp_client.lock()
+        && let Some(server_id) = manager
+            .session_labels_for_path(&context.path)
+            .into_iter()
+            .next()
+    {
+        return Ok(Some(server_id));
+    }
+    if let Some(server_id) = shell_ui(runtime)?
+        .attached_lsp_servers
+        .get(&workspace_id)
+        .and_then(|labels| labels.split(", ").next())
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+    {
+        return Ok(Some(server_id));
+    }
+    Ok(runtime
+        .services()
+        .get::<LspLogBufferState>()
+        .and_then(|state| state.buffers_for_workspace(workspace_id).into_iter().next())
+        .map(|(server_id, _)| server_id))
+}
+
+fn lsp_log_buffer_name(server_id: &str) -> String {
+    format!("{LSP_LOG_BUFFER_PREFIX}{server_id}*")
 }
 
 fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -9506,12 +9913,19 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
         .services()
         .get::<Arc<Mutex<LspClientManager>>>()
         .cloned();
+    let lsp_context = active_lsp_buffer_context(runtime).ok();
     let overlay = {
         let ui = shell_ui(runtime)?;
         let Some(buffer) = ui.buffer(buffer_id) else {
             return Ok(());
         };
-        hover_overlay_for_buffer(buffer_id, buffer, &registry, lsp_client.as_ref())
+        hover_overlay_for_buffer(
+            buffer_id,
+            buffer,
+            &registry,
+            lsp_client.as_ref(),
+            lsp_context.as_ref(),
+        )
     };
     let ui = shell_ui_mut(runtime)?;
     if let Some(mut overlay) = overlay {
@@ -9527,6 +9941,7 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
     let selected = {
         let ui = shell_ui(runtime)?;
         ui.autocomplete()
+            .filter(|autocomplete| autocomplete.is_visible())
             .and_then(|autocomplete| autocomplete.selected().cloned())
     };
     let Some(selected) = selected else {
@@ -9572,6 +9987,28 @@ fn shell_ui_mut(runtime: &mut EditorRuntime) -> Result<&mut ShellUiState, String
         .services_mut()
         .get_mut::<ShellUiState>()
         .ok_or_else(|| "shell UI state service missing".to_owned())
+}
+
+fn terminal_buffer_state(
+    runtime: &EditorRuntime,
+) -> Result<std::sync::MutexGuard<'_, TerminalBufferState>, String> {
+    runtime
+        .services()
+        .get::<Mutex<TerminalBufferState>>()
+        .ok_or_else(|| "terminal buffer state service missing".to_owned())?
+        .lock()
+        .map_err(|_| "terminal buffer state mutex poisoned".to_owned())
+}
+
+fn terminal_buffer_state_mut(
+    runtime: &mut EditorRuntime,
+) -> Result<&mut TerminalBufferState, String> {
+    runtime
+        .services_mut()
+        .get_mut::<Mutex<TerminalBufferState>>()
+        .ok_or_else(|| "terminal buffer state service missing".to_owned())?
+        .get_mut()
+        .map_err(|_| "terminal buffer state mutex poisoned".to_owned())
 }
 
 fn vim_count_digit(chord: &str, has_existing_count: bool) -> Option<usize> {
@@ -9651,6 +10088,8 @@ fn active_buffer_event_context(
         is_git_commit: buffer_is_git_commit(&buffer.kind),
         is_acp: buffer_is_acp(&buffer.kind),
         is_directory: buffer_is_directory(&buffer.kind),
+        is_browser: buffer_is_browser(&buffer.kind),
+        is_terminal: buffer_is_terminal(&buffer.kind),
     })
 }
 
@@ -9700,6 +10139,10 @@ fn buffer_is_acp(kind: &BufferKind) -> bool {
 
 fn buffer_is_browser(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND)
+}
+
+fn buffer_is_terminal(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Terminal)
 }
 
 fn buffer_is_directory(kind: &BufferKind) -> bool {
@@ -10521,6 +10964,7 @@ fn hover_overlay_for_buffer(
     buffer: &ShellBuffer,
     registry: &HoverRegistry,
     lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Option<HoverOverlay> {
     if registry.providers.is_empty() {
         return None;
@@ -10540,7 +10984,10 @@ fn hover_overlay_for_buffer(
                 HoverProviderKind::TestHover => {
                     hover_test_provider_lines(buffer, token_info.as_ref())
                 }
-                HoverProviderKind::Lsp => hover_lsp_provider_lines(buffer, lsp_client),
+                HoverProviderKind::Lsp => hover_lsp_provider_lines(buffer, lsp_client, lsp_context),
+                HoverProviderKind::SignatureHelp => {
+                    hover_signature_provider_lines(buffer, lsp_client, lsp_context)
+                }
                 HoverProviderKind::Diagnostics => hover_diagnostic_provider_lines(buffer),
             };
             (!lines.is_empty()).then(|| HoverProviderContent {
@@ -10568,6 +11015,8 @@ fn hover_overlay_for_buffer(
         scroll_offset: 0,
         focused: false,
         line_limit: registry.line_limit,
+        pending_g_prefix: false,
+        count: None,
     })
 }
 
@@ -10603,7 +11052,32 @@ fn hover_test_provider_lines(
             "Move onto an identifier to inspect token details.".to_owned(),
         ]);
     }
+    if let Some(span) = hover_syntax_span_at_cursor(buffer, token_info) {
+        let capture_name = if span.capture_name.starts_with('@') {
+            span.capture_name.clone()
+        } else {
+            format!("@{}", span.capture_name)
+        };
+        lines.extend([
+            format!("Theme color: {}", span.theme_token),
+            format!("Tree-sitter token: {capture_name}"),
+        ]);
+    }
     lines
+}
+
+fn hover_syntax_span_at_cursor<'a>(
+    buffer: &'a ShellBuffer,
+    token_info: Option<&(TextRange, String)>,
+) -> Option<&'a LineSyntaxSpan> {
+    let point = token_info
+        .map(|(range, _)| range.start())
+        .unwrap_or_else(|| buffer.cursor_point());
+    buffer
+        .line_syntax_spans(point.line)?
+        .iter()
+        .filter(|span| point.column >= span.start && point.column < span.end)
+        .min_by_key(|span| span.end.saturating_sub(span.start))
 }
 
 fn hover_empty_provider_lines(
@@ -10632,18 +11106,9 @@ fn hover_empty_provider_lines(
 fn hover_lsp_provider_lines(
     buffer: &ShellBuffer,
     lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Vec<String> {
-    let Some(path) = buffer.path() else {
-        return Vec::new();
-    };
-    let Some(lsp_client) = lsp_client else {
-        return Vec::new();
-    };
-    let hovers = lsp_client
-        .lock()
-        .ok()
-        .and_then(|manager| manager.hover(path, buffer.cursor_point()).ok())
-        .unwrap_or_default();
+    let hovers = synced_hover_lsp_request(buffer, lsp_client, lsp_context, LspClientManager::hover);
     let show_server_labels = hovers.len() > 1;
     let mut lines = Vec::new();
     for hover in hovers {
@@ -10657,6 +11122,61 @@ fn hover_lsp_provider_lines(
         lines.extend(hover.lines().iter().cloned());
     }
     lines
+}
+
+fn hover_signature_provider_lines(
+    buffer: &ShellBuffer,
+    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_context: Option<&ActiveLspBufferContext>,
+) -> Vec<String> {
+    let signatures = synced_hover_lsp_request(
+        buffer,
+        lsp_client,
+        lsp_context,
+        LspClientManager::signature_help,
+    );
+    let show_server_labels = signatures.len() > 1;
+    let mut lines = Vec::new();
+    for signature in signatures {
+        if show_server_labels {
+            lines.push(format!(
+                "{} {}",
+                user::hover::SIGNATURE_ICON,
+                signature.server_id()
+            ));
+        }
+        lines.extend(signature.lines().iter().cloned());
+    }
+    lines
+}
+
+fn synced_hover_lsp_request<T>(
+    buffer: &ShellBuffer,
+    lsp_client: Option<&Arc<Mutex<LspClientManager>>>,
+    lsp_context: Option<&ActiveLspBufferContext>,
+    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
+) -> Vec<T> {
+    let Some(lsp_client) = lsp_client else {
+        return Vec::new();
+    };
+    let Some(context) = lsp_context else {
+        return Vec::new();
+    };
+    lsp_client
+        .lock()
+        .ok()
+        .and_then(|manager| {
+            manager
+                .sync_buffer(
+                    &context.path,
+                    &context.text,
+                    context.revision,
+                    context.root.as_deref(),
+                )
+                .ok()?;
+            request(&manager, &context.path, buffer.cursor_point()).ok()
+        })
+        .unwrap_or_default()
 }
 
 fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
@@ -10708,12 +11228,194 @@ fn diagnostic_matches_cursor_line(diagnostic: &LspDiagnostic, cursor: TextPoint)
     true
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiagnosticUnderlineSpan {
+    start_col: usize,
+    end_col: usize,
+    severity: LspDiagnosticSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiagnosticLineSpan {
+    start_col: Option<usize>,
+    end_col: Option<usize>,
+    severity: LspDiagnosticSeverity,
+}
+
 const fn diagnostic_severity_rank(severity: LspDiagnosticSeverity) -> u8 {
     match severity {
         LspDiagnosticSeverity::Error => 0,
         LspDiagnosticSeverity::Warning => 1,
         LspDiagnosticSeverity::Information => 2,
     }
+}
+
+const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
+    match severity {
+        LspDiagnosticSeverity::Error => Color::RGB(224, 107, 117),
+        LspDiagnosticSeverity::Warning => Color::RGB(209, 154, 102),
+        LspDiagnosticSeverity::Information => Color::RGB(110, 170, 255),
+    }
+}
+
+fn statusline_lsp_diagnostics(
+    diagnostics: &[LspDiagnostic],
+) -> Option<user::statusline::LspDiagnosticsInfo> {
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    for diagnostic in diagnostics {
+        match diagnostic.severity() {
+            LspDiagnosticSeverity::Error => errors += 1,
+            LspDiagnosticSeverity::Warning => warnings += 1,
+            LspDiagnosticSeverity::Information => {}
+        }
+    }
+    (errors > 0 || warnings > 0)
+        .then_some(user::statusline::LspDiagnosticsInfo { errors, warnings })
+}
+
+fn diagnostic_line_spans_for_diagnostics(
+    diagnostics: &[LspDiagnostic],
+) -> BTreeMap<usize, Box<[DiagnosticLineSpan]>> {
+    let mut spans: BTreeMap<usize, Vec<DiagnosticLineSpan>> = BTreeMap::new();
+    for diagnostic in diagnostics {
+        let range = diagnostic.range().normalized();
+        for line_index in range.start().line..=range.end().line {
+            spans
+                .entry(line_index)
+                .or_default()
+                .push(DiagnosticLineSpan {
+                    start_col: (line_index == range.start().line).then_some(range.start().column),
+                    end_col: (line_index == range.end().line).then_some(range.end().column),
+                    severity: diagnostic.severity(),
+                });
+        }
+    }
+    spans
+        .into_iter()
+        .map(|(line_index, line_spans)| (line_index, line_spans.into_boxed_slice()))
+        .collect()
+}
+
+fn covering_syntax_span_for_range(
+    syntax_spans: &[LineSyntaxSpan],
+    start: usize,
+    end: usize,
+    line_len: usize,
+) -> Option<(usize, usize)> {
+    syntax_spans
+        .iter()
+        .filter_map(|span| {
+            let span_start = span.start.min(line_len);
+            let span_end = span.end.min(line_len);
+            (span_start < span_end && span_start <= start && span_end >= end)
+                .then_some((span_start, span_end))
+        })
+        .min_by_key(|(span_start, span_end)| span_end.saturating_sub(*span_start))
+}
+
+fn diagnostic_columns_for_line(
+    diagnostic: DiagnosticLineSpan,
+    line_len: usize,
+    syntax_spans: Option<&[LineSyntaxSpan]>,
+) -> Option<(usize, usize)> {
+    let start = diagnostic.start_col.unwrap_or(0).min(line_len);
+    let end = diagnostic.end_col.unwrap_or(line_len).min(line_len);
+    let columns = if start < end {
+        (start, end)
+    } else if line_len == 0 {
+        return None;
+    } else if start >= line_len {
+        (line_len.saturating_sub(1), line_len)
+    } else {
+        (start, (start + 1).min(line_len))
+    };
+    Some(
+        syntax_spans
+            .and_then(|spans| covering_syntax_span_for_range(spans, columns.0, columns.1, line_len))
+            .unwrap_or(columns),
+    )
+}
+
+#[cfg(test)]
+fn diagnostic_underlines_for_segment(
+    diagnostics: &[DiagnosticLineSpan],
+    syntax_spans: Option<&[LineSyntaxSpan]>,
+    line_len: usize,
+    segment: LineWrapSegment,
+) -> Vec<DiagnosticUnderlineSpan> {
+    let mut spans = Vec::with_capacity(diagnostics.len());
+    for severity in [
+        LspDiagnosticSeverity::Information,
+        LspDiagnosticSeverity::Warning,
+        LspDiagnosticSeverity::Error,
+    ] {
+        for diagnostic in diagnostics {
+            if diagnostic.severity != severity {
+                continue;
+            }
+            let Some((start, end)) =
+                diagnostic_columns_for_line(*diagnostic, line_len, syntax_spans)
+            else {
+                continue;
+            };
+            let clipped_start = start.max(segment.start_col);
+            let clipped_end = end.min(segment.end_col);
+            if clipped_start < clipped_end {
+                spans.push(DiagnosticUnderlineSpan {
+                    start_col: clipped_start,
+                    end_col: clipped_end,
+                    severity,
+                });
+            }
+        }
+    }
+    spans
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_diagnostic_underlines_for_segment(
+    target: &mut DrawTarget<'_>,
+    diagnostics: &[DiagnosticLineSpan],
+    syntax_spans: Option<&[LineSyntaxSpan]>,
+    segment_x: i32,
+    y: i32,
+    line_len: usize,
+    segment: LineWrapSegment,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    for severity in [
+        LspDiagnosticSeverity::Information,
+        LspDiagnosticSeverity::Warning,
+        LspDiagnosticSeverity::Error,
+    ] {
+        for diagnostic in diagnostics {
+            if diagnostic.severity != severity {
+                continue;
+            }
+            let Some((start, end)) =
+                diagnostic_columns_for_line(*diagnostic, line_len, syntax_spans)
+            else {
+                continue;
+            };
+            let clipped_start = start.max(segment.start_col);
+            let clipped_end = end.min(segment.end_col);
+            if clipped_start >= clipped_end {
+                continue;
+            }
+            draw_diagnostic_undercurl(
+                target,
+                segment_x + (clipped_start.saturating_sub(segment.start_col) as i32 * cell_width),
+                y,
+                (clipped_end.saturating_sub(clipped_start) as i32 * cell_width).max(1),
+                line_height,
+                diagnostic_color(severity),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 struct PendingVimSearchRequest {
@@ -11757,6 +12459,7 @@ fn apply_operator_to_range(
             buffer.delete_range(range);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            apply_directory_delete_if_needed(runtime)?;
             schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
@@ -11831,6 +12534,7 @@ fn apply_block_operator(
             buffer.set_cursor(target_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            apply_directory_delete_if_needed(runtime)?;
             schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
@@ -11874,6 +12578,14 @@ fn apply_block_operator(
     }
 
     Ok(())
+}
+
+fn apply_directory_delete_if_needed(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    apply_directory_edit_queue(runtime, buffer_id)
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
@@ -12043,6 +12755,13 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
     navigate_browser_buffer(runtime, buffer_id, raw_url)
 }
 
+fn browser_buffer_display_name(current_url: Option<&str>) -> String {
+    match current_url {
+        Some(url) => format!("{} {url}", user::browser::BUFFER_NAME),
+        None => user::browser::BUFFER_NAME.to_owned(),
+    }
+}
+
 fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input: bool) {
     let state = buffer
         .browser_state
@@ -12050,6 +12769,7 @@ fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input:
     let changed = state.current_url.as_deref() != Some(url);
     if changed {
         state.current_url = Some(url.to_owned());
+        buffer.name = browser_buffer_display_name(Some(url));
         buffer.replace_with_lines(user::browser::buffer_lines(Some(url)));
     }
     if let Some(input) = buffer.input_field_mut() {
@@ -12264,6 +12984,8 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
     }
+    acp::close_acp_buffer(runtime, buffer_id)?;
+    close_terminal_buffer(runtime, buffer_id)?;
     runtime
         .model_mut()
         .close_buffer(workspace_id, buffer_id)
@@ -12302,6 +13024,23 @@ fn close_lsp_buffers_for_workspace(
         manager
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn close_terminal_buffers_for_workspace(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+) -> Result<(), String> {
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.workspace_views
+            .get(&workspace_id)
+            .map(|view| view.buffer_ids.clone())
+            .unwrap_or_default()
+    };
+    for buffer_id in buffer_ids {
+        close_terminal_buffer(runtime, buffer_id)?;
     }
     Ok(())
 }
@@ -13099,6 +13838,20 @@ fn apply_operator_motion(
     )
 }
 
+fn terminal_scroll_for_motion(
+    motion: ShellMotion,
+    count: Option<usize>,
+) -> Option<TerminalViewportScroll> {
+    let count = count.unwrap_or(1).max(1);
+    match motion {
+        ShellMotion::Down => Some(TerminalViewportScroll::LineDelta(-(count as i32))),
+        ShellMotion::Up => Some(TerminalViewportScroll::LineDelta(count as i32)),
+        ShellMotion::FirstLine => Some(TerminalViewportScroll::Top),
+        ShellMotion::LastLine => Some(TerminalViewportScroll::Bottom),
+        _ => None,
+    }
+}
+
 fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Result<(), String> {
     let pending_operator = match shell_ui(runtime)?.vim().pending {
         Some(VimPending::Operator { operator, count }) => Some((operator, count)),
@@ -13111,12 +13864,30 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
     }
 
     let count = shell_ui_mut(runtime)?.vim_mut().take_count();
+    if let Some(scroll) = terminal_scroll_for_motion(motion, count)
+        && scroll_active_terminal_view(runtime, scroll)?
+    {
+        return Ok(());
+    }
     move_buffer_with_motion(active_shell_buffer_mut(runtime)?, motion, count);
     Ok(())
 }
 
 fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> Result<(), String> {
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    let terminal_scroll = match command {
+        ScrollCommand::HalfPageDown => Some(TerminalViewportScroll::HalfPageDown),
+        ScrollCommand::HalfPageUp => Some(TerminalViewportScroll::HalfPageUp),
+        ScrollCommand::PageDown => Some(TerminalViewportScroll::PageDown),
+        ScrollCommand::PageUp => Some(TerminalViewportScroll::PageUp),
+        ScrollCommand::LineDown => Some(TerminalViewportScroll::LineDelta(-(count as i32))),
+        ScrollCommand::LineUp => Some(TerminalViewportScroll::LineDelta(count as i32)),
+    };
+    if let Some(scroll) = terminal_scroll
+        && scroll_active_terminal_view(runtime, scroll)?
+    {
+        return Ok(());
+    }
     let buffer = active_shell_buffer_mut(runtime)?;
     let viewport = buffer.viewport_lines().max(1);
     match command {
@@ -13704,6 +14475,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let is_git_commit = buffer_is_git_commit(&buffer_kind);
     let is_git_status = buffer_is_git_status(&buffer_kind);
     let is_directory = buffer_is_directory(&buffer_kind);
+    let is_terminal = buffer_is_terminal(&buffer_kind);
 
     let (previous_pane, previous_buffer) = {
         let ui = shell_ui(runtime)?;
@@ -13732,7 +14504,12 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         }
         previous_buffer != Some(buffer_id) && has_input
     };
-    if should_enter_insert {
+    let terminal_created = if is_terminal {
+        ensure_terminal_session(runtime, buffer_id)?
+    } else {
+        false
+    };
+    if should_enter_insert || terminal_created {
         shell_ui_mut(runtime)?.enter_insert_mode();
     }
     if previous_buffer != Some(buffer_id) {
@@ -14020,15 +14797,20 @@ fn set_directory_root(
     buffer_id: BufferId,
     root: PathBuf,
 ) -> Result<(), String> {
+    let defaults = user::oil::defaults();
     let (show_hidden, sort_mode, trash_enabled, previous_root) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let state = buffer.directory_state();
         (
-            state.map(|state| state.show_hidden).unwrap_or(false),
+            state
+                .map(|state| state.show_hidden)
+                .unwrap_or(defaults.show_hidden),
             state
                 .map(|state| state.sort_mode)
-                .unwrap_or(DirectorySortMode::TypeThenName),
-            state.map(|state| state.trash_enabled).unwrap_or(false),
+                .unwrap_or(defaults.sort_mode),
+            state
+                .map(|state| state.trash_enabled)
+                .unwrap_or(defaults.trash_enabled),
             state.map(|state| state.root.clone()),
         )
     };
@@ -14096,7 +14878,7 @@ fn apply_directory_state(
         &state.root,
         &entries,
         state.show_hidden,
-        state.sort_mode.label(),
+        state.sort_mode,
         state.trash_enabled,
     )
     .render_lines(&collapsed);
@@ -14754,9 +15536,14 @@ fn cancel_git_commit_buffer(
     Ok(())
 }
 
-fn stage_git_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+fn stage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "add", &["add", "--", path])?;
+    let mut args = vec!["add".to_owned(), "--".to_owned()];
+    args.extend(paths.iter().cloned());
+    git_command_output_owned(runtime, &root, "add", &args)?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
 }
@@ -14768,9 +15555,14 @@ fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn unstage_git_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+fn unstage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "reset --", &["reset", "-q", "--", path])?;
+    let mut args = vec!["reset".to_owned(), "-q".to_owned(), "--".to_owned()];
+    args.extend(paths.iter().cloned());
+    git_command_output_owned(runtime, &root, "reset --", &args)?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
 }
@@ -14809,10 +15601,9 @@ fn git_status_delete_target_for_line(
         });
     }
     if action.id() == GIT_ACTION_STAGE_FILE {
-        let line_text = buffer.text.line(line_index).unwrap_or_default();
         return Some(GitDeleteTarget {
             path: path.to_owned(),
-            untracked: git_line_is_untracked(&line_text),
+            untracked: git_line_is_untracked(Some(meta)),
         });
     }
     None
@@ -14832,32 +15623,55 @@ fn visual_selection_line_range(selection: VisualSelection) -> Option<(usize, usi
     }
 }
 
+fn git_status_selected_lines(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(Vec<usize>, bool), String> {
+    let ui = shell_ui(runtime)?;
+    let is_visual = matches!(ui.input_mode(), InputMode::Visual);
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !is_visual {
+        return Ok((vec![buffer.cursor_point().line], false));
+    }
+
+    let anchor = ui
+        .vim()
+        .visual_anchor
+        .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+    let selection = visual_selection(buffer, anchor, ui.vim().visual_kind)
+        .ok_or_else(|| "visual selection is empty".to_owned())?;
+    let (start_line, end_line) = visual_selection_line_range(selection).unwrap_or((0, 0));
+    let end_line = end_line.min(buffer.line_count().saturating_sub(1));
+    Ok(((start_line..=end_line).collect(), true))
+}
+
+fn git_status_action_targets(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    action_id: &str,
+) -> Result<(Vec<String>, bool), String> {
+    let (selected_lines, is_visual) = git_status_selected_lines(runtime, buffer_id)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    let mut targets = BTreeSet::new();
+    for line_index in selected_lines {
+        if let Some(path) = git_action_detail(buffer.section_line_meta(line_index), action_id) {
+            targets.insert(path);
+        }
+    }
+    Ok((targets.into_iter().collect(), is_visual))
+}
+
 fn git_status_delete_targets(
     runtime: &EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(Vec<GitDeleteTarget>, bool), String> {
-    let ui = shell_ui(runtime)?;
-    let is_visual = matches!(ui.input_mode(), InputMode::Visual);
+    let (selected_lines, is_visual) = git_status_selected_lines(runtime, buffer_id)?;
     let buffer = shell_buffer(runtime, buffer_id)?;
     let mut targets = BTreeMap::new();
-    if is_visual {
-        let anchor = ui
-            .vim()
-            .visual_anchor
-            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
-        let selection = visual_selection(buffer, anchor, ui.vim().visual_kind)
-            .ok_or_else(|| "visual selection is empty".to_owned())?;
-        let (start_line, end_line) = visual_selection_line_range(selection).unwrap_or((0, 0));
-        let end_line = end_line.min(buffer.line_count().saturating_sub(1));
-        for line_index in start_line..=end_line {
-            if let Some(target) = git_status_delete_target_for_line(buffer, line_index) {
-                targets.entry(target.path.clone()).or_insert(target);
-            }
+    for line_index in selected_lines {
+        if let Some(target) = git_status_delete_target_for_line(buffer, line_index) {
+            targets.entry(target.path.clone()).or_insert(target);
         }
-    } else if let Some(target) =
-        git_status_delete_target_for_line(buffer, buffer.cursor_point().line)
-    {
-        targets.insert(target.path.clone(), target);
     }
     Ok((targets.into_values().collect(), is_visual))
 }
@@ -14891,8 +15705,8 @@ fn delete_git_status_targets(
     Ok(())
 }
 
-fn git_line_is_untracked(line_text: &str) -> bool {
-    line_text.trim_start().starts_with("untracked ")
+fn git_line_is_untracked(meta: Option<&SectionLineMeta>) -> bool {
+    meta.is_some_and(|meta| meta.section_id == GIT_SECTION_UNTRACKED)
 }
 
 fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<String> {
@@ -15064,7 +15878,7 @@ fn diff_git_dwim(
     runtime: &mut EditorRuntime,
     _buffer_id: BufferId,
     meta: Option<&SectionLineMeta>,
-    line_text: &str,
+    _line_text: &str,
 ) -> Result<(), String> {
     if let Some(commit) = git_action_detail(meta, GIT_ACTION_SHOW_COMMIT) {
         return open_git_diff_commit(runtime, &commit);
@@ -15076,7 +15890,7 @@ fn diff_git_dwim(
         return open_git_diff_staged_file(runtime, &path);
     }
     if let Some(path) = git_action_detail(meta, GIT_ACTION_STAGE_FILE) {
-        if git_line_is_untracked(line_text) {
+        if git_line_is_untracked(meta) {
             return open_git_diff_untracked_file(runtime, &path);
         }
         return open_git_diff_unstaged_file(runtime, &path);
@@ -15768,6 +16582,15 @@ fn fetch_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resul
     fetch_git_remote(runtime, &remote)
 }
 
+fn pull_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
+    let (remote, branch) = snapshot
+        .upstream()
+        .and_then(remote_and_branch_from_ref)
+        .ok_or_else(|| "no upstream configured for pull".to_owned())?;
+    pull_git_remote_branch(runtime, &remote, &branch)
+}
+
 fn push_git_to_pushremote(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
@@ -15793,6 +16616,17 @@ fn push_git_remote_branch(
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "push", &["push", remote, branch])?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+fn pull_git_remote_branch(
+    runtime: &mut EditorRuntime,
+    remote: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    git_command_output(runtime, &root, "pull", &["pull", remote, branch])?;
     refresh_git_status_buffers(runtime)?;
     Ok(())
 }
@@ -15919,6 +16753,837 @@ fn set_git_prefix(runtime: &mut EditorRuntime, prefix: GitPrefix) -> Result<(), 
     Ok(())
 }
 
+type ShellCommandHandler = fn(&mut EditorRuntime) -> Result<(), String>;
+
+#[derive(Debug, Clone)]
+struct GitStatusCommandContext {
+    buffer_id: BufferId,
+    meta: Option<SectionLineMeta>,
+    staged_empty: bool,
+    has_stage_candidates: bool,
+}
+
+const GIT_STATUS_COMMANDS: &[(&str, &str, ShellCommandHandler)] = &[
+    (
+        "git.status.refresh",
+        "Refresh the active git status buffer.",
+        git_status_refresh_command,
+    ),
+    (
+        "git.status.next-section",
+        "Move to the next git status section.",
+        git_status_next_section_command,
+    ),
+    (
+        "git.status.previous-section",
+        "Move to the previous git status section.",
+        git_status_previous_section_command,
+    ),
+    (
+        "git.status.stage",
+        "Stage the selected file or all unstaged changes.",
+        git_status_stage_command,
+    ),
+    (
+        "git.status.stage-all",
+        "Stage all unstaged changes.",
+        git_status_stage_all_command,
+    ),
+    (
+        "git.status.unstage",
+        "Unstage the selected file.",
+        git_status_unstage_command,
+    ),
+    (
+        "git.status.unstage-all",
+        "Unstage all staged changes.",
+        git_status_unstage_all_command,
+    ),
+    (
+        "git.status.commit",
+        "Open the git commit buffer for staged changes.",
+        git_status_commit_command,
+    ),
+    (
+        "git.status.push-pushremote",
+        "Push to the configured push-remote from the git status buffer.",
+        git_status_push_pushremote_command,
+    ),
+    (
+        "git.status.push-upstream",
+        "Push to the configured upstream from the git status buffer.",
+        git_status_push_upstream_command,
+    ),
+    (
+        "git.status.fetch-pushremote",
+        "Fetch from the configured push-remote from the git status buffer.",
+        git_status_fetch_pushremote_command,
+    ),
+    (
+        "git.status.fetch-upstream",
+        "Fetch from the configured upstream from the git status buffer.",
+        git_status_fetch_upstream_command,
+    ),
+    (
+        "git.status.fetch-all",
+        "Fetch all remotes.",
+        git_status_fetch_all_command,
+    ),
+    (
+        "git.status.pull-upstream",
+        "Pull from the configured upstream from the git status buffer.",
+        git_status_pull_upstream_command,
+    ),
+    (
+        "git.status.branches",
+        "Open the git branch picker.",
+        git_status_branches_command,
+    ),
+    (
+        "git.status.merge",
+        "Merge a branch from the git status buffer.",
+        git_status_merge_command,
+    ),
+    (
+        "git.status.merge-edit",
+        "Merge a branch and edit the merge message.",
+        git_status_merge_edit_command,
+    ),
+    (
+        "git.status.merge-no-commit",
+        "Merge a branch without committing.",
+        git_status_merge_no_commit_command,
+    ),
+    (
+        "git.status.merge-squash",
+        "Squash-merge a branch from the git status buffer.",
+        git_status_merge_squash_command,
+    ),
+    (
+        "git.status.merge-preview",
+        "Preview the diff for a branch merge.",
+        git_status_merge_preview_command,
+    ),
+    (
+        "git.status.merge-abort",
+        "Abort the current git merge.",
+        git_status_merge_abort_command,
+    ),
+    (
+        "git.status.rebase-pushremote",
+        "Rebase onto the configured push-remote from the git status buffer.",
+        git_status_rebase_pushremote_command,
+    ),
+    (
+        "git.status.rebase-upstream",
+        "Rebase onto the configured upstream from the git status buffer.",
+        git_status_rebase_upstream_command,
+    ),
+    (
+        "git.status.rebase-onto",
+        "Rebase onto a selected branch or edit the current rebase todo.",
+        git_status_rebase_onto_command,
+    ),
+    (
+        "git.status.rebase-interactive",
+        "Start an interactive rebase from the git status buffer.",
+        git_status_rebase_interactive_command,
+    ),
+    (
+        "git.status.rebase-continue",
+        "Continue the current git rebase.",
+        git_status_rebase_continue_command,
+    ),
+    (
+        "git.status.rebase-skip",
+        "Skip the current git rebase commit.",
+        git_status_rebase_skip_command,
+    ),
+    (
+        "git.status.rebase-abort",
+        "Abort the current git rebase.",
+        git_status_rebase_abort_command,
+    ),
+    (
+        "git.status.rebase-autosquash",
+        "Autosquash the current git rebase.",
+        git_status_rebase_autosquash_command,
+    ),
+    (
+        "git.status.rebase-edit-commit",
+        "Edit a commit during the current git rebase.",
+        git_status_rebase_edit_commit_command,
+    ),
+    (
+        "git.status.rebase-reword",
+        "Reword a commit during the current git rebase.",
+        git_status_rebase_reword_command,
+    ),
+    (
+        "git.status.rebase-remove-commit",
+        "Remove a commit during the current git rebase.",
+        git_status_rebase_remove_commit_command,
+    ),
+    (
+        "git.status.diff-dwim",
+        "Open the most relevant git diff for the current status line.",
+        git_status_diff_dwim_command,
+    ),
+    (
+        "git.status.diff-staged",
+        "Open the staged git diff buffer.",
+        git_status_diff_staged_command,
+    ),
+    (
+        "git.status.diff-unstaged",
+        "Open the unstaged git diff buffer.",
+        git_status_diff_unstaged_command,
+    ),
+    (
+        "git.status.diff-commit",
+        "Open a git diff for the commit at point or HEAD.",
+        git_status_diff_commit_command,
+    ),
+    (
+        "git.status.diff-stash",
+        "Open a git diff for the stash at point.",
+        git_status_diff_stash_command,
+    ),
+    (
+        "git.status.diff-range",
+        "Diff a git range from the git status buffer.",
+        git_status_diff_range_command,
+    ),
+    (
+        "git.status.diff-paths",
+        "Diff selected paths from the git status buffer.",
+        git_status_diff_paths_command,
+    ),
+    (
+        "git.status.log-head",
+        "Open the git log for HEAD.",
+        git_status_log_head_command,
+    ),
+    (
+        "git.status.log-related",
+        "Open the git log for the branch, upstream, and push-remote related to the status buffer.",
+        git_status_log_related_command,
+    ),
+    (
+        "git.status.log-other",
+        "Open another git log view from the git status buffer.",
+        git_status_log_other_command,
+    ),
+    (
+        "git.status.log-branches",
+        "Open the git log for local branches.",
+        git_status_log_branches_command,
+    ),
+    (
+        "git.status.log-all-branches",
+        "Open the git log for local and remote branches.",
+        git_status_log_all_branches_command,
+    ),
+    (
+        "git.status.log-all",
+        "Open the git log for all refs.",
+        git_status_log_all_command,
+    ),
+    (
+        "git.status.stash-both",
+        "Stash both index and worktree changes.",
+        git_status_stash_both_command,
+    ),
+    (
+        "git.status.stash-index",
+        "Stash staged changes.",
+        git_status_stash_index_command,
+    ),
+    (
+        "git.status.stash-worktree",
+        "Stash worktree changes.",
+        git_status_stash_worktree_command,
+    ),
+    (
+        "git.status.stash-keep-index",
+        "Stash changes while keeping the index.",
+        git_status_stash_keep_index_command,
+    ),
+    (
+        "git.status.stash-apply",
+        "Apply the stash at point.",
+        git_status_stash_apply_command,
+    ),
+    (
+        "git.status.stash-pop",
+        "Pop the stash at point.",
+        git_status_stash_pop_command,
+    ),
+    (
+        "git.status.stash-drop",
+        "Drop the stash at point.",
+        git_status_stash_drop_command,
+    ),
+    (
+        "git.status.stash-show",
+        "Show the stash diff at point.",
+        git_status_stash_show_command,
+    ),
+    (
+        "git.status.cherry-open",
+        "Open the git cherry buffer for the current upstream.",
+        git_status_cherry_open_command,
+    ),
+    (
+        "git.status.cherry-pick",
+        "Cherry-pick the commit at point or continue an active sequence.",
+        git_status_cherry_pick_command,
+    ),
+    (
+        "git.status.cherry-pick-apply",
+        "Apply the commit at point without committing, or abort an active sequence.",
+        git_status_cherry_pick_apply_command,
+    ),
+    (
+        "git.status.cherry-pick-skip",
+        "Skip the current cherry-pick sequence step.",
+        git_status_cherry_pick_skip_command,
+    ),
+    (
+        "git.status.revert",
+        "Revert the commit at point or continue an active revert sequence.",
+        git_status_revert_command,
+    ),
+    (
+        "git.status.revert-no-commit",
+        "Revert the commit at point without committing, or abort an active revert sequence.",
+        git_status_revert_no_commit_command,
+    ),
+    (
+        "git.status.revert-skip",
+        "Skip the current cherry-pick or revert sequence step.",
+        git_status_revert_skip_command,
+    ),
+    (
+        "git.status.revert-abort",
+        "Abort the current cherry-pick or revert sequence.",
+        git_status_revert_abort_command,
+    ),
+    (
+        "git.status.apply-commit",
+        "Apply the commit at point without committing, or open the commit picker.",
+        git_status_apply_commit_command,
+    ),
+    (
+        "git.status.reset-mixed",
+        "Reset to the selected commit with --mixed.",
+        git_status_reset_mixed_command,
+    ),
+    (
+        "git.status.reset-soft",
+        "Reset to the selected commit with --soft.",
+        git_status_reset_soft_command,
+    ),
+    (
+        "git.status.reset-hard",
+        "Reset to the selected commit with --hard.",
+        git_status_reset_hard_command,
+    ),
+    (
+        "git.status.reset-keep",
+        "Reset to the selected commit with --keep.",
+        git_status_reset_keep_command,
+    ),
+    (
+        "git.status.reset-index",
+        "Reset the git index from the git status buffer.",
+        git_status_reset_index_command,
+    ),
+    (
+        "git.status.reset-worktree",
+        "Reset the git worktree from the git status buffer.",
+        git_status_reset_worktree_command,
+    ),
+    (
+        "git.status.checkout-file",
+        "Check out a file from the git status buffer.",
+        git_status_checkout_file_command,
+    ),
+    (
+        "git.status.discard-or-reset",
+        "Delete selected git status targets or reset the commit at point.",
+        git_status_discard_or_reset_command,
+    ),
+];
+
+fn register_git_status_commands(runtime: &mut EditorRuntime) -> Result<(), String> {
+    for &(name, description, handler) in GIT_STATUS_COMMANDS {
+        runtime
+            .register_command(name, description, CommandSource::Core, handler)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn active_git_status_command_context(
+    runtime: &EditorRuntime,
+) -> Result<GitStatusCommandContext, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_git_status(&buffer.kind) {
+        return Err("git status buffer is not active".to_owned());
+    }
+    let snapshot = buffer.git_snapshot();
+    Ok(GitStatusCommandContext {
+        buffer_id,
+        meta: buffer
+            .section_line_meta(buffer.cursor_point().line)
+            .cloned(),
+        staged_empty: snapshot
+            .map(|snapshot| snapshot.staged().is_empty())
+            .unwrap_or(true),
+        has_stage_candidates: snapshot
+            .map(|snapshot| !(snapshot.unstaged().is_empty() && snapshot.untracked().is_empty()))
+            .unwrap_or(false),
+    })
+}
+
+fn ensure_no_rebase_in_progress(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if git_rebase_in_progress(runtime)? {
+        return Err("rebase already in progress".to_owned());
+    }
+    Ok(())
+}
+
+fn ensure_rebase_in_progress(runtime: &mut EditorRuntime, message: &str) -> Result<(), String> {
+    if !git_rebase_in_progress(runtime)? {
+        return Err(message.to_owned());
+    }
+    Ok(())
+}
+
+fn git_status_sequence_kind(
+    runtime: &mut EditorRuntime,
+    message: &str,
+) -> Result<GitSequenceKind, String> {
+    git_sequence_in_progress(runtime)?.ok_or_else(|| message.to_owned())
+}
+
+fn unsupported_git_status_command(message: &str) -> Result<(), String> {
+    Err(message.to_owned())
+}
+
+fn git_status_refresh_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    refresh_git_status_buffer(runtime, context.buffer_id)
+}
+
+fn git_status_next_section_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    move_git_section(runtime, true).map(|_| ())
+}
+
+fn git_status_previous_section_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    move_git_section(runtime, false).map(|_| ())
+}
+
+fn git_status_stage_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    let (targets, is_visual) =
+        git_status_action_targets(runtime, context.buffer_id, GIT_ACTION_STAGE_FILE)?;
+    if !targets.is_empty() {
+        stage_git_files(runtime, &targets)?;
+        if is_visual {
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        return Ok(());
+    }
+    if is_visual {
+        return Err("no stageable files selected".to_owned());
+    }
+    if !context.has_stage_candidates {
+        return Err("no unstaged changes to stage".to_owned());
+    }
+    stage_git_all(runtime)
+}
+
+fn git_status_stage_all_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if !context.has_stage_candidates {
+        return Err("no unstaged changes to stage".to_owned());
+    }
+    stage_git_all(runtime)
+}
+
+fn git_status_unstage_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    let (targets, is_visual) =
+        git_status_action_targets(runtime, context.buffer_id, GIT_ACTION_UNSTAGE_FILE)?;
+    if !targets.is_empty() {
+        unstage_git_files(runtime, &targets)?;
+        if is_visual {
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        return Ok(());
+    }
+    if is_visual {
+        return Err("no staged files selected".to_owned());
+    }
+    Ok(())
+}
+
+fn git_status_unstage_all_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if context.staged_empty {
+        return Err("no staged changes to unstage".to_owned());
+    }
+    unstage_git_all(runtime)
+}
+
+fn git_status_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if context.staged_empty {
+        return Err("no staged changes to commit".to_owned());
+    }
+    open_git_commit_buffer(runtime)
+}
+
+fn git_status_push_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    push_git_to_pushremote(runtime, context.buffer_id)
+}
+
+fn git_status_push_upstream_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    push_git_to_upstream(runtime, context.buffer_id)
+}
+
+fn git_status_fetch_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    fetch_git_pushremote(runtime, context.buffer_id)
+}
+
+fn git_status_fetch_upstream_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    fetch_git_upstream(runtime, context.buffer_id)
+}
+
+fn git_status_fetch_all_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    fetch_git_all(runtime)
+}
+
+fn git_status_pull_upstream_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    pull_git_upstream(runtime, context.buffer_id)
+}
+
+fn git_status_branches_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker(runtime)
+}
+
+fn git_status_merge_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if git_merge_in_progress(runtime)? {
+        return merge_git_continue(runtime);
+    }
+    open_git_branch_picker_with_action(runtime, "Git Merge", GitBranchActionKind::MergePlain)
+}
+
+fn git_status_merge_edit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker_with_action(
+        runtime,
+        "Git Merge (Edit Message)",
+        GitBranchActionKind::MergeEdit,
+    )
+}
+
+fn git_status_merge_no_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker_with_action(
+        runtime,
+        "Git Merge (No Commit)",
+        GitBranchActionKind::MergeNoCommit,
+    )
+}
+
+fn git_status_merge_squash_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker_with_action(
+        runtime,
+        "Git Merge (Squash)",
+        GitBranchActionKind::MergeSquash,
+    )
+}
+
+fn git_status_merge_preview_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_branch_picker_with_action(
+        runtime,
+        "Git Merge (Preview)",
+        GitBranchActionKind::MergePreview,
+    )
+}
+
+fn git_status_merge_abort_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    merge_git_abort(runtime)
+}
+
+fn git_status_rebase_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_no_rebase_in_progress(runtime)?;
+    let context = active_git_status_command_context(runtime)?;
+    rebase_git_onto_pushremote(runtime, context.buffer_id)
+}
+
+fn git_status_rebase_upstream_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_no_rebase_in_progress(runtime)?;
+    let context = active_git_status_command_context(runtime)?;
+    rebase_git_onto_upstream(runtime, context.buffer_id)
+}
+
+fn git_status_rebase_onto_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if git_rebase_in_progress(runtime)? {
+        return rebase_git_edit_todo(runtime);
+    }
+    open_git_branch_picker_with_action(runtime, "Git Rebase", GitBranchActionKind::RebaseOnto)
+}
+
+fn git_status_rebase_interactive_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_no_rebase_in_progress(runtime)?;
+    open_git_branch_picker_with_action(
+        runtime,
+        "Git Rebase (Interactive)",
+        GitBranchActionKind::RebaseInteractive,
+    )
+}
+
+fn git_status_rebase_continue_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_rebase_in_progress(runtime, "no rebase in progress")?;
+    rebase_git_continue(runtime)
+}
+
+fn git_status_rebase_skip_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_rebase_in_progress(runtime, "rebase subset is not supported yet")?;
+    rebase_git_skip(runtime)
+}
+
+fn git_status_rebase_abort_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    ensure_rebase_in_progress(runtime, "no rebase in progress")?;
+    rebase_git_abort(runtime)
+}
+
+fn git_status_rebase_autosquash_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("rebase autosquash is not supported yet")
+}
+
+fn git_status_rebase_edit_commit_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("rebase edit-commit is not supported yet")
+}
+
+fn git_status_rebase_reword_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("rebase reword is not supported yet")
+}
+
+fn git_status_rebase_remove_commit_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("rebase remove-commit is not supported yet")
+}
+
+fn git_status_diff_dwim_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    diff_git_dwim(runtime, context.buffer_id, context.meta.as_ref(), "")
+}
+
+fn git_status_diff_staged_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_diff_staged(runtime)
+}
+
+fn git_status_diff_unstaged_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_diff_unstaged(runtime)
+}
+
+fn git_status_diff_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    diff_git_commit_at_point(runtime, context.buffer_id, context.meta.as_ref())
+}
+
+fn git_status_diff_stash_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    diff_git_stash_at_point(runtime, context.meta.as_ref())
+}
+
+fn git_status_diff_range_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("git diff range is not supported yet")
+}
+
+fn git_status_diff_paths_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("git diff paths is not supported yet")
+}
+
+fn git_status_log_head_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_log_head(runtime)
+}
+
+fn git_status_log_related_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    open_git_log_related(runtime, context.buffer_id)
+}
+
+fn git_status_log_other_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("git log other is not supported yet")
+}
+
+fn git_status_log_branches_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_log_branches(runtime)
+}
+
+fn git_status_log_all_branches_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_log_all_branches(runtime)
+}
+
+fn git_status_log_all_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_log_all(runtime)
+}
+
+fn git_status_stash_both_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    stash_git_both(runtime)
+}
+
+fn git_status_stash_index_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    stash_git_index(runtime)
+}
+
+fn git_status_stash_worktree_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    stash_git_worktree(runtime)
+}
+
+fn git_status_stash_keep_index_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    stash_git_keep_index(runtime)
+}
+
+fn git_status_stash_apply_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    stash_git_apply_at_point(runtime, context.meta.as_ref())
+}
+
+fn git_status_stash_pop_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    stash_git_pop_at_point(runtime, context.meta.as_ref())
+}
+
+fn git_status_stash_drop_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    stash_git_drop_at_point(runtime, context.meta.as_ref())
+}
+
+fn git_status_stash_show_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    stash_git_show_at_point(runtime, context.meta.as_ref())
+}
+
+fn git_status_cherry_open_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    open_git_cherry_buffer(runtime, context.buffer_id)
+}
+
+fn git_status_cherry_pick_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if let Some(kind) = git_sequence_in_progress(runtime)? {
+        return sequence_git_continue(runtime, kind);
+    }
+    cherry_pick_commit_at_point_or_picker(runtime, context.meta.as_ref())
+}
+
+fn git_status_cherry_pick_apply_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if let Some(kind) = git_sequence_in_progress(runtime)? {
+        return sequence_git_abort(runtime, kind);
+    }
+    cherry_pick_apply_at_point_or_picker(runtime, context.meta.as_ref())
+}
+
+fn git_status_cherry_pick_skip_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let kind =
+        git_status_sequence_kind(runtime, "cherry-pick move commands are not supported yet")?;
+    sequence_git_skip(runtime, kind)
+}
+
+fn git_status_revert_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if let Some(kind) = git_sequence_in_progress(runtime)? {
+        return sequence_git_continue(runtime, kind);
+    }
+    revert_commit_at_point_or_picker(runtime, context.meta.as_ref())
+}
+
+fn git_status_revert_no_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    if let Some(kind) = git_sequence_in_progress(runtime)? {
+        return sequence_git_abort(runtime, kind);
+    }
+    revert_no_commit_at_point_or_picker(runtime, context.meta.as_ref())
+}
+
+fn git_status_revert_skip_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let kind = git_status_sequence_kind(runtime, "no cherry-pick or revert in progress")?;
+    sequence_git_skip(runtime, kind)
+}
+
+fn git_status_revert_abort_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let kind = git_status_sequence_kind(runtime, "no cherry-pick or revert in progress")?;
+    sequence_git_abort(runtime, kind)
+}
+
+fn git_status_apply_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    cherry_pick_apply_at_point_or_picker(runtime, context.meta.as_ref())
+}
+
+fn git_status_reset_mixed_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Mixed)
+}
+
+fn git_status_reset_soft_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Soft)
+}
+
+fn git_status_reset_hard_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Hard)
+}
+
+fn git_status_reset_keep_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Keep)
+}
+
+fn git_status_reset_index_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("reset index is not supported yet")
+}
+
+fn git_status_reset_worktree_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("reset worktree is not supported yet")
+}
+
+fn git_status_checkout_file_command(_: &mut EditorRuntime) -> Result<(), String> {
+    unsupported_git_status_command("file checkout is not supported yet")
+}
+
+fn git_status_discard_or_reset_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_git_status_command_context(runtime)?;
+    let (targets, is_visual) = git_status_delete_targets(runtime, context.buffer_id)?;
+    if !targets.is_empty() {
+        delete_git_status_targets(runtime, &targets)?;
+        if is_visual {
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        return Ok(());
+    }
+    if is_visual {
+        return Err("no deletable files selected".to_owned());
+    }
+    reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Mixed)
+}
+
+fn git_status_command_name(prefix: Option<GitPrefix>, chord: &str) -> Option<&'static str> {
+    user::git::status_command_name(prefix, chord)
+}
+
 fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<bool, String> {
     const PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
@@ -16034,503 +17699,28 @@ fn toggle_git_section(runtime: &mut EditorRuntime) -> Result<bool, String> {
 
 fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (meta, line_text, staged_empty, has_stage_candidates) = {
+    {
         let buffer = shell_buffer(runtime, buffer_id)?;
         if !buffer_is_git_status(&buffer.kind) {
             return Ok(false);
         }
-        let meta = buffer
-            .section_line_meta(buffer.cursor_point().line)
-            .cloned();
-        let line_text = buffer
-            .text
-            .line(buffer.cursor_point().line)
-            .unwrap_or_default();
-        let snapshot = buffer.git_snapshot();
-        let staged_empty = snapshot
-            .map(|snapshot| snapshot.staged().is_empty())
-            .unwrap_or(true);
-        let has_stage_candidates = snapshot
-            .map(|snapshot| !(snapshot.unstaged().is_empty() && snapshot.untracked().is_empty()))
-            .unwrap_or(false);
-        (meta, line_text, staged_empty, has_stage_candidates)
-    };
-
-    if let Some(prefix) = take_git_prefix(runtime)? {
-        match prefix {
-            GitPrefix::Commit if chord == "c" => {
-                if staged_empty {
-                    return Err("no staged changes to commit".to_owned());
-                }
-                open_git_commit_buffer(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Push if chord == "p" => {
-                push_git_to_pushremote(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Push if chord == "u" => {
-                push_git_to_upstream(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Fetch if chord == "p" => {
-                fetch_git_pushremote(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Fetch if chord == "u" => {
-                fetch_git_upstream(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Fetch if chord == "a" => {
-                fetch_git_all(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Branch if chord == "b" => {
-                open_git_branch_picker(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "m" => {
-                if git_merge_in_progress(runtime)? {
-                    merge_git_continue(runtime)?;
-                } else {
-                    open_git_branch_picker_with_action(
-                        runtime,
-                        "Git Merge",
-                        GitBranchActionKind::MergePlain,
-                    )?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "e" => {
-                open_git_branch_picker_with_action(
-                    runtime,
-                    "Git Merge (Edit Message)",
-                    GitBranchActionKind::MergeEdit,
-                )?;
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "n" => {
-                open_git_branch_picker_with_action(
-                    runtime,
-                    "Git Merge (No Commit)",
-                    GitBranchActionKind::MergeNoCommit,
-                )?;
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "s" => {
-                open_git_branch_picker_with_action(
-                    runtime,
-                    "Git Merge (Squash)",
-                    GitBranchActionKind::MergeSquash,
-                )?;
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "p" => {
-                open_git_branch_picker_with_action(
-                    runtime,
-                    "Git Merge (Preview)",
-                    GitBranchActionKind::MergePreview,
-                )?;
-                return Ok(true);
-            }
-            GitPrefix::Merge if chord == "a" => {
-                merge_git_abort(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "p" => {
-                if git_rebase_in_progress(runtime)? {
-                    return Err("rebase already in progress".to_owned());
-                }
-                rebase_git_onto_pushremote(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "u" => {
-                if git_rebase_in_progress(runtime)? {
-                    return Err("rebase already in progress".to_owned());
-                }
-                rebase_git_onto_upstream(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "e" => {
-                if git_rebase_in_progress(runtime)? {
-                    rebase_git_edit_todo(runtime)?;
-                } else {
-                    open_git_branch_picker_with_action(
-                        runtime,
-                        "Git Rebase",
-                        GitBranchActionKind::RebaseOnto,
-                    )?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "i" => {
-                if git_rebase_in_progress(runtime)? {
-                    return Err("rebase already in progress".to_owned());
-                }
-                open_git_branch_picker_with_action(
-                    runtime,
-                    "Git Rebase (Interactive)",
-                    GitBranchActionKind::RebaseInteractive,
-                )?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "r" => {
-                if !git_rebase_in_progress(runtime)? {
-                    return Err("no rebase in progress".to_owned());
-                }
-                rebase_git_continue(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "s" => {
-                if !git_rebase_in_progress(runtime)? {
-                    return Err("rebase subset is not supported yet".to_owned());
-                }
-                rebase_git_skip(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "a" => {
-                if !git_rebase_in_progress(runtime)? {
-                    return Err("no rebase in progress".to_owned());
-                }
-                rebase_git_abort(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Rebase if chord == "f" => {
-                return Err("rebase autosquash is not supported yet".to_owned());
-            }
-            GitPrefix::Rebase if chord == "m" => {
-                return Err("rebase edit-commit is not supported yet".to_owned());
-            }
-            GitPrefix::Rebase if chord == "w" => {
-                return Err("rebase reword is not supported yet".to_owned());
-            }
-            GitPrefix::Rebase if chord == "k" => {
-                return Err("rebase remove-commit is not supported yet".to_owned());
-            }
-            GitPrefix::Diff if chord == "d" => {
-                diff_git_dwim(runtime, buffer_id, meta.as_ref(), &line_text)?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "s" => {
-                open_git_diff_staged(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "u" => {
-                open_git_diff_unstaged(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "w" => {
-                open_git_diff_worktree(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "c" => {
-                diff_git_commit_at_point(runtime, buffer_id, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "t" => {
-                diff_git_stash_at_point(runtime, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Diff if chord == "r" => {
-                return Err("git diff range is not supported yet".to_owned());
-            }
-            GitPrefix::Diff if chord == "p" => {
-                return Err("git diff paths is not supported yet".to_owned());
-            }
-            GitPrefix::Log if chord == "l" => {
-                open_git_log_current(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Log if chord == "h" => {
-                open_git_log_head(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Log if chord == "u" => {
-                open_git_log_related(runtime, buffer_id)?;
-                return Ok(true);
-            }
-            GitPrefix::Log if chord == "o" => {
-                return Err("git log other is not supported yet".to_owned());
-            }
-            GitPrefix::Log if chord == "L" => {
-                open_git_log_branches(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Log if chord == "b" => {
-                open_git_log_all_branches(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Log if chord == "a" => {
-                open_git_log_all(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "z" => {
-                stash_git_both(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "i" => {
-                stash_git_index(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "w" => {
-                stash_git_worktree(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "x" => {
-                stash_git_keep_index(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "a" => {
-                stash_git_apply_at_point(runtime, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "p" => {
-                stash_git_pop_at_point(runtime, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "k" => {
-                stash_git_drop_at_point(runtime, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "v" => {
-                stash_git_show_at_point(runtime, meta.as_ref())?;
-                return Ok(true);
-            }
-            GitPrefix::Stash if chord == "l" => {
-                open_git_stash_list_buffer(runtime)?;
-                return Ok(true);
-            }
-            GitPrefix::CherryPick if chord == "A" => {
-                if let Some(kind) = git_sequence_in_progress(runtime)? {
-                    sequence_git_continue(runtime, kind)?;
-                } else {
-                    cherry_pick_commit_at_point_or_picker(runtime, meta.as_ref())?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::CherryPick if chord == "a" => {
-                if let Some(kind) = git_sequence_in_progress(runtime)? {
-                    sequence_git_abort(runtime, kind)?;
-                } else {
-                    cherry_pick_apply_at_point_or_picker(runtime, meta.as_ref())?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::CherryPick if chord == "s" => {
-                let Some(kind) = git_sequence_in_progress(runtime)? else {
-                    return Err("cherry-pick move commands are not supported yet".to_owned());
-                };
-                sequence_git_skip(runtime, kind)?;
-                return Ok(true);
-            }
-            GitPrefix::Revert if chord == "V" => {
-                if let Some(kind) = git_sequence_in_progress(runtime)? {
-                    sequence_git_continue(runtime, kind)?;
-                } else {
-                    revert_commit_at_point_or_picker(runtime, meta.as_ref())?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::Revert if chord == "v" => {
-                if let Some(kind) = git_sequence_in_progress(runtime)? {
-                    sequence_git_abort(runtime, kind)?;
-                } else {
-                    revert_no_commit_at_point_or_picker(runtime, meta.as_ref())?;
-                }
-                return Ok(true);
-            }
-            GitPrefix::Revert if chord == "s" => {
-                let Some(kind) = git_sequence_in_progress(runtime)? else {
-                    return Err("no cherry-pick or revert in progress".to_owned());
-                };
-                sequence_git_skip(runtime, kind)?;
-                return Ok(true);
-            }
-            GitPrefix::Revert if chord == "a" => {
-                let Some(kind) = git_sequence_in_progress(runtime)? else {
-                    return Err("no cherry-pick or revert in progress".to_owned());
-                };
-                sequence_git_abort(runtime, kind)?;
-                return Ok(true);
-            }
-            GitPrefix::Reset if chord == "m" => {
-                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Mixed)?;
-                return Ok(true);
-            }
-            GitPrefix::Reset if chord == "s" => {
-                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Soft)?;
-                return Ok(true);
-            }
-            GitPrefix::Reset if chord == "h" => {
-                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Hard)?;
-                return Ok(true);
-            }
-            GitPrefix::Reset if chord == "k" => {
-                reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Keep)?;
-                return Ok(true);
-            }
-            GitPrefix::Reset if chord == "i" => {
-                return Err("reset index is not supported yet".to_owned());
-            }
-            GitPrefix::Reset if chord == "w" => {
-                return Err("reset worktree is not supported yet".to_owned());
-            }
-            GitPrefix::Reset if chord == "f" => {
-                return Err("file checkout is not supported yet".to_owned());
-            }
-            _ => {}
-        }
     }
 
-    if !matches!(
-        chord,
-        "s" | "S"
-            | "u"
-            | "U"
-            | "c"
-            | "P"
-            | "p"
-            | "n"
-            | "g"
-            | "f"
-            | "b"
-            | "d"
-            | "l"
-            | "z"
-            | "m"
-            | "r"
-            | "Y"
-            | "A"
-            | "V"
-            | "a"
-            | "X"
-            | "x"
-    ) {
-        return Ok(false);
+    let prefix = take_git_prefix(runtime)?;
+    if let Some(command_name) =
+        git_status_command_name(prefix, chord).or_else(|| git_status_command_name(None, chord))
+    {
+        runtime
+            .execute_command(command_name)
+            .map_err(|error| error.to_string())?;
+        return Ok(true);
     }
 
-    match chord {
-        "g" => {
-            refresh_git_status_buffer(runtime, buffer_id)?;
-            Ok(true)
-        }
-        "n" => move_git_section(runtime, true),
-        "p" => move_git_section(runtime, false),
-        "S" => {
-            if !has_stage_candidates {
-                return Err("no unstaged changes to stage".to_owned());
-            }
-            stage_git_all(runtime)?;
-            Ok(true)
-        }
-        "s" => {
-            if let Some(action) = meta.as_ref().and_then(|meta| meta.action.as_ref())
-                && action.id() == GIT_ACTION_STAGE_FILE
-            {
-                let path = action
-                    .detail()
-                    .ok_or_else(|| "git stage action missing path".to_owned())?;
-                stage_git_file(runtime, path)?;
-                return Ok(true);
-            }
-            if !has_stage_candidates {
-                return Err("no unstaged changes to stage".to_owned());
-            }
-            stage_git_all(runtime)?;
-            Ok(true)
-        }
-        "u" => {
-            if let Some(action) = meta.as_ref().and_then(|meta| meta.action.as_ref())
-                && action.id() == GIT_ACTION_UNSTAGE_FILE
-            {
-                let path = action
-                    .detail()
-                    .ok_or_else(|| "git unstage action missing path".to_owned())?;
-                unstage_git_file(runtime, path)?;
-                return Ok(true);
-            }
-            Ok(false)
-        }
-        "U" => {
-            if staged_empty {
-                return Err("no staged changes to unstage".to_owned());
-            }
-            unstage_git_all(runtime)?;
-            Ok(true)
-        }
-        "c" => {
-            set_git_prefix(runtime, GitPrefix::Commit)?;
-            Ok(true)
-        }
-        "P" => {
-            set_git_prefix(runtime, GitPrefix::Push)?;
-            Ok(true)
-        }
-        "f" => {
-            set_git_prefix(runtime, GitPrefix::Fetch)?;
-            Ok(true)
-        }
-        "b" => {
-            set_git_prefix(runtime, GitPrefix::Branch)?;
-            Ok(true)
-        }
-        "d" => {
-            set_git_prefix(runtime, GitPrefix::Diff)?;
-            Ok(true)
-        }
-        "l" => {
-            set_git_prefix(runtime, GitPrefix::Log)?;
-            Ok(true)
-        }
-        "z" => {
-            set_git_prefix(runtime, GitPrefix::Stash)?;
-            Ok(true)
-        }
-        "m" => {
-            set_git_prefix(runtime, GitPrefix::Merge)?;
-            Ok(true)
-        }
-        "r" => {
-            set_git_prefix(runtime, GitPrefix::Rebase)?;
-            Ok(true)
-        }
-        "Y" => {
-            open_git_cherry_buffer(runtime, buffer_id)?;
-            Ok(true)
-        }
-        "A" => {
-            set_git_prefix(runtime, GitPrefix::CherryPick)?;
-            Ok(true)
-        }
-        "V" => {
-            set_git_prefix(runtime, GitPrefix::Revert)?;
-            Ok(true)
-        }
-        "a" => {
-            cherry_pick_apply_at_point_or_picker(runtime, meta.as_ref())?;
-            Ok(true)
-        }
-        "X" => {
-            set_git_prefix(runtime, GitPrefix::Reset)?;
-            Ok(true)
-        }
-        "x" => {
-            let (targets, is_visual) = git_status_delete_targets(runtime, buffer_id)?;
-            if !targets.is_empty() {
-                delete_git_status_targets(runtime, &targets)?;
-                if is_visual {
-                    shell_ui_mut(runtime)?.enter_normal_mode();
-                }
-                return Ok(true);
-            }
-            if is_visual {
-                return Err("no deletable files selected".to_owned());
-            }
-            reset_commit_at_point_or_picker(runtime, meta.as_ref(), GitResetMode::Mixed)?;
-            Ok(true)
-        }
-        _ => Ok(false),
+    if let Some(prefix) = user::git::status_prefix_for_chord(chord) {
+        set_git_prefix(runtime, prefix)?;
+        return Ok(true);
     }
+    Ok(false)
 }
 
 fn handle_git_view_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
@@ -16569,18 +17759,18 @@ fn handle_directory_keydown_chord(
         return Ok(false);
     }
     shell_ui_mut(runtime)?.pending_directory_prefix = None;
-    match chord {
-        "Enter" => {
+    match user::oil::keydown_action(chord) {
+        Some(user::oil::OilKeyAction::OpenEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
             Ok(true)
         }
-        "Ctrl+s" => {
+        Some(user::oil::OilKeyAction::OpenVerticalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
             Ok(true)
         }
-        "Ctrl+h" => {
+        Some(user::oil::OilKeyAction::OpenHorizontalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(
                 runtime,
@@ -16590,21 +17780,21 @@ fn handle_directory_keydown_chord(
             )?;
             Ok(true)
         }
-        "Ctrl+t" => {
+        Some(user::oil::OilKeyAction::OpenNewPane) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
             Ok(true)
         }
-        "Ctrl+p" => {
+        Some(user::oil::OilKeyAction::PreviewEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
             Ok(true)
         }
-        "Ctrl+l" => {
+        Some(user::oil::OilKeyAction::Refresh) => {
             refresh_directory_buffer(runtime, buffer_id)?;
             Ok(true)
         }
-        "Ctrl+c" => {
+        Some(user::oil::OilKeyAction::Close) => {
             close_buffer_discard(runtime, buffer_id)?;
             Ok(true)
         }
@@ -16618,70 +17808,63 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
     if !buffer_is_directory(&buffer.kind) {
         return Ok(false);
     }
-    if take_directory_prefix(runtime)? {
-        match chord {
-            "?" => {
-                open_oil_help_popup(runtime)?;
-                Ok(true)
-            }
-            "." => {
-                update_directory_state(runtime, buffer_id, |state| {
-                    state.show_hidden = !state.show_hidden;
-                })?;
-                Ok(true)
-            }
-            "\\" => {
-                update_directory_state(runtime, buffer_id, |state| {
-                    state.trash_enabled = !state.trash_enabled;
-                })?;
-                Ok(true)
-            }
-            "s" => {
-                update_directory_state(runtime, buffer_id, |state| {
-                    state.sort_mode = state.sort_mode.cycle();
-                })?;
-                Ok(true)
-            }
-            "x" => {
-                let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-                open_external_path(entry.path())?;
-                Ok(true)
-            }
-            "~" => {
-                directory_cd_from_cursor(runtime, buffer_id)?;
-                Ok(true)
-            }
-            _ => {
-                record_runtime_error(
-                    runtime,
-                    "oil.directory",
-                    format!("unknown oil g action `{chord}`"),
-                );
-                Ok(true)
-            }
+    let had_prefix = take_directory_prefix(runtime)?;
+    match user::oil::chord_action(had_prefix, chord) {
+        Some(user::oil::OilKeyAction::ShowHelp) => {
+            open_oil_help_popup(runtime)?;
+            Ok(true)
         }
-    } else {
-        match chord {
-            "g" => {
-                set_directory_prefix(runtime)?;
-                Ok(true)
-            }
-            "-" => {
-                let root = oil_parent_root(runtime)?;
-                set_directory_root(runtime, buffer_id, root)?;
-                Ok(true)
-            }
-            "_" => {
-                let root = oil_workspace_root(runtime)?;
-                set_directory_root(runtime, buffer_id, root)?;
-                Ok(true)
-            }
-            "`" => {
-                directory_cd_from_cursor(runtime, buffer_id)?;
-                Ok(true)
-            }
-            _ => Ok(false),
+        Some(user::oil::OilKeyAction::ToggleHidden) => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.show_hidden = !state.show_hidden;
+            })?;
+            Ok(true)
         }
+        Some(user::oil::OilKeyAction::ToggleTrash) => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.trash_enabled = !state.trash_enabled;
+            })?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::CycleSort) => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.sort_mode = state.sort_mode.cycle();
+            })?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::OpenExternal) => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_external_path(entry.path())?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::SetTabLocalRoot) | Some(user::oil::OilKeyAction::SetRoot) => {
+            directory_cd_from_cursor(runtime, buffer_id)?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::StartPrefix) => {
+            set_directory_prefix(runtime)?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::OpenParent) => {
+            let root = oil_parent_root(runtime)?;
+            set_directory_root(runtime, buffer_id, root)?;
+            Ok(true)
+        }
+        Some(user::oil::OilKeyAction::OpenWorkspaceRoot) => {
+            let root = oil_workspace_root(runtime)?;
+            set_directory_root(runtime, buffer_id, root)?;
+            Ok(true)
+        }
+        None if had_prefix => {
+            let prefix = user::oil::keybindings().prefix;
+            record_runtime_error(
+                runtime,
+                "oil.directory",
+                format!("unknown oil {prefix} action `{chord}`"),
+            );
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -16805,6 +17988,252 @@ fn refresh_pending_git(
     Ok(())
 }
 
+fn refresh_pending_terminal(
+    runtime: &mut EditorRuntime,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<bool, String> {
+    let resized_buffer = resize_active_terminal_session(
+        runtime,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    let active_buffer_id = shell_ui(runtime)?.active_buffer_id();
+    let terminal_buffer_ids = terminal_buffer_state(runtime)?.buffer_ids();
+    if terminal_buffer_ids.is_empty() {
+        return Ok(false);
+    }
+    let mut updates = Vec::new();
+    {
+        let state = terminal_buffer_state_mut(runtime)?;
+        for buffer_id in terminal_buffer_ids {
+            let Some(session) = state.session_mut(buffer_id) else {
+                continue;
+            };
+            let changed = session.poll().map_err(|error| error.to_string())?;
+            if changed || resized_buffer == Some(buffer_id) {
+                updates.push((
+                    buffer_id,
+                    session.snapshot().lines().to_vec(),
+                    session.render_snapshot(),
+                ));
+            }
+        }
+    }
+    let changed = !updates.is_empty();
+    for (buffer_id, lines, render) in updates {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.set_terminal_render(render);
+        if active_buffer_id == Some(buffer_id) {
+            buffer.replace_with_lines_follow_output(lines);
+        } else {
+            buffer.replace_with_lines_preserve_view(lines);
+        }
+    }
+    Ok(changed)
+}
+
+fn ensure_terminal_session(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<bool, String> {
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(false);
+    }
+    if terminal_buffer_state(runtime)?.contains(buffer_id) {
+        return Ok(false);
+    }
+    let config = terminal_spawn_config(runtime, buffer_id, 24, 80)?;
+    let session = LiveTerminalSession::spawn(config).map_err(|error| error.to_string())?;
+    let lines = session.snapshot().lines().to_vec();
+    let render = session.render_snapshot();
+    terminal_buffer_state_mut(runtime)?.insert(buffer_id, session);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.set_terminal_render(render);
+    buffer.replace_with_lines_follow_output(lines);
+    Ok(true)
+}
+
+fn resize_active_terminal_session(
+    runtime: &mut EditorRuntime,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<Option<BufferId>, String> {
+    let Some((buffer_id, rows, cols)) = active_terminal_dimensions(
+        runtime,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?
+    else {
+        return Ok(None);
+    };
+    ensure_terminal_session(runtime, buffer_id)?;
+    let resized = terminal_buffer_state_mut(runtime)?
+        .session_mut(buffer_id)
+        .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?
+        .resize(rows, cols)
+        .map_err(|error| error.to_string())?;
+    Ok(resized.then_some(buffer_id))
+}
+
+fn active_terminal_dimensions(
+    runtime: &EditorRuntime,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<Option<(BufferId, u16, u16)>, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_terminal(&buffer.kind) {
+        return Ok(None);
+    }
+
+    let popup = active_runtime_popup(runtime)?;
+    let (width, height) = if popup
+        .as_ref()
+        .is_some_and(|popup| popup.active_buffer == buffer_id)
+    {
+        (
+            render_width,
+            popup_window_height(render_height, line_height).max(1),
+        )
+    } else {
+        let popup_height = popup
+            .as_ref()
+            .map(|_| popup_window_height(render_height, line_height))
+            .unwrap_or(0);
+        let pane_height = render_height.saturating_sub(popup_height);
+        let ui = shell_ui(runtime)?;
+        let panes = ui
+            .panes()
+            .ok_or_else(|| "active workspace view is missing".to_owned())?;
+        let pane_rects = match ui.pane_split_direction() {
+            PaneSplitDirection::Vertical => {
+                vertical_pane_rects(render_width, pane_height, panes.len())
+            }
+            PaneSplitDirection::Horizontal => {
+                horizontal_pane_rects(render_width, pane_height, panes.len())
+            }
+        };
+        let rect = pane_rects
+            .get(ui.active_pane_index())
+            .ok_or_else(|| "active pane rect is missing".to_owned())?;
+        (rect.width, rect.height)
+    };
+
+    let rows = buffer_visible_rows_for_height(buffer, height, line_height).max(1);
+    let cols = wrap_columns_for_width(width, cell_width).max(1);
+    Ok(Some((
+        buffer_id,
+        rows.min(u16::MAX as usize) as u16,
+        cols.min(u16::MAX as usize) as u16,
+    )))
+}
+
+fn terminal_spawn_config(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    rows: u16,
+    cols: u16,
+) -> Result<LiveTerminalConfig, String> {
+    let title = shell_buffer(runtime, buffer_id)?.display_name().to_owned();
+    let mut config = LiveTerminalConfig::new(
+        title,
+        user::terminal::default_shell_program(),
+        user::terminal::default_shell_args(),
+    )
+    .with_size(rows, cols);
+    if let Some(cwd) = terminal_working_dir(runtime)? {
+        config = config.with_cwd(cwd);
+    }
+    Ok(config)
+}
+
+fn terminal_working_dir(runtime: &EditorRuntime) -> Result<Option<PathBuf>, String> {
+    if let Some(root) = active_workspace_root(runtime)? {
+        return Ok(Some(root));
+    }
+    env::current_dir()
+        .map(Some)
+        .map_err(|error| format!("failed to determine terminal working directory: {error}"))
+}
+
+fn scroll_active_terminal_view(
+    runtime: &mut EditorRuntime,
+    scroll: TerminalViewportScroll,
+) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(false);
+    }
+    ensure_terminal_session(runtime, buffer_id)?;
+    let (changed, lines, render) = {
+        let state = terminal_buffer_state_mut(runtime)?;
+        let session = state
+            .session_mut(buffer_id)
+            .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?;
+        let changed = session.scroll_viewport(scroll);
+        let lines = changed.then(|| session.snapshot().lines().to_vec());
+        let render = changed.then(|| session.render_snapshot());
+        (changed, lines, render)
+    };
+    if !changed {
+        return Ok(false);
+    }
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.set_terminal_render(
+        render.ok_or_else(|| "terminal render snapshot missing after scroll".to_owned())?,
+    );
+    buffer.replace_with_lines_preserve_view(
+        lines.ok_or_else(|| "terminal lines missing after scroll".to_owned())?,
+    );
+    Ok(true)
+}
+
+fn write_active_terminal_text(runtime: &mut EditorRuntime, text: &str) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    ensure_terminal_session(runtime, buffer_id)?;
+    terminal_buffer_state_mut(runtime)?
+        .session_mut(buffer_id)
+        .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?
+        .write_text(text)
+        .map_err(|error| error.to_string())
+}
+
+fn write_active_terminal_key(runtime: &mut EditorRuntime, key: TerminalKey) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    ensure_terminal_session(runtime, buffer_id)?;
+    terminal_buffer_state_mut(runtime)?
+        .session_mut(buffer_id)
+        .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?
+        .write_key(key)
+        .map_err(|error| error.to_string())
+}
+
+fn close_terminal_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+        buffer.clear_terminal_render();
+    }
+    let Some(mut session) = terminal_buffer_state_mut(runtime)?.remove(buffer_id) else {
+        return Ok(());
+    };
+    session.kill().map_err(|error| {
+        format!(
+            "failed to terminate terminal session `{}` for buffer `{buffer_id}`: {error}",
+            session.title()
+        )
+    })
+}
+
 #[derive(Debug)]
 struct LspBufferRefreshRequest {
     path: PathBuf,
@@ -16814,6 +18243,7 @@ struct LspBufferRefreshRequest {
 }
 
 fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let now = Instant::now();
     let Some(lsp_client) = runtime
         .services()
         .get::<Arc<Mutex<LspClientManager>>>()
@@ -16872,7 +18302,13 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
             .map_err(|error| error.to_string())?;
     }
 
-    let (diagnostic_updates, active_workspace_id, active_server_label, log_snapshot) = {
+    let (
+        diagnostic_updates,
+        active_workspace_id,
+        active_server_label,
+        log_snapshot,
+        notification_snapshot,
+    ) = {
         let manager = lsp_client
             .lock()
             .map_err(|_| "LSP client mutex poisoned".to_owned())?;
@@ -16897,6 +18333,7 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
             ui.active_workspace(),
             active_server_label,
             manager.log_snapshot(),
+            manager.notification_snapshot(),
         )
     };
 
@@ -16909,39 +18346,113 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
             }
         }
         changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
+        changed |= apply_lsp_notifications(ui, &notification_snapshot, now);
     }
     changed |= refresh_lsp_log_buffers(runtime, &log_snapshot)?;
     Ok(changed)
+}
+
+fn notification_severity(level: LspNotificationLevel) -> NotificationSeverity {
+    match level {
+        LspNotificationLevel::Info => NotificationSeverity::Info,
+        LspNotificationLevel::Success => NotificationSeverity::Success,
+        LspNotificationLevel::Warning => NotificationSeverity::Warning,
+        LspNotificationLevel::Error => NotificationSeverity::Error,
+    }
+}
+
+fn apply_lsp_notifications(
+    ui: &mut ShellUiState,
+    snapshot: &LspNotificationSnapshot,
+    now: Instant,
+) -> bool {
+    let mut changed = false;
+    let last_seen = ui.last_lsp_notification_revision();
+    for entry in snapshot.entries() {
+        if entry.revision() <= last_seen {
+            continue;
+        }
+        let notification = entry.notification();
+        let progress = notification
+            .progress()
+            .map(|progress| NotificationProgress {
+                percentage: progress
+                    .percentage()
+                    .and_then(|percentage| u8::try_from(percentage.min(u32::from(u8::MAX))).ok()),
+            });
+        changed |= ui.apply_notification(
+            NotificationUpdate {
+                key: notification.key().to_owned(),
+                severity: notification_severity(notification.level()),
+                title: notification.title().to_owned(),
+                body_lines: notification.body_lines().to_vec(),
+                progress,
+                active: notification.active(),
+            },
+            now,
+        );
+    }
+    ui.set_last_lsp_notification_revision(snapshot.revision());
+    changed
 }
 
 fn refresh_lsp_log_buffers(
     runtime: &mut EditorRuntime,
     snapshot: &LspLogSnapshot,
 ) -> Result<bool, String> {
-    let (buffer_ids, applied_revision) = {
+    let (workspace_buffers, applied_revision) = {
         let Some(state) = runtime.services().get::<LspLogBufferState>() else {
             return Ok(false);
         };
         (
-            state.buffer_ids.values().copied().collect::<Vec<_>>(),
+            state
+                .buffer_ids
+                .iter()
+                .map(|(workspace_id, buffers)| {
+                    (
+                        *workspace_id,
+                        buffers
+                            .iter()
+                            .map(|(server_id, buffer_id)| (server_id.clone(), *buffer_id))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
             state.applied_revision,
         )
     };
     if snapshot.revision() == applied_revision {
         return Ok(false);
     }
-    let lines = lsp_log_buffer_lines(snapshot.entries());
+    let active_workspace = runtime.model().active_workspace_id().ok();
+    let server_ids = snapshot
+        .entries()
+        .iter()
+        .map(LspLogEntry::server_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(workspace_id) = active_workspace {
+        for server_id in server_ids {
+            let _ = ensure_lsp_log_buffer(runtime, workspace_id, server_id)?;
+        }
+    }
+    let had_buffers = !workspace_buffers.is_empty();
     {
         let ui = shell_ui_mut(runtime)?;
-        for buffer_id in &buffer_ids {
-            ui.ensure_buffer(*buffer_id, LSP_LOG_BUFFER_NAME, BufferKind::Diagnostics)
-                .replace_with_lines_follow_output(lines.clone());
+        for (_workspace_id, buffers) in &workspace_buffers {
+            for (server_id, buffer_id) in buffers {
+                let entries = lsp_log_entries_for_server(snapshot.entries(), server_id);
+                if let Some(buffer) = ui.buffer_mut(*buffer_id) {
+                    buffer.replace_with_lines_follow_output(lsp_log_buffer_lines(
+                        server_id, &entries,
+                    ));
+                }
+            }
         }
     }
     if let Some(state) = runtime.services_mut().get_mut::<LspLogBufferState>() {
         state.applied_revision = snapshot.revision();
     }
-    Ok(!buffer_ids.is_empty())
+    Ok(had_buffers || !snapshot.entries().is_empty())
 }
 
 fn refresh_pending_git_fringe(
@@ -17367,7 +18878,6 @@ pub(crate) fn open_workspace_from_project(
         ui.add_workspace(workspace_id, primary_pane_id, scratch, notes, notes_id);
         ui.switch_workspace(workspace_id);
     }
-    let _ = ensure_lsp_log_buffer(runtime, workspace_id)?;
 
     runtime
         .emit_hook(
@@ -17403,6 +18913,7 @@ pub(crate) fn delete_runtime_workspace(
 
     let window_id = active_window_id(runtime)?;
     close_lsp_buffers_for_workspace(runtime, workspace_id)?;
+    close_terminal_buffers_for_workspace(runtime, workspace_id)?;
     let removed = runtime
         .model_mut()
         .close_workspace(workspace_id)
@@ -18279,970 +19790,6 @@ fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
     line[..byte_offset].chars().count()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, Default)]
-    struct CommandLog(Vec<String>);
-
-    fn slice_by_columns(text: &str, start: usize, end: usize) -> String {
-        text.chars()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .collect()
-    }
-
-    fn syntax_span_segments(line: &str, spans: &[LineSyntaxSpan]) -> Vec<(String, String)> {
-        spans
-            .iter()
-            .map(|span| {
-                (
-                    span.theme_token.clone(),
-                    slice_by_columns(line, span.start, span.end),
-                )
-            })
-            .collect()
-    }
-
-    fn install_acp_test_buffer(
-        state: &mut ShellState,
-        output_lines: usize,
-        input_text: &str,
-        hint: Option<&str>,
-    ) -> Result<BufferId, String> {
-        let workspace_id = state
-            .runtime
-            .model()
-            .active_workspace_id()
-            .map_err(|error| error.to_string())?;
-        let buffer_id = state
-            .runtime
-            .model_mut()
-            .create_buffer(
-                workspace_id,
-                "*acp test*",
-                BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .runtime
-            .model_mut()
-            .focus_buffer(workspace_id, buffer_id)
-            .map_err(|error| error.to_string())?;
-        let buffer = state
-            .runtime
-            .model()
-            .workspace(workspace_id)
-            .map_err(|error| error.to_string())?
-            .buffer(buffer_id)
-            .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
-        let mut shell_buffer = ShellBuffer::from_runtime_buffer(
-            buffer,
-            (1..=output_lines)
-                .map(|index| format!("line {index}"))
-                .collect(),
-        );
-        if let Some(input) = shell_buffer.input_field_mut() {
-            input.set_text(input_text);
-            input.set_hint(hint.map(str::to_owned));
-        }
-        shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
-        shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
-        Ok(buffer_id)
-    }
-
-    fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
-        let workspace_id = state
-            .runtime
-            .model()
-            .active_workspace_id()
-            .map_err(|error| error.to_string())?;
-        let buffer_id = state
-            .runtime
-            .model_mut()
-            .create_buffer(
-                workspace_id,
-                user::browser::BUFFER_NAME,
-                BufferKind::Plugin(BROWSER_KIND.to_owned()),
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .runtime
-            .model_mut()
-            .focus_buffer(workspace_id, buffer_id)
-            .map_err(|error| error.to_string())?;
-        shell_ui_mut(&mut state.runtime)?.ensure_buffer(
-            buffer_id,
-            user::browser::BUFFER_NAME,
-            BufferKind::Plugin(BROWSER_KIND.to_owned()),
-        );
-        shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
-        Ok(buffer_id)
-    }
-
-    fn install_hover_test_overlay(
-        state: &mut ShellState,
-        focused: bool,
-    ) -> Result<BufferId, String> {
-        let buffer_id = shell_ui(&state.runtime)?
-            .active_buffer_id()
-            .ok_or_else(|| "active buffer missing".to_owned())?;
-        let anchor = state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .cursor_point();
-        shell_ui_mut(&mut state.runtime)?.set_hover(HoverOverlay {
-            buffer_id,
-            anchor,
-            token: "hover".to_owned(),
-            providers: vec![
-                HoverProviderContent {
-                    provider_label: "Alpha".to_owned(),
-                    provider_icon: "A".to_owned(),
-                    lines: vec!["first".to_owned()],
-                },
-                HoverProviderContent {
-                    provider_label: "Beta".to_owned(),
-                    provider_icon: "B".to_owned(),
-                    lines: vec!["second".to_owned()],
-                },
-                HoverProviderContent {
-                    provider_label: "Gamma".to_owned(),
-                    provider_icon: "G".to_owned(),
-                    lines: vec!["third".to_owned()],
-                },
-            ],
-            provider_index: 0,
-            scroll_offset: 0,
-            focused,
-            line_limit: 8,
-        });
-        Ok(buffer_id)
-    }
-
-    #[test]
-    fn parse_rg_workspace_search_line_extracts_location() {
-        let parsed = parse_rg_workspace_search_line(r"src\main.rs:12:7:let answer = compute();")
-            .expect("rg output should parse into a workspace search match");
-        assert_eq!(parsed.0, r"src\main.rs");
-        assert_eq!(parsed.1, 12);
-        assert_eq!(parsed.2, 7);
-        assert_eq!(parsed.3, "let answer = compute();");
-    }
-
-    #[test]
-    fn parse_grep_workspace_search_line_finds_case_insensitive_column() {
-        let parsed = parse_grep_workspace_search_line(r"src\lib.rs:3:Hello Workspace", "workspace")
-            .expect("grep output should parse into a workspace search match");
-        assert_eq!(parsed.0, r"src\lib.rs");
-        assert_eq!(parsed.1, 3);
-        assert_eq!(parsed.2, 7);
-        assert_eq!(parsed.3, "Hello Workspace");
-    }
-
-    #[test]
-    fn workspace_search_char_column_handles_utf8_offsets() {
-        assert_eq!(workspace_search_char_column("aébc", 0), 0);
-        assert_eq!(workspace_search_char_column("aébc", 1), 1);
-        assert_eq!(workspace_search_char_column("aébc", 3), 2);
-    }
-
-    #[test]
-    fn frame_pacing_remaining_clamps_to_120fps_budget() {
-        let now = Instant::now();
-        let remaining = frame_pacing_remaining(now - Duration::from_millis(2), now);
-        assert!(remaining >= Duration::from_micros(6_000));
-        assert_eq!(
-            frame_pacing_remaining(now - Duration::from_millis(10), now),
-            Duration::from_secs(0)
-        );
-    }
-
-    #[test]
-    fn git_refresh_is_deferred_while_typing() {
-        let now = Instant::now();
-        assert!(git_refresh_deferred_for_typing(Some(now), now));
-        assert!(git_refresh_deferred_for_typing(
-            Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
-            now
-        ));
-        assert!(!git_refresh_deferred_for_typing(
-            Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD),
-            now
-        ));
-        assert!(!git_refresh_deferred_for_typing(None, now));
-    }
-
-    #[test]
-    fn frame_pacing_is_deferred_while_typing() {
-        let now = Instant::now();
-        assert!(frame_pacing_deferred_for_typing(Some(now), now));
-        assert!(frame_pacing_deferred_for_typing(
-            Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
-            now
-        ));
-        assert!(!frame_pacing_deferred_for_typing(
-            Some(now - FRAME_PACING_TYPING_IDLE_THRESHOLD),
-            now
-        ));
-        assert!(!frame_pacing_deferred_for_typing(None, now));
-    }
-
-    #[test]
-    fn typing_event_batches_yield_once_budget_is_exhausted() {
-        let now = Instant::now();
-        assert!(!should_yield_after_typing_batch(
-            0,
-            TYPING_EVENT_BATCH_LIMIT,
-            now
-        ));
-        assert!(!should_yield_after_typing_batch(
-            1,
-            TYPING_EVENT_BATCH_LIMIT - 1,
-            now
-        ));
-        assert!(should_yield_after_typing_batch(
-            1,
-            TYPING_EVENT_BATCH_LIMIT,
-            now
-        ));
-        assert!(should_yield_after_typing_batch(
-            1,
-            1,
-            now - TYPING_EVENT_BATCH_TIME_BUDGET
-        ));
-    }
-
-    #[test]
-    fn truncate_text_to_width_uses_cell_budget() {
-        assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
-        assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
-        assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
-    }
-
-    #[test]
-    fn git_status_header_spans_skip_leading_icons() {
-        let line = SectionRenderLine {
-            text: format!(
-                "{} Head: master f9d8c15 Added some more keybinds",
-                user::icon_font::symbols::dev::DEV_GIT_BRANCH
-            ),
-            depth: 1,
-            section_id: GIT_SECTION_HEADERS.to_owned(),
-            action: None,
-            kind: SectionRenderLineKind::Item,
-        };
-        let formatted = format_section_line(&line);
-        let spans = git_status_line_spans(&line, &formatted);
-
-        assert_eq!(
-            syntax_span_segments(&formatted, &spans),
-            vec![
-                (
-                    TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
-                    user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
-                ),
-                (TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(), "Head:".to_owned()),
-                (
-                    TOKEN_GIT_STATUS_HEADER_VALUE.to_owned(),
-                    "master".to_owned()
-                ),
-                (
-                    TOKEN_GIT_STATUS_HEADER_HASH.to_owned(),
-                    "f9d8c15".to_owned()
-                ),
-                (
-                    TOKEN_GIT_STATUS_HEADER_SUMMARY.to_owned(),
-                    "Added some more keybinds".to_owned(),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn git_status_entry_spans_skip_leading_icons() {
-        let line = SectionRenderLine {
-            text: format!(
-                "{} modified crates/editor-sdl/src/shell.rs",
-                user::icon_font::symbols::cod::COD_DIFF_MODIFIED
-            ),
-            depth: 1,
-            section_id: GIT_SECTION_UNSTAGED.to_owned(),
-            action: None,
-            kind: SectionRenderLineKind::Item,
-        };
-        let formatted = format_section_line(&line);
-        let spans = git_status_line_spans(&line, &formatted);
-
-        assert_eq!(
-            syntax_span_segments(&formatted, &spans),
-            vec![
-                (
-                    TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
-                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
-                ),
-                (
-                    TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
-                    "modified".to_owned(),
-                ),
-                (
-                    TOKEN_GIT_STATUS_ENTRY_PATH.to_owned(),
-                    "crates/editor-sdl/src/shell.rs".to_owned(),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
-        let line = SectionRenderLine {
-            text: format!(
-                "{} Press c to commit staged changes.",
-                user::icon_font::symbols::cod::COD_GIT_COMMIT
-            ),
-            depth: 1,
-            section_id: GIT_SECTION_COMMIT.to_owned(),
-            action: None,
-            kind: SectionRenderLineKind::Item,
-        };
-        let formatted = format_section_line(&line);
-        let spans = git_status_line_spans(&line, &formatted);
-
-        assert_eq!(
-            syntax_span_segments(&formatted, &spans),
-            vec![(
-                TOKEN_GIT_STATUS_COMMAND.to_owned(),
-                format!(
-                    "{} Press c to commit staged changes.",
-                    user::icon_font::symbols::cod::COD_GIT_COMMIT
-                ),
-            )]
-        );
-    }
-
-    #[test]
-    fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_acp_test_buffer(
-            &mut state,
-            40,
-            "",
-            Some("chat · gpt-5.4 · shift+tab switch mode"),
-        )?;
-        let buffer = state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?;
-        let rect = PixelRectToRect::rect(0, 0, 800, 400);
-        let layout = buffer_footer_layout(buffer, rect, 18);
-        let output_bottom = layout.body_y + layout.visible_rows as i32 * 18;
-        let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
-
-        assert!(output_bottom <= layout.input_y);
-        assert!(layout.input_y < hint_y);
-        assert!(hint_y < layout.statusline_y);
-        Ok(())
-    }
-
-    #[test]
-    fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_acp_test_buffer(
-            &mut state,
-            40,
-            "first line\nsecond line",
-            Some("chat · gpt-5.4 · shift+tab switch mode"),
-        )?;
-
-        state
-            .sync_active_viewport(400, 18)
-            .map_err(|error| error.to_string())?;
-
-        let buffer = state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?;
-        let layout = buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 800, 400), 18);
-        assert_eq!(buffer.viewport_lines(), layout.visible_rows);
-
-        buffer.scroll_output_to_end();
-        buffer.append_output_lines(&["tail".to_owned()]);
-
-        assert!(
-            buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
-                >= buffer.line_count()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
-        let font_path = resolve_bundled_icon_font_dir()
-            .map_err(|error| error.to_string())?
-            .join("NFM.ttf");
-        let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
-        let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
-            .map_err(|error| error.to_string())?;
-        let material_icon = user::icon_font_symbols::md::MD_FORMAT_BOLD
-            .chars()
-            .next()
-            .ok_or_else(|| "material icon glyph missing".to_owned())?;
-        let (metrics, bitmap) = font.rasterize(material_icon, 48.0);
-        let occupied_rows = bitmap
-            .chunks(metrics.width)
-            .map(|row| row.iter().filter(|alpha| **alpha > 32).count())
-            .filter(|count| *count > 0)
-            .collect::<Vec<_>>();
-        let unique_row_widths = occupied_rows.iter().copied().collect::<BTreeSet<_>>();
-
-        assert!(material_icon as u32 > 0xFFFF);
-        assert!(metrics.width > 0);
-        assert!(metrics.height > 0);
-        assert!(!occupied_rows.is_empty());
-        assert!(unique_row_widths.len() > 4);
-        Ok(())
-    }
-
-    #[test]
-    fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .text = TextBuffer::from_text("alpha alphabet\nalp");
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .set_cursor(TextPoint::new(1, 3));
-
-        let (buffer_id, buffer_revision, text, cursor, query) = {
-            let ui = state.ui().map_err(|error| error.to_string())?;
-            let buffer_id = ui
-                .active_buffer_id()
-                .ok_or_else(|| "active buffer missing".to_owned())?;
-            let buffer = ui
-                .buffer(buffer_id)
-                .ok_or_else(|| "shell buffer missing".to_owned())?;
-            let text = buffer.text.snapshot();
-            let query = autocomplete_query(&text, true)
-                .ok_or_else(|| "autocomplete query missing".to_owned())?;
-            (
-                buffer_id,
-                buffer.text.revision(),
-                text,
-                buffer.cursor_point(),
-                query,
-            )
-        };
-        let request = AutocompleteWorkerRequest {
-            request_id: 1,
-            buffer_id,
-            buffer_revision,
-            text,
-            path: None,
-            root: None,
-            cursor,
-            query,
-            providers: vec![
-                AutocompleteProviderSpec {
-                    id: "primary".to_owned(),
-                    label: "Primary".to_owned(),
-                    icon: "P".to_owned(),
-                    item_icon: "1".to_owned(),
-                    or_group: Some("source".to_owned()),
-                    kind: AutocompleteProviderKind::Buffer,
-                },
-                AutocompleteProviderSpec {
-                    id: "fallback".to_owned(),
-                    label: "Fallback".to_owned(),
-                    icon: "F".to_owned(),
-                    item_icon: "2".to_owned(),
-                    or_group: Some("source".to_owned()),
-                    kind: AutocompleteProviderKind::Buffer,
-                },
-            ],
-            result_limit: 8,
-            lsp_client: None,
-        };
-
-        let entries = autocomplete_entries(&request);
-        assert!(!entries.is_empty());
-        assert!(entries.iter().all(|entry| entry.provider_id == "primary"));
-        Ok(())
-    }
-
-    #[test]
-    fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .text = TextBuffer::from_text("alpha beta");
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .set_cursor(TextPoint::new(0, 5));
-
-        let (range, token) = completion_token_at_cursor(
-            state
-                .active_buffer_mut()
-                .map_err(|error| error.to_string())?,
-        )
-        .ok_or_else(|| "completion token missing at cursor edge".to_owned())?;
-
-        assert_eq!(token, "alpha");
-        assert_eq!(range.start(), TextPoint::new(0, 0));
-        assert_eq!(range.end(), TextPoint::new(0, 5));
-        Ok(())
-    }
-
-    #[test]
-    fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let buffer_id = install_browser_test_buffer(&mut state)?;
-        {
-            let buffer = shell_ui_mut(&mut state.runtime)?
-                .buffer_mut(buffer_id)
-                .ok_or_else(|| "browser shell buffer missing".to_owned())?;
-            let input = buffer
-                .input_field_mut()
-                .ok_or_else(|| "browser input field missing".to_owned())?;
-            input.set_text("example.com/docs");
-        }
-
-        submit_input_buffer(&mut state.runtime)?;
-
-        let buffer = shell_ui(&state.runtime)?
-            .buffer(buffer_id)
-            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
-        let state = buffer
-            .browser_state
-            .as_ref()
-            .ok_or_else(|| "browser state missing".to_owned())?;
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("https://example.com/docs")
-        );
-        assert!(buffer.text.text().contains("https://example.com/docs"));
-        Ok(())
-    }
-
-    #[test]
-    fn hover_next_command_cycles_open_overlay_without_focus() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Alpha".to_owned())
-        );
-
-        cycle_hover_provider(&mut state.runtime, true)?;
-
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Beta".to_owned())
-        );
-        assert!(!state.hover_focused().map_err(|error| error.to_string())?);
-        Ok(())
-    }
-
-    #[test]
-    fn hover_previous_command_wraps_open_overlay_without_focus() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Alpha".to_owned())
-        );
-
-        cycle_hover_provider(&mut state.runtime, false)?;
-
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Gamma".to_owned())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn hover_tab_shortcut_focuses_open_overlay() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
-        assert!(state.hover_visible().map_err(|error| error.to_string())?);
-        assert!(!state.hover_focused().map_err(|error| error.to_string())?);
-
-        assert!(
-            state
-                .try_runtime_keybinding(Keycode::Tab, Mod::empty())
-                .map_err(|error| error.to_string())?
-        );
-
-        assert!(state.hover_focused().map_err(|error| error.to_string())?);
-        Ok(())
-    }
-
-    #[test]
-    fn hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_hover_test_overlay(&mut state, false)?;
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Alpha".to_owned())
-        );
-
-        assert!(
-            state
-                .try_runtime_keybinding(Keycode::N, ctrl_mod())
-                .map_err(|error| error.to_string())?
-        );
-
-        assert_eq!(
-            state
-                .hover_provider_label()
-                .map_err(|error| error.to_string())?,
-            Some("Beta".to_owned())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state.runtime.services_mut().insert(CommandLog::default());
-        state
-            .runtime
-            .register_command(
-                "tests.g-prefix-exact",
-                "Test exact g-prefix binding",
-                CommandSource::Core,
-                |runtime| {
-                    let log = runtime
-                        .services_mut()
-                        .get_mut::<CommandLog>()
-                        .ok_or_else(|| "command log missing".to_owned())?;
-                    log.0.push("exact".to_owned());
-                    Ok(())
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .runtime
-            .register_key_binding_for_mode(
-                "g z",
-                "tests.g-prefix-exact",
-                KeymapScope::Workspace,
-                KeymapVimMode::Normal,
-                CommandSource::Core,
-            )
-            .map_err(|error| error.to_string())?;
-
-        state
-            .handle_text_input("g")
-            .map_err(|error| error.to_string())?;
-        assert_eq!(
-            state.ui().map_err(|error| error.to_string())?.vim().pending,
-            Some(VimPending::GPrefix {
-                operator: None,
-                line_target: None,
-            })
-        );
-
-        state
-            .handle_text_input("z")
-            .map_err(|error| error.to_string())?;
-
-        assert_eq!(
-            state
-                .runtime
-                .services()
-                .get::<CommandLog>()
-                .ok_or_else(|| "command log missing".to_owned())?
-                .0,
-            vec!["exact".to_owned()]
-        );
-        let ui = state.ui().map_err(|error| error.to_string())?;
-        assert_eq!(ui.vim().pending, None);
-        assert_eq!(ui.vim().pending_change_prefix, None);
-        Ok(())
-    }
-
-    #[test]
-    fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state.runtime.services_mut().insert(CommandLog::default());
-        state
-            .runtime
-            .register_command(
-                "tests.g-prefix-sequence",
-                "Test longer g-prefix binding",
-                CommandSource::Core,
-                |runtime| {
-                    let log = runtime
-                        .services_mut()
-                        .get_mut::<CommandLog>()
-                        .ok_or_else(|| "command log missing".to_owned())?;
-                    log.0.push("sequence".to_owned());
-                    Ok(())
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .runtime
-            .register_key_binding_for_mode(
-                "g z z",
-                "tests.g-prefix-sequence",
-                KeymapScope::Workspace,
-                KeymapVimMode::Normal,
-                CommandSource::Core,
-            )
-            .map_err(|error| error.to_string())?;
-
-        state
-            .handle_text_input("g")
-            .map_err(|error| error.to_string())?;
-        state
-            .handle_text_input("z")
-            .map_err(|error| error.to_string())?;
-
-        assert_eq!(
-            state
-                .runtime
-                .services()
-                .get::<CommandLog>()
-                .ok_or_else(|| "command log missing".to_owned())?
-                .0,
-            Vec::<String>::new()
-        );
-        let ui = state.ui().map_err(|error| error.to_string())?;
-        assert_eq!(
-            ui.vim().pending,
-            Some(VimPending::GPrefix {
-                operator: None,
-                line_target: None,
-            })
-        );
-        assert_eq!(
-            ui.vim().pending_change_prefix,
-            Some(VimRecordedInput::Chord("g z".to_owned()))
-        );
-
-        state
-            .handle_text_input("z")
-            .map_err(|error| error.to_string())?;
-
-        assert_eq!(
-            state
-                .runtime
-                .services()
-                .get::<CommandLog>()
-                .ok_or_else(|| "command log missing".to_owned())?
-                .0,
-            vec!["sequence".to_owned()]
-        );
-        let ui = state.ui().map_err(|error| error.to_string())?;
-        assert_eq!(ui.vim().pending, None);
-        assert_eq!(ui.vim().pending_change_prefix, None);
-        Ok(())
-    }
-
-    #[test]
-    fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let buffer_id = install_browser_test_buffer(&mut state)?;
-        let buffer = shell_ui(&state.runtime)?
-            .buffer(buffer_id)
-            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
-        let rect = PixelRectToRect::rect(0, 0, 800, 400);
-        let layout = buffer_footer_layout(buffer, rect, 18);
-        let viewport = browser_viewport_rect(buffer, rect, 18)
-            .ok_or_else(|| "browser viewport missing".to_owned())?;
-        let viewport_bottom = viewport.y + viewport.height as i32;
-
-        assert!(viewport.width > 0);
-        assert!(viewport.height > 0);
-        assert!(viewport.y >= layout.body_y - 2);
-        assert!(viewport_bottom <= layout.input_y);
-        Ok(())
-    }
-
-    #[test]
-    fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let buffer_id = install_browser_test_buffer(&mut state)?;
-        let plan = browser_sync_plan(
-            state.ui().map_err(|error| error.to_string())?,
-            None,
-            800,
-            400,
-            18,
-        )
-        .map_err(|error| error.to_string())?;
-        let surface = plan
-            .visible_surfaces
-            .iter()
-            .find(|surface| surface.buffer_id == buffer_id)
-            .ok_or_else(|| "browser surface missing".to_owned())?;
-
-        assert_eq!(
-            browser_surface_buffer_at_point(&plan, surface.rect.x + 4, surface.rect.y + 4),
-            Some(buffer_id)
-        );
-        assert_eq!(
-            browser_surface_buffer_at_point(
-                &plan,
-                surface.rect.x + 4,
-                surface.rect.y + surface.rect.height as i32 + 4
-            ),
-            None
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let _buffer_id = install_browser_test_buffer(&mut state)?;
-        state
-            .ui_mut()
-            .map_err(|error| error.to_string())?
-            .set_picker(PickerOverlay::from_entries("Buffers", Vec::new()));
-
-        let plan = browser_sync_plan(
-            state.ui().map_err(|error| error.to_string())?,
-            None,
-            800,
-            400,
-            18,
-        )
-        .map_err(|error| error.to_string())?;
-
-        assert_eq!(plan.buffers.len(), 1);
-        assert!(plan.visible_surfaces.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn detect_browser_url_uses_cursor_hit_or_single_line_url() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .text = TextBuffer::from_text("See https://example.com/docs.");
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .set_cursor(TextPoint::new(0, 10));
-        let cursor_hit = detect_browser_url(
-            state
-                .active_buffer_mut()
-                .map_err(|error| error.to_string())?,
-        )
-        .ok_or_else(|| "browser URL missing under cursor".to_owned())?;
-        assert_eq!(cursor_hit, "https://example.com/docs");
-
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .set_cursor(TextPoint::new(0, 0));
-        let single_url = detect_browser_url(
-            state
-                .active_buffer_mut()
-                .map_err(|error| error.to_string())?,
-        )
-        .ok_or_else(|| "browser URL missing from single-url line".to_owned())?;
-        assert_eq!(single_url, "https://example.com/docs");
-        Ok(())
-    }
-
-    #[test]
-    fn browser_url_command_opens_popup_browser_with_detected_url() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .text = TextBuffer::from_text("Docs: https://example.com/docs.");
-        state
-            .active_buffer_mut()
-            .map_err(|error| error.to_string())?
-            .set_cursor(TextPoint::new(0, 8));
-
-        open_detected_browser_url(&mut state.runtime)?;
-
-        let popup = active_runtime_popup(&state.runtime)?
-            .ok_or_else(|| "browser popup was not opened".to_owned())?;
-        let buffer = shell_ui(&state.runtime)?
-            .buffer(popup.active_buffer)
-            .ok_or_else(|| "browser popup buffer missing".to_owned())?;
-        assert!(buffer_is_browser(&buffer.kind));
-        assert!(buffer.text.text().contains("https://example.com/docs"));
-        assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
-        Ok(())
-    }
-
-    #[test]
-    fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let workspace_id = state
-            .runtime
-            .model()
-            .active_workspace_id()
-            .map_err(|error| error.to_string())?;
-        let buffer_id = state
-            .runtime
-            .model_mut()
-            .create_buffer(
-                workspace_id,
-                user::browser::BUFFER_NAME,
-                BufferKind::Plugin(BROWSER_KIND.to_owned()),
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .runtime
-            .model_mut()
-            .focus_buffer(workspace_id, buffer_id)
-            .map_err(|error| error.to_string())?;
-
-        sync_active_buffer(&mut state.runtime)?;
-
-        let ui = shell_ui(&state.runtime)?;
-        assert_eq!(ui.active_buffer_id(), Some(buffer_id));
-        assert_eq!(ui.input_mode(), InputMode::Insert);
-        Ok(())
-    }
-
-    #[test]
-    fn browser_host_focus_parent_event_returns_to_normal_mode() -> Result<(), String> {
-        let mut state = ShellState::new().map_err(|error| error.to_string())?;
-        let buffer_id = install_browser_test_buffer(&mut state)?;
-        state
-            .ui_mut()
-            .map_err(|error| error.to_string())?
-            .enter_insert_mode();
-
-        state
-            .apply_browser_host_events(&[BrowserHostEvent::FocusParentRequested { buffer_id }])
-            .map_err(|error| error.to_string())?;
-
-        assert_eq!(
-            state.ui().map_err(|error| error.to_string())?.input_mode(),
-            InputMode::Normal
-        );
-        Ok(())
-    }
-}
-
 fn git_command_output(
     runtime: &mut EditorRuntime,
     root: &Path,
@@ -19269,6 +19816,16 @@ fn git_command_output(
         return Err(format!("git {label} failed: {}", result.transcript()));
     }
     Ok(result.stdout().to_owned())
+}
+
+fn git_command_output_owned(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    label: &str,
+    args: &[String],
+) -> Result<String, String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_command_output(runtime, root, label, &refs)
 }
 
 fn git_command_output_allow_exit_codes(
@@ -19461,6 +20018,13 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
         };
     }
 
+    if keymod.intersects(alt_mod()) && !keymod.intersects(ctrl_mod() | gui_mod()) {
+        return match keycode {
+            Keycode::X => Some("Alt+x".to_owned()),
+            _ => None,
+        };
+    }
+
     if keymod.intersects(shift_mod()) && matches!(keycode, Keycode::Tab) {
         return Some("Shift+Tab".to_owned());
     }
@@ -19510,6 +20074,46 @@ fn shift_mod() -> Mod {
     Mod::LSHIFTMOD | Mod::RSHIFTMOD
 }
 
+fn alt_mod() -> Mod {
+    Mod::LALTMOD | Mod::RALTMOD
+}
+
+fn gui_mod() -> Mod {
+    Mod::LGUIMOD | Mod::RGUIMOD
+}
+
+fn browser_devtools_shortcut_requested(keycode: Keycode, keymod: Mod) -> bool {
+    if !keymod.intersects(alt_mod() | gui_mod()) && keycode == Keycode::F12 {
+        return true;
+    }
+    keycode == Keycode::I
+        && keymod.intersects(ctrl_mod())
+        && keymod.intersects(shift_mod())
+        && !keymod.intersects(alt_mod() | gui_mod())
+}
+
+fn terminal_key_for_event(keycode: Keycode, keymod: Mod) -> Option<TerminalKey> {
+    if keymod.intersects(ctrl_mod()) && keycode == Keycode::C {
+        return Some(TerminalKey::CtrlC);
+    }
+    match keycode {
+        Keycode::Return | Keycode::KpEnter => Some(TerminalKey::Enter),
+        Keycode::Backspace => Some(TerminalKey::Backspace),
+        Keycode::Delete => Some(TerminalKey::Delete),
+        Keycode::Left => Some(TerminalKey::Left),
+        Keycode::Right => Some(TerminalKey::Right),
+        Keycode::Up => Some(TerminalKey::Up),
+        Keycode::Down => Some(TerminalKey::Down),
+        Keycode::Home => Some(TerminalKey::Home),
+        Keycode::End => Some(TerminalKey::End),
+        Keycode::PageUp => Some(TerminalKey::PageUp),
+        Keycode::PageDown => Some(TerminalKey::PageDown),
+        Keycode::Tab if keymod.intersects(shift_mod()) => Some(TerminalKey::BackTab),
+        Keycode::Tab => Some(TerminalKey::Tab),
+        _ => None,
+    }
+}
+
 fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     match input_mode {
         InputMode::Normal => KeymapVimMode::Normal,
@@ -19540,8 +20144,79 @@ fn default_error_log_path() -> PathBuf {
     default_volt_state_dir().join(ERROR_LOG_FILE_NAME)
 }
 
+fn active_theme_state_path() -> PathBuf {
+    default_volt_state_dir().join(ACTIVE_THEME_STATE_FILE_NAME)
+}
+
 fn default_typing_profile_log_path() -> PathBuf {
     default_volt_state_dir().join(TYPING_PROFILE_LOG_FILE_NAME)
+}
+
+fn read_saved_theme_selection(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let theme_id = contents.trim();
+            if theme_id.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(theme_id.to_owned()))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "failed to read saved theme from `{}`: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn write_saved_theme_selection(path: &Path, theme_id: &str) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err(format!(
+            "saved theme path `{}` does not have a parent directory",
+            path.display()
+        ));
+    };
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create theme state directory `{}`: {error}",
+            parent.display()
+        )
+    })?;
+    fs::write(path, format!("{theme_id}\n")).map_err(|error| {
+        format!(
+            "failed to write saved theme to `{}`: {error}",
+            path.display()
+        )
+    })
+}
+
+fn clear_saved_theme_selection(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to clear saved theme `{}`: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn restore_saved_theme_selection(
+    theme_registry: &mut ThemeRegistry,
+    path: &Path,
+) -> Result<(), String> {
+    let Some(theme_id) = read_saved_theme_selection(path)? else {
+        return Ok(());
+    };
+    if let Err(error) = theme_registry.activate(&theme_id) {
+        clear_saved_theme_selection(path)?;
+        return Err(format!(
+            "saved theme `{theme_id}` is no longer available and was removed from `{}`: {error}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_log_directory(path: &Path) -> Result<(), String> {
@@ -19770,8 +20445,16 @@ fn format_lsp_log_entry_lines(entry: &LspLogEntry) -> Vec<String> {
     lines
 }
 
-fn lsp_log_buffer_lines(entries: &[LspLogEntry]) -> Vec<String> {
-    let mut lines = initial_lsp_log_lines();
+fn lsp_log_entries_for_server(entries: &[LspLogEntry], server_id: &str) -> Vec<LspLogEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.server_id() == server_id)
+        .cloned()
+        .collect()
+}
+
+fn lsp_log_buffer_lines(server_id: &str, entries: &[LspLogEntry]) -> Vec<String> {
+    let mut lines = initial_lsp_log_lines(server_id);
     if entries.is_empty() {
         return lines;
     }
@@ -19835,10 +20518,13 @@ fn initial_errors_lines(log_path: Option<&Path>) -> Vec<String> {
     lines
 }
 
-fn initial_lsp_log_lines() -> Vec<String> {
+fn initial_lsp_log_lines(server_id: &str) -> Vec<String> {
     vec![
-        "*lsp-log* captures live JSON-RPC traffic between Volt and language servers.".to_owned(),
-        "Run `lsp.log` or open the buffer picker (F4) to focus this buffer.".to_owned(),
+        format!(
+            "{} captures live JSON-RPC traffic for `{server_id}`.",
+            lsp_log_buffer_name(server_id)
+        ),
+        "Run `lsp.log` from a buffer using that server, or open the buffer picker (F4) to focus this buffer.".to_owned(),
         "Requests, notifications, responses, and disconnect events are appended here.".to_owned(),
     ]
 }
@@ -19925,6 +20611,7 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),
+        BufferKind::Terminal => (true, None),
         BufferKind::Directory => (false, None),
         _ => (false, None),
     }
@@ -19956,8 +20643,9 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "The SDL shell renders picker state through the popup search UI.".to_owned(),
             ],
             BufferKind::Terminal => vec![
-                format!("{name} was opened by the compiled terminal package."),
-                "Terminal rendering is still placeholder content in this vertical slice.".to_owned(),
+                format!("{name} is launching the configured shell."),
+                "Press i to enter terminal input mode, or stay in Normal mode to navigate scrollback."
+                    .to_owned(),
             ],
             BufferKind::Git => vec![
                 format!("{name} is reserved for git workflows."),
@@ -20054,6 +20742,7 @@ fn render_shell_state(
     runtime_popup: Option<&RuntimePopupSnapshot>,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    lsp_workspace_loaded: bool,
     acp_connected: bool,
     theme_registry: Option<&ThemeRegistry>,
     width: u32,
@@ -20128,6 +20817,7 @@ fn render_shell_state(
                 state.vim().recording_macro,
                 workspace_name,
                 lsp_server,
+                lsp_workspace_loaded,
                 acp_connected,
                 git_summary.as_ref(),
                 theme_registry,
@@ -20147,6 +20837,7 @@ fn render_shell_state(
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
             workspace_name,
             lsp_server,
+            lsp_workspace_loaded,
             acp_connected,
             theme_registry,
             cell_width,
@@ -20156,7 +20847,9 @@ fn render_shell_state(
         )?;
     }
 
-    if let Some(autocomplete) = state.autocomplete()
+    if let Some(autocomplete) = state
+        .autocomplete()
+        .filter(|autocomplete| autocomplete.is_visible())
         && let Some(active_rect) = pane_rects.get(state.active_pane_index())
     {
         render_autocomplete_overlay(
@@ -20206,6 +20899,17 @@ fn render_shell_state(
         )?;
     }
 
+    render_notification_overlay(
+        target,
+        state,
+        width,
+        height,
+        theme_registry,
+        cell_width,
+        line_height,
+        now,
+    )?;
+
     Ok(())
 }
 
@@ -20225,6 +20929,7 @@ fn render_runtime_popup_overlay(
     popup_rect: Rect,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    lsp_workspace_loaded: bool,
     acp_connected: bool,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
@@ -20266,6 +20971,7 @@ fn render_runtime_popup_overlay(
             state.vim().recording_macro,
             workspace_name,
             lsp_server,
+            lsp_workspace_loaded,
             acp_connected,
             git_summary.as_ref(),
             theme_registry,
@@ -20283,7 +20989,9 @@ fn browser_sync_plan(
     runtime_popup: Option<&RuntimePopupSnapshot>,
     width: u32,
     height: u32,
+    cell_width: i32,
     line_height: i32,
+    now: Instant,
 ) -> Result<BrowserSyncPlan, ShellError> {
     let buffers = state
         .buffers
@@ -20318,6 +21026,16 @@ fn browser_sync_plan(
         PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
         PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
     };
+    let notification_rects = notification_overlay_layouts(
+        &state.visible_notifications(now),
+        width,
+        height,
+        cell_width,
+        line_height,
+    )
+    .into_iter()
+    .map(|layout| layout.rect)
+    .collect::<Vec<_>>();
     let mut visible_surfaces = Vec::new();
     for (pane_index, pane) in panes.iter().enumerate() {
         let Some(buffer) = state.buffer(pane.buffer_id) else {
@@ -20338,6 +21056,12 @@ fn browser_sync_plan(
         ) else {
             continue;
         };
+        if notification_rects
+            .iter()
+            .any(|overlay| rects_intersect(browser_viewport_rect_rect(rect), *overlay))
+        {
+            continue;
+        }
         visible_surfaces.push(BrowserSurfacePlan {
             buffer_id: buffer.id(),
             rect,
@@ -20351,6 +21075,9 @@ fn browser_sync_plan(
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
             line_height,
         )
+        && !notification_rects
+            .iter()
+            .any(|overlay| rects_intersect(browser_viewport_rect_rect(rect), *overlay))
     {
         visible_surfaces.push(BrowserSurfacePlan {
             buffer_id: buffer.id(),
@@ -20361,6 +21088,21 @@ fn browser_sync_plan(
         buffers,
         visible_surfaces,
     })
+}
+
+fn browser_viewport_rect_rect(rect: BrowserViewportRect) -> Rect {
+    PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height)
+}
+
+fn rects_intersect(left: Rect, right: Rect) -> bool {
+    let left_right = left.x().saturating_add(left.width() as i32);
+    let left_bottom = left.y().saturating_add(left.height() as i32);
+    let right_right = right.x().saturating_add(right.width() as i32);
+    let right_bottom = right.y().saturating_add(right.height() as i32);
+    left.x() < right_right
+        && left_right > right.x()
+        && left.y() < right_bottom
+        && left_bottom > right.y()
 }
 
 fn render_autocomplete_overlay(
@@ -20481,30 +21223,29 @@ fn render_autocomplete_overlay(
         docs_background,
     )?;
     if autocomplete.entries().is_empty() {
-        draw_text(target, x + 10, y + 8, "Loading completions...", muted)?;
-    } else {
-        let list_text_width = list_width.saturating_sub(24);
-        for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
-            let row_y = y + 8 + index as i32 * row_height;
-            if index == autocomplete.selected_index {
-                fill_rect(
-                    target,
-                    PixelRectToRect::rect(
-                        x + 6,
-                        row_y - 2,
-                        list_width.saturating_sub(12),
-                        row_height as u32,
-                    ),
-                    selected_background,
-                )?;
-            }
-            let label = truncate_text_to_width(
-                &format!("{} {}", entry.item_icon, entry.label),
-                list_text_width,
-                cell_width,
-            );
-            draw_text(target, x + 10, row_y, &label, foreground)?;
+        return Ok(());
+    }
+    let list_text_width = list_width.saturating_sub(24);
+    for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
+        let row_y = y + 8 + index as i32 * row_height;
+        if index == autocomplete.selected_index {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    x + 6,
+                    row_y - 2,
+                    list_width.saturating_sub(12),
+                    row_height as u32,
+                ),
+                selected_background,
+            )?;
         }
+        let label = truncate_text_to_width(
+            &format!("{} {}", entry.item_icon, entry.label),
+            list_text_width,
+            cell_width,
+        );
+        draw_text(target, x + 10, row_y, &label, foreground)?;
     }
     for (index, line) in preview_lines.iter().take(body_rows).enumerate() {
         let row_y = y + 8 + index as i32 * row_height;
@@ -20699,6 +21440,226 @@ fn render_hover_overlay(
             &truncate_text_to_width(&footer_text, width.saturating_sub(20), cell_width),
             muted,
         )?;
+    }
+    Ok(())
+}
+
+fn notification_accent_color(
+    theme_registry: Option<&ThemeRegistry>,
+    severity: NotificationSeverity,
+    fallback: Color,
+) -> Color {
+    let token = match severity {
+        NotificationSeverity::Info => "ui.notification.info",
+        NotificationSeverity::Success => "ui.notification.success",
+        NotificationSeverity::Warning => "ui.notification.warning",
+        NotificationSeverity::Error => "ui.notification.error",
+    };
+    theme_color(theme_registry, token, fallback)
+}
+
+fn notification_status_text(notification: &ShellNotification) -> Option<String> {
+    match notification
+        .progress
+        .and_then(|progress| progress.percentage)
+    {
+        Some(percentage) if notification.active => Some(format!("{percentage}%")),
+        None if notification.active && notification.progress.is_some() => {
+            Some("Working".to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn notification_overlay_layouts(
+    notifications: &[&ShellNotification],
+    width: u32,
+    height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Vec<NotificationOverlayLayout> {
+    if notifications.is_empty() {
+        return Vec::new();
+    }
+    let row_height = line_height.max(1) as u32;
+    let toast_width = overlay_width(width, cell_width, 34, 56);
+    let body_columns = overlay_text_columns(toast_width, 28, cell_width);
+    let x = width as i32 - toast_width as i32 - 12;
+    let mut layouts = Vec::new();
+    let mut bottom = height as i32 - 12;
+    for notification in notifications {
+        let body_lines = wrap_overlay_lines(
+            &notification.body_lines,
+            body_columns,
+            NOTIFICATION_MAX_BODY_LINES,
+        );
+        let body_rows = body_lines.len() as u32;
+        let progress_height = u32::from(notification.progress.is_some()) * 10;
+        let body_gap = u32::from(!body_lines.is_empty()) * 4;
+        let panel_height = row_height + body_rows * row_height + body_gap + progress_height + 20;
+        let y = bottom - panel_height as i32;
+        if y < 8 {
+            break;
+        }
+        layouts.push(NotificationOverlayLayout {
+            rect: PixelRectToRect::rect(x, y, toast_width, panel_height),
+            title: notification.title.clone(),
+            body_lines,
+            status_text: notification_status_text(notification),
+            severity: notification.severity,
+            progress: notification.progress,
+            active: notification.active,
+        });
+        bottom = y - NOTIFICATION_STACK_GAP;
+    }
+    layouts
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_notification_overlay(
+    target: &mut DrawTarget<'_>,
+    state: &ShellUiState,
+    width: u32,
+    height: u32,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+    now: Instant,
+) -> Result<(), ShellError> {
+    let notifications = state.visible_notifications(now);
+    let layouts =
+        notification_overlay_layouts(&notifications, width, height, cell_width, line_height);
+    if layouts.is_empty() {
+        return Ok(());
+    }
+
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let base_foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let background = theme_color(
+        theme_registry,
+        "ui.notification.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let foreground = theme_color(
+        theme_registry,
+        "ui.notification.foreground",
+        base_foreground,
+    );
+    let title_color = theme_color(theme_registry, "ui.notification.title", foreground);
+    let muted = theme_color(
+        theme_registry,
+        "ui.notification.muted",
+        blend_color(base_foreground, background, 0.46),
+    );
+    let border = theme_color(
+        theme_registry,
+        "ui.notification.border",
+        adjust_color(base_background, if is_dark { 30 } else { -30 }),
+    );
+    let progress_background = theme_color(
+        theme_registry,
+        "ui.notification.progress.background",
+        adjust_color(background, if is_dark { 10 } else { -10 }),
+    );
+    let default_info = theme_color(
+        theme_registry,
+        "ui.statusline.active",
+        adjust_color(base_background, if is_dark { 56 } else { -56 }),
+    );
+
+    for layout in layouts {
+        let accent = notification_accent_color(theme_registry, layout.severity, default_info);
+        let outer_rect = layout.rect;
+        let inner_rect = PixelRectToRect::rect(
+            layout.rect.x() + 1,
+            layout.rect.y() + 1,
+            layout.rect.width().saturating_sub(2),
+            layout.rect.height().saturating_sub(2),
+        );
+        fill_rounded_rect(target, outer_rect, 10, border)?;
+        fill_rounded_rect(target, inner_rect, 9, background)?;
+        fill_rounded_rect(
+            target,
+            PixelRectToRect::rect(
+                layout.rect.x() + 1,
+                layout.rect.y() + 1,
+                5,
+                layout.rect.height().saturating_sub(2),
+            ),
+            4,
+            accent,
+        )?;
+
+        let title_y = layout.rect.y() + 10;
+        let status_width = layout
+            .status_text
+            .as_ref()
+            .map(|status| monospace_text_width(status, cell_width) as i32)
+            .unwrap_or(0);
+        let title_width = layout
+            .rect
+            .width()
+            .saturating_sub((28 + status_width.max(0) as u32).max(28));
+        let title = truncate_text_to_width(&layout.title, title_width, cell_width);
+        draw_text(target, layout.rect.x() + 14, title_y, &title, title_color)?;
+        if let Some(status_text) = layout.status_text.as_ref() {
+            draw_text(
+                target,
+                layout.rect.x() + layout.rect.width() as i32 - status_width - 12,
+                title_y,
+                status_text,
+                accent,
+            )?;
+        }
+
+        for (index, line) in layout.body_lines.iter().enumerate() {
+            let row_y = title_y + line_height.max(1) + 4 + index as i32 * line_height.max(1);
+            let clipped =
+                truncate_text_to_width(line, layout.rect.width().saturating_sub(28), cell_width);
+            draw_text(
+                target,
+                layout.rect.x() + 14,
+                row_y,
+                &clipped,
+                if index == 0 { foreground } else { muted },
+            )?;
+        }
+
+        if let Some(progress) = layout.progress {
+            let bar_width = layout.rect.width().saturating_sub(28);
+            let bar_x = layout.rect.x() + 14;
+            let bar_y = layout.rect.y() + layout.rect.height() as i32 - 10;
+            fill_rounded_rect(
+                target,
+                PixelRectToRect::rect(bar_x, bar_y, bar_width, 4),
+                2,
+                progress_background,
+            )?;
+            let fill_width = if layout.active {
+                progress
+                    .percentage
+                    .map(|percentage| {
+                        ((bar_width.saturating_mul(u32::from(percentage))) / 100).max(1)
+                    })
+                    .unwrap_or(bar_width / 3)
+            } else {
+                bar_width
+            };
+            if fill_width > 0 {
+                let fill = theme_color(theme_registry, "ui.notification.progress.fill", accent);
+                fill_rounded_rect(
+                    target,
+                    PixelRectToRect::rect(bar_x, bar_y, fill_width, 4),
+                    2,
+                    fill,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -20934,6 +21895,64 @@ fn wrap_overlay_text(text: &str, max_columns: usize, max_lines: usize) -> Vec<St
     wrapped
 }
 
+fn statusline_icon_segments<'a>(text: &'a str, icons: &[&'a str]) -> Vec<(&'a str, bool)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut remaining = text;
+    let mut segments = Vec::new();
+    while !remaining.is_empty() {
+        let next_icon = icons
+            .iter()
+            .filter_map(|icon| remaining.find(icon).map(|index| (index, *icon)))
+            .min_by_key(|(index, _)| *index);
+        let Some((index, icon)) = next_icon else {
+            segments.push((remaining, false));
+            break;
+        };
+        if index > 0 {
+            let (before, after) = remaining.split_at(index);
+            segments.push((before, false));
+            remaining = after;
+            continue;
+        }
+        let after = &remaining[icon.len()..];
+        segments.push((icon, true));
+        remaining = after;
+    }
+    segments
+}
+
+fn statusline_icon_colors(
+    statusline: &str,
+    acp_connected: bool,
+    lsp_server_visible: bool,
+    lsp_workspace_loaded: bool,
+    connected_color: Color,
+) -> Vec<(&'static str, Color)> {
+    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
+    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
+    let error_icon = user::statusline::LSP_ERROR_ICON;
+    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let mut icon_colors = Vec::new();
+    if acp_connected && statusline.contains(acp_icon) {
+        icon_colors.push((acp_icon, connected_color));
+    }
+    if lsp_server_visible && lsp_workspace_loaded && statusline.contains(lsp_icon) {
+        icon_colors.push((lsp_icon, connected_color));
+    }
+    if statusline.contains(error_icon) {
+        icon_colors.push((error_icon, diagnostic_color(LspDiagnosticSeverity::Error)));
+    }
+    if statusline.contains(warning_icon) {
+        icon_colors.push((
+            warning_icon,
+            diagnostic_color(LspDiagnosticSeverity::Warning),
+        ));
+    }
+    icon_colors
+}
+
 fn buffer_cursor_screen_anchor(
     buffer: &ShellBuffer,
     rect: Rect,
@@ -20989,6 +22008,69 @@ fn buffer_cursor_screen_anchor(
         y: layout.body_y + cursor_row_on_screen as i32 * line_height,
         pane_bottom: layout.pane_bottom,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn buffer_point_at_screen(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    theme_registry: Option<&ThemeRegistry>,
+    x: i32,
+    y: i32,
+    cell_width: i32,
+    line_height: i32,
+    clamp_body: bool,
+) -> Option<TextPoint> {
+    let line_height = line_height.max(1);
+    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let body_height = layout.visible_rows as i32 * line_height;
+    let body_top = layout.body_y;
+    let body_bottom = body_top + body_height;
+    if body_height <= 0 {
+        return None;
+    }
+    if !clamp_body && (y < body_top || y >= body_bottom) {
+        return None;
+    }
+    let y = y.clamp(body_top, body_bottom.saturating_sub(1));
+    let visual_row_target = ((y - body_top) / line_height) as usize;
+    let cell_width = cell_width.max(1);
+    let fringe_width = cell_width;
+    let line_number_width = cell_width * 5;
+    let text_x = rect.x() + 12 + fringe_width + line_number_width;
+    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
+    let wrapped_lines = collect_wrapped_lines(
+        buffer,
+        buffer.scroll_row,
+        layout.visible_rows,
+        wrap_cols,
+        indent_size,
+    );
+    let mut visual_row = 0usize;
+    for wrapped in wrapped_lines {
+        let line_len = buffer.line_len_chars(wrapped.line_index);
+        for (segment_index, segment) in wrapped.segments.iter().enumerate() {
+            if visual_row == visual_row_target {
+                let segment_indent_cols = if segment_index == 0 {
+                    0
+                } else {
+                    wrapped.continuation_indent_cols
+                };
+                let segment_x = text_x + (segment_indent_cols as i32 * cell_width);
+                let column_offset = (x.saturating_sub(segment_x) / cell_width).max(0) as usize;
+                let max_col = if line_len == 0 {
+                    0
+                } else {
+                    segment.end_col.saturating_sub(1)
+                };
+                let column = segment.start_col.saturating_add(column_offset).min(max_col);
+                return Some(TextPoint::new(wrapped.line_index, column));
+            }
+            visual_row = visual_row.saturating_add(1);
+        }
+    }
+    None
 }
 
 fn fallback_overlay_anchor(
@@ -21063,6 +22145,7 @@ fn render_buffer(
     recording_macro: Option<char>,
     workspace_name: &str,
     lsp_server: Option<&str>,
+    lsp_workspace_loaded: bool,
     acp_connected: bool,
     git_summary: Option<&GitSummarySnapshot>,
     theme_registry: Option<&ThemeRegistry>,
@@ -21134,9 +22217,6 @@ fn render_buffer(
         user::gitfringe::TOKEN_REMOVED,
         git_removed_fallback,
     );
-    let diagnostic_error = Color::RGB(224, 107, 117);
-    let diagnostic_warning = Color::RGB(209, 154, 102);
-    let diagnostic_information = Color::RGB(110, 170, 255);
     let cell_width = cell_width.max(1);
     let git_info = git_summary.and_then(|summary| {
         summary
@@ -21148,6 +22228,16 @@ fn render_buffer(
                 removed: summary.removed,
             })
     });
+    let lsp_diagnostics = statusline_lsp_diagnostics(buffer.lsp_diagnostics());
+    let terminal_cursor = buffer
+        .terminal_render()
+        .and_then(TerminalRenderSnapshot::cursor);
+    let statusline_line = terminal_cursor
+        .map(|cursor| cursor.row() as usize + 1)
+        .unwrap_or(buffer.cursor_row() + 1);
+    let statusline_column = terminal_cursor
+        .map(|cursor| cursor.col() as usize + 1)
+        .unwrap_or(buffer.cursor_col() + 1);
     let statusline = truncate_text_to_width(
         &user::statusline::compose(&user::statusline::StatuslineContext {
             vim_mode: input_mode.label(),
@@ -21156,9 +22246,10 @@ fn render_buffer(
             buffer_name: buffer.display_name(),
             buffer_modified: buffer.is_dirty(),
             language_id: buffer.language_id(),
-            line: buffer.cursor_row() + 1,
-            column: buffer.cursor_col() + 1,
+            line: statusline_line,
+            column: statusline_column,
             lsp_server,
+            lsp_diagnostics,
             acp_connected,
             git: git_info,
         }),
@@ -21167,6 +22258,30 @@ fn render_buffer(
     );
 
     let layout = buffer_footer_layout(buffer, rect, line_height);
+    if buffer_is_terminal(&buffer.kind)
+        && let Some(terminal_render) = buffer.terminal_render()
+    {
+        render_terminal_buffer(
+            target,
+            buffer,
+            terminal_render,
+            rect,
+            layout,
+            active,
+            input_mode,
+            theme_registry,
+            base_background,
+            cursor,
+            text_color,
+            border_color,
+            statusline,
+            statusline_active,
+            statusline_inactive,
+            cell_width,
+            line_height,
+        )?;
+        return Ok(());
+    }
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -21296,11 +22411,7 @@ fn render_buffer(
                     .then(|| buffer.lsp_diagnostic_severity(line_index))
                     .flatten();
                 if let Some(severity) = diagnostic_severity {
-                    let color = match severity {
-                        LspDiagnosticSeverity::Error => diagnostic_error,
-                        LspDiagnosticSeverity::Warning => diagnostic_warning,
-                        LspDiagnosticSeverity::Information => diagnostic_information,
-                    };
+                    let color = diagnostic_color(severity);
                     draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
                 } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
                     let color = match kind {
@@ -21319,13 +22430,7 @@ fn render_buffer(
                 } else {
                     line_index + 1
                 };
-                let line_number_color = diagnostic_severity
-                    .map(|severity| match severity {
-                        LspDiagnosticSeverity::Error => diagnostic_error,
-                        LspDiagnosticSeverity::Warning => diagnostic_warning,
-                        LspDiagnosticSeverity::Information => diagnostic_information,
-                    })
-                    .unwrap_or(muted);
+                let line_number_color = diagnostic_severity.map(diagnostic_color).unwrap_or(muted);
                 draw_text(
                     target,
                     line_number_x,
@@ -21345,7 +22450,29 @@ fn render_buffer(
                 theme_registry,
                 text_color,
                 cell_width,
+                block_cursor_text_override(
+                    &wrapped.char_map,
+                    *segment,
+                    line_index,
+                    cursor_row,
+                    cursor_col,
+                    matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                        .then_some(base_background),
+                ),
             )?;
+            if user::lsp::SHOW_BUFFER_DIAGNOSTICS && buffer.lsp_enabled() {
+                draw_diagnostic_underlines_for_segment(
+                    target,
+                    buffer.lsp_diagnostic_line_spans(line_index),
+                    buffer.line_syntax_spans(line_index),
+                    segment_x,
+                    y,
+                    line_len,
+                    *segment,
+                    cell_width,
+                    line_height,
+                )?;
+            }
             visual_row = visual_row.saturating_add(1);
         }
         if visual_row >= layout.visible_rows {
@@ -21470,42 +22597,31 @@ fn render_buffer(
         border_color,
     )?;
     let statusline_x = rect.x() + 12;
-    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
-    if acp_connected && statusline.contains(acp_icon) {
-        if let Some((before, rest)) = statusline.split_once(acp_icon) {
-            let mut draw_x = statusline_x;
-            if !before.is_empty() {
-                draw_text(target, draw_x, layout.statusline_y, before, title_color)?;
-                draw_x += monospace_text_width(before, cell_width) as i32;
-            }
-            draw_text(
-                target,
-                draw_x,
-                layout.statusline_y,
-                acp_icon,
-                git_added_fallback,
-            )?;
-            draw_x += monospace_text_width(acp_icon, cell_width) as i32;
-            if !rest.is_empty() {
-                draw_text(target, draw_x, layout.statusline_y, rest, title_color)?;
-            }
+    let statusline_icon_colors = statusline_icon_colors(
+        &statusline,
+        acp_connected,
+        lsp_server.is_some(),
+        lsp_workspace_loaded,
+        git_added_fallback,
+    );
+    let highlighted_statusline_icons = statusline_icon_colors
+        .iter()
+        .map(|(icon, _)| *icon)
+        .collect::<Vec<_>>();
+    let mut draw_x = statusline_x;
+    for (segment, highlighted) in
+        statusline_icon_segments(&statusline, &highlighted_statusline_icons)
+    {
+        let color = if highlighted {
+            statusline_icon_colors
+                .iter()
+                .find_map(|(icon, color)| (*icon == segment).then_some(*color))
+                .unwrap_or(title_color)
         } else {
-            draw_text(
-                target,
-                statusline_x,
-                layout.statusline_y,
-                &statusline,
-                title_color,
-            )?;
-        }
-    } else {
-        draw_text(
-            target,
-            statusline_x,
-            layout.statusline_y,
-            &statusline,
-            title_color,
-        )?;
+            title_color
+        };
+        draw_text(target, draw_x, layout.statusline_y, segment, color)?;
+        draw_x += monospace_text_width(segment, cell_width) as i32;
     }
 
     let _ = ascent;
@@ -21524,6 +22640,226 @@ fn render_buffer(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn render_terminal_buffer(
+    target: &mut DrawTarget<'_>,
+    _buffer: &ShellBuffer,
+    terminal_render: &TerminalRenderSnapshot,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    input_mode: InputMode,
+    _theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+    cursor_color: Color,
+    text_color: Color,
+    border_color: Color,
+    statusline: String,
+    statusline_active: Color,
+    statusline_inactive: Color,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let text_x = rect.x() + 12;
+    for (row_index, line) in terminal_render
+        .lines()
+        .iter()
+        .enumerate()
+        .take(layout.visible_rows)
+    {
+        let y = layout.body_y + row_index as i32 * line_height;
+        for run in line.runs() {
+            let run_x = text_x + run.col() as i32 * cell_width;
+            let run_width = (run.width_cells() as i32 * cell_width).max(1) as u32;
+            if let Some(background) = run.background() {
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(run_x, y, run_width, line_height.max(1) as u32),
+                    Color::RGB(background.r, background.g, background.b),
+                )?;
+            }
+            if run.text().chars().any(|character| character != ' ') {
+                draw_text(
+                    target,
+                    run_x,
+                    y,
+                    run.text(),
+                    Color::RGB(run.foreground().r, run.foreground().g, run.foreground().b),
+                )?;
+            }
+            if let Some(underline) = run.underline() {
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(run_x, y + line_height.saturating_sub(2), run_width, 1),
+                    Color::RGB(underline.r, underline.g, underline.b),
+                )?;
+            }
+        }
+    }
+
+    if active && let Some(cursor) = terminal_render.cursor() {
+        draw_terminal_cursor(
+            target,
+            text_x,
+            layout.body_y,
+            cursor,
+            match input_mode {
+                InputMode::Normal | InputMode::Visual => {
+                    editor_terminal::TerminalCursorShape::Block
+                }
+                InputMode::Insert | InputMode::Replace => cursor.shape(),
+            },
+            cursor_color,
+            base_background,
+            cell_width,
+            line_height,
+        )?;
+    }
+
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + 8,
+            layout.statusline_y - 6,
+            rect.width().saturating_sub(16),
+            1,
+        ),
+        border_color,
+    )?;
+    draw_text(
+        target,
+        rect.x() + 12,
+        layout.statusline_y,
+        &statusline,
+        if active {
+            statusline_active
+        } else {
+            statusline_inactive
+        },
+    )?;
+    let _ = text_color;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x(),
+            rect.y() + rect.height() as i32 - 2,
+            rect.width(),
+            1,
+        ),
+        border_color,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_terminal_cursor(
+    target: &mut DrawTarget<'_>,
+    text_x: i32,
+    body_y: i32,
+    cursor: &editor_terminal::TerminalCursorSnapshot,
+    shape: editor_terminal::TerminalCursorShape,
+    cursor_color: Color,
+    text_override_color: Color,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let x = text_x + cursor.col() as i32 * cell_width;
+    let y = body_y + cursor.row() as i32 * line_height;
+    let width = (cursor.width_cells() as i32 * cell_width).max(1);
+    match shape {
+        editor_terminal::TerminalCursorShape::Hidden => {}
+        editor_terminal::TerminalCursorShape::Block => {
+            fill_rounded_rect(
+                target,
+                PixelRectToRect::rect(x, y, width as u32, line_height.max(2) as u32),
+                2,
+                cursor_color,
+            )?;
+            if !cursor.text().is_empty() {
+                draw_text(target, x, y, cursor.text(), text_override_color)?;
+            }
+        }
+        editor_terminal::TerminalCursorShape::Underline => {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(x, y + line_height.saturating_sub(2), width as u32, 2),
+                cursor_color,
+            )?;
+        }
+        editor_terminal::TerminalCursorShape::Beam => {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    x,
+                    y,
+                    (cell_width / 4).max(2) as u32,
+                    line_height.max(2) as u32,
+                ),
+                cursor_color,
+            )?;
+        }
+        editor_terminal::TerminalCursorShape::HollowBlock => {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(x, y, width as u32, 1),
+                cursor_color,
+            )?;
+            fill_rect(
+                target,
+                PixelRectToRect::rect(x, y + line_height.saturating_sub(1), width as u32, 1),
+                cursor_color,
+            )?;
+            fill_rect(
+                target,
+                PixelRectToRect::rect(x, y, 1, line_height.max(1) as u32),
+                cursor_color,
+            )?;
+            fill_rect(
+                target,
+                PixelRectToRect::rect(x + width.saturating_sub(1), y, 1, line_height.max(1) as u32),
+                cursor_color,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextColorOverride {
+    start: usize,
+    end: usize,
+    color: Color,
+}
+
+fn block_cursor_text_override(
+    char_map: &LineCharMap,
+    segment: LineWrapSegment,
+    line_index: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+    color: Option<Color>,
+) -> Option<TextColorOverride> {
+    let color = color?;
+    if line_index != cursor_row || cursor_col < segment.start_col || cursor_col >= segment.end_col {
+        return None;
+    }
+    if cursor_col >= char_map.len() {
+        return None;
+    }
+    let segment_start = char_map
+        .bytes
+        .get(segment.start_col)
+        .copied()
+        .unwrap_or_default();
+    let start = char_map.bytes.get(cursor_col).copied()?;
+    let end = char_map.bytes.get(cursor_col.saturating_add(1)).copied()?;
+    (start < end).then_some(TextColorOverride {
+        start: start.saturating_sub(segment_start),
+        end: end.saturating_sub(segment_start),
+        color,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_buffer_text(
     target: &mut DrawTarget<'_>,
     x: i32,
@@ -21535,8 +22871,17 @@ fn draw_buffer_text(
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
     cell_width: i32,
+    text_override: Option<TextColorOverride>,
 ) -> Result<(), ShellError> {
-    let segment_text = char_map.slice(line, segment.start_col, segment.end_col);
+    let segment_end_col = segment.end_col.min(char_map.len());
+    let segment_start_col = segment.start_col.min(segment_end_col);
+    let segment_text = char_map.slice(line, segment_start_col, segment_end_col);
+    let segment_base_byte = char_map
+        .bytes
+        .get(segment_start_col)
+        .copied()
+        .unwrap_or_default();
+    let segment_byte_offsets = &char_map.bytes[segment_start_col..=segment_end_col];
     let mut clipped_spans = Vec::new();
     if let Some(line_syntax_spans) = line_syntax_spans {
         for span in line_syntax_spans {
@@ -21546,6 +22891,7 @@ fn draw_buffer_text(
                 clipped_spans.push(LineSyntaxSpan {
                     start: start - segment.start_col,
                     end: end - segment.start_col,
+                    capture_name: span.capture_name.clone(),
                     theme_token: span.theme_token.clone(),
                 });
             }
@@ -21558,9 +22904,15 @@ fn draw_buffer_text(
     };
 
     let mut draw_x = x;
-    for (colored_segment, color) in
-        line_color_segments(segment_text, clipped_spans, theme_registry, default_color)
-    {
+    for (colored_segment, color) in line_color_segments(
+        segment_text,
+        clipped_spans,
+        theme_registry,
+        default_color,
+        text_override,
+        segment_byte_offsets,
+        segment_base_byte,
+    ) {
         if colored_segment.is_empty() {
             continue;
         }
@@ -21575,16 +22927,49 @@ fn line_color_segments(
     line_syntax_spans: Option<&[LineSyntaxSpan]>,
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
+    text_override: Option<TextColorOverride>,
+    column_byte_offsets: &[usize],
+    base_byte: usize,
 ) -> Vec<(String, Color)> {
+    let text_override = text_override.and_then(|text_override| {
+        let start = clamp_to_char_boundary(line, text_override.start);
+        let end = clamp_to_char_boundary(line, text_override.end.min(line.len()));
+        (start < end).then_some(TextColorOverride {
+            start,
+            end,
+            color: text_override.color,
+        })
+    });
     let Some(line_syntax_spans) = line_syntax_spans else {
+        if let Some(text_override) = text_override {
+            return line_color_segments(
+                line,
+                Some(&[]),
+                theme_registry,
+                default_color,
+                Some(text_override),
+                column_byte_offsets,
+                base_byte,
+            );
+        }
         return vec![(line.to_owned(), default_color)];
     };
 
     let relevant_spans = line_syntax_spans
         .iter()
         .filter_map(|span| {
-            let start = clamp_to_char_boundary(line, span.start);
-            let end = clamp_to_char_boundary(line, span.end.min(line.len()));
+            let start = column_to_relative_byte_offset(
+                line.len(),
+                column_byte_offsets,
+                base_byte,
+                span.start,
+            );
+            let end = column_to_relative_byte_offset(
+                line.len(),
+                column_byte_offsets,
+                base_byte,
+                span.end,
+            );
             if start >= end {
                 return None;
             }
@@ -21592,7 +22977,7 @@ fn line_color_segments(
             Some((start, end, span.theme_token.as_str()))
         })
         .collect::<Vec<_>>();
-    if relevant_spans.is_empty() {
+    if relevant_spans.is_empty() && text_override.is_none() {
         return vec![(line.to_owned(), default_color)];
     }
 
@@ -21600,6 +22985,10 @@ fn line_color_segments(
     for (start, end, _) in &relevant_spans {
         breakpoints.push(*start);
         breakpoints.push(*end);
+    }
+    if let Some(text_override) = text_override {
+        breakpoints.push(text_override.start);
+        breakpoints.push(text_override.end);
     }
     breakpoints.sort_unstable();
     breakpoints.dedup();
@@ -21614,13 +23003,22 @@ fn line_color_segments(
         let Some(text) = line.get(start..end) else {
             continue;
         };
-        let color = relevant_spans
-            .iter()
-            .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
-            .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
-            .and_then(|(_, _, token)| theme_registry.and_then(|registry| registry.resolve(token)))
-            .map(to_sdl_color)
-            .unwrap_or(default_color);
+        let color = if let Some(text_override) = text_override
+            && start >= text_override.start
+            && end <= text_override.end
+        {
+            text_override.color
+        } else {
+            relevant_spans
+                .iter()
+                .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
+                .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
+                .and_then(|(_, _, token)| {
+                    theme_registry.and_then(|registry| registry.resolve(token))
+                })
+                .map(to_sdl_color)
+                .unwrap_or(default_color)
+        };
         segments.push((text.to_owned(), color));
     }
 
@@ -21629,6 +23027,43 @@ fn line_color_segments(
     } else {
         segments
     }
+}
+
+fn column_to_relative_byte_offset(
+    line_len: usize,
+    column_byte_offsets: &[usize],
+    base_byte: usize,
+    column: usize,
+) -> usize {
+    column_byte_offsets
+        .get(column)
+        .copied()
+        .unwrap_or_else(|| base_byte.saturating_add(line_len))
+        .saturating_sub(base_byte)
+        .min(line_len)
+}
+
+fn draw_diagnostic_undercurl(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    width: i32,
+    line_height: i32,
+    color: Color,
+) -> Result<(), ShellError> {
+    if width <= 0 || line_height <= 0 {
+        return Ok(());
+    }
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::Undercurl {
+            x,
+            y,
+            width: width as u32,
+            line_height: line_height as u32,
+            color: to_render_color(color),
+        }),
+    }
+    Ok(())
 }
 
 fn selection_columns_for_line(
@@ -21681,6 +23116,7 @@ fn index_syntax_lines(snapshot: SyntaxSnapshot) -> IndexedSyntaxLines {
         let end_line = span.end_position.line;
         let start_column = span.start_position.column;
         let end_column = span.end_position.column;
+        let mut capture_name = span.capture_name;
         let mut theme_token = span.theme_token;
         for line_index in start_line..=end_line {
             let start = if line_index == start_line {
@@ -21702,6 +23138,11 @@ fn index_syntax_lines(snapshot: SyntaxSnapshot) -> IndexedSyntaxLines {
                 .push(LineSyntaxSpan {
                     start,
                     end,
+                    capture_name: if line_index == end_line {
+                        std::mem::take(&mut capture_name)
+                    } else {
+                        capture_name.clone()
+                    },
                     theme_token: if line_index == end_line {
                         std::mem::take(&mut theme_token)
                     } else {
@@ -21734,9 +23175,16 @@ struct FontRun {
     text: String,
 }
 
+fn is_private_use_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+    )
+}
+
 fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
-    if fonts.prefers_icon_font(character)
-        && let Some(index) = fonts.icon_font_index_for_char(character)
+    if let Some(index) = fonts.icon_font_index_for_char(character)
+        && (fonts.prefers_icon_font(character) || is_private_use_character(character))
     {
         return FontRole::Icon(index);
     }
@@ -21829,6 +23277,20 @@ fn present_scene_to_canvas(
                 *radius,
                 from_render_color(*color),
             )?,
+            DrawCommand::Undercurl {
+                x,
+                y,
+                width,
+                line_height,
+                color,
+            } => draw_undercurl_canvas(
+                canvas,
+                *x,
+                *y,
+                *width,
+                *line_height,
+                from_render_color(*color),
+            )?,
             DrawCommand::Text { x, y, text, color } => {
                 render_text_with_fonts(canvas, fonts, *x, *y, text, *color)?;
             }
@@ -21863,8 +23325,48 @@ fn blit_surface_to_canvas(
 struct IconGlyphRenderStyle<'a> {
     icon_font: &'a IconFont<'a>,
     icon_pixel_size: f32,
+    cell_width: i32,
     primary_ascent: i32,
     color: RenderColor,
+}
+
+fn rasterize_icon_glyph_for_cell(
+    raster_font: &RasterFont,
+    character: char,
+    icon_pixel_size: f32,
+    cell_width: i32,
+) -> (fontdue::Metrics, Vec<u8>) {
+    let cell_width = cell_width.max(1) as usize;
+    let mut pixel_size = icon_pixel_size.max(1.0);
+    let mut rasterized = raster_font.rasterize(character, pixel_size);
+    for _ in 0..4 {
+        if rasterized.0.width <= cell_width {
+            break;
+        }
+        let next_pixel_size = (pixel_size * cell_width as f32 / rasterized.0.width as f32)
+            .floor()
+            .max(1.0);
+        if next_pixel_size >= pixel_size {
+            break;
+        }
+        pixel_size = next_pixel_size;
+        rasterized = raster_font.rasterize(character, pixel_size);
+    }
+    rasterized
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IconGlyphCellLayout {
+    draw_offset_x: i32,
+    advance: i32,
+}
+
+fn icon_glyph_cell_layout(metrics: &fontdue::Metrics, cell_width: i32) -> IconGlyphCellLayout {
+    let advance = cell_width.max(1);
+    IconGlyphCellLayout {
+        draw_offset_x: advance.saturating_sub(metrics.width as i32) / 2,
+        advance,
+    }
 }
 
 fn render_icon_glyph_with_fontdue(
@@ -21874,13 +23376,15 @@ fn render_icon_glyph_with_fontdue(
     y: i32,
     character: char,
 ) -> Result<i32, ShellError> {
-    let (metrics, bitmap) = style
-        .icon_font
-        .raster_font
-        .rasterize(character, style.icon_pixel_size);
-    let advance = metrics.advance_width.ceil().max(0.0) as i32;
+    let (metrics, bitmap) = rasterize_icon_glyph_for_cell(
+        &style.icon_font.raster_font,
+        character,
+        style.icon_pixel_size,
+        style.cell_width,
+    );
+    let layout = icon_glyph_cell_layout(&metrics, style.cell_width);
     if metrics.width == 0 || metrics.height == 0 {
-        return Ok(advance);
+        return Ok(layout.advance);
     }
 
     let mut pixels = vec![0u8; metrics.width * metrics.height * 4];
@@ -21900,10 +23404,10 @@ fn render_icon_glyph_with_fontdue(
         PixelFormat::RGBA32,
     )
     .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let draw_x = x + metrics.xmin;
+    let draw_x = x + layout.draw_offset_x;
     let draw_y = y + style.primary_ascent - metrics.height as i32 - metrics.ymin;
     blit_surface_to_canvas(canvas, &surface, draw_x, draw_y)?;
-    Ok(advance.max(metrics.xmin + metrics.width as i32))
+    Ok(layout.advance)
 }
 
 fn render_text_with_fonts(
@@ -21945,6 +23449,7 @@ fn render_text_with_fonts(
                 let style = IconGlyphRenderStyle {
                     icon_font,
                     icon_pixel_size: fonts.icon_pixel_size(),
+                    cell_width: fonts.cell_width(),
                     primary_ascent,
                     color,
                 };
@@ -22046,6 +23551,42 @@ fn fill_rounded_rect_canvas<T: RenderTarget>(
     }
 
     Ok(())
+}
+
+fn draw_undercurl_canvas<T: RenderTarget>(
+    canvas: &mut Canvas<T>,
+    x: i32,
+    y: i32,
+    width: u32,
+    line_height: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    if width == 0 || line_height == 0 {
+        return Ok(());
+    }
+
+    let baseline_y = y + line_height as i32 - 2;
+    let upper_y = baseline_y.saturating_sub(1);
+    let width = width as i32;
+    let mut points = Vec::with_capacity(width.max(1) as usize);
+    let mut dx = 0i32;
+    while dx < width {
+        let segment_width = (width - dx).min(2);
+        let segment_y = if (dx / 2) % 2 == 0 {
+            baseline_y
+        } else {
+            upper_y
+        };
+        for offset in 0..segment_width {
+            points.push(FPoint::new((x + dx + offset) as f32, segment_y as f32));
+        }
+        dx += 2;
+    }
+
+    canvas.set_draw_color(color);
+    canvas
+        .draw_points(points.as_slice())
+        .map_err(|error| ShellError::Sdl(error.to_string()))
 }
 
 fn truncate_text_to_width(text: &str, max_width: u32, cell_width: i32) -> String {

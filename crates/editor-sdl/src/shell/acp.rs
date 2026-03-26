@@ -93,6 +93,20 @@ pub(super) fn acp_new_session(runtime: &mut EditorRuntime) -> Result<(), String>
     open_acp_client_with_config(runtime, client, false, None).map(|_| ())
 }
 
+pub(super) fn close_acp_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let Some(manager) = runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() else {
+        return Ok(());
+    };
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.close_buffer(buffer_id);
+    Ok(())
+}
+
 fn open_acp_client_buffer(
     runtime: &mut EditorRuntime,
     client_id: &str,
@@ -123,8 +137,19 @@ fn open_acp_client_with_config(
             manager.buffer_for_client(&client.id)
         }
     {
-        focus_acp_buffer(runtime, buffer_id)?;
-        return Ok(buffer_id);
+        if shell_ui(runtime)
+            .ok()
+            .and_then(|ui| ui.buffer(buffer_id))
+            .is_none()
+        {
+            let mut manager = manager
+                .lock()
+                .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+            manager.close_buffer(buffer_id);
+        } else {
+            focus_acp_buffer(runtime, buffer_id)?;
+            return Ok(buffer_id);
+        }
     }
 
     let buffer_id = create_acp_buffer(runtime, &client)?;
@@ -1101,6 +1126,24 @@ impl AcpManager {
         std::mem::take(&mut self.pending_ui_actions)
     }
 
+    fn close_buffer(&mut self, buffer_id: BufferId) {
+        self.pending_clients.remove(&buffer_id);
+        self.pending_slash.remove(&buffer_id);
+        self.pending_ui_actions.retain(|action| {
+            !matches!(
+                action,
+                AcpUiAction::OpenSlashCompletion {
+                    buffer_id: action_buffer_id,
+                    ..
+                } if *action_buffer_id == buffer_id
+            )
+        });
+        if let Some(session_id) = self.buffers.remove(&buffer_id) {
+            self.sessions.remove(&session_id);
+            self.disconnect(session_id);
+        }
+    }
+
     fn connect(
         &mut self,
         client: user::acp::AcpClientConfig,
@@ -1238,6 +1281,7 @@ impl AcpManager {
                 models,
             } => {
                 let Some(pending) = self.pending_clients.remove(&buffer_id) else {
+                    self.disconnect(session_id);
                     return Ok(());
                 };
                 self.buffers.insert(buffer_id, session_id.clone());
@@ -2866,6 +2910,42 @@ mod tests {
         ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
     };
 
+    fn test_acp_manager() -> (AcpManager, tokio_mpsc::UnboundedReceiver<AcpCommand>) {
+        let (_event_tx, event_rx) = mpsc::channel();
+        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
+        (
+            AcpManager {
+                runtime: AcpRuntime { sender: command_tx },
+                events: event_rx,
+                sessions: HashMap::new(),
+                buffers: HashMap::new(),
+                pending_clients: HashMap::new(),
+                pending_slash: HashMap::new(),
+                pending_ui_actions: Vec::new(),
+            },
+            command_rx,
+        )
+    }
+
+    fn test_buffer_id() -> Result<BufferId, String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let workspace_id = state
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                "*acp test*",
+                BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn active_command_input_hint_uses_unstructured_command_metadata() {
         let commands = vec![
@@ -2917,5 +2997,78 @@ mod tests {
         assert!(rendered.contains("src\\main.rs:12"));
         assert!(rendered.contains("Allow once (allow once)"));
         assert!(rendered.contains("Reject once (reject once)"));
+    }
+
+    #[test]
+    fn close_buffer_disconnects_sessions_and_clears_reuse_state() -> Result<(), String> {
+        let (mut manager, mut command_rx) = test_acp_manager();
+        let buffer_id = test_buffer_id()?;
+        let session_id = agent_client_protocol::SessionId::new("session-1");
+        manager.sessions.insert(
+            session_id.clone(),
+            AcpSessionInfo {
+                client_id: "copilot".to_owned(),
+                buffer_id,
+                available_commands: Vec::new(),
+                mode_state: None,
+                model_state: None,
+                config_options: Vec::new(),
+                mode_config_id: None,
+                model_config_id: None,
+            },
+        );
+        manager.buffers.insert(buffer_id, session_id.clone());
+        manager
+            .pending_slash
+            .insert(buffer_id, PendingSlashTrigger::Manual);
+        manager
+            .pending_ui_actions
+            .push(AcpUiAction::OpenSlashCompletion {
+                buffer_id,
+                trigger: PendingSlashTrigger::Manual,
+            });
+
+        manager.close_buffer(buffer_id);
+
+        assert!(manager.buffer_for_client("copilot").is_none());
+        assert!(manager.session_for_buffer(buffer_id).is_none());
+        assert!(!manager.pending_slash.contains_key(&buffer_id));
+        assert!(manager.pending_ui_actions.is_empty());
+        assert!(matches!(
+            command_rx.try_recv().expect("disconnect command should be queued"),
+            AcpCommand::Disconnect {
+                session_id: disconnected
+            } if disconnected == session_id
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn connected_event_for_closed_buffer_disconnects_orphaned_session() -> Result<(), String> {
+        let (mut manager, mut command_rx) = test_acp_manager();
+        let buffer_id = test_buffer_id()?;
+        let session_id = agent_client_protocol::SessionId::new("session-closed");
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::Connected {
+                buffer_id,
+                client_id: "copilot".to_owned(),
+                session_id: session_id.clone(),
+                modes: None,
+                models: None,
+            },
+        )?;
+
+        assert!(manager.sessions.is_empty());
+        assert!(manager.buffers.is_empty());
+        assert!(matches!(
+            command_rx.try_recv().expect("orphaned connect should disconnect"),
+            AcpCommand::Disconnect {
+                session_id: disconnected
+            } if disconnected == session_id
+        ));
+        Ok(())
     }
 }

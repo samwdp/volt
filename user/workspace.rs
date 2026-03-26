@@ -105,9 +105,11 @@ mod tests {
     #[test]
     fn package_exports_format_command() {
         let package = package();
-        assert!(package
-            .commands()
-            .iter()
-            .any(|command| command.name() == "workspace.format"));
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "workspace.format")
+        );
     }
 }
