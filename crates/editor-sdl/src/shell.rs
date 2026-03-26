@@ -4931,11 +4931,13 @@ impl ShellState {
             Event::MouseMotion { x, y, .. } => {
                 self.update_mouse_selection(x as i32, y as i32, cell_width, line_height)?;
             }
-            Event::MouseButtonUp { mouse_btn, .. } => {
-                if mouse_btn == MouseButton::Left {
-                    self.finish_mouse_selection()?;
-                }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Left,
+                ..
+            } => {
+                self.finish_mouse_selection()?;
             }
+            Event::MouseButtonUp { .. } => {}
             Event::MouseWheel {
                 y,
                 direction,
