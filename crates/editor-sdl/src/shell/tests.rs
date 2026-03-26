@@ -1,5 +1,6 @@
 use super::*;
 use editor_lsp::LspLogDirection;
+use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
 
 #[derive(Debug, Default)]
@@ -133,6 +134,59 @@ fn lsp_log_buffer_lines_only_include_entries_for_requested_server() {
     assert!(body.contains("*lsp-log csharp-ls* captures live JSON-RPC traffic for `csharp-ls`."));
     assert!(body.contains("OUT csharp-ls"));
     assert!(!body.contains("rust-analyzer"));
+}
+
+#[test]
+fn errors_buffer_updates_stay_in_the_background() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let active_before = active_runtime_buffer(&state.runtime)?
+        .ok_or_else(|| "active runtime buffer is missing".to_owned())?;
+
+    assert_ne!(active_before.2, "*errors*");
+    record_runtime_error(&mut state.runtime, "test.error", "boom");
+
+    let active_after = active_runtime_buffer(&state.runtime)?
+        .ok_or_else(|| "active runtime buffer is missing after logging".to_owned())?;
+    assert_eq!(active_after.0, active_before.0);
+    assert_eq!(active_after.1, active_before.1);
+    assert_eq!(active_after.2, active_before.2);
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, active_before.1);
+    Ok(())
+}
+
+#[test]
+fn lsp_log_buffers_stay_in_the_background_until_explicitly_focused() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let active_before = active_runtime_buffer(&state.runtime)?
+        .ok_or_else(|| "active runtime buffer is missing".to_owned())?;
+
+    let buffer_id = ensure_lsp_log_buffer(&mut state.runtime, workspace_id, "rust-analyzer")?;
+    let active_after_creation = active_runtime_buffer(&state.runtime)?
+        .ok_or_else(|| "active runtime buffer is missing after creating log buffer".to_owned())?;
+
+    assert_eq!(active_after_creation.0, active_before.0);
+    assert_eq!(active_after_creation.1, active_before.1);
+    assert_eq!(active_after_creation.2, active_before.2);
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, active_before.1);
+
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    sync_active_buffer(&mut state.runtime)?;
+
+    let active_after_focus = active_runtime_buffer(&state.runtime)?
+        .ok_or_else(|| "active runtime buffer is missing after focusing log buffer".to_owned())?;
+    assert_eq!(active_after_focus.1, buffer_id);
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
+    Ok(())
 }
 
 #[test]
@@ -623,6 +677,31 @@ fn install_terminal_test_buffer(state: &mut ShellState) -> Result<BufferId, Stri
         .map_err(|error| error.to_string())?;
     shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_terminal_popup_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_popup_buffer(workspace_id, "*terminal-popup*", BufferKind::Terminal, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .open_popup(workspace_id, "Terminal", vec![buffer_id], buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.ensure_popup_buffer(
+        buffer_id,
+        "*terminal-popup*",
+        BufferKind::Terminal,
+    );
+    shell_ui_mut(&mut state.runtime)?.set_popup_focus(true);
     Ok(buffer_id)
 }
 
@@ -1515,6 +1594,46 @@ fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> 
 }
 
 #[test]
+fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 320;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_text_test_buffer(
+        &mut state,
+        "*split-viewport*",
+        (0..120).map(|index| format!("line {index}")).collect(),
+    )?;
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Horizontal)?;
+
+    state
+        .sync_active_viewport_for_render_size(render_width, render_height, line_height)
+        .map_err(|error| error.to_string())?;
+
+    let pane_rect = horizontal_pane_rects(render_width, render_height, 2)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "horizontal split did not produce a pane rect".to_owned())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let pane_layout = buffer_footer_layout(
+        buffer,
+        PixelRectToRect::rect(pane_rect.x, pane_rect.y, pane_rect.width, pane_rect.height),
+        line_height,
+    );
+    let full_layout = buffer_footer_layout(
+        buffer,
+        PixelRectToRect::rect(0, 0, render_width, render_height),
+        line_height,
+    );
+
+    assert_eq!(buffer.viewport_lines(), pane_layout.visible_rows);
+    assert!(pane_layout.visible_rows < full_layout.visible_rows);
+    Ok(())
+}
+
+#[test]
 fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
     let font_path = resolve_bundled_icon_font_dir()
         .map_err(|error| error.to_string())?
@@ -1571,45 +1690,29 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
 
 #[test]
 fn font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint() -> Result<(), String> {
-    let _sdl = sdl3::init().map_err(|error| error.to_string())?;
-    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
-    let font_path = resolve_bundled_icon_font_dir()
-        .map_err(|error| error.to_string())?
-        .join("NFM.ttf");
-    let primary = ttf
-        .load_font(&font_path, 18.0)
-        .map_err(|error| error.to_string())?;
-    let icon_font = ttf
-        .load_font(&font_path, 18.0)
-        .map_err(|error| error.to_string())?;
-    let cell_width = primary
-        .size_of_char('M')
-        .map_err(|error| error.to_string())?
-        .0
-        .max(1) as i32;
-    let bytes = std::fs::read(&font_path).map_err(|error| error.to_string())?;
-    let raster_font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
-        .map_err(|error| error.to_string())?;
-    let fonts = FontSet {
-        primary,
-        icon_fonts: vec![IconFont {
-            name: "NFM.ttf".to_owned(),
-            font: icon_font,
-            raster_font,
-        }],
-        icon_chars: BTreeSet::new(),
-        icon_pixel_size: 18.0,
-        cell_width,
-    };
     let branch = user::icon_font_symbols::ple::PL_BRANCH
         .chars()
         .next()
         .ok_or_else(|| "powerline branch glyph missing".to_owned())?;
 
     assert!(is_private_use_character(branch));
-    assert!(!fonts.prefers_icon_font(branch));
-    assert!(fonts.primary().find_glyph(branch).is_some());
-    assert_eq!(font_role_for_char(&fonts, branch), FontRole::Icon(0));
+    assert_eq!(
+        resolve_font_role_for_char(Some(0), true, false, branch),
+        FontRole::Icon(0)
+    );
+    Ok(())
+}
+
+#[test]
+fn font_role_prefers_icon_font_for_symbol_like_prompt_glyphs() -> Result<(), String> {
+    let prompt = '\u{276F}';
+
+    assert!(is_symbol_like_character(prompt));
+    assert!(!is_private_use_character(prompt));
+    assert_eq!(
+        resolve_font_role_for_char(Some(0), true, false, prompt),
+        FontRole::Icon(0)
+    );
     Ok(())
 }
 
@@ -2665,6 +2768,105 @@ fn mouse_double_click_selects_the_whole_line() -> Result<(), String> {
         buffer.line_span_range(1, 1).map(VisualSelection::Range)
     );
     assert!(state.mouse_drag.is_none());
+    Ok(())
+}
+
+#[test]
+fn terminal_mode_insert_hook_allows_reentering_insert_for_terminals() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_terminal_test_buffer(&mut state)?;
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_INSERT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn terminal_vim_edit_shortcuts_enter_insert_mode_instead_of_read_only_errors() -> Result<(), String>
+{
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_terminal_test_buffer(&mut state)?;
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("substitute-char"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn terminal_popup_bootstraps_session_and_enters_insert_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_popup_test_buffer(&mut state)?;
+
+    let popup = state
+        .runtime_popup()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal popup was not opened".to_owned())?;
+
+    assert_eq!(popup.active_buffer, buffer_id);
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert!(terminal_buffer_state(&state.runtime)?.contains(buffer_id));
+    Ok(())
+}
+
+#[test]
+fn pane_close_hook_closes_the_focused_split() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let initial_pane_id = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .active_pane_id()
+        .ok_or_else(|| "initial pane is missing".to_owned())?;
+
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Horizontal)?;
+    cycle_runtime_pane(&mut state.runtime)?;
+    state
+        .runtime
+        .emit_hook(HOOK_PANE_CLOSE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        state
+            .runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .pane_count(),
+        1
+    );
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 1);
+    assert_eq!(
+        state
+            .runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .active_pane_id(),
+        Some(initial_pane_id)
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_pane_id(),
+        Some(initial_pane_id)
+    );
     Ok(())
 }
 

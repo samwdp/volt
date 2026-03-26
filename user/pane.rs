@@ -13,6 +13,11 @@ pub fn package() -> PluginPackage {
             "Splits the active workspace vertically.",
             "ui.pane.split-vertical",
         ),
+        hook_command(
+            "pane.close",
+            "Closes the currently focused split.",
+            "ui.pane.close",
+        ),
     ])
 }
 
@@ -22,4 +27,32 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
         description,
         vec![PluginAction::emit_hook(hook_name, None::<&str>)],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package;
+
+    #[test]
+    fn package_exports_split_and_close_commands() {
+        let package = package();
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "pane.split-horizontal")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "pane.split-vertical")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "pane.close")
+        );
+    }
 }

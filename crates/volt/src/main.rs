@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 profile_input_latency: options.profile_input_latency,
                 ..ShellConfig::default()
             })?;
-            print_shell_summary("volt shell demo", &summary);
+            print_shell_summary("Volt", &summary);
             return Ok(());
         }
         LaunchMode::ShellHidden => {

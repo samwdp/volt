@@ -649,4 +649,50 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn model_closes_active_pane_without_closing_buffers() -> Result<(), ModelError> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "default", None)?;
+        let scratch_id = runtime.model_mut().create_buffer(
+            workspace_id,
+            "*scratch*",
+            BufferKind::Scratch,
+            None,
+        )?;
+        let notes_id = runtime.model_mut().create_buffer(
+            workspace_id,
+            "*notes*",
+            BufferKind::Scratch,
+            None,
+        )?;
+
+        let initial_pane = runtime
+            .model()
+            .workspace(workspace_id)?
+            .active_pane_id()
+            .ok_or(ModelError::NoActivePane(workspace_id))?;
+        runtime.model_mut().focus_buffer(workspace_id, scratch_id)?;
+        let split_pane_id = runtime.model_mut().split_pane(workspace_id, notes_id)?;
+        runtime
+            .model_mut()
+            .focus_pane(workspace_id, split_pane_id)?;
+        runtime
+            .model_mut()
+            .close_pane(workspace_id, split_pane_id)?;
+
+        let workspace = runtime.model().workspace(workspace_id)?;
+        assert_eq!(workspace.pane_count(), 1);
+        assert_eq!(workspace.active_pane_id(), Some(initial_pane));
+        assert!(workspace.buffer(notes_id).is_some());
+        assert_eq!(
+            runtime.model_mut().close_pane(workspace_id, initial_pane),
+            Err(ModelError::CannotCloseLastPane(workspace_id))
+        );
+
+        Ok(())
+    }
 }

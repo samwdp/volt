@@ -147,6 +147,7 @@ const HOOK_ACP_CYCLE_MODE: &str = "ui.acp.cycle-mode";
 const HOOK_ACP_COMPLETE_SLASH: &str = "ui.acp.complete-slash";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
+const HOOK_PANE_CLOSE: &str = "ui.pane.close";
 const HOOK_WORKSPACE_WINDOW_LEFT: &str = "ui.workspace.window-left";
 const HOOK_WORKSPACE_WINDOW_DOWN: &str = "ui.workspace.window-down";
 const HOOK_WORKSPACE_WINDOW_UP: &str = "ui.workspace.window-up";
@@ -4042,6 +4043,25 @@ impl ShellUiState {
         }
     }
 
+    fn close_pane(&mut self, pane_id: PaneId) {
+        if let Some(view) = self.workspace_view_mut()
+            && view.panes.len() > 1
+            && let Some(index) = view.panes.iter().position(|pane| pane.pane_id == pane_id)
+        {
+            view.panes.remove(index);
+            if view.panes.len() == 1 {
+                view.split_direction = None;
+            }
+            if index < view.active_pane {
+                view.active_pane = view.active_pane.saturating_sub(1);
+            } else if index == view.active_pane {
+                view.active_pane = view.active_pane.min(view.panes.len().saturating_sub(1));
+            }
+        }
+        self.close_autocomplete();
+        self.close_hover();
+    }
+
     fn shift_active_pane(&mut self, delta: isize) -> Option<PaneId> {
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
@@ -4672,7 +4692,7 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         let errors_id = runtime
             .model_mut()
-            .create_buffer(workspace_id, "*errors*", BufferKind::Diagnostics, None)
+            .create_popup_buffer(workspace_id, "*errors*", BufferKind::Diagnostics, None)
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         let (scratch, notes, primary_pane_id) = {
             let workspace = runtime
@@ -7123,11 +7143,62 @@ impl ShellState {
         Ok(())
     }
 
+    fn active_viewport_height(
+        &mut self,
+        render_width: u32,
+        render_height: u32,
+        line_height: i32,
+    ) -> Result<u32, ShellError> {
+        let runtime_popup = self.runtime_popup()?;
+        let ui = self.ui()?;
+        if let Some(popup) = runtime_popup.as_ref()
+            && ui.popup_focus_active(popup)
+        {
+            return Ok(popup_window_height(render_height, line_height).max(1));
+        }
+        let popup_height = runtime_popup
+            .as_ref()
+            .map(|_| popup_window_height(render_height, line_height))
+            .unwrap_or(0);
+        let pane_height = render_height.saturating_sub(popup_height);
+        let panes = ui
+            .panes()
+            .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
+        let pane_rects = match ui.pane_split_direction() {
+            PaneSplitDirection::Vertical => {
+                vertical_pane_rects(render_width, pane_height, panes.len())
+            }
+            PaneSplitDirection::Horizontal => {
+                horizontal_pane_rects(render_width, pane_height, panes.len())
+            }
+        };
+        let rect = pane_rects
+            .get(ui.active_pane_index())
+            .ok_or_else(|| ShellError::Runtime("active pane rect is missing".to_owned()))?;
+        Ok(rect.height.max(1))
+    }
+
+    fn sync_active_viewport_for_render_size(
+        &mut self,
+        render_width: u32,
+        render_height: u32,
+        line_height: i32,
+    ) -> Result<(), ShellError> {
+        let viewport_height =
+            self.active_viewport_height(render_width, render_height, line_height)?;
+        self.sync_active_viewport(viewport_height, line_height)
+    }
+
     fn runtime_popup(&mut self) -> Result<Option<RuntimePopupSnapshot>, ShellError> {
         let popup = active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?;
         if let Some(popup) = popup.as_ref() {
             ensure_shell_buffer(&mut self.runtime, popup.active_buffer)
                 .map_err(ShellError::Runtime)?;
+            if ensure_terminal_session(&mut self.runtime, popup.active_buffer)
+                .map_err(ShellError::Runtime)?
+            {
+                self.ui_mut()?.enter_insert_mode();
+            }
         }
         Ok(popup)
     }
@@ -7173,10 +7244,11 @@ impl ShellState {
 
     fn refresh_pending_acp(
         &mut self,
-        viewport_height: u32,
+        render_width: u32,
+        render_height: u32,
         line_height: i32,
     ) -> Result<bool, ShellError> {
-        self.sync_active_viewport(viewport_height, line_height)?;
+        self.sync_active_viewport_for_render_size(render_width, render_height, line_height)?;
         let active_buffer_id =
             active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
         let followed_output = {
@@ -7185,7 +7257,7 @@ impl ShellState {
             buffer.has_input_field() && buffer.should_follow_output()
         };
         let changed = acp::refresh_pending_acp(&mut self.runtime).map_err(ShellError::Runtime)?;
-        self.sync_active_viewport(viewport_height, line_height)?;
+        self.sync_active_viewport_for_render_size(render_width, render_height, line_height)?;
         if changed
             && followed_output
             && active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?
@@ -7383,27 +7455,12 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         return FrameOutcome::Continue;
                     }
                 };
-                let popup_visible = match state.runtime_popup() {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(error) => {
-                        state.record_shell_error("shell.popup-visible-rows", error);
-                        false
-                    }
-                };
-                let popup_height = if popup_visible {
-                    popup_window_height(render_height, line_height as i32)
-                } else {
-                    0
-                };
-                let pane_height = render_height.saturating_sub(popup_height);
-                let active_height = if popup_visible {
-                    popup_height
-                } else {
-                    pane_height
-                };
                 let wrap_cols = wrap_columns_for_width(render_width, cell_width);
-                if let Err(error) = state.sync_active_viewport(active_height, line_height as i32) {
+                if let Err(error) = state.sync_active_viewport_for_render_size(
+                    render_width,
+                    render_height,
+                    line_height as i32,
+                ) {
                     state.record_shell_error("shell.sync-active-viewport", error);
                 }
                 let mut had_events = false;
@@ -7451,8 +7508,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     }
                 }
                 if had_events
-                    && let Err(error) =
-                        state.sync_active_viewport(active_height, line_height as i32)
+                    && let Err(error) = state.sync_active_viewport_for_render_size(
+                        render_width,
+                        render_height,
+                        line_height as i32,
+                    )
                 {
                     state.record_shell_error("shell.sync-active-viewport", error);
                 }
@@ -7536,8 +7596,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     frame.git_refresh = git_refresh_started.elapsed();
                 }
                 let acp_refresh_started = Instant::now();
-                let acp_changed = match state.refresh_pending_acp(active_height, line_height as i32)
-                {
+                let acp_changed = match state.refresh_pending_acp(
+                    render_width,
+                    render_height,
+                    line_height as i32,
+                ) {
                     Ok(changed) => changed,
                     Err(error) => {
                         state.record_shell_error("shell.acp-refresh", error);
@@ -8167,6 +8230,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_PANE_CLOSE,
+        "Closes the currently focused split.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_WINDOW_LEFT,
         "Moves focus to the window on the left.",
     )?;
@@ -8471,8 +8539,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MODE_INSERT, "shell.enter-insert-mode", |_, runtime| {
-            if active_shell_buffer_read_only(runtime)? && !active_shell_buffer_has_input(runtime)? {
+            let is_terminal = active_shell_buffer_is_terminal(runtime)?;
+            if active_shell_buffer_read_only(runtime)?
+                && !active_shell_buffer_has_input(runtime)?
+                && !is_terminal
+            {
                 report_read_only(runtime, "insert mode blocked");
+                return Ok(());
+            }
+            if is_terminal {
+                shell_ui_mut(runtime)?.enter_insert_mode();
                 return Ok(());
             }
             start_change_recording(runtime)?;
@@ -8529,6 +8605,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_VIM_EDIT, "shell.vim-edit", |event, runtime| {
             let detail = event.detail.as_deref().unwrap_or_default();
+            if handle_terminal_vim_edit(runtime, detail)? {
+                return Ok(());
+            }
             if vim_edit_requires_write(detail) && active_shell_buffer_read_only(runtime)? {
                 let action = format!("{detail} blocked");
                 report_read_only(runtime, &action);
@@ -8993,6 +9072,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 Ok(())
             },
         )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_PANE_CLOSE, "shell.pane-close", |_, runtime| {
+            close_runtime_pane(runtime)?;
+            Ok(())
+        })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
@@ -9722,7 +9807,7 @@ fn ensure_lsp_log_buffer(
     let buffer_name = lsp_log_buffer_name(server_id);
     let buffer_id = runtime
         .model_mut()
-        .create_buffer(workspace_id, &buffer_name, BufferKind::Diagnostics, None)
+        .create_popup_buffer(workspace_id, &buffer_name, BufferKind::Diagnostics, None)
         .map_err(|error| error.to_string())?;
     {
         let ui = shell_ui_mut(runtime)?;
@@ -10145,6 +10230,11 @@ fn buffer_is_terminal(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Terminal)
 }
 
+fn active_shell_buffer_is_terminal(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    Ok(buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind))
+}
+
 fn buffer_is_directory(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Directory)
 }
@@ -10197,6 +10287,24 @@ fn vim_edit_requires_write(detail: &str) -> bool {
             | "visual-block-insert"
             | "visual-block-append"
     )
+}
+
+fn handle_terminal_vim_edit(runtime: &mut EditorRuntime, detail: &str) -> Result<bool, String> {
+    if !active_shell_buffer_is_terminal(runtime)? {
+        return Ok(false);
+    }
+    match detail {
+        "append" | "append-line-end" | "insert-line-start" | "open-line-below"
+        | "open-line-above" | "substitute-char" | "substitute-line" => {
+            shell_ui_mut(runtime)?.enter_insert_mode();
+            Ok(true)
+        }
+        "enter-replace-mode" | "replace-char" => {
+            shell_ui_mut(runtime)?.enter_replace_mode();
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn shell_buffer(runtime: &EditorRuntime, buffer_id: BufferId) -> Result<&ShellBuffer, String> {
@@ -19057,6 +19165,41 @@ fn split_runtime_pane(
     Ok(())
 }
 
+fn close_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let pane_id = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .active_pane_id()
+        .ok_or_else(|| format!("workspace `{workspace_id}` has no active pane"))?;
+    runtime
+        .model_mut()
+        .close_pane(workspace_id, pane_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.close_pane(pane_id);
+    sync_active_buffer(runtime)?;
+
+    let (active_pane_id, active_buffer_id) = active_runtime_buffer(runtime)?
+        .map(|(active_pane_id, active_buffer_id, _, _)| (active_pane_id, active_buffer_id))
+        .ok_or_else(|| "active runtime surface is missing after closing pane".to_owned())?;
+    let window_id = active_window_id(runtime)?;
+    runtime
+        .emit_hook(
+            builtins::PANE_SWITCH,
+            HookEvent::new()
+                .with_window(window_id)
+                .with_workspace(workspace_id)
+                .with_pane(active_pane_id)
+                .with_buffer(active_buffer_id),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn cycle_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let pane_id = shell_ui_mut(runtime)?.cycle_active_pane();
     let Some(pane_id) = pane_id else {
@@ -23182,19 +23325,47 @@ fn is_private_use_character(character: char) -> bool {
     )
 }
 
-fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
-    if let Some(index) = fonts.icon_font_index_for_char(character)
-        && (fonts.prefers_icon_font(character) || is_private_use_character(character))
+fn is_symbol_like_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x2190..=0x21FF
+            | 0x2300..=0x23FF
+            | 0x2500..=0x257F
+            | 0x2580..=0x259F
+            | 0x25A0..=0x25FF
+            | 0x2600..=0x27BF
+            | 0x2B00..=0x2BFF
+    )
+}
+
+fn resolve_font_role_for_char(
+    icon_font_index: Option<usize>,
+    primary_has_glyph: bool,
+    prefers_icon_font: bool,
+    character: char,
+) -> FontRole {
+    if let Some(index) = icon_font_index
+        && (prefers_icon_font
+            || is_private_use_character(character)
+            || is_symbol_like_character(character))
     {
         return FontRole::Icon(index);
     }
-    if fonts.primary().find_glyph(character).is_some() {
+    if primary_has_glyph {
         return FontRole::Primary;
     }
-    fonts
-        .icon_font_index_for_char(character)
+    icon_font_index
         .map(FontRole::Icon)
         .unwrap_or(FontRole::Primary)
+}
+
+fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRole {
+    resolve_font_role_for_char(
+        fonts.icon_font_index_for_char(character),
+        fonts.primary().find_glyph(character).is_some(),
+        fonts.prefers_icon_font(character),
+        character,
+    )
 }
 
 fn font_runs(text: &str, fonts: &FontSet<'_>) -> Vec<FontRun> {

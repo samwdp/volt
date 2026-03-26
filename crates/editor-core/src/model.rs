@@ -611,6 +611,34 @@ impl EditorModel {
         Ok(())
     }
 
+    /// Closes a pane in the specified workspace.
+    pub fn close_pane(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    ) -> Result<(), ModelError> {
+        let workspace = self.workspace_mut(workspace_id)?;
+        if !workspace.panes.contains_key(&pane_id) {
+            return Err(ModelError::PaneNotFound(pane_id));
+        }
+        if workspace.panes.len() <= 1 {
+            return Err(ModelError::CannotCloseLastPane(workspace_id));
+        }
+        let next_active_pane =
+            if workspace.active_pane == Some(pane_id) || workspace.active_pane.is_none() {
+                workspace
+                    .panes
+                    .keys()
+                    .copied()
+                    .find(|candidate| *candidate != pane_id)
+            } else {
+                workspace.active_pane
+            };
+        workspace.panes.remove(&pane_id);
+        workspace.active_pane = next_active_pane;
+        Ok(())
+    }
+
     /// Closes a buffer in the specified workspace.
     pub fn close_buffer(
         &mut self,
@@ -833,6 +861,8 @@ pub enum ModelError {
     PopupNotFound(PopupId),
     /// The workspace has no active pane available.
     NoActivePane(WorkspaceId),
+    /// The workspace must keep at least one pane.
+    CannotCloseLastPane(WorkspaceId),
     /// The workspace must keep at least one buffer.
     CannotCloseLastBuffer(WorkspaceId),
     /// Popups must be created with at least one buffer.
@@ -866,6 +896,10 @@ impl fmt::Display for ModelError {
             Self::NoActivePane(workspace_id) => {
                 write!(formatter, "workspace {workspace_id} has no active pane")
             }
+            Self::CannotCloseLastPane(workspace_id) => write!(
+                formatter,
+                "workspace {workspace_id} must retain at least one pane"
+            ),
             Self::CannotCloseLastBuffer(workspace_id) => write!(
                 formatter,
                 "workspace {workspace_id} must retain at least one buffer"

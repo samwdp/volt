@@ -26,7 +26,7 @@ pub struct ShellConfig {
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            title: "volt shell demo".to_owned(),
+            title: "Volt".to_owned(),
             width: 1200,
             height: 760,
             font_size: 18,
