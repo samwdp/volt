@@ -39,7 +39,7 @@ pub fn clients() -> Vec<AcpClientConfig> {
             "copilot",
             "GitHub Copilot (ACP)",
             "copilot",
-            &["--acp", "--stdio"],
+            &["--acp", "--stdio", "--yolo"],
         ),
         AcpClientConfig::new("opencode", "OpenCode (ACP)", "opencode", &["acp"]),
     ]

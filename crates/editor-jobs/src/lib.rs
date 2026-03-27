@@ -22,12 +22,12 @@ pub const fn role() -> &'static str {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn configure_background_command(command: &mut Command) {
+fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
 
-        command.creation_flags(CREATE_NO_WINDOW);
+        _command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 

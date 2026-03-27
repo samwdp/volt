@@ -1689,12 +1689,12 @@ fn spawn_reader_thread(
     });
 }
 
-fn configure_lsp_command(command: &mut Command) {
+fn configure_lsp_command(_command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
 
-        command.creation_flags(CREATE_NO_WINDOW);
+        _command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -1704,6 +1704,10 @@ fn spawn_lsp_command(
     cwd: Option<&Path>,
     env: &[(String, String)],
 ) -> std::io::Result<Child> {
+    #[cfg(not(windows))]
+    let spawn_result = build_lsp_command(program, args, cwd, env, None).spawn();
+
+    #[cfg(windows)]
     let mut spawn_result = build_lsp_command(program, args, cwd, env, None).spawn();
     #[cfg(windows)]
     {

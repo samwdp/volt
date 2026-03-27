@@ -24,12 +24,12 @@ fn with_clipboard_util<T>(f: impl FnOnce(&sdl3::clipboard::ClipboardUtil) -> T) 
     })
 }
 
-pub(super) fn configure_background_command(command: &mut Command) {
+pub(super) fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
 
-        command.creation_flags(CREATE_NO_WINDOW);
+        _command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 

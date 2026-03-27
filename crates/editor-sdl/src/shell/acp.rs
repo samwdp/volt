@@ -39,10 +39,10 @@ use super::*;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn configure_background_command(command: &mut Command) {
+fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]
     {
-        command.creation_flags(CREATE_NO_WINDOW);
+        _command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -108,6 +108,35 @@ pub(super) fn close_acp_buffer(
     Ok(())
 }
 
+pub(super) fn close_acp_workspace_buffers(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+) -> Result<(), String> {
+    let Some(manager) = runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() else {
+        return Ok(());
+    };
+    let buffer_ids = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffers()
+        .filter(|buffer| {
+            matches!(
+                buffer.kind(),
+                BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+            )
+        })
+        .map(|buffer| buffer.id())
+        .collect::<Vec<_>>();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    for buffer_id in buffer_ids {
+        manager.close_buffer(buffer_id);
+    }
+    Ok(())
+}
+
 fn open_acp_client_buffer(
     runtime: &mut EditorRuntime,
     client_id: &str,
@@ -125,6 +154,10 @@ fn open_acp_client_with_config(
     reuse_existing: bool,
     load_session_id: Option<agent_client_protocol::SessionId>,
 ) -> Result<BufferId, String> {
+    let active_workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
@@ -135,7 +168,7 @@ fn open_acp_client_with_config(
             let manager = manager
                 .lock()
                 .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-            manager.buffer_for_client(&client.id)
+            manager.buffer_for_client(active_workspace_id, &client.id)
         }
     {
         if shell_ui(runtime)
@@ -153,7 +186,7 @@ fn open_acp_client_with_config(
         }
     }
 
-    let (buffer_id, workspace_name) = create_acp_buffer(runtime, &client)?;
+    let (buffer_id, workspace_id, workspace_name) = create_acp_buffer(runtime, &client)?;
     let workspace_root = active_workspace_root(runtime)?
         .or_else(|| env::current_dir().ok())
         .ok_or_else(|| "ACP requires a workspace root or current directory".to_owned())?;
@@ -163,6 +196,7 @@ fn open_acp_client_with_config(
     manager.connect(
         client,
         workspace_root,
+        workspace_id,
         buffer_id,
         load_session_id,
         workspace_name,
@@ -173,7 +207,7 @@ fn open_acp_client_with_config(
 fn create_acp_buffer(
     runtime: &mut EditorRuntime,
     client: &user::acp::AcpClientConfig,
-) -> Result<(BufferId, String), String> {
+) -> Result<(BufferId, WorkspaceId, String), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -210,7 +244,7 @@ fn create_acp_buffer(
     shell_buffer.set_language_id(Some("markdown".to_owned()));
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
-    Ok((buffer_id, workspace_name))
+    Ok((buffer_id, workspace_id, workspace_name))
 }
 
 fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -1156,6 +1190,7 @@ struct AcpManager {
     events: mpsc::Receiver<AcpEvent>,
     sessions: HashMap<agent_client_protocol::SessionId, AcpSessionInfo>,
     buffers: HashMap<BufferId, agent_client_protocol::SessionId>,
+    workspace_client_buffers: HashMap<(WorkspaceId, String), BufferId>,
     pending_clients: HashMap<BufferId, PendingAcpClient>,
     pending_slash: HashMap<BufferId, PendingSlashTrigger>,
     pending_ui_actions: Vec<AcpUiAction>,
@@ -1173,6 +1208,7 @@ impl AcpManager {
             events: event_rx,
             sessions: HashMap::new(),
             buffers: HashMap::new(),
+            workspace_client_buffers: HashMap::new(),
             pending_clients: HashMap::new(),
             pending_slash: HashMap::new(),
             pending_ui_actions: Vec::new(),
@@ -1182,17 +1218,22 @@ impl AcpManager {
         })
     }
 
-    fn buffer_for_client(&self, client_id: &str) -> Option<BufferId> {
-        self.sessions
-            .values()
-            .find(|session| session.client_id == client_id)
-            .map(|session| session.buffer_id)
-            .or_else(|| {
-                self.pending_clients
-                    .values()
-                    .find(|pending| pending.client_id == client_id)
-                    .map(|pending| pending.buffer_id)
-            })
+    fn buffer_for_client(&self, workspace_id: WorkspaceId, client_id: &str) -> Option<BufferId> {
+        self.workspace_client_buffers
+            .get(&(workspace_id, client_id.to_owned()))
+            .copied()
+    }
+
+    fn clear_workspace_client_buffer(
+        &mut self,
+        workspace_id: WorkspaceId,
+        client_id: &str,
+        buffer_id: BufferId,
+    ) {
+        let key = (workspace_id, client_id.to_owned());
+        if self.workspace_client_buffers.get(&key) == Some(&buffer_id) {
+            self.workspace_client_buffers.remove(&key);
+        }
     }
 
     fn buffer_for_session(
@@ -1254,7 +1295,9 @@ impl AcpManager {
     }
 
     fn close_buffer(&mut self, buffer_id: BufferId) {
-        self.pending_clients.remove(&buffer_id);
+        if let Some(pending) = self.pending_clients.remove(&buffer_id) {
+            self.clear_workspace_client_buffer(pending.workspace_id, &pending.client_id, buffer_id);
+        }
         self.pending_slash.remove(&buffer_id);
         self.pending_ui_actions.retain(|action| {
             !matches!(
@@ -1266,7 +1309,13 @@ impl AcpManager {
             )
         });
         if let Some(session_id) = self.buffers.remove(&buffer_id) {
-            self.sessions.remove(&session_id);
+            if let Some(session) = self.sessions.remove(&session_id) {
+                self.clear_workspace_client_buffer(
+                    session.workspace_id,
+                    &session.client_id,
+                    buffer_id,
+                );
+            }
             self.disconnect(session_id);
         }
     }
@@ -1275,25 +1324,34 @@ impl AcpManager {
         &mut self,
         client: user::acp::AcpClientConfig,
         workspace_root: PathBuf,
+        workspace_id: WorkspaceId,
         buffer_id: BufferId,
         load_session_id: Option<agent_client_protocol::SessionId>,
         workspace_name: String,
     ) -> Result<(), String> {
+        let client_id = client.id.clone();
         self.pending_clients.insert(
             buffer_id,
             PendingAcpClient {
-                client_id: client.id.clone(),
-                buffer_id,
+                client_id: client_id.clone(),
                 load_session_id,
                 workspace_root: workspace_root.clone(),
+                workspace_id,
                 workspace_name,
             },
         );
-        self.runtime.send(AcpCommand::Connect {
+        self.workspace_client_buffers
+            .insert((workspace_id, client_id.clone()), buffer_id);
+        if let Err(error) = self.runtime.send(AcpCommand::Connect {
             config: client,
             workspace_root,
             buffer_id,
-        })
+        }) {
+            self.pending_clients.remove(&buffer_id);
+            self.clear_workspace_client_buffer(workspace_id, &client_id, buffer_id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn prompt(
@@ -1555,6 +1613,7 @@ impl AcpManager {
                     AcpSessionInfo {
                         client_id: client_id.clone(),
                         buffer_id,
+                        workspace_id: pending.workspace_id,
                         workspace_name: pending.workspace_name.clone(),
                         title: None,
                         available_commands: Vec::new(),
@@ -1568,13 +1627,11 @@ impl AcpManager {
 
                 // Update buffer name to include session ID for uniqueness
                 let buffer_name = format!("*acp {} [{}]*", client_id, session_id);
-                if let Ok(workspace_id) = runtime.model().active_workspace_id() {
-                    let _ = runtime.model_mut().set_buffer_name(
-                        workspace_id,
-                        buffer_id,
-                        buffer_name.clone(),
-                    );
-                }
+                let _ = runtime.model_mut().set_buffer_name(
+                    pending.workspace_id,
+                    buffer_id,
+                    buffer_name.clone(),
+                );
                 if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
                     buffer.name = buffer_name;
                 }
@@ -1606,7 +1663,13 @@ impl AcpManager {
                 }
             }
             AcpEvent::ClientFailed { buffer_id, message } => {
-                self.pending_clients.remove(&buffer_id);
+                if let Some(pending) = self.pending_clients.remove(&buffer_id) {
+                    self.clear_workspace_client_buffer(
+                        pending.workspace_id,
+                        &pending.client_id,
+                        buffer_id,
+                    );
+                }
                 if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
                     buffer.acp_push_system_message(message);
                 }
@@ -1927,6 +1990,7 @@ impl AcpManager {
             } => {
                 if let Some(session) = self.sessions.remove(&old_session_id) {
                     let client_id = session.client_id.clone();
+                    let workspace_id = session.workspace_id;
                     let workspace_name = session.workspace_name.clone();
                     self.buffers.insert(buffer_id, new_session_id.clone());
                     self.sessions.insert(
@@ -1934,6 +1998,7 @@ impl AcpManager {
                         AcpSessionInfo {
                             client_id: client_id.clone(),
                             buffer_id,
+                            workspace_id,
                             workspace_name,
                             title: None,
                             available_commands: Vec::new(),
@@ -2076,6 +2141,11 @@ impl AcpManager {
                         .map(|request| request.request_id)
                         .collect::<Vec<_>>();
                     self.buffers.remove(&session.buffer_id);
+                    self.clear_workspace_client_buffer(
+                        session.workspace_id,
+                        &session.client_id,
+                        session.buffer_id,
+                    );
                     self.pending_slash.remove(&session.buffer_id);
                     update_acp_input_hint(runtime, session.buffer_id, None, None, &[]);
                     self.dismiss_permission_picker_for_requests(runtime, &removed_request_ids)?;
@@ -2108,15 +2178,16 @@ impl AcpManager {
 
 struct PendingAcpClient {
     client_id: String,
-    buffer_id: BufferId,
     load_session_id: Option<agent_client_protocol::SessionId>,
     workspace_root: PathBuf,
+    workspace_id: WorkspaceId,
     workspace_name: String,
 }
 
 struct AcpSessionInfo {
     client_id: String,
     buffer_id: BufferId,
+    workspace_id: WorkspaceId,
     workspace_name: String,
     title: Option<String>,
     available_commands: Vec<AvailableCommand>,
@@ -3415,6 +3486,7 @@ mod tests {
                 events: event_rx,
                 sessions: HashMap::new(),
                 buffers: HashMap::new(),
+                workspace_client_buffers: HashMap::new(),
                 pending_clients: HashMap::new(),
                 pending_slash: HashMap::new(),
                 pending_ui_actions: Vec::new(),
@@ -3442,6 +3514,15 @@ mod tests {
                 BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
                 None,
             )
+            .map_err(|error| error.to_string())
+    }
+
+    fn test_workspace_id() -> Result<WorkspaceId, String> {
+        let state = ShellState::new().map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model()
+            .active_workspace_id()
             .map_err(|error| error.to_string())
     }
 
@@ -3541,12 +3622,14 @@ mod tests {
     fn close_buffer_disconnects_sessions_and_clears_reuse_state() -> Result<(), String> {
         let (mut manager, mut command_rx) = test_acp_manager();
         let buffer_id = test_buffer_id()?;
+        let workspace_id = test_workspace_id()?;
         let session_id = agent_client_protocol::SessionId::new("session-1");
         manager.sessions.insert(
             session_id.clone(),
             AcpSessionInfo {
                 client_id: "copilot".to_owned(),
                 buffer_id,
+                workspace_id,
                 workspace_name: "project".to_owned(),
                 title: None,
                 available_commands: Vec::new(),
@@ -3559,6 +3642,9 @@ mod tests {
         );
         manager.buffers.insert(buffer_id, session_id.clone());
         manager
+            .workspace_client_buffers
+            .insert((workspace_id, "copilot".to_owned()), buffer_id);
+        manager
             .pending_slash
             .insert(buffer_id, PendingSlashTrigger::Manual);
         manager
@@ -3570,7 +3656,7 @@ mod tests {
 
         manager.close_buffer(buffer_id);
 
-        assert!(manager.buffer_for_client("copilot").is_none());
+        assert!(manager.buffer_for_client(workspace_id, "copilot").is_none());
         assert!(manager.session_for_buffer(buffer_id).is_none());
         assert!(!manager.pending_slash.contains_key(&buffer_id));
         assert!(manager.pending_ui_actions.is_empty());
@@ -3616,6 +3702,7 @@ mod tests {
     fn permission_requests_queue_and_advance_after_resolution() -> Result<(), String> {
         let (mut manager, _command_rx) = test_acp_manager();
         let buffer_id = test_buffer_id()?;
+        let workspace_id = test_workspace_id()?;
         let session_id = agent_client_protocol::SessionId::new("session-1");
         let mut state = ShellState::new().map_err(|error| error.to_string())?;
         manager.sessions.insert(
@@ -3623,6 +3710,7 @@ mod tests {
             AcpSessionInfo {
                 client_id: "copilot".to_owned(),
                 buffer_id,
+                workspace_id,
                 workspace_name: "project".to_owned(),
                 title: None,
                 available_commands: Vec::new(),
@@ -3693,6 +3781,37 @@ mod tests {
         assert_eq!(
             shell_ui(&state.runtime)?.picker_kind(),
             Some(PickerKind::AcpPermission { request_id: 2 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_lookup_is_scoped_to_workspace() -> Result<(), String> {
+        let (mut manager, _command_rx) = test_acp_manager();
+        let buffer_id = test_buffer_id()?;
+        let workspace_id = test_workspace_id()?;
+        let mut other_state = ShellState::new().map_err(|error| error.to_string())?;
+        let window_id = other_state
+            .runtime
+            .model()
+            .active_window_id()
+            .ok_or_else(|| "active window is missing".to_owned())?;
+        let other_workspace_id = other_state
+            .runtime
+            .model_mut()
+            .open_workspace(window_id, "other", Some(PathBuf::from("P:\\other")))
+            .map_err(|error| error.to_string())?;
+        manager
+            .workspace_client_buffers
+            .insert((workspace_id, "copilot".to_owned()), buffer_id);
+
+        assert_eq!(
+            manager.buffer_for_client(workspace_id, "copilot"),
+            Some(buffer_id)
+        );
+        assert_eq!(
+            manager.buffer_for_client(other_workspace_id, "copilot"),
+            None
         );
         Ok(())
     }

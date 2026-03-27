@@ -1242,18 +1242,15 @@ fn terminal_tty_options(config: &LiveTerminalConfig) -> TtyOptions {
         env!("CARGO_PKG_VERSION").to_owned(),
     );
 
-    let mut options = TtyOptions {
+    TtyOptions {
         shell: Some(TtyShell::new(config.program.clone(), config.args.clone())),
         working_directory: config.cwd.clone(),
         drain_on_exit: true,
         env,
+        #[cfg(windows)]
+        escape_args: true,
         ..TtyOptions::default()
-    };
-    #[cfg(windows)]
-    {
-        options.escape_args = true;
     }
-    options
 }
 
 #[cfg(windows)]

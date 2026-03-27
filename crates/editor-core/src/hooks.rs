@@ -18,6 +18,8 @@ pub mod builtins {
     pub const BUFFER_SWITCH: &str = "buffer.switch";
     /// Fires when a workspace is opened.
     pub const WORKSPACE_OPEN: &str = "workspace.open";
+    /// Fires when the active workspace changes.
+    pub const WORKSPACE_SWITCH: &str = "workspace.switch";
     /// Fires when a workspace is closed.
     pub const WORKSPACE_CLOSE: &str = "workspace.close";
     /// Fires after a horizontal pane split.
@@ -35,13 +37,14 @@ pub mod builtins {
     /// Fires when a terminal session exits.
     pub const TERMINAL_EXIT: &str = "terminal.exit";
 
-    pub(super) const DEFINITIONS: [(&str, &str); 14] = [
+    pub(super) const DEFINITIONS: [(&str, &str); 15] = [
         (STARTUP, "Runs during editor startup."),
         (FILE_OPEN, "Runs after a file-backed buffer is opened."),
         (BEFORE_SAVE, "Runs immediately before a buffer is saved."),
         (AFTER_SAVE, "Runs after a buffer is saved."),
         (BUFFER_SWITCH, "Runs when the active buffer changes."),
         (WORKSPACE_OPEN, "Runs when a workspace is opened."),
+        (WORKSPACE_SWITCH, "Runs when the active workspace changes."),
         (WORKSPACE_CLOSE, "Runs when a workspace is closed."),
         (
             PANE_SPLIT_HORIZONTAL,

@@ -47,15 +47,29 @@ jobs:
           $releaseAssets = Join-Path $PWD "release-assets"
           New-Item -ItemType Directory -Force -Path $releaseAssets | Out-Null
           $ext = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
-          $asset = "volt-$($env:RUNNER_OS.ToLower())-$($env:RUNNER_ARCH.ToLower())$ext"
-          $source = Join-Path $PWD "target/release/volt$ext"
-          Copy-Item -Path $source -Destination (Join-Path $releaseAssets $asset)
+          $bundleName = "volt-$($env:RUNNER_OS.ToLower())-$($env:RUNNER_ARCH.ToLower()).zip"
+          $bundleRoot = Join-Path $releaseAssets "bundle-root"
+          $sourceRoot = Join-Path $PWD "target/release"
+          $sourceBinary = Join-Path $sourceRoot "volt$ext"
+          $sourceAssets = Join-Path $sourceRoot "assets"
+          $sourceUser = Join-Path $sourceRoot "user"
+          $bundlePath = Join-Path $releaseAssets $bundleName
+
+          New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
+          Copy-Item -Path $sourceAssets -Destination (Join-Path $bundleRoot "assets") -Recurse
+          Copy-Item -Path $sourceUser -Destination (Join-Path $bundleRoot "user") -Recurse
+          Copy-Item -Path $sourceBinary -Destination (Join-Path $bundleRoot "volt$ext")
+
+          if (Test-Path $bundlePath) {
+            Remove-Item -Path $bundlePath -Force
+          }
+          Compress-Archive -Path (Join-Path $bundleRoot '*') -DestinationPath $bundlePath
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-release
-          path: release-assets/volt-*
+          path: release-assets/*.zip
           if-no-files-found: error
 
   release:
@@ -72,5 +86,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/volt-*
+          files: release-assets/*.zip
           generate_release_notes: true

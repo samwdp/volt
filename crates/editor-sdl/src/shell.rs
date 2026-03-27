@@ -20311,6 +20311,22 @@ pub(crate) fn switch_runtime_workspace(
         .switch_workspace(workspace_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.switch_workspace(workspace_id);
+    let window_id = active_window_id(runtime)?;
+    let workspace_name = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .name()
+        .to_owned();
+    runtime
+        .emit_hook(
+            builtins::WORKSPACE_SWITCH,
+            HookEvent::new()
+                .with_window(window_id)
+                .with_workspace(workspace_id)
+                .with_detail(workspace_name),
+        )
+        .map_err(|error| error.to_string())?;
     sync_active_buffer(runtime)
 }
 
@@ -20406,6 +20422,7 @@ pub(crate) fn delete_runtime_workspace(
     let window_id = active_window_id(runtime)?;
     close_lsp_buffers_for_workspace(runtime, workspace_id)?;
     close_terminal_buffers_for_workspace(runtime, workspace_id)?;
+    acp::close_acp_workspace_buffers(runtime, workspace_id)?;
     let removed = runtime
         .model_mut()
         .close_workspace(workspace_id)
