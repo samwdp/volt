@@ -1249,7 +1249,6 @@ fn terminal_tty_options(config: &LiveTerminalConfig) -> TtyOptions {
         env,
         #[cfg(windows)]
         escape_args: true,
-        ..TtyOptions::default()
     }
 }
 
