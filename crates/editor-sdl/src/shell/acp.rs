@@ -13,16 +13,17 @@ use agent_client_protocol::{
     AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
     CreateTerminalResponse, Error, FileSystemCapabilities, Implementation, InitializeRequest,
     KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, ModelId,
-    ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionKind, ProtocolVersion,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionInfo, SessionMode, SessionModeId, SessionModeState,
-    SessionModelState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, SetSessionModelRequest, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
+    ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionMode,
+    SessionModeId, SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
+    ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use async_trait::async_trait;
 use tokio::{
@@ -152,25 +153,37 @@ fn open_acp_client_with_config(
         }
     }
 
-    let buffer_id = create_acp_buffer(runtime, &client)?;
+    let (buffer_id, workspace_name) = create_acp_buffer(runtime, &client)?;
     let workspace_root = active_workspace_root(runtime)?
         .or_else(|| env::current_dir().ok())
         .ok_or_else(|| "ACP requires a workspace root or current directory".to_owned())?;
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.connect(client, workspace_root, buffer_id, load_session_id)?;
+    manager.connect(
+        client,
+        workspace_root,
+        buffer_id,
+        load_session_id,
+        workspace_name,
+    )?;
     Ok(buffer_id)
 }
 
 fn create_acp_buffer(
     runtime: &mut EditorRuntime,
     client: &user::acp::AcpClientConfig,
-) -> Result<BufferId, String> {
+) -> Result<(BufferId, String), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
+    let workspace_name = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .name()
+        .to_owned();
     let buffer_name = format!("*acp {}*", client.label);
     let buffer_id = runtime
         .model_mut()
@@ -191,29 +204,13 @@ fn create_acp_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let mut shell_buffer =
-        ShellBuffer::from_runtime_buffer(buffer, initial_acp_buffer_lines(client));
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new());
+    shell_buffer.init_acp_view(&client.label);
     shell_buffer.clear_input();
     shell_buffer.set_language_id(Some("markdown".to_owned()));
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
-    Ok(buffer_id)
-}
-
-fn initial_acp_buffer_lines(client: &user::acp::AcpClientConfig) -> Vec<String> {
-    let mut lines = Vec::new();
-    if client.id.eq_ignore_ascii_case("copilot") {
-        lines.push("![copilot](copilot.png)".to_owned());
-        lines.push(String::new());
-    }
-    lines.push(format!("# {}", client.label));
-    lines.push(String::new());
-    lines.push(format!(
-        "{} Connected via ACP.",
-        user::icon_font::symbols::fa::FA_CONNECTDEVELOP
-    ));
-    lines.push(String::new());
-    lines
+    Ok((buffer_id, workspace_name))
 }
 
 fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -266,17 +263,14 @@ pub(super) fn submit_acp_prompt(
     };
     let Some(session_id) = session_id else {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.append_output_lines(&["ACP session is not connected.".to_owned()]);
+        buffer.acp_push_system_message("ACP session is not connected.");
         buffer.clear_input();
         refresh_acp_input_hint(runtime, buffer_id)?;
         return Ok(());
     };
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.append_output_lines(&[format!(
-            "{} **You:** {prompt}{text}",
-            user::icon_font::symbols::md::MD_ACCOUNT
-        )]);
+        buffer.acp_push_user_prompt(format!("{prompt}{text}"));
         buffer.clear_input();
     }
     refresh_acp_input_hint(runtime, buffer_id)?;
@@ -883,6 +877,33 @@ pub(super) fn acp_permission_deny(runtime: &mut EditorRuntime) -> Result<(), Str
     resolve_permission(runtime, PermissionDecision::Deny)
 }
 
+pub(super) fn acp_resolve_permission_option(
+    runtime: &mut EditorRuntime,
+    session_id: &str,
+    option_id: &str,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.resolve_permission_option(
+        agent_client_protocol::SessionId::new(session_id.to_owned()),
+        PermissionOptionId::new(option_id.to_owned()),
+    );
+    Ok(())
+}
+
+pub(super) fn acp_switch_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let _ = buffer.acp_switch_pane();
+    Ok(())
+}
+
 fn resolve_permission(
     runtime: &mut EditorRuntime,
     decision: PermissionDecision,
@@ -900,6 +921,63 @@ fn resolve_permission(
         return Ok(());
     };
     manager.resolve_permission(session_id, decision);
+    Ok(())
+}
+
+fn open_permission_picker(
+    runtime: &mut EditorRuntime,
+    session_id: &agent_client_protocol::SessionId,
+    workspace_name: &str,
+    tool_call: &ToolCallUpdate,
+    options: &[PermissionOption],
+) -> Result<(), String> {
+    let title = tool_call
+        .fields
+        .title
+        .clone()
+        .unwrap_or_else(|| "Tool".to_owned());
+    let entries = options
+        .iter()
+        .map(|option| PickerEntry {
+            item: PickerItem::new(
+                option.option_id.to_string(),
+                option.name.clone(),
+                format!(
+                    "{workspace_name} · {}",
+                    format_permission_option_kind(option.kind)
+                ),
+                None::<String>,
+            ),
+            action: PickerAction::AcpResolvePermission {
+                session_id: session_id.to_string(),
+                option_id: option.option_id.to_string(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let picker = PickerOverlay::from_entries(format!("ACP Permission · {title}"), entries);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn apply_acp_notification(
+    runtime: &mut EditorRuntime,
+    key: String,
+    severity: NotificationSeverity,
+    title: String,
+    body_lines: Vec<String>,
+    active: bool,
+) -> Result<(), String> {
+    shell_ui_mut(runtime)?.apply_notification(
+        NotificationUpdate {
+            key,
+            severity,
+            title,
+            body_lines,
+            progress: None,
+            active,
+        },
+        Instant::now(),
+    );
     Ok(())
 }
 
@@ -1150,6 +1228,7 @@ impl AcpManager {
         workspace_root: PathBuf,
         buffer_id: BufferId,
         load_session_id: Option<agent_client_protocol::SessionId>,
+        workspace_name: String,
     ) -> Result<(), String> {
         self.pending_clients.insert(
             buffer_id,
@@ -1158,6 +1237,7 @@ impl AcpManager {
                 buffer_id,
                 load_session_id,
                 workspace_root: workspace_root.clone(),
+                workspace_name,
             },
         );
         self.runtime.send(AcpCommand::Connect {
@@ -1262,6 +1342,17 @@ impl AcpManager {
         });
     }
 
+    fn resolve_permission_option(
+        &mut self,
+        session_id: agent_client_protocol::SessionId,
+        option_id: agent_client_protocol::PermissionOptionId,
+    ) {
+        let _ = self.runtime.send(AcpCommand::ResolvePermissionOption {
+            session_id,
+            option_id,
+        });
+    }
+
     fn drain_events(&mut self, runtime: &mut EditorRuntime) -> Result<bool, String> {
         let events: Vec<AcpEvent> = self.events.try_iter().collect();
         let changed = !events.is_empty();
@@ -1290,6 +1381,8 @@ impl AcpManager {
                     AcpSessionInfo {
                         client_id,
                         buffer_id,
+                        workspace_name: pending.workspace_name.clone(),
+                        title: None,
                         available_commands: Vec::new(),
                         mode_state: modes,
                         model_state: models,
@@ -1327,22 +1420,146 @@ impl AcpManager {
             AcpEvent::ClientFailed { buffer_id, message } => {
                 self.pending_clients.remove(&buffer_id);
                 if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                    buffer.append_output_lines(&[message]);
+                    buffer.acp_push_system_message(message);
                 }
             }
             AcpEvent::ClientLog { buffer_id, message } => {
                 if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                    buffer.append_output_lines(&[message]);
+                    buffer.acp_push_system_message(message);
                 }
             }
-            AcpEvent::SessionText { session_id, text } => {
+            AcpEvent::SessionUserPrompt { session_id, prompt } => {
                 if let Some(buffer_id) = self
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
                     && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.append_output_text(&text);
+                    buffer.acp_push_user_prompt(prompt);
+                }
+            }
+            AcpEvent::SessionAgentChunk {
+                session_id,
+                content,
+            } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
+                {
+                    buffer.acp_append_agent_chunk(content);
+                }
+            }
+            AcpEvent::SessionPlan { session_id, plan } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
+                {
+                    buffer.acp_set_plan(plan);
+                }
+            }
+            AcpEvent::SessionToolCall {
+                session_id,
+                tool_call,
+            } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
+                {
+                    buffer.acp_upsert_tool_call(tool_call);
+                }
+            }
+            AcpEvent::SessionToolCallUpdate { session_id, update } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
+                {
+                    buffer.acp_update_tool_call(update);
+                }
+            }
+            AcpEvent::SessionInfoUpdated { session_id, update } => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    if let agent_client_protocol::MaybeUndefined::Value(title) = &update.title {
+                        session.title = Some(title.clone());
+                    } else if matches!(update.title, agent_client_protocol::MaybeUndefined::Null) {
+                        session.title = None;
+                    }
+                    if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
+                        buffer.acp_set_session_info(&update);
+                    }
+                }
+            }
+            AcpEvent::PermissionRequested {
+                session_id,
+                tool_call,
+                options,
+            } => {
+                let Some(session) = self.sessions.get(&session_id) else {
+                    return Ok(());
+                };
+                if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
+                    buffer.acp_update_tool_call(tool_call.clone());
+                }
+                open_permission_picker(
+                    runtime,
+                    &session_id,
+                    &session.workspace_name,
+                    &tool_call,
+                    &options,
+                )?;
+                apply_acp_notification(
+                    runtime,
+                    format!("acp.permission.{session_id}"),
+                    NotificationSeverity::Warning,
+                    format!(
+                        "{} {} is requesting permission",
+                        session.workspace_name,
+                        tool_call
+                            .fields
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "Tool".to_owned())
+                    ),
+                    options.iter().map(|option| option.name.clone()).collect(),
+                    true,
+                )?;
+            }
+            AcpEvent::PermissionResolved {
+                session_id,
+                message,
+            } => {
+                if let Some(session) = self.sessions.get(&session_id) {
+                    apply_acp_notification(
+                        runtime,
+                        format!("acp.permission.{session_id}"),
+                        NotificationSeverity::Info,
+                        format!("{} permission resolved", session.workspace_name),
+                        vec![message],
+                        false,
+                    )?;
+                }
+            }
+            AcpEvent::SessionFinished { session_id } => {
+                if let Some(session) = self.sessions.get(&session_id) {
+                    let title = session
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Session {session_id}"));
+                    apply_acp_notification(
+                        runtime,
+                        format!("acp.end-turn.{session_id}"),
+                        NotificationSeverity::Success,
+                        format!("{} {} has finished", session.workspace_name, title),
+                        Vec::new(),
+                        false,
+                    )?;
                 }
             }
             AcpEvent::SessionLines { session_id, lines } => {
@@ -1352,7 +1569,9 @@ impl AcpManager {
                     .map(|session| session.buffer_id)
                     && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.append_output_lines(&lines);
+                    for line in lines {
+                        buffer.acp_push_system_message(line);
+                    }
                 }
             }
             AcpEvent::SessionCommands {
@@ -1515,12 +1734,16 @@ impl AcpManager {
                 models,
             } => {
                 if let Some(session) = self.sessions.remove(&old_session_id) {
+                    let client_id = session.client_id.clone();
+                    let workspace_name = session.workspace_name.clone();
                     self.buffers.insert(buffer_id, new_session_id.clone());
                     self.sessions.insert(
                         new_session_id.clone(),
                         AcpSessionInfo {
-                            client_id: session.client_id,
+                            client_id: client_id.clone(),
                             buffer_id,
+                            workspace_name,
+                            title: None,
                             available_commands: Vec::new(),
                             mode_state: modes,
                             model_state: models,
@@ -1530,7 +1753,12 @@ impl AcpManager {
                         },
                     );
                     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.replace_with_lines(Vec::new());
+                        buffer.init_acp_view(
+                            user::acp::client_by_id(&client_id)
+                                .map(|client| client.label)
+                                .unwrap_or_else(|| "ACP".to_owned())
+                                .as_str(),
+                        );
                         buffer.clear_input();
                     }
                     if let Some(session) = self.sessions.get(&new_session_id) {
@@ -1653,7 +1881,14 @@ impl AcpManager {
                     self.buffers.remove(&session.buffer_id);
                     self.pending_slash.remove(&session.buffer_id);
                     update_acp_input_hint(runtime, session.buffer_id, None, None, &[]);
-                    let _ = message;
+                    apply_acp_notification(
+                        runtime,
+                        format!("acp.permission.{session_id}"),
+                        NotificationSeverity::Info,
+                        format!("{} ACP session disconnected", session.workspace_name),
+                        vec![message],
+                        false,
+                    )?;
                 }
             }
         }
@@ -1666,11 +1901,14 @@ struct PendingAcpClient {
     buffer_id: BufferId,
     load_session_id: Option<agent_client_protocol::SessionId>,
     workspace_root: PathBuf,
+    workspace_name: String,
 }
 
 struct AcpSessionInfo {
     client_id: String,
     buffer_id: BufferId,
+    workspace_name: String,
+    title: Option<String>,
     available_commands: Vec<AvailableCommand>,
     mode_state: Option<SessionModeState>,
     model_state: Option<SessionModelState>,
@@ -1695,9 +1933,41 @@ enum AcpEvent {
         buffer_id: BufferId,
         message: String,
     },
-    SessionText {
+    SessionUserPrompt {
         session_id: agent_client_protocol::SessionId,
-        text: String,
+        prompt: String,
+    },
+    SessionAgentChunk {
+        session_id: agent_client_protocol::SessionId,
+        content: ContentBlock,
+    },
+    SessionPlan {
+        session_id: agent_client_protocol::SessionId,
+        plan: Plan,
+    },
+    SessionToolCall {
+        session_id: agent_client_protocol::SessionId,
+        tool_call: ToolCall,
+    },
+    SessionToolCallUpdate {
+        session_id: agent_client_protocol::SessionId,
+        update: ToolCallUpdate,
+    },
+    SessionInfoUpdated {
+        session_id: agent_client_protocol::SessionId,
+        update: SessionInfoUpdate,
+    },
+    PermissionRequested {
+        session_id: agent_client_protocol::SessionId,
+        tool_call: ToolCallUpdate,
+        options: Vec<PermissionOption>,
+    },
+    PermissionResolved {
+        session_id: agent_client_protocol::SessionId,
+        message: String,
+    },
+    SessionFinished {
+        session_id: agent_client_protocol::SessionId,
     },
     SessionLines {
         session_id: agent_client_protocol::SessionId,
@@ -1785,6 +2055,10 @@ enum AcpCommand {
     ResolvePermission {
         session_id: agent_client_protocol::SessionId,
         decision: PermissionDecision,
+    },
+    ResolvePermissionOption {
+        session_id: agent_client_protocol::SessionId,
+        option_id: PermissionOptionId,
     },
 }
 
@@ -1960,6 +2234,12 @@ async fn acp_runtime_loop(
             } => {
                 resolve_permission_response(state.clone(), session_id, decision);
             }
+            AcpCommand::ResolvePermissionOption {
+                session_id,
+                option_id,
+            } => {
+                resolve_permission_option(state.clone(), session_id, option_id);
+            }
         }
     }
 }
@@ -2066,18 +2346,20 @@ async fn send_acp_prompt(
             .map(|session| session.connection.clone())
     }
     .ok_or_else(|| "ACP session is not connected".to_owned())?;
-    {
-        let mut state = state.borrow_mut();
-        state.pending_agent_newline.insert(session_id.clone(), true);
-    }
     let request = agent_client_protocol::PromptRequest::new(
         session_id.clone(),
         vec![ContentBlock::from(prompt)],
     );
-    connection
+    let response = connection
         .prompt(request)
         .await
         .map_err(|error| format!("ACP prompt failed: {error}"))?;
+    if matches!(response.stop_reason, StopReason::EndTurn) {
+        let _ = state
+            .borrow()
+            .event_tx
+            .send(AcpEvent::SessionFinished { session_id });
+    }
     Ok(())
 }
 
@@ -2132,10 +2414,6 @@ async fn load_acp_session(
         if let Some(session) = state.sessions.remove(&session_id) {
             state.sessions.insert(target_session_id.clone(), session);
         }
-        state.pending_agent_newline.remove(&session_id);
-        state
-            .pending_agent_newline
-            .insert(target_session_id.clone(), true);
     }
     resolve_all_pending_permissions(&state, &session_id);
     let _ = state.borrow().event_tx.send(AcpEvent::SessionLoaded {
@@ -2232,7 +2510,6 @@ async fn disconnect_acp_session(
 ) {
     let session = {
         let mut state = state.borrow_mut();
-        state.pending_agent_newline.remove(&session_id);
         state.sessions.remove(&session_id)
     };
     if let Some(mut session) = session {
@@ -2301,7 +2578,41 @@ fn resolve_permission_response(
         PermissionDecision::Approve => "Permission approved.",
         PermissionDecision::Deny => "Permission denied.",
     };
-    send_session_lines(state, &session_id, vec![label.to_owned()]);
+    let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
+        session_id,
+        message: label.to_owned(),
+    });
+}
+
+fn resolve_permission_option(
+    state: Rc<RefCell<AcpRuntimeState>>,
+    session_id: agent_client_protocol::SessionId,
+    option_id: PermissionOptionId,
+) {
+    let pending = {
+        let mut state = state.borrow_mut();
+        let index = state
+            .pending_permissions
+            .iter()
+            .position(|pending| pending.session_id == session_id);
+        index.and_then(|index| state.pending_permissions.remove(index))
+    };
+    let Some(pending) = pending else {
+        return;
+    };
+    let message = pending
+        .options
+        .iter()
+        .find(|option| option.option_id == option_id)
+        .map(|option| format!("Permission `{}` selected.", option.name))
+        .unwrap_or_else(|| "Permission selected.".to_owned());
+    let _ = pending.responder.send(RequestPermissionOutcome::Selected(
+        SelectedPermissionOutcome::new(option_id.clone()),
+    ));
+    let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
+        session_id,
+        message,
+    });
 }
 
 fn choose_permission_outcome(
@@ -2377,7 +2688,6 @@ struct AcpRuntimeState {
     sessions: HashMap<agent_client_protocol::SessionId, AcpSession>,
     terminals: HashMap<TerminalId, AcpTerminal>,
     pending_permissions: VecDeque<PendingPermission>,
-    pending_agent_newline: HashMap<agent_client_protocol::SessionId, bool>,
     event_tx: mpsc::Sender<AcpEvent>,
 }
 
@@ -2387,7 +2697,6 @@ impl AcpRuntimeState {
             sessions: HashMap::new(),
             terminals: HashMap::new(),
             pending_permissions: VecDeque::new(),
-            pending_agent_newline: HashMap::new(),
             event_tx,
         }
     }
@@ -2420,16 +2729,16 @@ impl Client for AcpClient {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = self.state.borrow_mut();
-            let session_id = args.session_id.clone();
-            let lines = permission_prompt_lines(&args);
             state.pending_permissions.push_back(PendingPermission {
                 session_id: args.session_id.clone(),
                 options: args.options.clone(),
                 responder: tx,
             });
-            let _ = state
-                .event_tx
-                .send(AcpEvent::SessionLines { session_id, lines });
+            let _ = state.event_tx.send(AcpEvent::PermissionRequested {
+                session_id: args.session_id.clone(),
+                tool_call: args.tool_call.clone(),
+                options: args.options.clone(),
+            });
         }
         let outcome = rx.await.unwrap_or(RequestPermissionOutcome::Cancelled);
         Ok(RequestPermissionResponse::new(outcome))
@@ -2642,72 +2951,38 @@ fn handle_session_update(
     update: SessionUpdate,
 ) {
     match update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
+        SessionUpdate::UserMessageChunk(chunk) => {
             if let ContentBlock::Text(text) = chunk.content {
-                let prefix_newline = {
-                    let mut state = state.borrow_mut();
-                    state
-                        .pending_agent_newline
-                        .remove(&session_id)
-                        .unwrap_or(false)
-                };
-                let mut output = text.text;
-                if prefix_newline && !output.starts_with('\n') {
-                    output = format!("\n{output}");
-                }
-                let _ = state.borrow().event_tx.send(AcpEvent::SessionText {
+                let _ = state.borrow().event_tx.send(AcpEvent::SessionUserPrompt {
                     session_id,
-                    text: output,
+                    prompt: text.text,
                 });
             }
         }
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            let _ = state.borrow().event_tx.send(AcpEvent::SessionAgentChunk {
+                session_id,
+                content: chunk.content,
+            });
+        }
         SessionUpdate::AgentThoughtChunk(_) => {}
         SessionUpdate::ToolCall(call) => {
-            let mut lines = vec![format!(
-                "{} **{}** · {}",
-                user::icon_font::symbols::cod::COD_TOOLS,
-                call.title,
-                format_acp_status_badge(&call.status)
-            )];
-            lines.extend(render_tool_call_content(&call.content));
-            let _ = state
-                .borrow()
-                .event_tx
-                .send(AcpEvent::SessionLines { session_id, lines });
+            let _ = state.borrow().event_tx.send(AcpEvent::SessionToolCall {
+                session_id,
+                tool_call: call,
+            });
         }
         SessionUpdate::ToolCallUpdate(update) => {
-            let mut lines = vec![format!(
-                "{} linked update `{}`",
-                user::icon_font::symbols::cod::COD_LINK,
-                update.tool_call_id
-            )];
-            if let Some(status) = update.fields.status {
-                lines.push(format!("  {}", format_acp_status_badge(&status)));
-            }
-            if let Some(content) = update.fields.content {
-                lines.extend(render_tool_call_content(&content));
-            }
             let _ = state
                 .borrow()
                 .event_tx
-                .send(AcpEvent::SessionLines { session_id, lines });
+                .send(AcpEvent::SessionToolCallUpdate { session_id, update });
         }
         SessionUpdate::Plan(plan) => {
-            let mut lines = Vec::new();
-            for entry in plan.entries {
-                lines.push(format!(
-                    "{} {} · {}",
-                    user::icon_font::symbols::cod::COD_NOTEBOOK,
-                    entry.content,
-                    format_acp_status_badge(&entry.status)
-                ));
-            }
-            if !lines.is_empty() {
-                let _ = state
-                    .borrow()
-                    .event_tx
-                    .send(AcpEvent::SessionLines { session_id, lines });
-            }
+            let _ = state
+                .borrow()
+                .event_tx
+                .send(AcpEvent::SessionPlan { session_id, plan });
         }
         SessionUpdate::AvailableCommandsUpdate(update) => {
             let commands = update.available_commands.clone();
@@ -2733,82 +3008,16 @@ fn handle_session_update(
                 });
         }
         SessionUpdate::SessionInfoUpdate(update) => {
-            let _ = update;
+            let _ = state
+                .borrow()
+                .event_tx
+                .send(AcpEvent::SessionInfoUpdated { session_id, update });
         }
         _ => {}
     }
 }
 
-fn format_acp_status_badge(status: &impl std::fmt::Debug) -> String {
-    let raw = format!("{status:?}");
-    let icon = match raw.as_str() {
-        "Pending" | "Running" | "InProgress" => user::icon_font::symbols::cod::COD_LOADING,
-        "Completed" | "Success" | "Succeeded" => user::icon_font::symbols::cod::COD_CHECK,
-        "Failed" | "Error" => user::icon_font::symbols::cod::COD_ERROR,
-        "Cancelled" | "Canceled" | "Denied" => user::icon_font::symbols::cod::COD_CIRCLE_SLASH,
-        _ => user::icon_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
-    };
-    format!("{icon} {}", humanize_debug_label(&raw))
-}
-
-fn humanize_debug_label(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_was_word = false;
-    for character in value.chars() {
-        if matches!(character, '_' | '-') {
-            if !output.ends_with(' ') {
-                output.push(' ');
-            }
-            previous_was_word = false;
-            continue;
-        }
-        let starts_new_word = character.is_ascii_uppercase() && previous_was_word;
-        if starts_new_word && !output.ends_with(' ') {
-            output.push(' ');
-        }
-        output.push(character);
-        previous_was_word = character.is_ascii_lowercase() || character.is_ascii_digit();
-    }
-    output
-}
-
-fn render_tool_call_content(content: &[agent_client_protocol::ToolCallContent]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for item in content {
-        match item {
-            agent_client_protocol::ToolCallContent::Content(content) => {
-                if let ContentBlock::Text(text) = &content.content {
-                    for line in text.text.lines() {
-                        if line.trim().is_empty() {
-                            lines.push(String::new());
-                        } else {
-                            lines.push(format!("  {line}"));
-                        }
-                    }
-                }
-            }
-            agent_client_protocol::ToolCallContent::Diff(diff) => {
-                lines.push(format!(
-                    "  {} `{}` · {} -> {}",
-                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED,
-                    diff.path.display(),
-                    diff.old_text.as_ref().map_or("new", |_| "old"),
-                    "new"
-                ));
-            }
-            agent_client_protocol::ToolCallContent::Terminal(terminal) => {
-                lines.push(format!(
-                    "  {} terminal `{}`",
-                    user::icon_font::symbols::cod::COD_TERMINAL,
-                    terminal.terminal_id
-                ));
-            }
-            _ => {}
-        }
-    }
-    lines
-}
-
+#[cfg(test)]
 fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     let mut lines = vec![format!(
         "{} Permission requested by agent.",
@@ -2855,6 +3064,41 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
         user::icon_font::symbols::cod::COD_CHECKLIST
     ));
     lines
+}
+
+#[cfg(test)]
+fn format_acp_status_badge(status: &impl std::fmt::Debug) -> String {
+    let raw = format!("{status:?}");
+    let icon = match raw.as_str() {
+        "Pending" | "Running" | "InProgress" => user::icon_font::symbols::cod::COD_LOADING,
+        "Completed" | "Success" | "Succeeded" => user::icon_font::symbols::cod::COD_CHECK,
+        "Failed" | "Error" => user::icon_font::symbols::cod::COD_ERROR,
+        "Cancelled" | "Canceled" | "Denied" => user::icon_font::symbols::cod::COD_CIRCLE_SLASH,
+        _ => user::icon_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
+    };
+    format!("{icon} {}", humanize_debug_label(&raw))
+}
+
+#[cfg(test)]
+fn humanize_debug_label(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_word = false;
+    for character in value.chars() {
+        if matches!(character, '_' | '-') {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+            previous_was_word = false;
+            continue;
+        }
+        let starts_new_word = character.is_ascii_uppercase() && previous_was_word;
+        if starts_new_word && !output.ends_with(' ') {
+            output.push(' ');
+        }
+        output.push(character);
+        previous_was_word = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+    output
 }
 
 fn format_permission_option_kind(kind: PermissionOptionKind) -> &'static str {
@@ -2994,7 +3238,8 @@ mod tests {
 
         let rendered = permission_prompt_lines(&request).join("\n");
         assert!(rendered.contains("Read project file"));
-        assert!(rendered.contains("src\\main.rs:12"));
+        assert!(rendered.contains("main.rs"));
+        assert!(rendered.contains("12"));
         assert!(rendered.contains("Allow once (allow once)"));
         assert!(rendered.contains("Reject once (reject once)"));
     }
@@ -3009,6 +3254,8 @@ mod tests {
             AcpSessionInfo {
                 client_id: "copilot".to_owned(),
                 buffer_id,
+                workspace_name: "project".to_owned(),
+                title: None,
                 available_commands: Vec::new(),
                 mode_state: None,
                 model_state: None,

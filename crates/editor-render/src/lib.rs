@@ -3,6 +3,7 @@
 use std::{
     env, fmt, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 /// Pixel-space rectangle used by the shell renderer.
@@ -91,6 +92,13 @@ pub enum DrawCommand {
         y: i32,
         text: String,
         color: RenderColor,
+    },
+    /// Draws an RGBA image scaled into the given rectangle.
+    Image {
+        rect: PixelRect,
+        image_width: u32,
+        image_height: u32,
+        pixels: Arc<[u8]>,
     },
 }
 

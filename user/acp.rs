@@ -89,6 +89,12 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "acp.switch-pane",
+            "Switches focus between the ACP plan and output panes.",
+            "ui.acp.switch-pane",
+            None,
+        ),
+        hook_command(
             "acp.complete-slash",
             "Opens ACP slash command completion.",
             "ui.acp.complete-slash",
@@ -117,6 +123,7 @@ pub fn package() -> PluginPackage {
     let key_bindings = vec![
         PluginKeyBinding::new("Shift+Tab", "acp.cycle-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
+        PluginKeyBinding::new("Ctrl+Tab", "acp.switch-pane", PluginKeymapScope::Global),
     ];
 
     PluginPackage::new("acp", true, "Agent Client Protocol integrations.")

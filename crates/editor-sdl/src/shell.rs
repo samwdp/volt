@@ -22,6 +22,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use agent_client_protocol::{
+    ContentBlock, MaybeUndefined, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    SessionInfoUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+};
+use base64::Engine as _;
 use clipboard::*;
 use ui_overlays::*;
 
@@ -144,6 +149,7 @@ const HOOK_ACP_NEW_SESSION: &str = "ui.acp.new-session";
 const HOOK_ACP_PICK_MODE: &str = "ui.acp.pick-mode";
 const HOOK_ACP_PICK_MODEL: &str = "ui.acp.pick-model";
 const HOOK_ACP_CYCLE_MODE: &str = "ui.acp.cycle-mode";
+const HOOK_ACP_SWITCH_PANE: &str = "ui.acp.switch-pane";
 const HOOK_ACP_COMPLETE_SLASH: &str = "ui.acp.complete-slash";
 const HOOK_PANE_SPLIT_HORIZONTAL: &str = "ui.pane.split-horizontal";
 const HOOK_PANE_SPLIT_VERTICAL: &str = "ui.pane.split-vertical";
@@ -1951,6 +1957,7 @@ pub(crate) struct ShellBuffer {
     read_only: bool,
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
+    acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
     git_fringe: Option<GitFringeState>,
@@ -1977,6 +1984,208 @@ pub(crate) struct ShellBuffer {
     lsp_diagnostics_revision: u64,
     last_edit_at: Option<Instant>,
     vim_buffer_state: VimBufferState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpPane {
+    Plan,
+    Output,
+}
+
+#[derive(Debug, Clone)]
+struct AcpBufferState {
+    session_title: Option<String>,
+    active_pane: AcpPane,
+    plan_entries: Vec<PlanEntry>,
+    output_items: Vec<AcpOutputItem>,
+    tool_item_indices: BTreeMap<String, usize>,
+    plan_pane: AcpPaneState,
+    output_pane: AcpPaneState,
+}
+
+#[derive(Debug, Clone)]
+struct AcpPaneState {
+    text: TextBuffer,
+    render_lines: Vec<AcpRenderedLine>,
+    scroll_row: usize,
+}
+
+#[derive(Debug, Clone)]
+enum AcpOutputItem {
+    UserPrompt(String),
+    AgentBlocks(Vec<ContentBlock>),
+    ToolCall(ToolCall),
+    SystemMessage(String),
+}
+
+#[derive(Debug, Clone)]
+enum AcpRenderedLine {
+    Text(AcpRenderedTextLine),
+    Image(AcpRenderedImageLine),
+    ImageContinuation,
+    Spacer,
+}
+
+#[derive(Debug, Clone)]
+struct AcpRenderedTextLine {
+    prefix: Vec<AcpRenderedSegment>,
+    text: String,
+    text_role: AcpColorRole,
+}
+
+#[derive(Debug, Clone)]
+struct AcpRenderedSegment {
+    text: String,
+    role: AcpColorRole,
+    animate: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AcpRenderedImageLine {
+    label: String,
+    image: Option<AcpDecodedImage>,
+    rows: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AcpDecodedImage {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpColorRole {
+    Default,
+    Muted,
+    Accent,
+    Success,
+    Warning,
+    Error,
+    PriorityHigh,
+    PriorityMedium,
+    PriorityLow,
+}
+
+const ACP_IMAGE_ROWS: usize = 12;
+
+impl Default for AcpPaneState {
+    fn default() -> Self {
+        Self {
+            text: TextBuffer::new(),
+            render_lines: Vec::new(),
+            scroll_row: 0,
+        }
+    }
+}
+
+impl AcpBufferState {
+    fn new(client_label: String) -> Self {
+        let _ = client_label;
+        Self {
+            session_title: None,
+            active_pane: AcpPane::Output,
+            plan_entries: Vec::new(),
+            output_items: Vec::new(),
+            tool_item_indices: BTreeMap::new(),
+            plan_pane: AcpPaneState::default(),
+            output_pane: AcpPaneState::default(),
+        }
+    }
+}
+
+impl AcpPaneState {
+    fn line_count(&self) -> usize {
+        self.text.line_count()
+    }
+
+    fn line_len_chars(&self, line_index: usize) -> usize {
+        self.text.line_len_chars(line_index).unwrap_or(0)
+    }
+
+    fn cursor(&self) -> TextPoint {
+        self.text.cursor()
+    }
+
+    fn set_cursor(&mut self, point: TextPoint) {
+        self.text.set_cursor(point);
+    }
+
+    fn should_follow_output(&self, visible_rows: usize) -> bool {
+        if self.line_count() == 0 {
+            return true;
+        }
+        self.scroll_row.saturating_add(visible_rows.max(1)) + 1 >= self.line_count()
+    }
+
+    fn replace_render_lines(
+        &mut self,
+        render_lines: Vec<AcpRenderedLine>,
+        follow_output: bool,
+        visible_rows: usize,
+    ) {
+        let cursor = self.cursor();
+        let scroll_row = self.scroll_row;
+        let lines = render_lines
+            .iter()
+            .map(AcpRenderedLine::plain_text)
+            .collect::<Vec<_>>();
+        let text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text = text;
+        self.text.mark_clean();
+        self.render_lines = render_lines;
+        let line_count = self.line_count();
+        if line_count == 0 {
+            self.text.set_cursor(TextPoint::default());
+            self.scroll_row = 0;
+            return;
+        }
+        let line = cursor.line.min(line_count.saturating_sub(1));
+        let column = cursor.column.min(self.line_len_chars(line));
+        self.text.set_cursor(TextPoint::new(line, column));
+        if follow_output {
+            self.scroll_row = line_count.saturating_sub(visible_rows.max(1));
+        } else {
+            self.scroll_row = scroll_row.min(line_count.saturating_sub(1));
+        }
+    }
+}
+
+impl AcpRenderedLine {
+    fn plain_text(&self) -> String {
+        match self {
+            Self::Text(line) => {
+                let mut text = String::new();
+                for segment in &line.prefix {
+                    text.push_str(&segment.text);
+                }
+                text.push_str(&line.text);
+                text
+            }
+            Self::Image(line) => line.label.clone(),
+            Self::ImageContinuation | Self::Spacer => String::new(),
+        }
+    }
+}
+
+fn acp_text_segment(text: impl Into<String>, role: AcpColorRole) -> AcpRenderedSegment {
+    AcpRenderedSegment {
+        text: text.into(),
+        role,
+        animate: false,
+    }
+}
+
+fn acp_spinner_segment(role: AcpColorRole) -> AcpRenderedSegment {
+    AcpRenderedSegment {
+        text: user::icon_font::symbols::fa::FA_SPINNER.to_owned(),
+        role,
+        animate: true,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2039,6 +2248,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            acp_state: None,
             git_snapshot: None,
             git_view: None,
             git_fringe: None,
@@ -2085,6 +2295,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            acp_state: None,
             git_snapshot: None,
             git_view: None,
             git_fringe,
@@ -2132,6 +2343,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            acp_state: None,
             git_snapshot: None,
             git_view: None,
             git_fringe: None,
@@ -2175,6 +2387,222 @@ impl ShellBuffer {
 
     fn has_input_field(&self) -> bool {
         self.input.is_some()
+    }
+
+    fn is_acp_buffer(&self) -> bool {
+        self.acp_state.is_some()
+    }
+
+    pub(crate) fn init_acp_view(&mut self, client_label: &str) {
+        self.text = TextBuffer::new();
+        self.undo_tree = UndoTree::new(&self.text);
+        self.scroll_row = 0;
+        self.wrap_cache = None;
+        self.acp_state = Some(AcpBufferState::new(client_label.to_owned()));
+        self.acp_push_system_message(format!(
+            "{} Connected to {client_label}.",
+            user::icon_font::symbols::cod::COD_ROCKET
+        ));
+    }
+
+    pub(crate) fn acp_switch_pane(&mut self) -> bool {
+        let Some(state) = self.acp_state.as_mut() else {
+            return false;
+        };
+        state.active_pane = match state.active_pane {
+            AcpPane::Plan => AcpPane::Output,
+            AcpPane::Output => AcpPane::Plan,
+        };
+        true
+    }
+
+    fn acp_active_pane(&self) -> Option<AcpPane> {
+        self.acp_state.as_ref().map(|state| state.active_pane)
+    }
+
+    fn acp_total_viewport_lines(&self) -> usize {
+        self.viewport_lines.max(2)
+    }
+
+    fn acp_plan_viewport_lines(&self) -> usize {
+        let total = self.acp_total_viewport_lines();
+        let plan = ((total as f32) * 0.4).round() as usize;
+        plan.max(1).min(total.saturating_sub(1))
+    }
+
+    fn acp_output_viewport_lines(&self) -> usize {
+        self.acp_total_viewport_lines()
+            .saturating_sub(self.acp_plan_viewport_lines())
+            .max(1)
+    }
+
+    fn acp_active_pane_state(&self) -> Option<&AcpPaneState> {
+        let state = self.acp_state.as_ref()?;
+        Some(match state.active_pane {
+            AcpPane::Plan => &state.plan_pane,
+            AcpPane::Output => &state.output_pane,
+        })
+    }
+
+    fn current_scroll_row(&self) -> usize {
+        self.acp_active_pane_state()
+            .map(|pane| pane.scroll_row)
+            .unwrap_or(self.scroll_row)
+    }
+
+    fn acp_active_pane_state_mut(&mut self) -> Option<&mut AcpPaneState> {
+        let state = self.acp_state.as_mut()?;
+        Some(match state.active_pane {
+            AcpPane::Plan => &mut state.plan_pane,
+            AcpPane::Output => &mut state.output_pane,
+        })
+    }
+
+    pub(crate) fn acp_push_user_prompt(&mut self, prompt: impl Into<String>) {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            state
+                .output_items
+                .push(AcpOutputItem::UserPrompt(prompt.into()));
+        }
+        self.acp_rebuild_output_view(follow_output);
+    }
+
+    pub(crate) fn acp_push_system_message(&mut self, message: impl Into<String>) {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            state
+                .output_items
+                .push(AcpOutputItem::SystemMessage(message.into()));
+        }
+        self.acp_rebuild_output_view(follow_output);
+    }
+
+    pub(crate) fn acp_append_agent_chunk(&mut self, content: ContentBlock) {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            match state.output_items.last_mut() {
+                Some(AcpOutputItem::AgentBlocks(blocks)) => blocks.push(content),
+                _ => state
+                    .output_items
+                    .push(AcpOutputItem::AgentBlocks(vec![content])),
+            }
+        }
+        self.acp_rebuild_output_view(follow_output);
+    }
+
+    pub(crate) fn acp_set_plan(&mut self, plan: Plan) {
+        if let Some(state) = self.acp_state.as_mut() {
+            state.plan_entries = plan.entries;
+        }
+        self.acp_rebuild_plan_view();
+    }
+
+    pub(crate) fn acp_set_session_info(&mut self, update: &SessionInfoUpdate) {
+        if let Some(state) = self.acp_state.as_mut() {
+            match &update.title {
+                MaybeUndefined::Value(title) => state.session_title = Some(title.clone()),
+                MaybeUndefined::Null => state.session_title = None,
+                MaybeUndefined::Undefined => {}
+            }
+        }
+    }
+
+    pub(crate) fn acp_upsert_tool_call(&mut self, tool_call: ToolCall) {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            let tool_key = tool_call.tool_call_id.to_string();
+            if let Some(index) = state.tool_item_indices.get(tool_key.as_str()).copied() {
+                state.output_items[index] = AcpOutputItem::ToolCall(tool_call);
+            } else {
+                let index = state.output_items.len();
+                state.tool_item_indices.insert(tool_key, index);
+                state.output_items.push(AcpOutputItem::ToolCall(tool_call));
+            }
+        }
+        self.acp_rebuild_output_view(follow_output);
+    }
+
+    pub(crate) fn acp_update_tool_call(&mut self, update: ToolCallUpdate) {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            let tool_key = update.tool_call_id.to_string();
+            if let Some(index) = state.tool_item_indices.get(tool_key.as_str()).copied() {
+                if let Some(AcpOutputItem::ToolCall(tool_call)) = state.output_items.get_mut(index)
+                {
+                    tool_call.update(update.fields.clone());
+                }
+            } else {
+                let tool_call = ToolCall::try_from(update.clone())
+                    .unwrap_or_else(|_| acp_tool_call_from_partial_update(&update));
+                let index = state.output_items.len();
+                state.tool_item_indices.insert(tool_key, index);
+                state.output_items.push(AcpOutputItem::ToolCall(tool_call));
+            }
+        }
+        self.acp_rebuild_output_view(follow_output);
+    }
+
+    fn acp_rebuild_plan_view(&mut self) {
+        let visible_rows = self.acp_plan_viewport_lines();
+        let Some(state) = self.acp_state.as_mut() else {
+            return;
+        };
+        let render_lines = acp_build_plan_lines(&state.plan_entries);
+        state
+            .plan_pane
+            .replace_render_lines(render_lines, false, visible_rows);
+    }
+
+    fn acp_rebuild_output_view(&mut self, follow_output: bool) {
+        let visible_rows = self.acp_output_viewport_lines();
+        let Some(state) = self.acp_state.as_mut() else {
+            return;
+        };
+        let render_lines = acp_build_output_lines(&state.output_items);
+        state
+            .output_pane
+            .replace_render_lines(render_lines, follow_output, visible_rows);
     }
 
     fn input_field(&self) -> Option<&InputField> {
@@ -2348,41 +2776,6 @@ impl ShellBuffer {
         self.invalidate_wrap_cache();
     }
 
-    fn append_output_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let original_cursor = self.cursor_point();
-        let original_scroll = self.scroll_row;
-        let follow_output = self.should_follow_output();
-        if self.line_count() == 0 {
-            self.text.set_cursor(TextPoint::new(0, 0));
-            self.text.insert_text(text);
-        } else {
-            let last_line = self.line_count().saturating_sub(1);
-            let column = self.line_len_chars(last_line);
-            self.text.set_cursor(TextPoint::new(last_line, column));
-            self.text.insert_text(text);
-        }
-        self.text.mark_clean();
-        self.text.set_cursor(original_cursor);
-        if follow_output {
-            self.scroll_output_to_end();
-        } else {
-            self.scroll_row = original_scroll.min(self.line_count().saturating_sub(1));
-        }
-        self.undo_tree = UndoTree::new(&self.text);
-        self.syntax_error = None;
-        self.syntax_lines.clear();
-        if self.language_id.is_some() {
-            self.mark_syntax_dirty();
-        } else {
-            self.syntax_dirty = false;
-            self.last_edit_at = None;
-        }
-        self.invalidate_wrap_cache();
-    }
-
     fn language_id(&self) -> Option<&str> {
         self.language_id.as_deref()
     }
@@ -2392,26 +2785,41 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_row(&self) -> usize {
-        self.text.cursor().line
+        self.acp_active_pane_state()
+            .map(|pane| pane.cursor().line)
+            .unwrap_or_else(|| self.text.cursor().line)
     }
 
     pub(crate) fn cursor_col(&self) -> usize {
-        self.text.cursor().column
+        self.acp_active_pane_state()
+            .map(|pane| pane.cursor().column)
+            .unwrap_or_else(|| self.text.cursor().column)
     }
 
     pub(crate) fn cursor_point(&self) -> TextPoint {
-        self.text.cursor()
+        self.acp_active_pane_state()
+            .map(AcpPaneState::cursor)
+            .unwrap_or_else(|| self.text.cursor())
     }
 
     fn line_count(&self) -> usize {
-        self.text.line_count()
+        self.acp_active_pane_state()
+            .map(AcpPaneState::line_count)
+            .unwrap_or_else(|| self.text.line_count())
     }
 
     fn line_len_chars(&self, line_index: usize) -> usize {
-        self.text.line_len_chars(line_index).unwrap_or(0)
+        self.acp_active_pane_state()
+            .map(|pane| pane.line_len_chars(line_index))
+            .unwrap_or_else(|| self.text.line_len_chars(line_index).unwrap_or(0))
     }
 
     fn should_follow_output(&self) -> bool {
+        if let Some(state) = self.acp_state.as_ref() {
+            return state
+                .output_pane
+                .should_follow_output(self.acp_output_viewport_lines());
+        }
         if self.line_count() == 0 {
             return true;
         }
@@ -2420,6 +2828,12 @@ impl ShellBuffer {
     }
 
     fn scroll_output_to_end(&mut self) {
+        let output_rows = self.acp_output_viewport_lines();
+        if let Some(state) = self.acp_state.as_mut() {
+            state.output_pane.scroll_row =
+                state.output_pane.line_count().saturating_sub(output_rows);
+            return;
+        }
         self.scroll_row = self.line_count().saturating_sub(self.viewport_lines());
     }
 
@@ -2737,74 +3151,129 @@ impl ShellBuffer {
     }
 
     fn move_left(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_left();
+        }
         self.text.move_left()
     }
 
     fn move_right(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_right();
+        }
         self.text.move_right()
     }
 
     fn move_up(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_up();
+        }
         self.text.move_up()
     }
 
     fn move_down(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_down();
+        }
         self.text.move_down()
     }
 
     fn move_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_word_forward();
+        }
         self.text.move_word_forward()
     }
 
     fn move_big_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_big_word_forward();
+        }
         self.text.move_big_word_forward()
     }
 
     fn move_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_word_backward();
+        }
         self.text.move_word_backward()
     }
 
     fn move_big_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_big_word_backward();
+        }
         self.text.move_big_word_backward()
     }
 
     fn move_word_end(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_word_end_forward();
+        }
         self.text.move_word_end_forward()
     }
 
     fn move_big_word_end(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_big_word_end_forward();
+        }
         self.text.move_big_word_end_forward()
     }
 
     fn move_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_word_end_backward();
+        }
         self.text.move_word_end_backward()
     }
 
     fn move_big_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_big_word_end_backward();
+        }
         self.text.move_big_word_end_backward()
     }
 
     fn move_matching_delimiter(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_matching_delimiter();
+        }
         self.text.move_matching_delimiter()
     }
 
     fn move_sentence_forward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_sentence_forward();
+        }
         self.text.move_sentence_forward()
     }
 
     fn move_sentence_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_sentence_backward();
+        }
         self.text.move_sentence_backward()
     }
 
     fn move_paragraph_forward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_paragraph_forward();
+        }
         self.text.move_paragraph_forward()
     }
 
     fn move_paragraph_backward(&mut self) -> bool {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            return pane.text.move_paragraph_backward();
+        }
         self.text.move_paragraph_backward()
     }
 
     pub(crate) fn set_cursor(&mut self, point: TextPoint) {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            pane.set_cursor(point);
+            return;
+        }
         self.text.set_cursor(point);
     }
 
@@ -2814,14 +3283,18 @@ impl ShellBuffer {
 
     fn move_line_start(&mut self) -> bool {
         let before = self.cursor_point();
-        self.text
-            .set_cursor(editor_buffer::TextPoint::new(self.cursor_row(), 0));
+        self.set_cursor(editor_buffer::TextPoint::new(self.cursor_row(), 0));
         self.cursor_point() != before
     }
 
     fn move_line_first_non_blank(&mut self) -> bool {
         let before = self.cursor_point();
-        if let Some(point) = self.text.first_non_blank_in_line(self.cursor_row()) {
+        let row = self.cursor_row();
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(row) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(point) = self.text.first_non_blank_in_line(row) {
             self.text.set_cursor(point);
         }
         self.cursor_point() != before
@@ -2830,19 +3303,18 @@ impl ShellBuffer {
     fn move_line_end(&mut self) -> bool {
         let before = self.cursor_point();
         let line = self.cursor_row();
-        let column = self
-            .text
-            .line_len_chars(line)
-            .map(|line_len| line_len.saturating_sub(1))
-            .unwrap_or(0);
-        self.text
-            .set_cursor(editor_buffer::TextPoint::new(line, column));
+        let column = self.line_len_chars(line).saturating_sub(1);
+        self.set_cursor(editor_buffer::TextPoint::new(line, column));
         self.cursor_point() != before
     }
 
     fn goto_first_line(&mut self) -> bool {
         let before = self.cursor_point();
-        if let Some(point) = self.text.first_non_blank_in_line(0) {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(0) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(point) = self.text.first_non_blank_in_line(0) {
             self.text.set_cursor(point);
         }
         self.cursor_point() != before
@@ -2851,7 +3323,11 @@ impl ShellBuffer {
     fn goto_last_line(&mut self) -> bool {
         let before = self.cursor_point();
         let line = self.line_count().saturating_sub(1);
-        if let Some(point) = self.text.first_non_blank_in_line(line) {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(line) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(point) = self.text.first_non_blank_in_line(line) {
             self.text.set_cursor(point);
         }
         self.cursor_point() != before
@@ -2860,11 +3336,19 @@ impl ShellBuffer {
     fn goto_line(&mut self, line_index: usize) -> bool {
         let before = self.cursor_point();
         let line = line_index.min(self.line_count().saturating_sub(1));
-        let point = self
-            .text
-            .first_non_blank_in_line(line)
-            .unwrap_or(TextPoint::new(line, 0));
-        self.text.set_cursor(point);
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            let point = pane
+                .text
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            pane.text.set_cursor(point);
+        } else {
+            let point = self
+                .text
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            self.text.set_cursor(point);
+        }
         self.cursor_point() != before
     }
 
@@ -3089,6 +3573,12 @@ impl ShellBuffer {
     }
 
     fn scroll_by(&mut self, delta: i32) {
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            let max_scroll = pane.line_count().saturating_sub(1) as i32;
+            let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
+            pane.scroll_row = next as usize;
+            return;
+        }
         let max_scroll = self.line_count().saturating_sub(1) as i32;
         let next = (self.scroll_row as i32 + delta).clamp(0, max_scroll);
         self.scroll_row = next as usize;
@@ -3096,14 +3586,37 @@ impl ShellBuffer {
 
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
+        let plan_rows = self.acp_plan_viewport_lines();
+        let output_rows = self.acp_output_viewport_lines();
+        if let Some(state) = self.acp_state.as_mut() {
+            state.plan_pane.scroll_row = state.plan_pane.scroll_row.min(
+                state
+                    .plan_pane
+                    .line_count()
+                    .saturating_sub(plan_rows.max(1)),
+            );
+            state.output_pane.scroll_row = state.output_pane.scroll_row.min(
+                state
+                    .output_pane
+                    .line_count()
+                    .saturating_sub(output_rows.max(1)),
+            );
+        }
     }
 
     fn viewport_lines(&self) -> usize {
-        self.viewport_lines.max(1)
+        match self.acp_active_pane() {
+            Some(AcpPane::Plan) => self.acp_plan_viewport_lines(),
+            Some(AcpPane::Output) => self.acp_output_viewport_lines(),
+            None => self.viewport_lines.max(1),
+        }
     }
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
         let max_line = self.line_count().saturating_sub(1);
+        if let Some(pane) = self.acp_active_pane_state() {
+            return pane.scroll_row.saturating_add(offset).min(max_line);
+        }
         self.scroll_row.saturating_add(offset).min(max_line)
     }
 
@@ -3121,6 +3634,23 @@ impl ShellBuffer {
     }
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
+        if self.is_acp_buffer() {
+            let visible_rows = visible_rows.max(1);
+            let cursor_row = self.cursor_row();
+            if let Some(pane) = self.acp_active_pane_state_mut() {
+                if cursor_row < pane.scroll_row {
+                    pane.scroll_row = cursor_row;
+                } else {
+                    let bottom = pane
+                        .scroll_row
+                        .saturating_add(visible_rows.saturating_sub(1));
+                    if cursor_row > bottom {
+                        pane.scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
+                    }
+                }
+            }
+            return;
+        }
         let visible_rows = visible_rows.max(1);
         let cursor_row = self.cursor_row();
         if cursor_row < self.scroll_row {
@@ -3203,6 +3733,395 @@ impl ShellBuffer {
         }
         self.scroll_row = new_scroll;
     }
+}
+
+fn acp_tool_call_from_partial_update(update: &ToolCallUpdate) -> ToolCall {
+    let mut tool_call = ToolCall::new(
+        update.tool_call_id.clone(),
+        update
+            .fields
+            .title
+            .clone()
+            .unwrap_or_else(|| "Tool call".to_owned()),
+    );
+    if let Some(kind) = update.fields.kind {
+        tool_call.kind = kind;
+    }
+    if let Some(status) = update.fields.status {
+        tool_call.status = status;
+    }
+    if let Some(content) = update.fields.content.clone() {
+        tool_call.content = content;
+    }
+    if let Some(locations) = update.fields.locations.clone() {
+        tool_call.locations = locations;
+    }
+    if let Some(raw_input) = update.fields.raw_input.clone() {
+        tool_call.raw_input = Some(raw_input);
+    }
+    if let Some(raw_output) = update.fields.raw_output.clone() {
+        tool_call.raw_output = Some(raw_output);
+    }
+    tool_call
+}
+
+fn acp_build_plan_lines(entries: &[PlanEntry]) -> Vec<AcpRenderedLine> {
+    if entries.is_empty() {
+        return vec![AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: vec![acp_icon_segment(
+                user::icon_font::symbols::cod::COD_NOTEBOOK,
+                AcpColorRole::Muted,
+            )],
+            text: " Waiting for plan updates...".to_owned(),
+            text_role: AcpColorRole::Muted,
+        })];
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let mut prefix = acp_plan_status_segments(entry.status.clone(), entry.priority.clone());
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            AcpRenderedLine::Text(AcpRenderedTextLine {
+                prefix,
+                text: entry.content.clone(),
+                text_role: AcpColorRole::Default,
+            })
+        })
+        .collect()
+}
+
+fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
+    let mut lines = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            lines.push(AcpRenderedLine::Spacer);
+        }
+        match item {
+            AcpOutputItem::UserPrompt(prompt) => {
+                let prefix = vec![
+                    acp_icon_segment(
+                        user::icon_font::symbols::cod::COD_PERSON,
+                        AcpColorRole::Accent,
+                    ),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ];
+                lines.extend(acp_multiline_text_lines(
+                    prefix,
+                    prompt,
+                    AcpColorRole::Default,
+                ));
+            }
+            AcpOutputItem::SystemMessage(message) => {
+                let prefix = vec![
+                    acp_icon_segment(user::icon_font::symbols::cod::COD_INFO, AcpColorRole::Muted),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ];
+                lines.extend(acp_multiline_text_lines(
+                    prefix,
+                    message,
+                    AcpColorRole::Muted,
+                ));
+            }
+            AcpOutputItem::AgentBlocks(blocks) => {
+                for block in blocks {
+                    lines.extend(acp_render_content_block(
+                        block,
+                        vec![
+                            acp_icon_segment(
+                                user::icon_font::symbols::cod::COD_COMMENT,
+                                AcpColorRole::Accent,
+                            ),
+                            acp_text_segment(" ", AcpColorRole::Default),
+                        ],
+                        AcpColorRole::Default,
+                    ));
+                }
+            }
+            AcpOutputItem::ToolCall(tool_call) => {
+                let mut prefix = acp_status_segments(tool_call.status);
+                prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+                prefix.push(acp_icon_segment(
+                    acp_tool_kind_icon(tool_call.kind),
+                    AcpColorRole::Accent,
+                ));
+                prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+                lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
+                    prefix,
+                    text: tool_call.title.clone(),
+                    text_role: AcpColorRole::Default,
+                }));
+                for content in &tool_call.content {
+                    lines.extend(acp_render_tool_content(content));
+                }
+                for location in &tool_call.locations {
+                    let line = location
+                        .line
+                        .map(|line| format!("{}:{line}", location.path.display()))
+                        .unwrap_or_else(|| location.path.display().to_string());
+                    lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
+                        prefix: vec![
+                            acp_icon_segment(
+                                user::icon_font::symbols::cod::COD_SEARCH,
+                                AcpColorRole::Muted,
+                            ),
+                            acp_text_segment(" ", AcpColorRole::Default),
+                        ],
+                        text: line,
+                        text_role: AcpColorRole::Muted,
+                    }));
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: vec![acp_icon_segment(
+                user::icon_font::symbols::cod::COD_HISTORY,
+                AcpColorRole::Muted,
+            )],
+            text: " Waiting for session output...".to_owned(),
+            text_role: AcpColorRole::Muted,
+        }));
+    }
+    lines
+}
+
+fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
+    match content {
+        ToolCallContent::Content(content) => acp_render_content_block(
+            &content.content,
+            vec![
+                acp_icon_segment(
+                    user::icon_font::symbols::cod::COD_CHEVRON_RIGHT,
+                    AcpColorRole::Muted,
+                ),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            AcpColorRole::Default,
+        ),
+        ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: vec![
+                acp_icon_segment(
+                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED,
+                    AcpColorRole::Warning,
+                ),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            text: diff.path.display().to_string(),
+            text_role: AcpColorRole::Default,
+        })],
+        ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: vec![
+                acp_icon_segment(
+                    user::icon_font::symbols::cod::COD_TERMINAL,
+                    AcpColorRole::Accent,
+                ),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            text: format!("terminal {}", terminal.terminal_id),
+            text_role: AcpColorRole::Default,
+        })],
+        _ => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: vec![
+                acp_icon_segment(
+                    user::icon_font::symbols::cod::COD_WARNING,
+                    AcpColorRole::Warning,
+                ),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            text: "Unsupported tool content".to_owned(),
+            text_role: AcpColorRole::Warning,
+        })],
+    }
+}
+
+fn acp_render_content_block(
+    block: &ContentBlock,
+    prefix: Vec<AcpRenderedSegment>,
+    text_role: AcpColorRole,
+) -> Vec<AcpRenderedLine> {
+    match block {
+        ContentBlock::Text(text) => acp_multiline_text_lines(prefix, &text.text, text_role),
+        ContentBlock::Image(image) => match acp_decode_image(image) {
+            Ok(decoded) => {
+                let mut lines = vec![AcpRenderedLine::Image(AcpRenderedImageLine {
+                    label: format!(
+                        "{} {}",
+                        user::icon_font::symbols::fa::FA_IMAGE,
+                        image.mime_type
+                    ),
+                    image: Some(decoded),
+                    rows: ACP_IMAGE_ROWS,
+                })];
+                lines.extend(std::iter::repeat_n(
+                    AcpRenderedLine::ImageContinuation,
+                    ACP_IMAGE_ROWS.saturating_sub(1),
+                ));
+                lines
+            }
+            Err(error) => acp_multiline_text_lines(
+                vec![
+                    acp_icon_segment(
+                        user::icon_font::symbols::cod::COD_WARNING,
+                        AcpColorRole::Warning,
+                    ),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ],
+                format!("Image decode failed: {error}"),
+                AcpColorRole::Warning,
+            ),
+        },
+        ContentBlock::Audio(_) | ContentBlock::ResourceLink(_) | ContentBlock::Resource(_) => {
+            acp_multiline_text_lines(
+                vec![
+                    acp_icon_segment(
+                        user::icon_font::symbols::cod::COD_WARNING,
+                        AcpColorRole::Warning,
+                    ),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ],
+                "Unsupported ACP content block",
+                AcpColorRole::Warning,
+            )
+        }
+        _ => acp_multiline_text_lines(
+            vec![
+                acp_icon_segment(
+                    user::icon_font::symbols::cod::COD_WARNING,
+                    AcpColorRole::Warning,
+                ),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            "Unsupported ACP content block",
+            AcpColorRole::Warning,
+        ),
+    }
+}
+
+fn acp_multiline_text_lines(
+    prefix: Vec<AcpRenderedSegment>,
+    text: impl AsRef<str>,
+    text_role: AcpColorRole,
+) -> Vec<AcpRenderedLine> {
+    let text = text.as_ref();
+    let mut lines = Vec::new();
+    let continuation_prefix = acp_padding_prefix(&prefix);
+    let parts = if text.is_empty() {
+        vec![String::new()]
+    } else {
+        text.split('\n').map(str::to_owned).collect::<Vec<_>>()
+    };
+    for (index, line) in parts.into_iter().enumerate() {
+        lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
+            prefix: if index == 0 {
+                prefix.clone()
+            } else {
+                continuation_prefix.clone()
+            },
+            text: line,
+            text_role,
+        }));
+    }
+    lines
+}
+
+fn acp_padding_prefix(prefix: &[AcpRenderedSegment]) -> Vec<AcpRenderedSegment> {
+    let width = prefix
+        .iter()
+        .map(|segment| segment.text.chars().count())
+        .sum();
+    if width == 0 {
+        return Vec::new();
+    }
+    vec![acp_text_segment(" ".repeat(width), AcpColorRole::Muted)]
+}
+
+fn acp_icon_segment(icon: &str, role: AcpColorRole) -> AcpRenderedSegment {
+    acp_text_segment(icon, role)
+}
+
+fn acp_status_segments(status: ToolCallStatus) -> Vec<AcpRenderedSegment> {
+    match status {
+        ToolCallStatus::Pending => vec![acp_icon_segment(
+            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            AcpColorRole::Muted,
+        )],
+        ToolCallStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
+        ToolCallStatus::Completed => vec![acp_icon_segment(
+            user::icon_font::symbols::fa::FA_CHECK,
+            AcpColorRole::Success,
+        )],
+        ToolCallStatus::Failed => vec![acp_icon_segment(
+            user::icon_font::symbols::cod::COD_ERROR,
+            AcpColorRole::Error,
+        )],
+        _ => vec![acp_icon_segment(
+            user::icon_font::symbols::cod::COD_WARNING,
+            AcpColorRole::Warning,
+        )],
+    }
+}
+
+fn acp_plan_status_segments(
+    status: PlanEntryStatus,
+    priority: PlanEntryPriority,
+) -> Vec<AcpRenderedSegment> {
+    match status {
+        PlanEntryStatus::Pending => vec![acp_icon_segment(
+            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            acp_priority_color_role(priority),
+        )],
+        PlanEntryStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
+        PlanEntryStatus::Completed => vec![acp_icon_segment(
+            user::icon_font::symbols::fa::FA_CHECK,
+            AcpColorRole::Success,
+        )],
+        _ => vec![acp_icon_segment(
+            user::icon_font::symbols::cod::COD_WARNING,
+            AcpColorRole::Warning,
+        )],
+    }
+}
+
+fn acp_priority_color_role(priority: PlanEntryPriority) -> AcpColorRole {
+    match priority {
+        PlanEntryPriority::High => AcpColorRole::PriorityHigh,
+        PlanEntryPriority::Medium => AcpColorRole::PriorityMedium,
+        PlanEntryPriority::Low => AcpColorRole::PriorityLow,
+        _ => AcpColorRole::Muted,
+    }
+}
+
+fn acp_tool_kind_icon(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => user::icon_font::symbols::cod::COD_NOTEBOOK,
+        ToolKind::Edit => user::icon_font::symbols::cod::COD_EDIT,
+        ToolKind::Delete => user::icon_font::symbols::cod::COD_DIFF_REMOVED,
+        ToolKind::Move => user::icon_font::symbols::cod::COD_ARROW_SWAP,
+        ToolKind::Search => user::icon_font::symbols::cod::COD_SEARCH,
+        ToolKind::Execute => user::icon_font::symbols::cod::COD_TERMINAL,
+        ToolKind::Think => user::icon_font::symbols::cod::COD_LIGHTBULB,
+        ToolKind::Fetch => user::icon_font::symbols::cod::COD_CLOUD_DOWNLOAD,
+        ToolKind::SwitchMode => user::icon_font::symbols::cod::COD_SYNC,
+        ToolKind::Other => user::icon_font::symbols::cod::COD_TOOLS,
+        _ => user::icon_font::symbols::cod::COD_TOOLS,
+    }
+}
+
+fn acp_decode_image(
+    image: &agent_client_protocol::ImageContent,
+) -> Result<AcpDecodedImage, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let decoded = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(AcpDecodedImage {
+        width,
+        height,
+        pixels: Arc::<[u8]>::from(rgba.into_raw()),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3322,6 +4241,10 @@ enum PickerAction {
     AcpSetModel {
         buffer_id: BufferId,
         model_id: String,
+    },
+    AcpResolvePermission {
+        session_id: String,
+        option_id: String,
     },
     CopyToClipboard(String),
 }
@@ -3637,6 +4560,40 @@ impl ShellUiState {
 
     fn input_mode(&self) -> InputMode {
         self.input_mode
+    }
+
+    fn input_mode_for_buffer(&self, buffer_id: BufferId, active: bool) -> InputMode {
+        if active {
+            self.input_mode
+        } else {
+            self.buffer(buffer_id)
+                .map(|buffer| buffer.vim_buffer_state.input_mode)
+                .unwrap_or(InputMode::Normal)
+        }
+    }
+
+    fn visual_selection_for_buffer(
+        &self,
+        buffer: &ShellBuffer,
+        active: bool,
+    ) -> Option<VisualSelection> {
+        let (input_mode, visual_anchor, visual_kind) = if active {
+            (
+                self.input_mode,
+                self.vim.visual_anchor,
+                self.vim.visual_kind,
+            )
+        } else {
+            (
+                buffer.vim_buffer_state.input_mode,
+                buffer.vim_buffer_state.visual_anchor,
+                buffer.vim_buffer_state.visual_kind,
+            )
+        };
+        if input_mode != InputMode::Visual {
+            return None;
+        }
+        visual_anchor.and_then(|anchor| visual_selection(buffer, anchor, visual_kind))
     }
 
     fn persist_buffer_vim_state(&mut self, buffer_id: BufferId) {
@@ -8366,6 +9323,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_ACP_SWITCH_PANE,
+        "Switches focus between the ACP plan and output panes.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_ACP_COMPLETE_SLASH,
         "Opens ACP slash command completion for the active input.",
     )?;
@@ -9480,6 +10442,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_ACP_SWITCH_PANE,
+            "shell.acp-switch-pane",
+            |_, runtime| {
+                acp::acp_switch_pane(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_ACP_COMPLETE_SLASH,
             "shell.acp-complete-slash",
             |_, runtime| {
@@ -9667,6 +10639,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     model_id,
                 } => {
                     acp::acp_set_model(runtime, buffer_id, &model_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpResolvePermission {
+                    session_id,
+                    option_id,
+                } => {
+                    acp::acp_resolve_permission_option(runtime, &session_id, &option_id)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::CopyToClipboard(text) => {
@@ -14182,7 +15161,9 @@ fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> 
 }
 
 fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
-    let screen_offset = buffer.cursor_row().saturating_sub(buffer.scroll_row);
+    let screen_offset = buffer
+        .cursor_row()
+        .saturating_sub(buffer.current_scroll_row());
     buffer.scroll_by(delta);
     let target_line = buffer.line_at_viewport_offset(screen_offset);
     let _ = buffer.goto_line(target_line);
@@ -14190,7 +15171,7 @@ fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
 
 fn scroll_buffer_viewport_only(buffer: &mut ShellBuffer, delta: i32) {
     buffer.scroll_by(delta);
-    let top = buffer.scroll_row;
+    let top = buffer.current_scroll_row();
     let bottom = buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1));
     if buffer.cursor_row() < top {
         let _ = buffer.goto_line(top);
@@ -20974,7 +21955,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),
                 "Type into the prompt and press Ctrl+Enter to send.".to_owned(),
-                "Use / for slash commands, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
+                "Use / for slash commands, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, Ctrl+Tab to switch ACP panes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
                     .to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),
@@ -21091,13 +22072,8 @@ fn render_shell_state(
         )?;
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
-            let visual_range = (state.input_mode() == InputMode::Visual && active)
-                .then(|| {
-                    state.vim().visual_anchor.and_then(|anchor| {
-                        visual_selection(buffer, anchor, state.vim().visual_kind)
-                    })
-                })
-                .flatten();
+            let input_mode = state.input_mode_for_buffer(buffer.id(), active);
+            let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
             render_buffer(
                 target,
@@ -21107,7 +22083,7 @@ fn render_shell_state(
                 active,
                 visual_range,
                 yank_flash,
-                state.input_mode(),
+                input_mode,
                 state.vim().recording_macro,
                 workspace_name,
                 lsp_server,
@@ -21244,14 +22220,8 @@ fn render_runtime_popup_overlay(
     )?;
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
-        let visual_range = (state.input_mode() == InputMode::Visual)
-            .then(|| {
-                state
-                    .vim()
-                    .visual_anchor
-                    .and_then(|anchor| visual_selection(buffer, anchor, state.vim().visual_kind))
-            })
-            .flatten();
+        let input_mode = state.input_mode_for_buffer(buffer.id(), popup_focus);
+        let visual_range = state.visual_selection_for_buffer(buffer, popup_focus);
         let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
             target,
@@ -21261,7 +22231,7 @@ fn render_runtime_popup_overlay(
             popup_focus,
             visual_range,
             yank_flash,
-            state.input_mode(),
+            input_mode,
             state.vim().recording_macro,
             workspace_name,
             lsp_server,
@@ -22576,201 +23546,224 @@ fn render_buffer(
         )?;
         return Ok(());
     }
-    let fringe_width = cell_width;
-    let line_number_width = cell_width * 5;
-    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
-    let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
-    let cursor_row = buffer.cursor_row();
-    let cursor_col = buffer.cursor_col();
-    let wrapped_lines = collect_wrapped_lines(
-        buffer,
-        buffer.scroll_row,
-        layout.visible_rows,
-        wrap_cols,
-        indent_size,
-    );
-    let mut cursor_row_on_screen = None;
-    let mut cursor_col_on_screen = None;
-    let mut cursor_indent_cols = 0usize;
-    let mut visual_row = 0usize;
-    for wrapped in &wrapped_lines {
-        if wrapped.line_index == cursor_row {
-            let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
-            if let Some(segment) = wrapped.segments.get(segment_index) {
-                cursor_row_on_screen = Some(visual_row + segment_index);
-                cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
-                cursor_indent_cols = if segment_index == 0 {
+    let text_x = rect.x() + 12 + cell_width + cell_width * 5;
+    if buffer.is_acp_buffer() {
+        render_acp_buffer_body(
+            target,
+            buffer,
+            rect,
+            layout,
+            active,
+            input_mode,
+            theme_registry,
+            base_background,
+            foreground,
+            muted,
+            border_color,
+            selection,
+            cursor,
+            cursor_roundness,
+            cell_width,
+            line_height,
+        )?;
+    } else {
+        let fringe_width = cell_width;
+        let line_number_width = cell_width * 5;
+        let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+        let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
+        let cursor_row = buffer.cursor_row();
+        let cursor_col = buffer.cursor_col();
+        let wrapped_lines = collect_wrapped_lines(
+            buffer,
+            buffer.scroll_row,
+            layout.visible_rows,
+            wrap_cols,
+            indent_size,
+        );
+        let mut cursor_row_on_screen = None;
+        let mut cursor_col_on_screen = None;
+        let mut cursor_indent_cols = 0usize;
+        let mut visual_row = 0usize;
+        for wrapped in &wrapped_lines {
+            if wrapped.line_index == cursor_row {
+                let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
+                if let Some(segment) = wrapped.segments.get(segment_index) {
+                    cursor_row_on_screen = Some(visual_row + segment_index);
+                    cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
+                    cursor_indent_cols = if segment_index == 0 {
+                        0
+                    } else {
+                        wrapped.continuation_indent_cols
+                    };
+                }
+            }
+            visual_row = visual_row.saturating_add(wrapped.segments.len());
+            if visual_row >= layout.visible_rows {
+                break;
+            }
+        }
+
+        let show_text_cursor = !buffer.has_input_field()
+            || !active
+            || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
+        if show_text_cursor
+            && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
+                (cursor_row_on_screen, cursor_col_on_screen)
+            && cursor_row_on_screen < layout.visible_rows
+        {
+            let cursor_width = match input_mode {
+                InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+                InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
+            };
+            fill_rounded_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x()
+                        + 12
+                        + fringe_width
+                        + line_number_width
+                        + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
+                    layout.body_y + cursor_row_on_screen as i32 * line_height,
+                    cursor_width,
+                    line_height.max(2) as u32,
+                ),
+                cursor_roundness,
+                cursor,
+            )?;
+        }
+
+        let gutter_x = rect.x() + 12;
+        let fringe_x = gutter_x;
+        let line_number_x = gutter_x + fringe_width;
+        let text_x = line_number_x + line_number_width;
+        let mut visual_row = 0usize;
+        for wrapped in wrapped_lines {
+            let line_index = wrapped.line_index;
+            let line_len = buffer.line_len_chars(line_index);
+            let selection_range = visual_selection.and_then(|selection_state| {
+                selection_columns_for_visual(selection_state, line_index, line_len)
+            });
+            let yank_range = yank_flash.and_then(|selection_state| {
+                selection_columns_for_visual(selection_state, line_index, line_len)
+            });
+            for (segment_index, segment) in wrapped.segments.iter().enumerate() {
+                if visual_row >= layout.visible_rows {
+                    break;
+                }
+                let y = layout.body_y + visual_row as i32 * line_height;
+                let segment_indent_cols = if segment_index == 0 {
                     0
                 } else {
                     wrapped.continuation_indent_cols
                 };
+                let segment_x = text_x + (segment_indent_cols as i32 * cell_width);
+                if let Some((selection_start, selection_end)) = selection_range {
+                    let start = selection_start.max(segment.start_col);
+                    let end = selection_end.min(segment.end_col);
+                    if start < end {
+                        fill_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                segment_x
+                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                y,
+                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                line_height.max(1) as u32,
+                            ),
+                            selection,
+                        )?;
+                    }
+                }
+                if let Some((selection_start, selection_end)) = yank_range {
+                    let start = selection_start.max(segment.start_col);
+                    let end = selection_end.min(segment.end_col);
+                    if start < end {
+                        fill_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                segment_x
+                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                y,
+                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                line_height.max(1) as u32,
+                            ),
+                            yank_flash_color,
+                        )?;
+                    }
+                }
+                if segment_index == 0 {
+                    let diagnostic_severity = user::lsp::SHOW_BUFFER_DIAGNOSTICS
+                        .then(|| buffer.lsp_diagnostic_severity(line_index))
+                        .flatten();
+                    if let Some(severity) = diagnostic_severity {
+                        let color = diagnostic_color(severity);
+                        draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
+                    } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
+                        let color = match kind {
+                            GitFringeKind::Added => git_fringe_added,
+                            GitFringeKind::Modified => git_fringe_modified,
+                            GitFringeKind::Removed => git_fringe_removed,
+                        };
+                        draw_text(target, fringe_x, y, user::gitfringe::SYMBOL, color)?;
+                    }
+                    let line_number = if relative_line_numbers {
+                        if line_index == cursor_row {
+                            0
+                        } else {
+                            cursor_row.abs_diff(line_index)
+                        }
+                    } else {
+                        line_index + 1
+                    };
+                    let line_number_color =
+                        diagnostic_severity.map(diagnostic_color).unwrap_or(muted);
+                    draw_text(
+                        target,
+                        line_number_x,
+                        y,
+                        &format!("{:>4}", line_number),
+                        line_number_color,
+                    )?;
+                }
+                draw_buffer_text(
+                    target,
+                    segment_x,
+                    y,
+                    &wrapped.line,
+                    *segment,
+                    &wrapped.char_map,
+                    buffer.line_syntax_spans(line_index),
+                    theme_registry,
+                    text_color,
+                    cell_width,
+                    block_cursor_text_override(
+                        &wrapped.char_map,
+                        *segment,
+                        line_index,
+                        cursor_row,
+                        cursor_col,
+                        matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                            .then_some(base_background),
+                    ),
+                )?;
+                if user::lsp::SHOW_BUFFER_DIAGNOSTICS && buffer.lsp_enabled() {
+                    draw_diagnostic_underlines_for_segment(
+                        target,
+                        buffer.lsp_diagnostic_line_spans(line_index),
+                        buffer.line_syntax_spans(line_index),
+                        segment_x,
+                        y,
+                        line_len,
+                        *segment,
+                        cell_width,
+                        line_height,
+                    )?;
+                }
+                visual_row = visual_row.saturating_add(1);
             }
-        }
-        visual_row = visual_row.saturating_add(wrapped.segments.len());
-        if visual_row >= layout.visible_rows {
-            break;
-        }
-    }
-
-    let show_text_cursor = !buffer.has_input_field()
-        || !active
-        || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
-    if show_text_cursor
-        && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
-            (cursor_row_on_screen, cursor_col_on_screen)
-        && cursor_row_on_screen < layout.visible_rows
-    {
-        let cursor_width = match input_mode {
-            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
-            InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
-        };
-        fill_rounded_rect(
-            target,
-            PixelRectToRect::rect(
-                rect.x()
-                    + 12
-                    + fringe_width
-                    + line_number_width
-                    + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                layout.body_y + cursor_row_on_screen as i32 * line_height,
-                cursor_width,
-                line_height.max(2) as u32,
-            ),
-            cursor_roundness,
-            cursor,
-        )?;
-    }
-
-    let gutter_x = rect.x() + 12;
-    let fringe_x = gutter_x;
-    let line_number_x = gutter_x + fringe_width;
-    let text_x = line_number_x + line_number_width;
-    let mut visual_row = 0usize;
-    for wrapped in wrapped_lines {
-        let line_index = wrapped.line_index;
-        let line_len = buffer.line_len_chars(line_index);
-        let selection_range = visual_selection.and_then(|selection_state| {
-            selection_columns_for_visual(selection_state, line_index, line_len)
-        });
-        let yank_range = yank_flash.and_then(|selection_state| {
-            selection_columns_for_visual(selection_state, line_index, line_len)
-        });
-        for (segment_index, segment) in wrapped.segments.iter().enumerate() {
             if visual_row >= layout.visible_rows {
                 break;
             }
-            let y = layout.body_y + visual_row as i32 * line_height;
-            let segment_indent_cols = if segment_index == 0 {
-                0
-            } else {
-                wrapped.continuation_indent_cols
-            };
-            let segment_x = text_x + (segment_indent_cols as i32 * cell_width);
-            if let Some((selection_start, selection_end)) = selection_range {
-                let start = selection_start.max(segment.start_col);
-                let end = selection_end.min(segment.end_col);
-                if start < end {
-                    fill_rect(
-                        target,
-                        PixelRectToRect::rect(
-                            segment_x
-                                + (start.saturating_sub(segment.start_col) as i32 * cell_width),
-                            y,
-                            (end.saturating_sub(start) as i32 * cell_width) as u32,
-                            line_height.max(1) as u32,
-                        ),
-                        selection,
-                    )?;
-                }
-            }
-            if let Some((selection_start, selection_end)) = yank_range {
-                let start = selection_start.max(segment.start_col);
-                let end = selection_end.min(segment.end_col);
-                if start < end {
-                    fill_rect(
-                        target,
-                        PixelRectToRect::rect(
-                            segment_x
-                                + (start.saturating_sub(segment.start_col) as i32 * cell_width),
-                            y,
-                            (end.saturating_sub(start) as i32 * cell_width) as u32,
-                            line_height.max(1) as u32,
-                        ),
-                        yank_flash_color,
-                    )?;
-                }
-            }
-            if segment_index == 0 {
-                let diagnostic_severity = user::lsp::SHOW_BUFFER_DIAGNOSTICS
-                    .then(|| buffer.lsp_diagnostic_severity(line_index))
-                    .flatten();
-                if let Some(severity) = diagnostic_severity {
-                    let color = diagnostic_color(severity);
-                    draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
-                } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
-                    let color = match kind {
-                        GitFringeKind::Added => git_fringe_added,
-                        GitFringeKind::Modified => git_fringe_modified,
-                        GitFringeKind::Removed => git_fringe_removed,
-                    };
-                    draw_text(target, fringe_x, y, user::gitfringe::SYMBOL, color)?;
-                }
-                let line_number = if relative_line_numbers {
-                    if line_index == cursor_row {
-                        0
-                    } else {
-                        cursor_row.abs_diff(line_index)
-                    }
-                } else {
-                    line_index + 1
-                };
-                let line_number_color = diagnostic_severity.map(diagnostic_color).unwrap_or(muted);
-                draw_text(
-                    target,
-                    line_number_x,
-                    y,
-                    &format!("{:>4}", line_number),
-                    line_number_color,
-                )?;
-            }
-            draw_buffer_text(
-                target,
-                segment_x,
-                y,
-                &wrapped.line,
-                *segment,
-                &wrapped.char_map,
-                buffer.line_syntax_spans(line_index),
-                theme_registry,
-                text_color,
-                cell_width,
-                block_cursor_text_override(
-                    &wrapped.char_map,
-                    *segment,
-                    line_index,
-                    cursor_row,
-                    cursor_col,
-                    matches!(input_mode, InputMode::Normal | InputMode::Visual)
-                        .then_some(base_background),
-                ),
-            )?;
-            if user::lsp::SHOW_BUFFER_DIAGNOSTICS && buffer.lsp_enabled() {
-                draw_diagnostic_underlines_for_segment(
-                    target,
-                    buffer.lsp_diagnostic_line_spans(line_index),
-                    buffer.line_syntax_spans(line_index),
-                    segment_x,
-                    y,
-                    line_len,
-                    *segment,
-                    cell_width,
-                    line_height,
-                )?;
-            }
-            visual_row = visual_row.saturating_add(1);
-        }
-        if visual_row >= layout.visible_rows {
-            break;
         }
     }
 
@@ -22931,6 +23924,440 @@ fn render_buffer(
     )?;
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_acp_buffer_body(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    input_mode: InputMode,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    selection: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(state) = buffer.acp_state.as_ref() else {
+        return Ok(());
+    };
+    let panel_x = rect.x() + 8;
+    let panel_width = rect.width().saturating_sub(16);
+    let gap = 8i32;
+    let total_height = layout
+        .pane_bottom
+        .saturating_sub(layout.body_y)
+        .max(line_height * 2);
+    let mut plan_height = ((total_height * 2) / 5).max(line_height * 3);
+    let min_output_height = line_height * 4;
+    if total_height - plan_height - gap < min_output_height {
+        plan_height = (total_height - gap - min_output_height).max(line_height * 2);
+    }
+    let output_height = total_height
+        .saturating_sub(plan_height + gap)
+        .max(line_height * 2);
+    let plan_rect = Rect::new(panel_x, layout.body_y, panel_width, plan_height as u32);
+    let output_rect = Rect::new(
+        panel_x,
+        layout.body_y + plan_height + gap,
+        panel_width,
+        output_height as u32,
+    );
+    let panel_background = theme_color(
+        theme_registry,
+        "ui.panel.background",
+        adjust_color(
+            base_background,
+            if is_dark_color(base_background) {
+                8
+            } else {
+                -8
+            },
+        ),
+    );
+    let header_background = theme_color(
+        theme_registry,
+        "ui.panel.header.background",
+        adjust_color(
+            panel_background,
+            if is_dark_color(panel_background) {
+                12
+            } else {
+                -12
+            },
+        ),
+    );
+    let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
+    let active_pane = state.active_pane;
+
+    render_acp_pane(
+        target,
+        &state.plan_pane,
+        active_pane == AcpPane::Plan,
+        plan_rect,
+        "Plan",
+        active,
+        input_mode,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        selection,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    render_acp_pane(
+        target,
+        &state.output_pane,
+        active_pane == AcpPane::Output,
+        output_rect,
+        "Output",
+        active,
+        input_mode,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        selection,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_acp_pane(
+    target: &mut DrawTarget<'_>,
+    pane: &AcpPaneState,
+    pane_active: bool,
+    rect: Rect,
+    title: &str,
+    shell_active: bool,
+    input_mode: InputMode,
+    theme_registry: Option<&ThemeRegistry>,
+    panel_background: Color,
+    header_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    active_border: Color,
+    selection: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let border = if pane_active {
+        active_border
+    } else {
+        border_color
+    };
+    fill_rounded_rect(target, rect, 10, border)?;
+    let inner_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        rect.height().saturating_sub(2),
+    );
+    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
+    let header_height = (line_height + 10).max(line_height);
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + 1,
+            rect.y() + 1,
+            rect.width().saturating_sub(2),
+            header_height as u32,
+        ),
+        if pane_active {
+            blend_color(selection, header_background, 0.45)
+        } else {
+            header_background
+        },
+    )?;
+    draw_text(target, rect.x() + 12, rect.y() + 6, title, foreground)?;
+    let body_x = rect.x() + 10;
+    let body_y = rect.y() + header_height + 4;
+    let body_width = rect.width().saturating_sub(20);
+    let body_height = rect
+        .height()
+        .saturating_sub(header_height as u32)
+        .saturating_sub(12);
+    let visible_rows = (body_height / line_height.max(1) as u32).max(1) as usize;
+    let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
+    let spinner_frame = acp_spinner_frame();
+    let cursor_point = pane.cursor();
+    let show_text_cursor = pane_active
+        && shell_active
+        && !matches!(input_mode, InputMode::Insert | InputMode::Replace);
+    let mut visual_row = 0usize;
+    let mut line_index = pane.scroll_row.min(pane.render_lines.len());
+    while line_index < pane.render_lines.len() && visual_row < visible_rows {
+        match &pane.render_lines[line_index] {
+            AcpRenderedLine::Text(line) => {
+                let prefix_cols = acp_prefix_columns(&line.prefix, spinner_frame);
+                let available_cols = wrap_cols.saturating_sub(prefix_cols).max(1);
+                let segments =
+                    wrap_line_segments_for_line(&line.text, available_cols, available_cols);
+                let cursor_segment = segment_index_for_column(&segments, cursor_point.column);
+                for (segment_index, segment) in segments.iter().enumerate() {
+                    if visual_row >= visible_rows {
+                        break;
+                    }
+                    let y = body_y + visual_row as i32 * line_height;
+                    if show_text_cursor
+                        && cursor_point.line == line_index
+                        && cursor_segment == segment_index
+                    {
+                        let cursor_x = body_x
+                            + (prefix_cols as i32 * cell_width)
+                            + (cursor_point.column.saturating_sub(segment.start_col) as i32
+                                * cell_width);
+                        let cursor_width = match input_mode {
+                            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+                            InputMode::Insert | InputMode::Replace => {
+                                (cell_width / 4).max(2) as u32
+                            }
+                        };
+                        fill_rounded_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                cursor_x,
+                                y,
+                                cursor_width,
+                                line_height.max(2) as u32,
+                            ),
+                            cursor_roundness,
+                            cursor,
+                        )?;
+                    }
+                    if segment_index == 0 {
+                        acp_draw_prefix_segments(
+                            target,
+                            body_x,
+                            y,
+                            &line.prefix,
+                            spinner_frame,
+                            theme_registry,
+                            foreground,
+                            muted,
+                            cursor,
+                            cell_width,
+                        )?;
+                    }
+                    let segment_text =
+                        acp_slice_chars(&line.text, segment.start_col, segment.end_col);
+                    draw_text(
+                        target,
+                        body_x + (prefix_cols as i32 * cell_width),
+                        y,
+                        &segment_text,
+                        acp_color(line.text_role, theme_registry, foreground, muted, cursor),
+                    )?;
+                    visual_row = visual_row.saturating_add(1);
+                }
+                line_index = line_index.saturating_add(1);
+            }
+            AcpRenderedLine::Image(image) => {
+                let remaining_rows = visible_rows.saturating_sub(visual_row);
+                let image_rows = image.rows.min(remaining_rows).max(1);
+                let y = body_y + visual_row as i32 * line_height;
+                let image_rect = PixelRectToRect::rect(
+                    body_x,
+                    y,
+                    body_width,
+                    (image_rows as i32 * line_height).max(line_height) as u32,
+                );
+                fill_rounded_rect(
+                    target,
+                    image_rect,
+                    8,
+                    adjust_color(
+                        panel_background,
+                        if is_dark_color(panel_background) {
+                            10
+                        } else {
+                            -10
+                        },
+                    ),
+                )?;
+                draw_text(target, body_x + 8, y + 6, &image.label, muted)?;
+                if let Some(decoded) = image.image.as_ref() {
+                    let top = y + line_height;
+                    let height = image_rect
+                        .height()
+                        .saturating_sub(line_height.max(1) as u32)
+                        .saturating_sub(8);
+                    if height > 0 {
+                        let width = body_width.saturating_sub(12);
+                        let draw_height = height;
+                        draw_image(
+                            target,
+                            PixelRectToRect::rect(body_x + 6, top + 2, width, draw_height),
+                            decoded.width,
+                            decoded.height,
+                            Arc::clone(&decoded.pixels),
+                        )?;
+                    }
+                }
+                visual_row = visual_row.saturating_add(image_rows);
+                line_index = line_index.saturating_add(image.rows.max(1));
+            }
+            AcpRenderedLine::ImageContinuation => {
+                let y = body_y + visual_row as i32 * line_height;
+                draw_text(target, body_x + 8, y, "image continues…", muted)?;
+                visual_row = visual_row.saturating_add(1);
+                line_index = line_index.saturating_add(1);
+            }
+            AcpRenderedLine::Spacer => {
+                visual_row = visual_row.saturating_add(1);
+                line_index = line_index.saturating_add(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acp_draw_prefix_segments(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    segments: &[AcpRenderedSegment],
+    spinner_frame: &str,
+    theme_registry: Option<&ThemeRegistry>,
+    foreground: Color,
+    muted: Color,
+    accent: Color,
+    cell_width: i32,
+) -> Result<(), ShellError> {
+    let mut draw_x = x;
+    for segment in segments {
+        let text = if segment.animate {
+            spinner_frame
+        } else {
+            segment.text.as_str()
+        };
+        let color = acp_color(segment.role, theme_registry, foreground, muted, accent);
+        draw_text(target, draw_x, y, text, color)?;
+        draw_x += monospace_text_width(text, cell_width) as i32;
+    }
+    Ok(())
+}
+
+fn acp_prefix_columns(segments: &[AcpRenderedSegment], spinner_frame: &str) -> usize {
+    segments
+        .iter()
+        .map(|segment| {
+            if segment.animate {
+                spinner_frame.chars().count()
+            } else {
+                segment.text.chars().count()
+            }
+        })
+        .sum()
+}
+
+fn acp_color(
+    role: AcpColorRole,
+    theme_registry: Option<&ThemeRegistry>,
+    foreground: Color,
+    muted: Color,
+    accent: Color,
+) -> Color {
+    match role {
+        AcpColorRole::Default => foreground,
+        AcpColorRole::Muted => muted,
+        AcpColorRole::Accent => accent,
+        AcpColorRole::Success => theme_color(
+            theme_registry,
+            "git.status.entry.added",
+            Color::RGB(108, 193, 118),
+        ),
+        AcpColorRole::Warning => theme_color(
+            theme_registry,
+            "ui.notification.warning",
+            Color::RGB(209, 154, 102),
+        ),
+        AcpColorRole::Error => theme_color(
+            theme_registry,
+            "ui.notification.error",
+            Color::RGB(224, 107, 117),
+        ),
+        AcpColorRole::PriorityHigh => theme_color(
+            theme_registry,
+            "ui.notification.error",
+            Color::RGB(224, 107, 117),
+        ),
+        AcpColorRole::PriorityMedium => theme_color(
+            theme_registry,
+            "ui.notification.warning",
+            Color::RGB(209, 154, 102),
+        ),
+        AcpColorRole::PriorityLow => theme_color(
+            theme_registry,
+            "ui.notification.info",
+            Color::RGB(110, 170, 255),
+        ),
+    }
+}
+
+fn acp_spinner_frame() -> &'static str {
+    const FRAMES: [&str; 6] = ["◜", "◠", "◝", "◞", "◡", "◟"];
+    let frame = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| ((duration.as_millis() / 120) % FRAMES.len() as u128) as usize)
+        .unwrap_or(0);
+    FRAMES[frame]
+}
+
+fn acp_slice_chars(text: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let mut start_byte = text.len();
+    let mut end_byte = text.len();
+    let mut seen = 0usize;
+    for (index, character) in text.char_indices() {
+        if seen == start {
+            start_byte = index;
+        }
+        if seen == end {
+            end_byte = index;
+            break;
+        }
+        seen = seen.saturating_add(1);
+        if seen == text.chars().count() {
+            end_byte = text.len();
+        }
+        let _ = character;
+    }
+    if start == 0 {
+        start_byte = 0;
+    }
+    if end >= text.chars().count() {
+        end_byte = text.len();
+    }
+    text.get(start_byte..end_byte)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -23616,6 +25043,33 @@ fn present_scene_to_canvas(
             DrawCommand::Text { x, y, text, color } => {
                 render_text_with_fonts(canvas, fonts, *x, *y, text, *color)?;
             }
+            DrawCommand::Image {
+                rect,
+                image_width,
+                image_height,
+                pixels,
+            } => {
+                let mut pixels = pixels.to_vec();
+                let surface = Surface::from_data(
+                    pixels.as_mut_slice(),
+                    *image_width,
+                    *image_height,
+                    image_width.saturating_mul(4),
+                    PixelFormat::RGBA32,
+                )
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                let texture_creator = canvas.texture_creator();
+                let texture = texture_creator
+                    .create_texture_from_surface(&surface)
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                canvas
+                    .copy(
+                        &texture,
+                        None,
+                        Rect::new(rect.x, rect.y, rect.width, rect.height),
+                    )
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
         }
     }
 
@@ -23804,6 +25258,24 @@ fn draw_text(
         }),
     }
 
+    Ok(())
+}
+
+fn draw_image(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    image_width: u32,
+    image_height: u32,
+    pixels: Arc<[u8]>,
+) -> Result<(), ShellError> {
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::Image {
+            rect: to_pixel_rect(rect),
+            image_width,
+            image_height,
+            pixels,
+        }),
+    }
     Ok(())
 }
 

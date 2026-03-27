@@ -1,5 +1,6 @@
 use editor_theme::{Color, Theme, ThemeOption};
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -7,6 +8,8 @@ use std::{
 const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
 const THEME_EXTENSION: &str = "toml";
 const DEFAULT_THEME_ID: &str = "gruvbox-dark";
+const PALETTE_SECTION_NAMES: [&str; 2] = ["palette", "pallet"];
+const PALETTE_REFERENCE_PREFIXES: [&str; 2] = ["palette.", "pallet."];
 // Maximum number of ancestor directories to check when resolving user/themes from current_exe.
 const THEME_SEARCH_DEPTH: usize = 6;
 
@@ -97,11 +100,12 @@ fn parse_theme(path: &Path, source: &str) -> Result<Theme, String> {
         .and_then(toml::Value::as_str)
         .unwrap_or(&id)
         .to_owned();
+    let palette = parse_palette(table)?;
 
     let mut theme = Theme::new(id, name);
     if let Some(tokens) = table.get("tokens").and_then(toml::Value::as_table) {
         for (token, value) in tokens {
-            let color = parse_color(token, value)?;
+            let color = parse_color(token, value, &palette)?;
             theme = theme.with_token(token, color);
         }
     }
@@ -129,6 +133,30 @@ fn parse_theme(path: &Path, source: &str) -> Result<Theme, String> {
     Ok(theme)
 }
 
+fn parse_palette(table: &toml::value::Table) -> Result<BTreeMap<String, Color>, String> {
+    let mut entries = BTreeMap::new();
+    for section_name in PALETTE_SECTION_NAMES {
+        let Some(section) = table.get(section_name) else {
+            continue;
+        };
+        let section = section
+            .as_table()
+            .ok_or_else(|| format!("{section_name} must be a table of palette colors"))?;
+        for (name, value) in section {
+            if entries.insert(name.as_str(), value).is_some() {
+                return Err(format!("palette entry `{name}` is declared more than once"));
+            }
+        }
+    }
+
+    let mut resolved = BTreeMap::new();
+    let mut stack = Vec::new();
+    for name in entries.keys().copied().collect::<Vec<_>>() {
+        resolve_palette_color(name, &entries, &mut resolved, &mut stack)?;
+    }
+    Ok(resolved)
+}
+
 fn theme_id(path: &Path, table: &toml::value::Table) -> Result<String, String> {
     let explicit = table
         .get("id")
@@ -144,11 +172,98 @@ fn theme_id(path: &Path, table: &toml::value::Table) -> Result<String, String> {
     stem.ok_or_else(|| format!("theme `{}` is missing an id", path.display()))
 }
 
-fn parse_color(token: &str, value: &toml::Value) -> Result<Color, String> {
+fn resolve_palette_color<'a>(
+    name: &'a str,
+    entries: &BTreeMap<&'a str, &'a toml::Value>,
+    resolved: &mut BTreeMap<String, Color>,
+    stack: &mut Vec<&'a str>,
+) -> Result<Color, String> {
+    if let Some(color) = resolved.get(name).copied() {
+        return Ok(color);
+    }
+    if let Some(start) = stack.iter().position(|entry| *entry == name) {
+        let mut cycle = stack[start..].to_vec();
+        cycle.push(name);
+        return Err(format!(
+            "palette references form a cycle: {}",
+            cycle.join(" -> ")
+        ));
+    }
+    let value = entries
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("palette entry `{name}` was not found"))?;
+    stack.push(name);
+    let raw = value
+        .as_str()
+        .ok_or_else(|| format!("palette entry `{name}` must be a string"))?;
+    let color = if let Some(color) =
+        parse_hex_color(raw).map_err(|error| format!("palette entry `{name}` {error}"))?
+    {
+        color
+    } else {
+        let Some(reference) = parse_palette_reference(raw) else {
+            return Err(format!(
+                "palette entry `{name}` must be a 6 or 8 digit hex value or a palette reference"
+            ));
+        };
+        if !entries.contains_key(reference) {
+            return Err(format!(
+                "palette entry `{name}` references unknown palette color `{reference}`"
+            ));
+        }
+        resolve_palette_color(reference, entries, resolved, stack)?
+    };
+    stack.pop();
+    resolved.insert(name.to_owned(), color);
+    Ok(color)
+}
+
+fn parse_color(
+    token: &str,
+    value: &toml::Value,
+    palette: &BTreeMap<String, Color>,
+) -> Result<Color, String> {
     let raw = value
         .as_str()
         .ok_or_else(|| format!("token `{token}` must be a string"))?;
-    let hex = raw.trim().trim_start_matches('#');
+    if let Some(color) = parse_hex_color(raw).map_err(|error| format!("token `{token}` {error}"))? {
+        return Ok(color);
+    }
+    let Some(reference) = parse_palette_reference(raw) else {
+        return Err(format!(
+            "token `{token}` must be a 6 or 8 digit hex value or a palette reference"
+        ));
+    };
+    palette
+        .get(reference)
+        .copied()
+        .ok_or_else(|| format!("token `{token}` references unknown palette color `{reference}`"))
+}
+
+fn parse_palette_reference(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    PALETTE_REFERENCE_PREFIXES
+        .into_iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+}
+
+fn parse_hex_color(raw: &str) -> Result<Option<Color>, String> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        return Ok(Some(parse_hex_color_value(hex)?));
+    }
+    let is_plain_hex = matches!(trimmed.len(), 6 | 8)
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    if is_plain_hex {
+        return Ok(Some(parse_hex_color_value(trimmed)?));
+    }
+    Ok(None)
+}
+
+fn parse_hex_color_value(hex: &str) -> Result<Color, String> {
     match hex.len() {
         6 => {
             let r = parse_hex_channel(&hex[0..2])?;
@@ -163,7 +278,7 @@ fn parse_color(token: &str, value: &toml::Value) -> Result<Color, String> {
             let a = parse_hex_channel(&hex[6..8])?;
             Ok(Color::rgba(r, g, b, a))
         }
-        _ => Err(format!("token `{token}` must be a 6 or 8 digit hex value")),
+        _ => Err("must be a 6 or 8 digit hex value".to_owned()),
     }
 }
 
@@ -194,15 +309,21 @@ fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String
 #[cfg(test)]
 mod tests {
     use super::parse_theme;
+    use editor_theme::Color;
 
     #[test]
-    fn parses_theme_tokens_and_options() {
+    fn parse_theme_resolves_palette_references_in_tokens_and_options() {
         let source = r##"
 id = "test-theme"
 name = "Test Theme"
 
+[palette]
+background = "#112233"
+accent = "palette.background"
+
 [tokens]
-"ui.background" = "#112233"
+"ui.background" = "palette.background"
+"ui.cursor" = "palette.accent"
 
 [options]
 font = "Example Mono"
@@ -218,12 +339,34 @@ use_tabs = false
             .unwrap_or_else(|error| panic!("unexpected error: {error}"));
 
         assert_eq!(theme.id(), "test-theme");
-        assert!(theme.color("ui.background").is_some());
+        assert_eq!(
+            theme.color("ui.background"),
+            Some(Color::rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(theme.color("ui.cursor"), Some(Color::rgb(0x11, 0x22, 0x33)));
         assert!(theme.option_string("font").is_some());
         assert!(theme.option_number("font_size").is_some());
         assert_eq!(theme.option_bool("ui.line-number.relative"), Some(true));
         assert_eq!(theme.option_number("langs.rust.indent"), Some(4.0));
         assert_eq!(theme.option_bool("langs.rust.format_on_save"), Some(true));
         assert_eq!(theme.option_bool("langs.rust.use_tabs"), Some(false));
+    }
+
+    #[test]
+    fn parse_theme_accepts_pallet_section_alias() {
+        let source = r##"
+[pallet]
+blue = "#83a598"
+
+[tokens]
+"ui.background" = "pallet.blue"
+"##;
+        let theme = parse_theme(std::path::Path::new("test.toml"), source)
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+        assert_eq!(
+            theme.color("ui.background"),
+            Some(Color::rgb(0x83, 0xa5, 0x98))
+        );
     }
 }

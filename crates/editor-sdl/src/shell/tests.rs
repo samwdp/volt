@@ -1,4 +1,8 @@
 use super::*;
+use agent_client_protocol::{
+    Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+};
 use editor_lsp::LspLogDirection;
 use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
@@ -1918,6 +1922,84 @@ fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> 
 }
 
 #[test]
+fn acp_plan_entries_populate_static_plan_pane() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_set_plan(Plan::new(vec![
+        PlanEntry::new(
+            "Render the ACP plan pane",
+            PlanEntryPriority::High,
+            PlanEntryStatus::Pending,
+        ),
+        PlanEntry::new(
+            "Stream tool output into cards",
+            PlanEntryPriority::Medium,
+            PlanEntryStatus::InProgress,
+        ),
+    ]));
+
+    let acp = buffer.acp_state.as_ref().expect("ACP state missing");
+    assert_eq!(acp.plan_entries.len(), 2);
+    match &acp.plan_pane.render_lines[0] {
+        AcpRenderedLine::Text(line) => {
+            assert_eq!(line.text, "Render the ACP plan pane");
+            assert_eq!(line.prefix[0].role, AcpColorRole::PriorityHigh);
+        }
+        other => panic!("expected text line, got {other:?}"),
+    }
+    match &acp.plan_pane.render_lines[1] {
+        AcpRenderedLine::Text(line) => {
+            assert_eq!(line.text, "Stream tool output into cards");
+            assert!(line.prefix[0].animate);
+        }
+        other => panic!("expected text line, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn acp_tool_call_updates_replace_existing_output_item() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_upsert_tool_call(
+        ToolCall::new("tool-1", "Read file")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::Pending),
+    );
+    buffer.acp_update_tool_call(ToolCallUpdate::new(
+        "tool-1",
+        ToolCallUpdateFields::new()
+            .title("Read src\\main.rs")
+            .status(ToolCallStatus::Completed)
+            .content(vec![ToolCallContent::from("Loaded 42 lines")]),
+    ));
+
+    let acp = buffer.acp_state.as_ref().expect("ACP state missing");
+    let tool_calls = acp
+        .output_items
+        .iter()
+        .filter_map(|item| match item {
+            AcpOutputItem::ToolCall(tool_call) => Some(tool_call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].title, "Read src\\main.rs");
+    assert_eq!(tool_calls[0].status, ToolCallStatus::Completed);
+    assert_eq!(tool_calls[0].content.len(), 1);
+    assert_eq!(acp.tool_item_indices.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Result<(), String> {
     let render_width = 640;
     let render_height = 320;
@@ -2966,6 +3048,47 @@ fn insert_mode_is_buffer_local_across_buffer_switches() -> Result<(), String> {
     let ui = shell_ui(&state.runtime)?;
     assert_eq!(ui.active_buffer_id(), Some(buffer_a));
     assert_eq!(ui.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn insert_mode_is_buffer_local_across_split_focus_changes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_a = install_scratch_test_buffer(&mut state, "*split-vim-a*")?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    cycle_runtime_pane(&mut state.runtime)?;
+
+    let buffer_b = install_scratch_test_buffer(&mut state, "*split-vim-b*")?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_b));
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+
+    cycle_runtime_pane(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_a));
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+
+    cycle_runtime_pane(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_b));
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn inactive_split_render_reads_saved_buffer_input_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_a = install_scratch_test_buffer(&mut state, "*render-vim-a*")?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    cycle_runtime_pane(&mut state.runtime)?;
+
+    let buffer_b = install_scratch_test_buffer(&mut state, "*render-vim-b*")?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_b));
+    assert_eq!(ui.input_mode_for_buffer(buffer_b, true), InputMode::Normal);
+    assert_eq!(ui.input_mode_for_buffer(buffer_a, false), InputMode::Insert);
     Ok(())
 }
 

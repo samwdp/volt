@@ -26,7 +26,8 @@ editor-syntax = { path = "../editor-syntax" }
 editor-terminal = { path = "../editor-terminal" }
 editor-theme = { path = "../editor-theme" }
 sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf", "raw-window-handle"] }
-image = { version = "0.25.1", default-features = false, features = ["png"] }
+image = { version = "0.25.1", default-features = false, features = ["jpeg", "png", "webp"] }
+base64 = "0.22.1"
 fontdue = "0.9.3"
 sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
 user = { package = "volt-user", path = "../../user" }
