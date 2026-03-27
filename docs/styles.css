@@ -129,17 +129,43 @@ pre {
 }
 
 .brand-mark {
+    position: relative;
     display: grid;
     place-items: center;
     width: 42px;
     height: 42px;
     border-radius: 14px;
-    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
-    color: #081018;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 0 28px rgba(0, 232, 255, 0.26);
+    overflow: hidden;
+}
+
+.brand-logo {
+    display: block;
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+}
+
+.brand-mark-fallback {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: transparent;
     font-family: "Orbitron", sans-serif;
     font-weight: 900;
     letter-spacing: 0.06em;
-    box-shadow: 0 0 28px rgba(0, 232, 255, 0.26);
+}
+
+.brand-mark.is-fallback {
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+    border-color: transparent;
+}
+
+.brand-mark.is-fallback .brand-mark-fallback {
+    color: #081018;
 }
 
 .brand-copy {
