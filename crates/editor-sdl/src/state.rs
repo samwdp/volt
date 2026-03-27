@@ -256,6 +256,41 @@ pub(crate) struct BlockInsertState {
     pub(crate) original_line: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VimBufferState {
+    pub(crate) input_mode: InputMode,
+    pub(crate) count: Option<usize>,
+    pub(crate) pending: Option<VimPending>,
+    pub(crate) visual_anchor: Option<TextPoint>,
+    pub(crate) visual_kind: VisualSelectionKind,
+    pub(crate) active_register: Option<char>,
+    pub(crate) pending_change_prefix: Option<VimRecordedInput>,
+    pub(crate) recording_change: bool,
+    pub(crate) finish_change_on_normal: bool,
+    pub(crate) finish_change_after_input: bool,
+    pub(crate) change_buffer: Vec<VimRecordedInput>,
+    pub(crate) block_insert: Option<BlockInsertState>,
+}
+
+impl Default for VimBufferState {
+    fn default() -> Self {
+        Self {
+            input_mode: InputMode::Normal,
+            count: None,
+            pending: None,
+            visual_anchor: None,
+            visual_kind: VisualSelectionKind::Character,
+            active_register: None,
+            pending_change_prefix: None,
+            recording_change: false,
+            finish_change_on_normal: false,
+            finish_change_after_input: false,
+            change_buffer: Vec::new(),
+            block_insert: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct YankFlash {
     pub(crate) buffer_id: BufferId,
@@ -313,5 +348,42 @@ impl VimState {
         self.count = None;
         self.pending = None;
         self.pending_change_prefix = None;
+    }
+
+    pub(crate) fn active_buffer_state(&self, input_mode: InputMode) -> VimBufferState {
+        VimBufferState {
+            input_mode,
+            count: self.count,
+            pending: self.pending,
+            visual_anchor: self.visual_anchor,
+            visual_kind: self.visual_kind,
+            active_register: self.active_register,
+            pending_change_prefix: self.pending_change_prefix.clone(),
+            recording_change: self.recording_change,
+            finish_change_on_normal: self.finish_change_on_normal,
+            finish_change_after_input: self.finish_change_after_input,
+            change_buffer: self.change_buffer.clone(),
+            block_insert: self.block_insert.clone(),
+        }
+    }
+
+    pub(crate) fn apply_active_buffer_state(
+        &mut self,
+        input_mode: &mut InputMode,
+        state: &VimBufferState,
+    ) {
+        *input_mode = state.input_mode;
+        self.count = state.count;
+        self.pending = state.pending;
+        self.visual_anchor = state.visual_anchor;
+        self.visual_kind = state.visual_kind;
+        self.active_register = state.active_register;
+        self.pending_change_prefix
+            .clone_from(&state.pending_change_prefix);
+        self.recording_change = state.recording_change;
+        self.finish_change_on_normal = state.finish_change_on_normal;
+        self.finish_change_after_input = state.finish_change_after_input;
+        self.change_buffer.clone_from(&state.change_buffer);
+        self.block_insert.clone_from(&state.block_insert);
     }
 }

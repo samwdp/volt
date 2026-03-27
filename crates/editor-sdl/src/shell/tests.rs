@@ -629,6 +629,43 @@ fn install_acp_test_buffer(
     Ok(buffer_id)
 }
 
+fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(workspace_id, name, BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    sync_active_buffer(&mut state.runtime)?;
+    Ok(buffer_id)
+}
+
+fn focus_test_buffer(state: &mut ShellState, buffer_id: BufferId) -> Result<(), String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    sync_active_buffer(&mut state.runtime)
+}
+
 fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, String> {
     let workspace_id = state
         .runtime
@@ -2911,6 +2948,46 @@ fn browser_host_focus_parent_event_returns_to_normal_mode() -> Result<(), String
         state.ui().map_err(|error| error.to_string())?.input_mode(),
         InputMode::Normal
     );
+    Ok(())
+}
+
+#[test]
+fn insert_mode_is_buffer_local_across_buffer_switches() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_a = install_scratch_test_buffer(&mut state, "*vim-a*")?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    let buffer_b = install_scratch_test_buffer(&mut state, "*vim-b*")?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_b));
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+
+    focus_test_buffer(&mut state, buffer_a)?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_a));
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn visual_mode_is_buffer_local_across_buffer_switches() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_a = install_scratch_test_buffer(&mut state, "*visual-a*")?;
+    let anchor = TextPoint::new(0, 0);
+    shell_ui_mut(&mut state.runtime)?.enter_visual_mode(anchor, VisualSelectionKind::Character);
+
+    let buffer_b = install_scratch_test_buffer(&mut state, "*visual-b*")?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_b));
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(ui.vim().visual_anchor, None);
+
+    focus_test_buffer(&mut state, buffer_a)?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_a));
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_anchor, Some(anchor));
+    assert_eq!(ui.vim().visual_kind, VisualSelectionKind::Character);
     Ok(())
 }
 

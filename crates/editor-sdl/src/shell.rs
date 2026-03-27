@@ -32,9 +32,9 @@ use crate::browser_host::{
 use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary};
 use crate::state::{
     BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
-    LastSearch, ScrollCommand, ShellMotion, VimFindKind, VimMark, VimOperator, VimPending,
-    VimRecordedInput, VimSearchDirection, VimState, VimTextObjectKind, VimVisualSnapshot,
-    VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
+    LastSearch, ScrollCommand, ShellMotion, VimBufferState, VimFindKind, VimMark, VimOperator,
+    VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTextObjectKind,
+    VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
@@ -1976,6 +1976,7 @@ pub(crate) struct ShellBuffer {
     lsp_diagnostic_lines: BTreeMap<usize, Box<[DiagnosticLineSpan]>>,
     lsp_diagnostics_revision: u64,
     last_edit_at: Option<Instant>,
+    vim_buffer_state: VimBufferState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2063,6 +2064,7 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
+            vim_buffer_state: VimBufferState::default(),
         }
     }
 
@@ -2108,6 +2110,7 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
+            vim_buffer_state: VimBufferState::default(),
         }
     }
 
@@ -2154,6 +2157,7 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
+            vim_buffer_state: VimBufferState::default(),
         }
     }
 
@@ -3635,11 +3639,43 @@ impl ShellUiState {
         self.input_mode
     }
 
+    fn persist_buffer_vim_state(&mut self, buffer_id: BufferId) {
+        let state = self.vim.active_buffer_state(self.input_mode);
+        if let Some(buffer) = self.buffer_mut(buffer_id) {
+            buffer.vim_buffer_state = state;
+        }
+    }
+
+    fn persist_active_buffer_vim_state(&mut self) {
+        if let Some(buffer_id) = self.active_buffer_id() {
+            self.persist_buffer_vim_state(buffer_id);
+        }
+    }
+
+    fn restore_buffer_vim_state(&mut self, buffer_id: BufferId) {
+        let state = self
+            .buffer(buffer_id)
+            .map(|buffer| buffer.vim_buffer_state.clone())
+            .unwrap_or_default();
+        self.vim
+            .apply_active_buffer_state(&mut self.input_mode, &state);
+    }
+
+    fn restore_active_buffer_vim_state(&mut self) {
+        if let Some(buffer_id) = self.active_buffer_id() {
+            self.restore_buffer_vim_state(buffer_id);
+        } else {
+            self.vim
+                .apply_active_buffer_state(&mut self.input_mode, &VimBufferState::default());
+        }
+    }
+
     fn enter_normal_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.persist_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -3649,6 +3685,7 @@ impl ShellUiState {
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.persist_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -3658,6 +3695,7 @@ impl ShellUiState {
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.persist_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -3667,6 +3705,7 @@ impl ShellUiState {
         self.vim.visual_anchor = Some(anchor);
         self.vim.visual_kind = kind;
         self.vim.clear_transient();
+        self.persist_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -3696,10 +3735,12 @@ impl ShellUiState {
     }
 
     fn switch_workspace(&mut self, workspace_id: WorkspaceId) {
+        self.persist_active_buffer_vim_state();
         if self.active_workspace != workspace_id {
             self.previous_workspace = Some(self.active_workspace);
             self.active_workspace = workspace_id;
         }
+        self.restore_active_buffer_vim_state();
         self.close_picker();
         self.close_autocomplete();
         self.close_hover();
@@ -3729,6 +3770,10 @@ impl ShellUiState {
     }
 
     fn remove_workspace(&mut self, workspace_id: WorkspaceId) {
+        let active_workspace_removed = self.active_workspace == workspace_id;
+        if active_workspace_removed {
+            self.persist_active_buffer_vim_state();
+        }
         let removed = self.workspace_views.remove(&workspace_id);
         self.attached_lsp_servers.remove(&workspace_id);
         if let Some(removed) = removed {
@@ -3740,6 +3785,7 @@ impl ShellUiState {
         }
         if self.active_workspace == workspace_id {
             self.active_workspace = self.default_workspace;
+            self.restore_active_buffer_vim_state();
         }
     }
 
@@ -3777,11 +3823,13 @@ impl ShellUiState {
     }
 
     fn focus_pane(&mut self, pane_id: PaneId) {
+        self.persist_active_buffer_vim_state();
         if let Some(view) = self.workspace_view_mut()
             && let Some(index) = view.panes.iter().position(|pane| pane.pane_id == pane_id)
         {
             view.active_pane = index;
         }
+        self.restore_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -3814,12 +3862,13 @@ impl ShellUiState {
         self.workspace_views.get_mut(&self.active_workspace)
     }
 
-    fn insert_buffer(&mut self, buffer: ShellBuffer) {
+    fn insert_buffer(&mut self, mut buffer: ShellBuffer) {
         if let Some(existing) = self
             .buffers
             .iter_mut()
             .find(|existing| existing.id() == buffer.id())
         {
+            buffer.vim_buffer_state = existing.vim_buffer_state.clone();
             *existing = buffer;
         } else {
             self.buffers.push(buffer);
@@ -3827,6 +3876,10 @@ impl ShellUiState {
     }
 
     fn remove_buffer(&mut self, buffer_id: BufferId) {
+        let removed_active_buffer = self.active_buffer_id() == Some(buffer_id);
+        if !removed_active_buffer {
+            self.persist_active_buffer_vim_state();
+        }
         self.buffers.retain(|buffer| buffer.id() != buffer_id);
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
@@ -3845,6 +3898,9 @@ impl ShellUiState {
             if view.active_pane >= view.panes.len() {
                 view.active_pane = 0;
             }
+        }
+        if removed_active_buffer {
+            self.restore_active_buffer_vim_state();
         }
     }
 
@@ -4028,6 +4084,7 @@ impl ShellUiState {
     }
 
     fn focus_buffer_in_active_pane(&mut self, buffer_id: BufferId) {
+        self.persist_active_buffer_vim_state();
         if self.buffers.iter().any(|buffer| buffer.id() == buffer_id)
             && let Some(view) = self.workspace_view_mut()
             && let Some(pane) = view.panes.get_mut(view.active_pane)
@@ -4037,6 +4094,7 @@ impl ShellUiState {
             }
             pane.buffer_id = buffer_id;
         }
+        self.restore_active_buffer_vim_state();
     }
 
     fn focus_buffer(&mut self, buffer_id: BufferId) {
@@ -4059,6 +4117,7 @@ impl ShellUiState {
     }
 
     fn close_pane(&mut self, pane_id: PaneId) {
+        self.persist_active_buffer_vim_state();
         if let Some(view) = self.workspace_view_mut()
             && view.panes.len() > 1
             && let Some(index) = view.panes.iter().position(|pane| pane.pane_id == pane_id)
@@ -4073,6 +4132,7 @@ impl ShellUiState {
                 view.active_pane = view.active_pane.min(view.panes.len().saturating_sub(1));
             }
         }
+        self.restore_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -4104,6 +4164,7 @@ impl ShellUiState {
     }
 
     fn shift_active_pane(&mut self, delta: isize) -> Option<PaneId> {
+        self.persist_active_buffer_vim_state();
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
             && view.panes.len() > 1
@@ -4112,16 +4173,19 @@ impl ShellUiState {
             let next = (view.active_pane as isize + delta).rem_euclid(pane_count);
             view.active_pane = next as usize;
         }
+        self.restore_active_buffer_vim_state();
         self.active_pane_id()
     }
 
     fn cycle_active_pane(&mut self) -> Option<PaneId> {
+        self.persist_active_buffer_vim_state();
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
             && view.panes.len() > 1
         {
             view.active_pane = (view.active_pane + 1) % view.panes.len();
         }
+        self.restore_active_buffer_vim_state();
         self.active_pane_id()
     }
 }
