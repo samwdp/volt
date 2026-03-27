@@ -10,4 +10,11 @@ workspace = true
 
 [dependencies]
 editor-core = { path = "../editor-core" }
+editor-dap = { path = "../editor-dap" }
+editor-fs = { path = "../editor-fs" }
+editor-git = { path = "../editor-git" }
+editor-icons = { path = "../editor-icons" }
+editor-lsp = { path = "../editor-lsp" }
 editor-plugin-api = { path = "../editor-plugin-api" }
+editor-syntax = { path = "../editor-syntax" }
+editor-theme = { path = "../editor-theme" }

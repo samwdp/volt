@@ -3,6 +3,14 @@
 //! This crate intentionally keeps feature packages as Rust modules living directly
 //! under the `user/` directory so the future extension model matches the planned
 //! 4coder-style workflow.
+//!
+//! # Distribution model
+//!
+//! The user library is compiled as both a `cdylib` (for runtime loading by
+//! `volt.exe`) and an `rlib` (for linking during development).  The public
+//! [`UserLibraryImpl`] struct implements the [`editor_plugin_host::UserLibrary`]
+//! trait so the host can call into the user library without direct source-level
+//! coupling.
 
 /// Agent Client Protocol integrations.
 pub mod acp;
@@ -20,11 +28,10 @@ pub mod git;
 pub mod gitfringe;
 /// Cursor-anchored hover commands and provider ordering.
 pub mod hover;
-/// Bundled icon-font symbols and metadata.
+/// Bundled icon-font symbols and metadata (backed by editor-icons).
 pub mod icon_font;
-/// Bundled icon-font symbol modules.
-#[path = "nerd_font_symbols/mod.rs"]
-pub mod icon_font_symbols;
+/// Bundled icon-font symbol modules (re-exported from editor-icons).
+pub use editor_icons::symbols as icon_font_symbols;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
 /// Language-specific registrations.
@@ -111,6 +118,315 @@ pub fn debug_adapters() -> Vec<DebugAdapterSpec> {
 pub fn themes() -> Vec<Theme> {
     theme::themes()
 }
+
+// ─── UserLibrary trait implementation ────────────────────────────────────────
+
+/// Concrete implementation of [`editor_plugin_host::UserLibrary`] backed by
+/// the modules compiled into this crate.
+///
+/// # Static vs. dynamic loading
+///
+/// During development, create an instance of this struct and pass it to
+/// `ShellConfig` (via `Box::new(UserLibraryImpl)` or `Arc::new`).
+///
+/// For distribution, the same functions are also exported as C-ABI symbols
+/// (see the bottom of this file) so that `volt.exe` can load `user.dll` /
+/// `libuser.so` dynamically at runtime without recompiling the editor binary.
+#[derive(Debug, Clone, Copy)]
+pub struct UserLibraryImpl;
+
+use editor_plugin_api::{
+    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilDefaults, OilKeyAction,
+    OilKeybindings, TerminalConfig, WorkspaceRoot,
+};
+use editor_plugin_host::{StatuslineContext, UserLibrary};
+
+impl UserLibrary for UserLibraryImpl {
+    fn packages(&self) -> Vec<PluginPackage> {
+        packages()
+    }
+
+    fn themes(&self) -> Vec<Theme> {
+        themes()
+    }
+
+    fn syntax_languages(&self) -> Vec<LanguageConfiguration> {
+        syntax_languages()
+    }
+
+    fn language_servers(&self) -> Vec<LanguageServerSpec> {
+        language_servers()
+    }
+
+    fn debug_adapters(&self) -> Vec<DebugAdapterSpec> {
+        debug_adapters()
+    }
+
+    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider> {
+        autocomplete::providers()
+            .into_iter()
+            .map(|p| AutocompleteProvider {
+                id: p.id,
+                label: p.label,
+                icon: p.icon,
+                item_icon: p.item_icon,
+                or_group: p.or_group,
+            })
+            .collect()
+    }
+
+    fn hover_providers(&self) -> Vec<HoverProvider> {
+        hover::providers()
+            .into_iter()
+            .map(|p| HoverProvider {
+                id: p.id,
+                label: p.label,
+                icon: p.icon,
+                line_limit: hover::LINE_LIMIT,
+            })
+            .collect()
+    }
+
+    fn acp_clients(&self) -> Vec<AcpClient> {
+        acp::clients()
+            .into_iter()
+            .map(|c| AcpClient {
+                id: c.id,
+                label: c.label,
+                command: c.command,
+                args: c.args,
+                env: c.env,
+                cwd: c.cwd,
+            })
+            .collect()
+    }
+
+    fn acp_client_by_id(&self, id: &str) -> Option<AcpClient> {
+        acp::client_by_id(id).map(|c| AcpClient {
+            id: c.id,
+            label: c.label,
+            command: c.command,
+            args: c.args,
+            env: c.env,
+            cwd: c.cwd,
+        })
+    }
+
+    fn workspace_roots(&self) -> Vec<WorkspaceRoot> {
+        workspace::project_search_roots()
+            .into_iter()
+            .map(|r| WorkspaceRoot {
+                path: r.root().display().to_string(),
+                max_depth: r.max_depth(),
+            })
+            .collect()
+    }
+
+    fn terminal_config(&self) -> TerminalConfig {
+        TerminalConfig {
+            program: terminal::default_shell_program(),
+            args: terminal::default_shell_args(),
+        }
+    }
+
+    fn oil_defaults(&self) -> OilDefaults {
+        let d = oil::defaults();
+        OilDefaults {
+            show_hidden: d.show_hidden,
+            sort_mode: match d.sort_mode {
+                oil::OilSortMode::TypeThenName => editor_plugin_api::OilSortMode::TypeThenName,
+                oil::OilSortMode::TypeThenNameDesc => {
+                    editor_plugin_api::OilSortMode::TypeThenNameDesc
+                }
+            },
+            trash_enabled: d.trash_enabled,
+        }
+    }
+
+    fn oil_keybindings(&self) -> OilKeybindings {
+        let k = oil::keybindings();
+        OilKeybindings {
+            open_entry: k.open_entry,
+            open_vertical_split: k.open_vertical_split,
+            open_horizontal_split: k.open_horizontal_split,
+            open_new_pane: k.open_new_pane,
+            preview_entry: k.preview_entry,
+            refresh: k.refresh,
+            close: k.close,
+            prefix: k.prefix,
+            open_parent: k.open_parent,
+            open_workspace_root: k.open_workspace_root,
+            set_root: k.set_root,
+            show_help: k.show_help,
+            cycle_sort: k.cycle_sort,
+            toggle_hidden: k.toggle_hidden,
+            toggle_trash: k.toggle_trash,
+            open_external: k.open_external,
+            set_tab_local_root: k.set_tab_local_root,
+        }
+    }
+
+    fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction> {
+        oil::keydown_action(chord).map(map_oil_key_action)
+    }
+
+    fn oil_chord_action(&self, had_prefix: bool, chord: &str) -> Option<OilKeyAction> {
+        oil::chord_action(had_prefix, chord).map(map_oil_key_action)
+    }
+
+    fn oil_help_lines(&self) -> Vec<String> {
+        oil::help_lines()
+    }
+
+    fn oil_directory_sections(
+        &self,
+        root: &std::path::Path,
+        entries: &[editor_fs::DirectoryEntry],
+        show_hidden: bool,
+        sort_mode: editor_plugin_api::OilSortMode,
+        trash_enabled: bool,
+    ) -> editor_core::SectionTree {
+        let user_sort = match sort_mode {
+            editor_plugin_api::OilSortMode::TypeThenName => oil::OilSortMode::TypeThenName,
+            editor_plugin_api::OilSortMode::TypeThenNameDesc => {
+                oil::OilSortMode::TypeThenNameDesc
+            }
+        };
+        oil::directory_sections(root, entries, show_hidden, user_sort, trash_enabled)
+    }
+
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
+        oil::strip_entry_icon_prefix(label)
+    }
+
+    fn git_status_sections(&self, snapshot: &editor_git::GitStatusSnapshot) -> editor_core::SectionTree {
+        git::status_sections(snapshot)
+    }
+
+    fn git_commit_template(&self) -> Vec<String> {
+        git::commit_buffer_template()
+    }
+
+    fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix> {
+        git::status_prefix_for_chord(chord).map(|p| match p {
+            git::GitStatusPrefix::Commit => GitStatusPrefix::Commit,
+            git::GitStatusPrefix::Push => GitStatusPrefix::Push,
+            git::GitStatusPrefix::Fetch => GitStatusPrefix::Fetch,
+            git::GitStatusPrefix::Pull => GitStatusPrefix::Pull,
+            git::GitStatusPrefix::Branch => GitStatusPrefix::Branch,
+            git::GitStatusPrefix::Diff => GitStatusPrefix::Diff,
+            git::GitStatusPrefix::Log => GitStatusPrefix::Log,
+            git::GitStatusPrefix::Stash => GitStatusPrefix::Stash,
+            git::GitStatusPrefix::Merge => GitStatusPrefix::Merge,
+            git::GitStatusPrefix::Rebase => GitStatusPrefix::Rebase,
+            git::GitStatusPrefix::CherryPick => GitStatusPrefix::CherryPick,
+            git::GitStatusPrefix::Revert => GitStatusPrefix::Revert,
+            git::GitStatusPrefix::Reset => GitStatusPrefix::Reset,
+        })
+    }
+
+    fn git_command_for_chord(
+        &self,
+        prefix: Option<GitStatusPrefix>,
+        chord: &str,
+    ) -> Option<&'static str> {
+        let user_prefix = prefix.map(|p| match p {
+            GitStatusPrefix::Commit => git::GitStatusPrefix::Commit,
+            GitStatusPrefix::Push => git::GitStatusPrefix::Push,
+            GitStatusPrefix::Fetch => git::GitStatusPrefix::Fetch,
+            GitStatusPrefix::Pull => git::GitStatusPrefix::Pull,
+            GitStatusPrefix::Branch => git::GitStatusPrefix::Branch,
+            GitStatusPrefix::Diff => git::GitStatusPrefix::Diff,
+            GitStatusPrefix::Log => git::GitStatusPrefix::Log,
+            GitStatusPrefix::Stash => git::GitStatusPrefix::Stash,
+            GitStatusPrefix::Merge => git::GitStatusPrefix::Merge,
+            GitStatusPrefix::Rebase => git::GitStatusPrefix::Rebase,
+            GitStatusPrefix::CherryPick => git::GitStatusPrefix::CherryPick,
+            GitStatusPrefix::Revert => git::GitStatusPrefix::Revert,
+            GitStatusPrefix::Reset => git::GitStatusPrefix::Reset,
+        });
+        git::status_command_name(user_prefix, chord)
+    }
+
+    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String> {
+        browser::buffer_lines(url)
+    }
+
+    fn browser_input_hint(&self, url: Option<&str>) -> String {
+        browser::input_hint(url)
+    }
+
+    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
+        statusline::compose(&statusline::StatuslineContext {
+            vim_mode: context.vim_mode,
+            recording_macro: context.recording_macro,
+            workspace_name: context.workspace_name,
+            buffer_name: context.buffer_name,
+            buffer_modified: context.buffer_modified,
+            language_id: context.language_id,
+            line: context.line,
+            column: context.column,
+            lsp_server: context.lsp_server,
+            lsp_diagnostics: context.lsp_diagnostics.map(|d| statusline::LspDiagnosticsInfo {
+                errors: d.errors,
+                warnings: d.warnings,
+            }),
+            acp_connected: context.acp_connected,
+            git: context.git_branch.map(|branch| statusline::GitStatuslineInfo {
+                branch,
+                added: context.git_added,
+                removed: context.git_removed,
+            }),
+        })
+    }
+
+    fn statusline_lsp_connected_icon(&self) -> &'static str {
+        statusline::LSP_CONNECTED_ICON
+    }
+
+    fn statusline_lsp_error_icon(&self) -> &'static str {
+        statusline::LSP_ERROR_ICON
+    }
+
+    fn statusline_lsp_warning_icon(&self) -> &'static str {
+        statusline::LSP_WARNING_ICON
+    }
+
+    fn lsp_diagnostic_icon(&self) -> &'static str {
+        lsp::DIAGNOSTIC_ICON
+    }
+
+    fn lsp_diagnostic_line_limit(&self) -> usize {
+        lsp::DIAGNOSTIC_LINE_LIMIT
+    }
+
+    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
+        editor_icons::all_symbols()
+    }
+}
+
+fn map_oil_key_action(action: oil::OilKeyAction) -> OilKeyAction {
+    match action {
+        oil::OilKeyAction::OpenEntry => OilKeyAction::OpenEntry,
+        oil::OilKeyAction::OpenVerticalSplit => OilKeyAction::OpenVerticalSplit,
+        oil::OilKeyAction::OpenHorizontalSplit => OilKeyAction::OpenHorizontalSplit,
+        oil::OilKeyAction::OpenNewPane => OilKeyAction::OpenNewPane,
+        oil::OilKeyAction::PreviewEntry => OilKeyAction::PreviewEntry,
+        oil::OilKeyAction::Refresh => OilKeyAction::Refresh,
+        oil::OilKeyAction::Close => OilKeyAction::Close,
+        oil::OilKeyAction::StartPrefix => OilKeyAction::StartPrefix,
+        oil::OilKeyAction::OpenParent => OilKeyAction::OpenParent,
+        oil::OilKeyAction::OpenWorkspaceRoot => OilKeyAction::OpenWorkspaceRoot,
+        oil::OilKeyAction::SetRoot => OilKeyAction::SetRoot,
+        oil::OilKeyAction::ShowHelp => OilKeyAction::ShowHelp,
+        oil::OilKeyAction::CycleSort => OilKeyAction::CycleSort,
+        oil::OilKeyAction::ToggleHidden => OilKeyAction::ToggleHidden,
+        oil::OilKeyAction::ToggleTrash => OilKeyAction::ToggleTrash,
+        oil::OilKeyAction::OpenExternal => OilKeyAction::OpenExternal,
+        oil::OilKeyAction::SetTabLocalRoot => OilKeyAction::SetTabLocalRoot,
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

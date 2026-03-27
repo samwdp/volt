@@ -639,6 +639,10 @@ name = "editor-git"
 version = "0.1.0"
 
 [[package]]
+name = "editor-icons"
+version = "0.1.0"
+
+[[package]]
 name = "editor-jobs"
 version = "0.1.0"
 
@@ -669,7 +673,14 @@ name = "editor-plugin-host"
 version = "0.1.0"
 dependencies = [
  "editor-core",
+ "editor-dap",
+ "editor-fs",
+ "editor-git",
+ "editor-icons",
+ "editor-lsp",
  "editor-plugin-api",
+ "editor-syntax",
+ "editor-theme",
 ]
 
 [[package]]
@@ -687,9 +698,11 @@ dependencies = [
  "editor-core",
  "editor-fs",
  "editor-git",
+ "editor-icons",
  "editor-jobs",
  "editor-lsp",
  "editor-picker",
+ "editor-plugin-api",
  "editor-plugin-host",
  "editor-render",
  "editor-syntax",
@@ -702,7 +715,6 @@ dependencies = [
  "sdl3-ttf-sys",
  "tokio",
  "tokio-util",
- "volt-user",
  "wry",
 ]
 
@@ -3256,8 +3268,10 @@ dependencies = [
  "editor-dap",
  "editor-fs",
  "editor-git",
+ "editor-icons",
  "editor-lsp",
  "editor-plugin-api",
+ "editor-plugin-host",
  "editor-syntax",
  "editor-theme",
  "toml",

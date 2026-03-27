@@ -1,9 +1,9 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
+use editor_plugin_host::UserLibrary;
 use editor_render::{RenderBackend, RenderError};
 
 /// Configures the demo shell loop.
-#[derive(Debug, Clone)]
 pub struct ShellConfig {
     /// Window title.
     pub title: String,
@@ -21,6 +21,9 @@ pub struct ShellConfig {
     pub frame_limit: Option<u32>,
     /// Enables detailed typing/input latency profiling and writes a report on exit.
     pub profile_input_latency: bool,
+    /// Compiled-in user extension library.  When `None` the shell falls back to
+    /// a built-in no-op implementation.
+    pub user_library: Option<Arc<dyn UserLibrary>>,
 }
 
 impl Default for ShellConfig {
@@ -34,6 +37,7 @@ impl Default for ShellConfig {
             render_backend: RenderBackend::SdlCanvas,
             frame_limit: None,
             profile_input_latency: false,
+            user_library: None,
         }
     }
 }

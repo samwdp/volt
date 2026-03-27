@@ -16,11 +16,13 @@ workspace = true
 
 [dependencies]
 editor-core = { path = "../crates/editor-core" }
-editor-fs = { path = "../crates/editor-fs" }
 editor-dap = { path = "../crates/editor-dap" }
+editor-fs = { path = "../crates/editor-fs" }
 editor-git = { path = "../crates/editor-git" }
+editor-icons = { path = "../crates/editor-icons" }
 editor-lsp = { path = "../crates/editor-lsp" }
 editor-plugin-api = { path = "../crates/editor-plugin-api" }
+editor-plugin-host = { path = "../crates/editor-plugin-host" }
 editor-syntax = { path = "../crates/editor-syntax" }
 editor-theme = { path = "../crates/editor-theme" }
 toml = "0.8.23"

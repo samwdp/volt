@@ -5,6 +5,255 @@ use abi_stable::{
     std_types::{ROption, RString, RVec},
 };
 
+// ─── Protocol hook name constants ───────────────────────────────────────────
+//
+// These string identifiers form the stable "protocol" between the host editor
+// and the compiled user library.  Keeping them here means both sides always
+// agree on the exact identifier without the host depending on the user crate.
+
+/// Hook name constants for the autocomplete subsystem.
+pub mod autocomplete_hooks {
+    pub const TRIGGER: &str = "ui.autocomplete.trigger";
+    pub const NEXT: &str = "ui.autocomplete.next";
+    pub const PREVIOUS: &str = "ui.autocomplete.previous";
+    pub const ACCEPT: &str = "ui.autocomplete.accept";
+    pub const CANCEL: &str = "ui.autocomplete.cancel";
+}
+
+/// Hook name constants for the hover subsystem.
+pub mod hover_hooks {
+    pub const TOGGLE: &str = "ui.hover.toggle";
+    pub const FOCUS: &str = "ui.hover.focus";
+    pub const NEXT: &str = "ui.hover.next";
+    pub const PREVIOUS: &str = "ui.hover.previous";
+}
+
+/// Hook name constants for the LSP subsystem.
+pub mod lsp_hooks {
+    pub const START: &str = "lsp.server-start";
+    pub const STOP: &str = "lsp.server-stop";
+    pub const RESTART: &str = "lsp.server-restart";
+    pub const LOG: &str = "lsp.open-log";
+    pub const DEFINITION: &str = "lsp.goto-definition";
+    pub const REFERENCES: &str = "lsp.goto-references";
+    pub const IMPLEMENTATION: &str = "lsp.goto-implementation";
+}
+
+/// Hook name constants for the git subsystem.
+pub mod git_hooks {
+    pub const STATUS_OPEN_POPUP: &str = "ui.git.status-open-popup";
+    pub const DIFF_OPEN: &str = "ui.git.diff-open";
+    pub const LOG_OPEN: &str = "ui.git.log-open";
+    pub const STASH_LIST_OPEN: &str = "ui.git.stash-list-open";
+}
+
+/// Hook name constants for the oil directory browser.
+pub mod oil_hooks {
+    pub const OPEN: &str = "ui.oil.open";
+    pub const OPEN_PARENT: &str = "ui.oil.open-parent";
+}
+
+/// Hook name constants for the browser buffer.
+pub mod browser_hooks {
+    pub const URL: &str = "ui.browser.url";
+}
+
+// ─── Buffer kind string constants ────────────────────────────────────────────
+
+/// Buffer kind strings used when creating or matching plugin buffers.
+pub mod buffer_kinds {
+    pub const GIT_STATUS: &str = "git-status";
+    pub const GIT_COMMIT: &str = "git-commit";
+    pub const GIT_DIFF: &str = "git-diff";
+    pub const GIT_LOG: &str = "git-log";
+    pub const GIT_STASH: &str = "git-stash";
+    pub const ACP: &str = "acp";
+    pub const BROWSER: &str = "browser";
+}
+
+// ─── Git action / section ID constants ───────────────────────────────────────
+
+/// Section action IDs for the git status buffer.
+pub mod git_actions {
+    pub const STAGE_FILE: &str = "git.stage-file";
+    pub const STAGE_ALL: &str = "git.stage-all";
+    pub const UNSTAGE_FILE: &str = "git.unstage-file";
+    pub const COMMIT_OPEN: &str = "git.commit-open";
+    pub const PUSH: &str = "git.push";
+    pub const SHOW_COMMIT: &str = "git.show-commit";
+    pub const SHOW_STASH: &str = "git.show-stash";
+}
+
+/// Section IDs used in the git status buffer tree.
+pub mod git_sections {
+    pub const HEADERS: &str = "git.status.headers";
+    pub const IN_PROGRESS: &str = "git.status.in-progress";
+    pub const STAGED: &str = "git.status.staged";
+    pub const UNSTAGED: &str = "git.status.unstaged";
+    pub const UNTRACKED: &str = "git.status.untracked";
+    pub const STASHES: &str = "git.status.stashes";
+    pub const UNPULLED: &str = "git.status.unpulled";
+    pub const UNPUSHED: &str = "git.status.unpushed";
+    pub const REMOTE: &str = "git.status.remote";
+    pub const COMMIT: &str = "git.status.commit";
+}
+
+// ─── Oil directory browser constants ─────────────────────────────────────────
+
+/// Section / action ID constants for the oil directory browser.
+pub mod oil_protocol {
+    pub const ACTION_OIL_ENTRY: &str = "oil.entry";
+    pub const SECTION_OIL_DIRECTORY: &str = "oil.directory";
+}
+
+// ─── Shared configuration types ──────────────────────────────────────────────
+
+/// User-configurable sort mode for oil directory buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OilSortMode {
+    TypeThenName,
+    TypeThenNameDesc,
+}
+
+impl OilSortMode {
+    /// Returns the human-readable label shown in the oil buffer header.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TypeThenName => "type+name",
+            Self::TypeThenNameDesc => "type+name desc",
+        }
+    }
+
+    /// Returns the next mode in the cycle used by the oil UI.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::TypeThenName => Self::TypeThenNameDesc,
+            Self::TypeThenNameDesc => Self::TypeThenName,
+        }
+    }
+}
+
+/// An action resolved from an oil key press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OilKeyAction {
+    OpenEntry,
+    OpenVerticalSplit,
+    OpenHorizontalSplit,
+    OpenNewPane,
+    PreviewEntry,
+    Refresh,
+    Close,
+    StartPrefix,
+    OpenParent,
+    OpenWorkspaceRoot,
+    SetRoot,
+    ShowHelp,
+    CycleSort,
+    ToggleHidden,
+    ToggleTrash,
+    OpenExternal,
+    SetTabLocalRoot,
+}
+
+/// User-configurable default options for new oil directory buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OilDefaults {
+    pub show_hidden: bool,
+    pub sort_mode: OilSortMode,
+    pub trash_enabled: bool,
+}
+
+/// User-configurable keybindings for the oil directory browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OilKeybindings {
+    pub open_entry: &'static str,
+    pub open_vertical_split: &'static str,
+    pub open_horizontal_split: &'static str,
+    pub open_new_pane: &'static str,
+    pub preview_entry: &'static str,
+    pub refresh: &'static str,
+    pub close: &'static str,
+    pub prefix: &'static str,
+    pub open_parent: &'static str,
+    pub open_workspace_root: &'static str,
+    pub set_root: &'static str,
+    pub show_help: &'static str,
+    pub cycle_sort: &'static str,
+    pub toggle_hidden: &'static str,
+    pub toggle_trash: &'static str,
+    pub open_external: &'static str,
+    pub set_tab_local_root: &'static str,
+}
+
+/// Git key-chord action prefix kind used for file-scoped git commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitStatusPrefix {
+    Commit,
+    Push,
+    Fetch,
+    Pull,
+    Branch,
+    Diff,
+    Log,
+    Stash,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Reset,
+}
+
+/// Autocomplete provider configuration exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutocompleteProvider {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub item_icon: String,
+    pub or_group: Option<String>,
+}
+
+/// Hover provider configuration exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverProvider {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub line_limit: usize,
+}
+
+/// ACP client configuration exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpClient {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: Option<String>,
+}
+
+/// Project search root exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRoot {
+    pub path: String,
+    pub max_depth: usize,
+}
+
+/// Terminal configuration exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalConfig {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// LSP diagnostic counts surfaced to the statusline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LspDiagnosticsInfo {
+    pub errors: usize,
+    pub warnings: usize,
+}
+
 /// Stable keymap scopes shared across the host and the compiled user library.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]

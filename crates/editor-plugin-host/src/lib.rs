@@ -2,10 +2,320 @@
 
 use editor_core::{
     BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode, ModelError,
+    SectionTree,
 };
 use editor_plugin_api::{
-    PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
+    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LspDiagnosticsInfo,
+    OilDefaults, OilKeyAction, OilKeybindings, PluginAction, PluginActionKind, PluginKeymapScope,
+    PluginPackage, PluginVimMode, TerminalConfig, WorkspaceRoot,
 };
+
+// ─── UserLibrary trait ───────────────────────────────────────────────────────
+
+/// All configuration and behaviour provided by the compiled user extension
+/// library.  The trait is the stable contract between the host (volt.exe /
+/// editor-sdl) and the user crate (user.dll / libuser.so).
+///
+/// A *static* implementation wraps a direct call into the compiled-in user
+/// module.  A *dynamic* implementation loads the symbols from a `.dll`/`.so`
+/// at runtime, allowing users to recompile only their `user/` directory without
+/// rebuilding the editor binary.
+pub trait UserLibrary: Send + Sync {
+    // ── Package registration ──────────────────────────────────────────────
+
+    /// Returns all plugin packages compiled into the user library.
+    fn packages(&self) -> Vec<PluginPackage>;
+
+    /// Returns all themes compiled into the user library.
+    fn themes(&self) -> Vec<editor_theme::Theme>;
+
+    /// Returns all syntax-language registrations compiled into the user library.
+    fn syntax_languages(&self) -> Vec<editor_syntax::LanguageConfiguration>;
+
+    /// Returns all language-server specifications compiled into the user library.
+    fn language_servers(&self) -> Vec<editor_lsp::LanguageServerSpec>;
+
+    /// Returns all debug-adapter specifications compiled into the user library.
+    fn debug_adapters(&self) -> Vec<editor_dap::DebugAdapterSpec>;
+
+    // ── Autocomplete ──────────────────────────────────────────────────────
+
+    /// Returns the ordered list of autocomplete providers.
+    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider>;
+
+    // ── Hover ─────────────────────────────────────────────────────────────
+
+    /// Returns the ordered list of hover providers.
+    fn hover_providers(&self) -> Vec<HoverProvider>;
+
+    // ── ACP ───────────────────────────────────────────────────────────────
+
+    /// Returns all configured ACP client definitions.
+    fn acp_clients(&self) -> Vec<AcpClient>;
+
+    /// Looks up a single ACP client by its identifier.
+    fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
+
+    // ── Workspace ─────────────────────────────────────────────────────────
+
+    /// Returns the project search roots used by the workspace picker.
+    fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
+
+    // ── Terminal ──────────────────────────────────────────────────────────
+
+    /// Returns the default terminal programme and arguments.
+    fn terminal_config(&self) -> TerminalConfig;
+
+    // ── Oil directory browser ─────────────────────────────────────────────
+
+    /// Returns user-configured default options for new oil buffers.
+    fn oil_defaults(&self) -> OilDefaults;
+
+    /// Returns user-configured keybindings for the oil directory browser.
+    fn oil_keybindings(&self) -> OilKeybindings;
+
+    /// Resolves an oil key action for a plain key-down event.
+    fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction>;
+
+    /// Resolves an oil key action that may follow an active prefix.
+    fn oil_chord_action(&self, had_prefix: bool, chord: &str) -> Option<OilKeyAction>;
+
+    /// Returns the rendered help text shown in oil help popups.
+    fn oil_help_lines(&self) -> Vec<String>;
+
+    /// Builds the section tree for a directory listing.
+    fn oil_directory_sections(
+        &self,
+        root: &std::path::Path,
+        entries: &[editor_fs::DirectoryEntry],
+        show_hidden: bool,
+        sort_mode: editor_plugin_api::OilSortMode,
+        trash_enabled: bool,
+    ) -> SectionTree;
+
+    /// Strips a leading icon prefix from an oil directory-entry label.
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str;
+
+    // ── Git ───────────────────────────────────────────────────────────────
+
+    /// Builds the section tree for a git status snapshot.
+    fn git_status_sections(&self, snapshot: &editor_git::GitStatusSnapshot) -> SectionTree;
+
+    /// Returns the default commit-buffer template lines.
+    fn git_commit_template(&self) -> Vec<String>;
+
+    /// Returns the git status prefix (if any) indicated by a key chord.
+    fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix>;
+
+    /// Returns the git command name (if any) for a prefix+chord combination.
+    fn git_command_for_chord(
+        &self,
+        prefix: Option<GitStatusPrefix>,
+        chord: &str,
+    ) -> Option<&'static str>;
+
+    // ── Browser ───────────────────────────────────────────────────────────
+
+    /// Returns the rendered lines for a browser buffer.
+    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String>;
+
+    /// Returns the input hint text for the browser URL bar.
+    fn browser_input_hint(&self, url: Option<&str>) -> String;
+
+    // ── Statusline ────────────────────────────────────────────────────────
+
+    /// Renders the complete statusline string from a context snapshot.
+    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String;
+
+    /// Returns the icon used for LSP "connected" state in the statusline.
+    fn statusline_lsp_connected_icon(&self) -> &'static str;
+
+    /// Returns the icon used for LSP error diagnostics in the statusline.
+    fn statusline_lsp_error_icon(&self) -> &'static str;
+
+    /// Returns the icon used for LSP warning diagnostics in the statusline.
+    fn statusline_lsp_warning_icon(&self) -> &'static str;
+
+    // ── LSP ───────────────────────────────────────────────────────────────
+
+    /// Returns the icon shown next to LSP diagnostics in the editor.
+    fn lsp_diagnostic_icon(&self) -> &'static str;
+
+    /// Returns the maximum number of diagnostic lines shown in hover popups.
+    fn lsp_diagnostic_line_limit(&self) -> usize;
+
+    // ── Icons ─────────────────────────────────────────────────────────────
+
+    /// Returns the full icon font symbol table.
+    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol];
+}
+
+// ─── NullUserLibrary ─────────────────────────────────────────────────────────
+
+/// A no-op [`UserLibrary`] implementation that returns empty collections and
+/// safe constant defaults.  Used as a fall-back when no user library has been
+/// registered (e.g. in tests or minimal shell invocations).
+pub struct NullUserLibrary;
+
+impl UserLibrary for NullUserLibrary {
+    fn packages(&self) -> Vec<PluginPackage> {
+        Vec::new()
+    }
+    fn themes(&self) -> Vec<editor_theme::Theme> {
+        Vec::new()
+    }
+    fn syntax_languages(&self) -> Vec<editor_syntax::LanguageConfiguration> {
+        Vec::new()
+    }
+    fn language_servers(&self) -> Vec<editor_lsp::LanguageServerSpec> {
+        Vec::new()
+    }
+    fn debug_adapters(&self) -> Vec<editor_dap::DebugAdapterSpec> {
+        Vec::new()
+    }
+    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider> {
+        Vec::new()
+    }
+    fn hover_providers(&self) -> Vec<HoverProvider> {
+        Vec::new()
+    }
+    fn acp_clients(&self) -> Vec<AcpClient> {
+        Vec::new()
+    }
+    fn acp_client_by_id(&self, _id: &str) -> Option<AcpClient> {
+        None
+    }
+    fn workspace_roots(&self) -> Vec<WorkspaceRoot> {
+        Vec::new()
+    }
+    fn terminal_config(&self) -> TerminalConfig {
+        #[cfg(target_os = "windows")]
+        return TerminalConfig {
+            program: "powershell.exe".to_owned(),
+            args: vec!["-NoLogo".to_owned()],
+        };
+        #[cfg(not(target_os = "windows"))]
+        return TerminalConfig {
+            program: "bash".to_owned(),
+            args: Vec::new(),
+        };
+    }
+    fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
+        editor_plugin_api::OilDefaults {
+            show_hidden: false,
+            sort_mode: editor_plugin_api::OilSortMode::TypeThenName,
+            trash_enabled: false,
+        }
+    }
+    fn oil_keybindings(&self) -> editor_plugin_api::OilKeybindings {
+        editor_plugin_api::OilKeybindings {
+            open_entry: "Enter",
+            open_vertical_split: "s",
+            open_horizontal_split: "S",
+            open_new_pane: "p",
+            preview_entry: "-",
+            refresh: "gr",
+            close: "q",
+            prefix: "g",
+            open_parent: "..",
+            open_workspace_root: "~",
+            set_root: "cd",
+            show_help: "?",
+            cycle_sort: "gs",
+            toggle_hidden: "gh",
+            toggle_trash: "gt",
+            open_external: "gx",
+            set_tab_local_root: "gl",
+        }
+    }
+    fn oil_keydown_action(&self, _chord: &str) -> Option<OilKeyAction> {
+        None
+    }
+    fn oil_chord_action(&self, _had_prefix: bool, _chord: &str) -> Option<OilKeyAction> {
+        None
+    }
+    fn oil_help_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn oil_directory_sections(
+        &self,
+        _root: &std::path::Path,
+        _entries: &[editor_fs::DirectoryEntry],
+        _show_hidden: bool,
+        _sort_mode: editor_plugin_api::OilSortMode,
+        _trash_enabled: bool,
+    ) -> SectionTree {
+        SectionTree::default()
+    }
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
+        label
+    }
+    fn git_status_sections(&self, _snapshot: &editor_git::GitStatusSnapshot) -> SectionTree {
+        SectionTree::default()
+    }
+    fn git_commit_template(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn git_prefix_for_chord(&self, _chord: &str) -> Option<GitStatusPrefix> {
+        None
+    }
+    fn git_command_for_chord(
+        &self,
+        _prefix: Option<GitStatusPrefix>,
+        _chord: &str,
+    ) -> Option<&'static str> {
+        None
+    }
+    fn browser_buffer_lines(&self, _url: Option<&str>) -> Vec<String> {
+        Vec::new()
+    }
+    fn browser_input_hint(&self, _url: Option<&str>) -> String {
+        String::new()
+    }
+    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
+        format!(" {} | {}:{} ", context.buffer_name, context.line, context.column)
+    }
+    fn statusline_lsp_connected_icon(&self) -> &'static str {
+        ""
+    }
+    fn statusline_lsp_error_icon(&self) -> &'static str {
+        "E"
+    }
+    fn statusline_lsp_warning_icon(&self) -> &'static str {
+        "W"
+    }
+    fn lsp_diagnostic_icon(&self) -> &'static str {
+        "●"
+    }
+    fn lsp_diagnostic_line_limit(&self) -> usize {
+        8
+    }
+    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
+        editor_icons::all_symbols()
+    }
+}
+
+// ─── Statusline context ──────────────────────────────────────────────────────
+
+/// Context passed to the user library when rendering the statusline.
+#[derive(Debug, Clone)]
+pub struct StatuslineContext<'a> {
+    pub vim_mode: &'a str,
+    pub recording_macro: Option<char>,
+    pub workspace_name: &'a str,
+    pub buffer_name: &'a str,
+    pub buffer_modified: bool,
+    pub language_id: Option<&'a str>,
+    pub line: usize,
+    pub column: usize,
+    pub lsp_server: Option<&'a str>,
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
+    pub acp_connected: bool,
+    pub git_branch: Option<&'a str>,
+    pub git_added: usize,
+    pub git_removed: usize,
+}
+
 
 /// Foundation metadata describing the current host configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

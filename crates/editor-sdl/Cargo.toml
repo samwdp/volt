@@ -17,9 +17,11 @@ editor-buffer = { path = "../editor-buffer" }
 editor-core = { path = "../editor-core" }
 editor-fs = { path = "../editor-fs" }
 editor-git = { path = "../editor-git" }
+editor-icons = { path = "../editor-icons" }
 editor-jobs = { path = "../editor-jobs" }
 editor-lsp = { path = "../editor-lsp" }
 editor-picker = { path = "../editor-picker" }
+editor-plugin-api = { path = "../editor-plugin-api" }
 editor-plugin-host = { path = "../editor-plugin-host" }
 editor-render = { path = "../editor-render" }
 editor-syntax = { path = "../editor-syntax" }
@@ -30,7 +32,6 @@ image = { version = "0.25.1", default-features = false, features = ["jpeg", "png
 base64 = "0.22.1"
 fontdue = "0.9.3"
 sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
-user = { package = "volt-user", path = "../../user" }
 agent-client-protocol = { version = "0.10.2", features = ["unstable_session_model"] }
 tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }

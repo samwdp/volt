@@ -59,7 +59,12 @@ use editor_lsp::{
     LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
 };
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_host::load_auto_loaded_packages;
+use editor_plugin_api::{
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilKeyAction, autocomplete_hooks, browser_hooks,
+    buffer_kinds, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks, oil_hooks,
+    oil_protocol,
+};
+use editor_plugin_host::{NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages};
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
     find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
@@ -129,15 +134,15 @@ const HOOK_PICKER_NEXT: &str = "ui.picker.next";
 const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
-const HOOK_AUTOCOMPLETE_TRIGGER: &str = user::autocomplete::HOOK_AUTOCOMPLETE_TRIGGER;
-const HOOK_AUTOCOMPLETE_NEXT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_NEXT;
-const HOOK_AUTOCOMPLETE_PREVIOUS: &str = user::autocomplete::HOOK_AUTOCOMPLETE_PREVIOUS;
-const HOOK_AUTOCOMPLETE_ACCEPT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_ACCEPT;
-const HOOK_AUTOCOMPLETE_CANCEL: &str = user::autocomplete::HOOK_AUTOCOMPLETE_CANCEL;
-const HOOK_HOVER_TOGGLE: &str = user::hover::HOOK_HOVER_TOGGLE;
-const HOOK_HOVER_FOCUS: &str = user::hover::HOOK_HOVER_FOCUS;
-const HOOK_HOVER_NEXT: &str = user::hover::HOOK_HOVER_NEXT;
-const HOOK_HOVER_PREVIOUS: &str = user::hover::HOOK_HOVER_PREVIOUS;
+const HOOK_AUTOCOMPLETE_TRIGGER: &str = autocomplete_hooks::TRIGGER;
+const HOOK_AUTOCOMPLETE_NEXT: &str = autocomplete_hooks::NEXT;
+const HOOK_AUTOCOMPLETE_PREVIOUS: &str = autocomplete_hooks::PREVIOUS;
+const HOOK_AUTOCOMPLETE_ACCEPT: &str = autocomplete_hooks::ACCEPT;
+const HOOK_AUTOCOMPLETE_CANCEL: &str = autocomplete_hooks::CANCEL;
+const HOOK_HOVER_TOGGLE: &str = hover_hooks::TOGGLE;
+const HOOK_HOVER_FOCUS: &str = hover_hooks::FOCUS;
+const HOOK_HOVER_NEXT: &str = hover_hooks::NEXT;
+const HOOK_HOVER_PREVIOUS: &str = hover_hooks::PREVIOUS;
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
@@ -161,48 +166,48 @@ const HOOK_WORKSPACE_WINDOW_UP: &str = "ui.workspace.window-up";
 const HOOK_WORKSPACE_WINDOW_RIGHT: &str = "ui.workspace.window-right";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
-const ACP_BUFFER_KIND: &str = user::acp::ACP_BUFFER_KIND;
-const BROWSER_KIND: &str = user::browser::BROWSER_KIND;
-const HOOK_BROWSER_URL: &str = user::browser::HOOK_BROWSER_URL;
-const AUTOCOMPLETE_BUFFER_PROVIDER: &str = user::autocomplete::PROVIDER_BUFFER;
-const AUTOCOMPLETE_LSP_PROVIDER: &str = user::autocomplete::PROVIDER_LSP;
-const HOVER_PROVIDER_TEST: &str = user::hover::PROVIDER_TEST_HOVER;
-const HOVER_PROVIDER_LSP: &str = user::hover::PROVIDER_LSP;
-const HOVER_PROVIDER_SIGNATURE_HELP: &str = user::hover::PROVIDER_SIGNATURE_HELP;
-const HOVER_PROVIDER_DIAGNOSTICS: &str = user::hover::PROVIDER_DIAGNOSTICS;
-const HOOK_LSP_START: &str = user::lsp::HOOK_LSP_START;
-const HOOK_LSP_STOP: &str = user::lsp::HOOK_LSP_STOP;
-const HOOK_LSP_RESTART: &str = user::lsp::HOOK_LSP_RESTART;
-const HOOK_LSP_LOG: &str = user::lsp::HOOK_LSP_LOG;
-const HOOK_LSP_DEFINITION: &str = user::lsp::HOOK_LSP_DEFINITION;
-const HOOK_LSP_REFERENCES: &str = user::lsp::HOOK_LSP_REFERENCES;
-const HOOK_LSP_IMPLEMENTATION: &str = user::lsp::HOOK_LSP_IMPLEMENTATION;
+const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
+const BROWSER_KIND: &str = buffer_kinds::BROWSER;
+const HOOK_BROWSER_URL: &str = browser_hooks::URL;
+const AUTOCOMPLETE_BUFFER_PROVIDER: &str = "buffer";
+const AUTOCOMPLETE_LSP_PROVIDER: &str = "lsp";
+const HOVER_PROVIDER_TEST: &str = "test-hover";
+const HOVER_PROVIDER_LSP: &str = "lsp";
+const HOVER_PROVIDER_SIGNATURE_HELP: &str = "signature-help";
+const HOVER_PROVIDER_DIAGNOSTICS: &str = "diagnostics";
+const HOOK_LSP_START: &str = lsp_hooks::START;
+const HOOK_LSP_STOP: &str = lsp_hooks::STOP;
+const HOOK_LSP_RESTART: &str = lsp_hooks::RESTART;
+const HOOK_LSP_LOG: &str = lsp_hooks::LOG;
+const HOOK_LSP_DEFINITION: &str = lsp_hooks::DEFINITION;
+const HOOK_LSP_REFERENCES: &str = lsp_hooks::REFERENCES;
+const HOOK_LSP_IMPLEMENTATION: &str = lsp_hooks::IMPLEMENTATION;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
-const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
-const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
-const GIT_DIFF_KIND: &str = user::git::GIT_DIFF_KIND;
-const GIT_LOG_KIND: &str = user::git::GIT_LOG_KIND;
-const GIT_STASH_KIND: &str = user::git::GIT_STASH_KIND;
-const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
-const HOOK_GIT_DIFF_OPEN: &str = user::git::HOOK_GIT_DIFF_OPEN;
-const HOOK_GIT_LOG_OPEN: &str = user::git::HOOK_GIT_LOG_OPEN;
-const HOOK_GIT_STASH_LIST_OPEN: &str = user::git::HOOK_GIT_STASH_LIST_OPEN;
-const HOOK_OIL_OPEN: &str = user::oil::HOOK_OIL_OPEN;
-const HOOK_OIL_OPEN_PARENT: &str = user::oil::HOOK_OIL_OPEN_PARENT;
-const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
-const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
-const GIT_ACTION_SHOW_COMMIT: &str = user::git::ACTION_SHOW_COMMIT;
-const GIT_ACTION_SHOW_STASH: &str = user::git::ACTION_SHOW_STASH;
-const GIT_SECTION_HEADERS: &str = user::git::SECTION_HEADERS;
-const GIT_SECTION_IN_PROGRESS: &str = user::git::SECTION_IN_PROGRESS;
-const GIT_SECTION_STAGED: &str = user::git::SECTION_STAGED;
-const GIT_SECTION_UNSTAGED: &str = user::git::SECTION_UNSTAGED;
-const GIT_SECTION_UNTRACKED: &str = user::git::SECTION_UNTRACKED;
-const GIT_SECTION_STASHES: &str = user::git::SECTION_STASHES;
-const GIT_SECTION_UNPULLED: &str = user::git::SECTION_UNPULLED;
-const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
-const GIT_SECTION_COMMIT: &str = user::git::SECTION_COMMIT;
+const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
+const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
+const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
+const GIT_LOG_KIND: &str = buffer_kinds::GIT_LOG;
+const GIT_STASH_KIND: &str = buffer_kinds::GIT_STASH;
+const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
+const HOOK_GIT_DIFF_OPEN: &str = git_hooks::DIFF_OPEN;
+const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
+const HOOK_GIT_STASH_LIST_OPEN: &str = git_hooks::STASH_LIST_OPEN;
+const HOOK_OIL_OPEN: &str = oil_hooks::OPEN;
+const HOOK_OIL_OPEN_PARENT: &str = oil_hooks::OPEN_PARENT;
+const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
+const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
+const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
+const GIT_ACTION_SHOW_STASH: &str = git_actions::SHOW_STASH;
+const GIT_SECTION_HEADERS: &str = git_sections::HEADERS;
+const GIT_SECTION_IN_PROGRESS: &str = git_sections::IN_PROGRESS;
+const GIT_SECTION_STAGED: &str = git_sections::STAGED;
+const GIT_SECTION_UNSTAGED: &str = git_sections::UNSTAGED;
+const GIT_SECTION_UNTRACKED: &str = git_sections::UNTRACKED;
+const GIT_SECTION_STASHES: &str = git_sections::STASHES;
+const GIT_SECTION_UNPULLED: &str = git_sections::UNPULLED;
+const GIT_SECTION_UNPUSHED: &str = git_sections::UNPUSHED;
+const GIT_SECTION_COMMIT: &str = git_sections::COMMIT;
 const TOKEN_GIT_STATUS_SECTION_HEADER: &str = "git.status.section.header";
 const TOKEN_GIT_STATUS_SECTION_COUNT: &str = "git.status.section.count";
 const TOKEN_GIT_STATUS_HEADER_LABEL: &str = "git.status.header.label";
@@ -296,6 +301,34 @@ const NOTIFICATION_MAX_STORED: usize = 12;
 const NOTIFICATION_STACK_GAP: i32 = 10;
 const NOTIFICATION_MAX_BODY_LINES: usize = 4;
 
+// ─── Local constants (formerly from user modules) ────────────────────────────
+const BROWSER_BUFFER_NAME: &str = "*browser*";
+const BROWSER_URL_PROMPT: &str = "URL > ";
+const BROWSER_URL_PLACEHOLDER: &str = "https://example.com";
+const GIT_FRINGE_TOKEN_ADDED: &str = "git.fringe.added";
+const GIT_FRINGE_TOKEN_MODIFIED: &str = "git.fringe.modified";
+const GIT_FRINGE_TOKEN_REMOVED: &str = "git.fringe.removed";
+const GIT_FRINGE_SYMBOL: &str = "⏽";
+const SHOW_BUFFER_DIAGNOSTICS: bool = true;
+const AUTOCOMPLETE_NEXT_CHORD: &str = "Ctrl+n";
+const AUTOCOMPLETE_PREVIOUS_CHORD: &str = "Ctrl+p";
+const HOVER_NEXT_CHORD: &str = "Ctrl+n";
+const HOVER_PREVIOUS_CHORD: &str = "Ctrl+p";
+
+/// Newtype wrapper so `Arc<dyn UserLibrary>` can be stored in the runtime's
+/// type-erased service map.
+struct UserLibraryService(Arc<dyn UserLibrary>);
+
+/// Returns a clone of the user library stored in the runtime service map.
+fn shell_user_library(runtime: &EditorRuntime) -> Arc<dyn UserLibrary> {
+    runtime
+        .services()
+        .get::<UserLibraryService>()
+        .expect("UserLibraryService not registered in runtime")
+        .0
+        .clone()
+}
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -339,8 +372,10 @@ impl<'ttf> FontSet<'ttf> {
         icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
         icon_pixel_size: f32,
         cell_width: i32,
+        user_library: &dyn UserLibrary,
     ) -> Self {
-        let icon_chars = user::icon_font::symbols()
+        let icon_chars = user_library
+            .icon_symbols()
             .iter()
             .flat_map(|symbol| symbol.glyph.chars())
             .collect();
@@ -1453,7 +1488,7 @@ impl GitViewState {
     }
 }
 
-type DirectorySortMode = user::oil::OilSortMode;
+type DirectorySortMode = editor_plugin_api::OilSortMode;
 
 #[derive(Debug, Clone)]
 struct DirectoryViewState {
@@ -1467,13 +1502,12 @@ struct DirectoryViewState {
 
 impl DirectoryViewState {
     fn new(root: PathBuf, entries: Vec<DirectoryEntry>) -> Self {
-        let defaults = user::oil::defaults();
         Self {
             root,
             entries,
-            show_hidden: defaults.show_hidden,
-            sort_mode: defaults.sort_mode,
-            trash_enabled: defaults.trash_enabled,
+            show_hidden: false,
+            sort_mode: DirectorySortMode::TypeThenName,
+            trash_enabled: false,
             edit_snapshot: Vec::new(),
         }
     }
@@ -1756,13 +1790,13 @@ fn git_status_entry_token(label: &str) -> &'static str {
 
 fn git_status_entry_token_from_icon(icon: &str) -> &'static str {
     match icon {
-        user::icon_font::symbols::cod::COD_DIFF_ADDED => TOKEN_GIT_STATUS_ENTRY_ADDED,
-        user::icon_font::symbols::cod::COD_DIFF_MODIFIED => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
-        user::icon_font::symbols::cod::COD_DIFF_REMOVED => TOKEN_GIT_STATUS_ENTRY_DELETED,
-        user::icon_font::symbols::cod::COD_DIFF_RENAMED => TOKEN_GIT_STATUS_ENTRY_RENAMED,
-        user::icon_font::symbols::cod::COD_ARROW_SWAP => TOKEN_GIT_STATUS_ENTRY_COPIED,
-        user::icon_font::symbols::cod::COD_SYNC => TOKEN_GIT_STATUS_ENTRY_UPDATED,
-        user::icon_font::symbols::cod::COD_SYMBOL_FILE => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
+        editor_icons::symbols::cod::COD_DIFF_ADDED => TOKEN_GIT_STATUS_ENTRY_ADDED,
+        editor_icons::symbols::cod::COD_DIFF_MODIFIED => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
+        editor_icons::symbols::cod::COD_DIFF_REMOVED => TOKEN_GIT_STATUS_ENTRY_DELETED,
+        editor_icons::symbols::cod::COD_DIFF_RENAMED => TOKEN_GIT_STATUS_ENTRY_RENAMED,
+        editor_icons::symbols::cod::COD_ARROW_SWAP => TOKEN_GIT_STATUS_ENTRY_COPIED,
+        editor_icons::symbols::cod::COD_SYNC => TOKEN_GIT_STATUS_ENTRY_UPDATED,
+        editor_icons::symbols::cod::COD_SYMBOL_FILE => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
         _ => TOKEN_GIT_STATUS_ENTRY_CHANGED,
     }
 }
@@ -2365,7 +2399,7 @@ fn acp_text_segment(text: impl Into<String>, role: AcpColorRole) -> AcpRenderedS
 
 fn acp_spinner_segment(role: AcpColorRole) -> AcpRenderedSegment {
     AcpRenderedSegment {
-        text: user::icon_font::symbols::fa::FA_SPINNER.to_owned(),
+        text: editor_icons::symbols::fa::FA_SPINNER.to_owned(),
         role,
         animate: true,
     }
@@ -2508,8 +2542,13 @@ impl ShellBuffer {
         }
     }
 
-    fn placeholder(buffer_id: BufferId, name: &str, kind: BufferKind) -> Self {
-        let lines = placeholder_lines(name, &kind);
+    fn placeholder(
+        buffer_id: BufferId,
+        name: &str,
+        kind: BufferKind,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
+        let lines = placeholder_lines(name, &kind, user_library);
         let text = if lines.is_empty() {
             TextBuffer::new()
         } else {
@@ -2584,7 +2623,7 @@ impl ShellBuffer {
         self.acp_state = Some(AcpBufferState::new(client_label.to_owned()));
         self.acp_push_system_message(format!(
             "{} Connected to {client_label}.",
-            user::icon_font::symbols::cod::COD_ROCKET
+            editor_icons::symbols::cod::COD_ROCKET
         ));
     }
 
@@ -3972,7 +4011,7 @@ fn acp_build_plan_lines(entries: &[PlanEntry]) -> Vec<AcpRenderedLine> {
     if entries.is_empty() {
         return vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![acp_icon_segment(
-                user::icon_font::symbols::cod::COD_NOTEBOOK,
+                editor_icons::symbols::cod::COD_NOTEBOOK,
                 AcpColorRole::Muted,
             )],
             text: " Waiting for plan updates...".to_owned(),
@@ -4003,7 +4042,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
             AcpOutputItem::UserPrompt(prompt) => {
                 let prefix = vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_PERSON,
+                        editor_icons::symbols::cod::COD_PERSON,
                         AcpColorRole::Accent,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4016,7 +4055,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
             }
             AcpOutputItem::SystemMessage(message) => {
                 let prefix = vec![
-                    acp_icon_segment(user::icon_font::symbols::cod::COD_INFO, AcpColorRole::Muted),
+                    acp_icon_segment(editor_icons::symbols::cod::COD_INFO, AcpColorRole::Muted),
                     acp_text_segment(" ", AcpColorRole::Default),
                 ];
                 lines.extend(acp_multiline_text_lines(
@@ -4031,7 +4070,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                         block,
                         vec![
                             acp_icon_segment(
-                                user::icon_font::symbols::cod::COD_COMMENT,
+                                editor_icons::symbols::cod::COD_COMMENT,
                                 AcpColorRole::Accent,
                             ),
                             acp_text_segment(" ", AcpColorRole::Default),
@@ -4064,7 +4103,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                     lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
                         prefix: vec![
                             acp_icon_segment(
-                                user::icon_font::symbols::cod::COD_SEARCH,
+                                editor_icons::symbols::cod::COD_SEARCH,
                                 AcpColorRole::Muted,
                             ),
                             acp_text_segment(" ", AcpColorRole::Default),
@@ -4079,7 +4118,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
     if lines.is_empty() {
         lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![acp_icon_segment(
-                user::icon_font::symbols::cod::COD_HISTORY,
+                editor_icons::symbols::cod::COD_HISTORY,
                 AcpColorRole::Muted,
             )],
             text: " Waiting for session output...".to_owned(),
@@ -4095,7 +4134,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
             &content.content,
             vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_CHEVRON_RIGHT,
+                    editor_icons::symbols::cod::COD_CHEVRON_RIGHT,
                     AcpColorRole::Muted,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4105,7 +4144,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED,
+                    editor_icons::symbols::cod::COD_DIFF_MODIFIED,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4116,7 +4155,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_TERMINAL,
+                    editor_icons::symbols::cod::COD_TERMINAL,
                     AcpColorRole::Accent,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4127,7 +4166,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         _ => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_WARNING,
+                    editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4150,7 +4189,7 @@ fn acp_render_content_block(
                 let mut lines = vec![AcpRenderedLine::Image(AcpRenderedImageLine {
                     label: format!(
                         "{} {}",
-                        user::icon_font::symbols::fa::FA_IMAGE,
+                        editor_icons::symbols::fa::FA_IMAGE,
                         image.mime_type
                     ),
                     image: Some(decoded),
@@ -4165,7 +4204,7 @@ fn acp_render_content_block(
             Err(error) => acp_multiline_text_lines(
                 vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_WARNING,
+                        editor_icons::symbols::cod::COD_WARNING,
                         AcpColorRole::Warning,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4178,7 +4217,7 @@ fn acp_render_content_block(
             acp_multiline_text_lines(
                 vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_WARNING,
+                        editor_icons::symbols::cod::COD_WARNING,
                         AcpColorRole::Warning,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4190,7 +4229,7 @@ fn acp_render_content_block(
         _ => acp_multiline_text_lines(
             vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_WARNING,
+                    editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4246,20 +4285,20 @@ fn acp_icon_segment(icon: &str, role: AcpColorRole) -> AcpRenderedSegment {
 fn acp_status_segments(status: ToolCallStatus) -> Vec<AcpRenderedSegment> {
     match status {
         ToolCallStatus::Pending => vec![acp_icon_segment(
-            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            editor_icons::symbols::dev::DEV_CIRCLECI,
             AcpColorRole::Muted,
         )],
         ToolCallStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
         ToolCallStatus::Completed => vec![acp_icon_segment(
-            user::icon_font::symbols::fa::FA_CHECK,
+            editor_icons::symbols::fa::FA_CHECK,
             AcpColorRole::Success,
         )],
         ToolCallStatus::Failed => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_ERROR,
+            editor_icons::symbols::cod::COD_ERROR,
             AcpColorRole::Error,
         )],
         _ => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_WARNING,
+            editor_icons::symbols::cod::COD_WARNING,
             AcpColorRole::Warning,
         )],
     }
@@ -4271,16 +4310,16 @@ fn acp_plan_status_segments(
 ) -> Vec<AcpRenderedSegment> {
     match status {
         PlanEntryStatus::Pending => vec![acp_icon_segment(
-            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            editor_icons::symbols::dev::DEV_CIRCLECI,
             acp_priority_color_role(priority),
         )],
         PlanEntryStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
         PlanEntryStatus::Completed => vec![acp_icon_segment(
-            user::icon_font::symbols::fa::FA_CHECK,
+            editor_icons::symbols::fa::FA_CHECK,
             AcpColorRole::Success,
         )],
         _ => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_WARNING,
+            editor_icons::symbols::cod::COD_WARNING,
             AcpColorRole::Warning,
         )],
     }
@@ -4297,17 +4336,17 @@ fn acp_priority_color_role(priority: PlanEntryPriority) -> AcpColorRole {
 
 fn acp_tool_kind_icon(kind: ToolKind) -> &'static str {
     match kind {
-        ToolKind::Read => user::icon_font::symbols::cod::COD_NOTEBOOK,
-        ToolKind::Edit => user::icon_font::symbols::cod::COD_EDIT,
-        ToolKind::Delete => user::icon_font::symbols::cod::COD_DIFF_REMOVED,
-        ToolKind::Move => user::icon_font::symbols::cod::COD_ARROW_SWAP,
-        ToolKind::Search => user::icon_font::symbols::cod::COD_SEARCH,
-        ToolKind::Execute => user::icon_font::symbols::cod::COD_TERMINAL,
-        ToolKind::Think => user::icon_font::symbols::cod::COD_LIGHTBULB,
-        ToolKind::Fetch => user::icon_font::symbols::cod::COD_CLOUD_DOWNLOAD,
-        ToolKind::SwitchMode => user::icon_font::symbols::cod::COD_SYNC,
-        ToolKind::Other => user::icon_font::symbols::cod::COD_TOOLS,
-        _ => user::icon_font::symbols::cod::COD_TOOLS,
+        ToolKind::Read => editor_icons::symbols::cod::COD_NOTEBOOK,
+        ToolKind::Edit => editor_icons::symbols::cod::COD_EDIT,
+        ToolKind::Delete => editor_icons::symbols::cod::COD_DIFF_REMOVED,
+        ToolKind::Move => editor_icons::symbols::cod::COD_ARROW_SWAP,
+        ToolKind::Search => editor_icons::symbols::cod::COD_SEARCH,
+        ToolKind::Execute => editor_icons::symbols::cod::COD_TERMINAL,
+        ToolKind::Think => editor_icons::symbols::cod::COD_LIGHTBULB,
+        ToolKind::Fetch => editor_icons::symbols::cod::COD_CLOUD_DOWNLOAD,
+        ToolKind::SwitchMode => editor_icons::symbols::cod::COD_SYNC,
+        ToolKind::Other => editor_icons::symbols::cod::COD_TOOLS,
+        _ => editor_icons::symbols::cod::COD_TOOLS,
     }
 }
 
@@ -4637,7 +4676,7 @@ impl ShellWorkspaceView {
     }
 }
 
-type GitPrefix = user::git::GitStatusPrefix;
+type GitPrefix = editor_plugin_api::GitStatusPrefix;
 
 #[derive(Debug, Clone)]
 struct GitPrefixState {
@@ -5218,6 +5257,7 @@ impl ShellUiState {
         buffer_id: BufferId,
         name: &str,
         kind: BufferKind,
+        user_library: &dyn UserLibrary,
     ) -> &mut ShellBuffer {
         if let Some(view) = self.workspace_view_mut()
             && !view.buffer_ids.contains(&buffer_id)
@@ -5234,7 +5274,7 @@ impl ShellUiState {
         }
 
         self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind));
+            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -5244,6 +5284,7 @@ impl ShellUiState {
         buffer_id: BufferId,
         name: &str,
         kind: BufferKind,
+        user_library: &dyn UserLibrary,
     ) -> &mut ShellBuffer {
         if let Some(index) = self
             .buffers
@@ -5254,7 +5295,7 @@ impl ShellUiState {
         }
 
         self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind));
+            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -5928,6 +5969,7 @@ struct ShellVisualRefreshKey {
 
 pub(crate) struct ShellState {
     pub(crate) runtime: EditorRuntime,
+    pub(crate) user_library: Arc<dyn UserLibrary>,
     typing_profiler: Option<TypingProfiler>,
     last_text_input_profile: Option<Duration>,
     last_text_input_at: Option<Instant>,
@@ -5953,12 +5995,22 @@ struct MouseDragState {
 impl ShellState {
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, ShellError> {
-        Self::new_with_log(default_error_log_path(), false)
+        let user_library: Arc<dyn UserLibrary> = Arc::new(NullUserLibrary);
+        Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
     pub(crate) fn new_with_log(
         log_file_path: PathBuf,
         profile_input_latency: bool,
+    ) -> Result<Self, ShellError> {
+        let user_library: Arc<dyn UserLibrary> = Arc::new(NullUserLibrary);
+        Self::new_with_user_library(log_file_path, profile_input_latency, user_library)
+    }
+
+    pub(crate) fn new_with_user_library(
+        log_file_path: PathBuf,
+        profile_input_latency: bool,
+        user_library: Arc<dyn UserLibrary>,
     ) -> Result<Self, ShellError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
@@ -6006,7 +6058,7 @@ impl ShellState {
         let mut ui_state =
             ShellUiState::new(workspace_id, primary_pane_id, scratch, notes, notes_id);
         ui_state
-            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics)
+            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics, &*user_library)
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
 
@@ -6028,26 +6080,26 @@ impl ShellState {
         acp::init_acp_manager(&mut runtime)?;
         runtime
             .services_mut()
-            .insert(AutocompleteRegistry::from_user_config());
+            .insert(AutocompleteRegistry::from_user_config(&*user_library));
         runtime
             .services_mut()
-            .insert(HoverRegistry::from_user_config());
+            .insert(HoverRegistry::from_user_config(&*user_library));
         let mut lsp_registry = LanguageServerRegistry::new();
         lsp_registry
-            .register_all(user::language_servers())
+            .register_all(user_library.language_servers())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime
             .services_mut()
             .insert(Arc::new(LspClientManager::new(lsp_registry)));
         let mut syntax_registry = SyntaxRegistry::new();
         syntax_registry
-            .register_all(user::syntax_languages())
+            .register_all(user_library.syntax_languages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime.services_mut().insert(syntax_registry);
         configure_syntax_refresh_worker(&mut runtime).map_err(ShellError::Runtime)?;
         let mut theme_registry = ThemeRegistry::new();
         theme_registry
-            .register_all(user::themes())
+            .register_all(user_library.themes())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         if let Err(error) =
             restore_saved_theme_selection(&mut theme_registry, &active_theme_state_path())
@@ -6055,13 +6107,17 @@ impl ShellState {
             record_runtime_error(&mut runtime, "theme.restore", error);
         }
         runtime.services_mut().insert(theme_registry);
-        load_auto_loaded_packages(&mut runtime, &user::packages())
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::clone(&user_library)));
+        load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
         register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
 
         Ok(Self {
             runtime,
+            user_library,
             typing_profiler: profile_input_latency
                 .then(|| TypingProfiler::new(default_typing_profile_log_path())),
             last_text_input_profile: None,
@@ -6896,6 +6952,7 @@ impl ShellState {
             line_height,
             ascent,
             Instant::now(),
+            &*self.user_library,
         )
     }
 
@@ -8176,10 +8233,10 @@ impl ShellState {
             if !autocomplete.is_visible() {
                 return Ok(false);
             }
-            if chord == user::autocomplete::NEXT_CHORD {
+            if chord == AUTOCOMPLETE_NEXT_CHORD {
                 autocomplete.select_next();
                 true
-            } else if chord == user::autocomplete::PREVIOUS_CHORD {
+            } else if chord == AUTOCOMPLETE_PREVIOUS_CHORD {
                 autocomplete.select_previous();
                 true
             } else {
@@ -8292,7 +8349,7 @@ impl ShellState {
             && hover_visible
             && matches!(
                 chord.as_str(),
-                user::hover::NEXT_CHORD | user::hover::PREVIOUS_CHORD
+                HOVER_NEXT_CHORD | HOVER_PREVIOUS_CHORD
             )
             && self
                 .runtime
@@ -8771,10 +8828,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let mut state = ShellState::new_with_log(log_file_path, config.profile_input_latency)?;
+    let user_library: Arc<dyn UserLibrary> = config
+        .user_library
+        .clone()
+        .unwrap_or_else(|| Arc::new(NullUserLibrary));
+    let mut state = ShellState::new_with_user_library(
+        log_file_path,
+        config.profile_input_latency,
+        Arc::clone(&user_library),
+    )?;
     let mut theme_settings =
         theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
-    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings)?;
+    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
@@ -9120,7 +9185,7 @@ fn update_theme_runtime<'ttf>(
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
     {
-        let (next_fonts, next_font_path) = load_font_set(ttf, &updated)?;
+        let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
         *font_path = next_font_path;
         *fonts = next_fonts;
         *line_height = fonts.primary().height().max(1) as usize;
@@ -9266,10 +9331,13 @@ fn resolve_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
     Ok(paths)
 }
 
-fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
+fn validate_bundled_icon_fonts(
+    fonts: &FontSet<'_>,
+    user_library: &dyn UserLibrary,
+) -> Result<(), ShellError> {
     let mut missing_count = 0usize;
     let mut examples = Vec::new();
-    for symbol in user::icon_font::symbols() {
+    for symbol in user_library.icon_symbols() {
         let supported = symbol
             .glyph
             .chars()
@@ -9300,6 +9368,7 @@ fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
 fn load_font_set<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     settings: &ThemeRuntimeSettings,
+    user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
     let primary = ttf
@@ -9337,8 +9406,14 @@ fn load_font_set<'ttf>(
             Ok((name, font, raster_font))
         })
         .collect::<Result<Vec<_>, ShellError>>()?;
-    let fonts = FontSet::new(primary, icon_fonts, settings.font_size as f32, cell_width);
-    validate_bundled_icon_fonts(&fonts)?;
+    let fonts = FontSet::new(
+        primary,
+        icon_fonts,
+        settings.font_size as f32,
+        cell_width,
+        user_library,
+    );
+    validate_bundled_icon_fonts(&fonts, user_library)?;
     Ok((fonts, primary_path))
 }
 
@@ -11246,7 +11321,7 @@ fn ensure_lsp_log_buffer(
         .map_err(|error| error.to_string())?;
     {
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics)
+        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics, &*shell_user_library(runtime))
             .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
     }
     runtime
@@ -11435,6 +11510,7 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
             &registry,
             lsp_client.as_ref(),
             lsp_context.as_ref(),
+            &*shell_user_library(runtime),
         )
     };
     let ui = shell_ui_mut(runtime)?;
@@ -12310,6 +12386,39 @@ fn buffer_autocomplete_entries(
         .collect()
 }
 
+fn lsp_kind_icon(kind: Option<editor_lsp::LspCompletionKind>) -> &'static str {
+    use editor_icons::symbols::cod::*;
+    use editor_lsp::LspCompletionKind;
+    match kind {
+        Some(LspCompletionKind::Text) => COD_TEXT_SIZE,
+        Some(LspCompletionKind::Method)
+        | Some(LspCompletionKind::Function)
+        | Some(LspCompletionKind::Constructor) => COD_SYMBOL_METHOD,
+        Some(LspCompletionKind::Field) => COD_SYMBOL_FIELD,
+        Some(LspCompletionKind::Variable) => COD_SYMBOL_VARIABLE,
+        Some(LspCompletionKind::Class) => COD_SYMBOL_CLASS,
+        Some(LspCompletionKind::Interface) => COD_SYMBOL_INTERFACE,
+        Some(LspCompletionKind::Module) => COD_SYMBOL_NAMESPACE,
+        Some(LspCompletionKind::Property) => COD_SYMBOL_PROPERTY,
+        Some(LspCompletionKind::Unit) => COD_SYMBOL_RULER,
+        Some(LspCompletionKind::Value) => COD_SYMBOL_NUMERIC,
+        Some(LspCompletionKind::Enum) => COD_SYMBOL_ENUM,
+        Some(LspCompletionKind::Keyword) => COD_SYMBOL_KEYWORD,
+        Some(LspCompletionKind::Snippet) => COD_SYMBOL_SNIPPET,
+        Some(LspCompletionKind::Color) => COD_SYMBOL_COLOR,
+        Some(LspCompletionKind::File) => COD_FILE,
+        Some(LspCompletionKind::Reference) => COD_REFERENCES,
+        Some(LspCompletionKind::Folder) => COD_FOLDER,
+        Some(LspCompletionKind::EnumMember) => COD_SYMBOL_ENUM_MEMBER,
+        Some(LspCompletionKind::Constant) => COD_SYMBOL_CONSTANT,
+        Some(LspCompletionKind::Struct) => COD_SYMBOL_STRUCTURE,
+        Some(LspCompletionKind::Event) => COD_SYMBOL_EVENT,
+        Some(LspCompletionKind::Operator) => COD_SYMBOL_OPERATOR,
+        Some(LspCompletionKind::TypeParameter) => COD_SYMBOL_PARAMETER,
+        None => COD_SYMBOL_MISC,
+    }
+}
+
 fn lsp_autocomplete_entries(
     request: &AutocompleteWorkerRequest,
     query: &AutocompleteQuery,
@@ -12355,7 +12464,7 @@ fn lsp_autocomplete_entries(
                     provider_id: provider.id.clone(),
                     provider_label: provider.label.clone(),
                     provider_icon: provider.icon.clone(),
-                    item_icon: user::autocomplete::lsp_kind_icon(item.kind()).to_owned(),
+                    item_icon: lsp_kind_icon(item.kind()).to_owned(),
                     label: candidate.clone(),
                     replacement,
                     detail: item.detail().map(str::to_owned),
@@ -12493,6 +12602,7 @@ fn hover_overlay_for_buffer(
     registry: &HoverRegistry,
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
+    user_library: &dyn UserLibrary,
 ) -> Option<HoverOverlay> {
     if registry.providers.is_empty() {
         return None;
@@ -12516,7 +12626,9 @@ fn hover_overlay_for_buffer(
                 HoverProviderKind::SignatureHelp => {
                     hover_signature_provider_lines(buffer, lsp_client, lsp_context)
                 }
-                HoverProviderKind::Diagnostics => hover_diagnostic_provider_lines(buffer),
+                HoverProviderKind::Diagnostics => {
+                    hover_diagnostic_provider_lines(buffer, user_library)
+                }
             };
             (!lines.is_empty()).then(|| HoverProviderContent {
                 provider_label: provider.label.clone(),
@@ -12528,7 +12640,7 @@ fn hover_overlay_for_buffer(
     let providers = if providers.is_empty() {
         vec![HoverProviderContent {
             provider_label: "Hover".to_owned(),
-            provider_icon: user::hover::TOKEN_ICON.to_owned(),
+            provider_icon: editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE.to_owned(),
             lines: hover_empty_provider_lines(buffer, token_info.as_ref()),
         }]
     } else {
@@ -12643,7 +12755,7 @@ fn hover_lsp_provider_lines(
         if show_server_labels {
             lines.push(format!(
                 "{} {}",
-                user::autocomplete::DOCUMENTATION_ICON,
+                editor_icons::symbols::cod::COD_INFO,
                 hover.server_id()
             ));
         }
@@ -12669,7 +12781,7 @@ fn hover_signature_provider_lines(
         if show_server_labels {
             lines.push(format!(
                 "{} {}",
-                user::hover::SIGNATURE_ICON,
+                editor_icons::symbols::md::MD_SIGNATURE,
                 signature.server_id()
             ));
         }
@@ -12702,21 +12814,25 @@ fn synced_hover_lsp_request<T>(
         .unwrap_or_default()
 }
 
-fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
+fn hover_diagnostic_provider_lines(
+    buffer: &ShellBuffer,
+    user_library: &dyn UserLibrary,
+) -> Vec<String> {
     let cursor = buffer.cursor_point();
+    let diagnostic_icon = user_library.lsp_diagnostic_icon();
+    let diagnostic_line_limit = user_library.lsp_diagnostic_line_limit();
     let matching = buffer
         .lsp_diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic_matches_cursor_line(diagnostic, cursor))
-        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
+        .take(diagnostic_line_limit)
         .map(|diagnostic| {
             let source = diagnostic.source();
             if source.is_empty() {
-                format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message())
+                format!("{diagnostic_icon} {}", diagnostic.message())
             } else {
                 format!(
-                    "{} {} ({source})",
-                    user::lsp::DIAGNOSTIC_ICON,
+                    "{diagnostic_icon} {} ({source})",
                     diagnostic.message()
                 )
             }
@@ -12729,8 +12845,8 @@ fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
         .lsp_diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.range().start().line == cursor.line)
-        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
-        .map(|diagnostic| format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message()))
+        .take(diagnostic_line_limit)
+        .map(|diagnostic| format!("{diagnostic_icon} {}", diagnostic.message()))
         .collect()
 }
 
@@ -12784,7 +12900,7 @@ const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
 
 fn statusline_lsp_diagnostics(
     diagnostics: &[LspDiagnostic],
-) -> Option<user::statusline::LspDiagnosticsInfo> {
+) -> Option<PluginLspDiagnosticsInfo> {
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for diagnostic in diagnostics {
@@ -12795,7 +12911,7 @@ fn statusline_lsp_diagnostics(
         }
     }
     (errors > 0 || warnings > 0)
-        .then_some(user::statusline::LspDiagnosticsInfo { errors, warnings })
+        .then_some(PluginLspDiagnosticsInfo { errors, warnings })
 }
 
 fn diagnostic_line_spans_for_diagnostics(
@@ -14217,8 +14333,9 @@ fn navigate_browser_buffer(
     raw_url: &str,
 ) -> Result<(), String> {
     let url = normalize_browser_url(raw_url);
+    let user_library = shell_user_library(runtime);
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    set_browser_buffer_location(buffer, &url, true);
+    set_browser_buffer_location(buffer, &url, true, &*user_library);
     Ok(())
 }
 
@@ -14259,7 +14376,7 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .model_mut()
         .create_popup_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )
@@ -14270,8 +14387,9 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.ensure_popup_buffer(
         buffer_id,
-        user::browser::BUFFER_NAME,
+        BROWSER_BUFFER_NAME,
         BufferKind::Plugin(BROWSER_KIND.to_owned()),
+        &*shell_user_library(runtime),
     );
     shell_ui_mut(runtime)?.set_popup_focus(true);
     enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
@@ -14280,12 +14398,17 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
 
 fn browser_buffer_display_name(current_url: Option<&str>) -> String {
     match current_url {
-        Some(url) => format!("{} {url}", user::browser::BUFFER_NAME),
-        None => user::browser::BUFFER_NAME.to_owned(),
+        Some(url) => format!("{} {url}", BROWSER_BUFFER_NAME),
+        None => BROWSER_BUFFER_NAME.to_owned(),
     }
 }
 
-fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input: bool) {
+fn set_browser_buffer_location(
+    buffer: &mut ShellBuffer,
+    url: &str,
+    clear_input: bool,
+    user_library: &dyn UserLibrary,
+) {
     let state = buffer
         .browser_state
         .get_or_insert_with(BrowserBufferState::default);
@@ -14293,13 +14416,13 @@ fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input:
     if changed {
         state.current_url = Some(url.to_owned());
         buffer.name = browser_buffer_display_name(Some(url));
-        buffer.replace_with_lines(user::browser::buffer_lines(Some(url)));
+        buffer.replace_with_lines(user_library.browser_buffer_lines(Some(url)));
     }
     if let Some(input) = buffer.input_field_mut() {
         if clear_input {
             input.clear();
         }
-        input.set_hint(Some(user::browser::input_hint(Some(url))));
+        input.set_hint(Some(user_library.browser_input_hint(Some(url))));
     }
 }
 
@@ -15992,7 +16115,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             ui.close_hover();
         }
         let has_input = ui
-            .ensure_buffer(buffer_id, &buffer_name, buffer_kind)
+            .ensure_buffer(buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime))
             .has_input_field();
         ui.focus_buffer_in_active_pane(buffer_id);
         if !is_git_commit {
@@ -16053,7 +16176,7 @@ fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resu
             .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
         (buffer.name().to_owned(), buffer.kind().clone())
     };
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime));
     Ok(())
 }
 
@@ -16158,6 +16281,7 @@ fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         buffer_id,
         "*git-status*",
         BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+        &*shell_user_library(runtime),
     );
     shell_ui_mut(runtime)?.set_popup_focus(true);
     refresh_git_status_buffer(runtime, buffer_id)
@@ -16244,7 +16368,7 @@ fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), 
     };
     {
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory);
+        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory, &*shell_user_library(runtime));
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
     }
@@ -16523,7 +16647,7 @@ mod directory_line_tests {
 
     #[test]
     fn parse_directory_line_strips_file_icons() {
-        let line = format!("{} Cargo.toml", user::icon_font::symbols::seti::CUSTOM_TOML);
+        let line = format!("{} Cargo.toml", editor_icons::symbols::seti::CUSTOM_TOML);
         let parsed = parse_directory_line(&line).expect("icon-prefixed file line should parse");
         assert_eq!(parsed.label, "Cargo.toml");
         assert_eq!(parsed.rel_path, PathBuf::from("Cargo.toml"));
@@ -16532,7 +16656,7 @@ mod directory_line_tests {
 
     #[test]
     fn parse_directory_line_strips_directory_icons() {
-        let line = format!("{} src/", user::icon_font::symbols::seti::CUSTOM_FOLDER);
+        let line = format!("{} src/", editor_icons::symbols::seti::CUSTOM_FOLDER);
         let parsed =
             parse_directory_line(&line).expect("icon-prefixed directory line should parse");
         assert_eq!(parsed.label, "src/");
@@ -20492,7 +20616,7 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics, &*shell_user_library(runtime));
     shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
 }
@@ -20545,7 +20669,7 @@ fn split_runtime_pane(
     };
     {
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind);
+        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime));
         ui.split_pane(pane_id, split_buffer_id, direction);
     }
     let window_id = active_window_id(runtime)?;
@@ -21965,7 +22089,7 @@ fn update_error_buffer(
     lines: Vec<String>,
 ) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
-    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics);
+    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics, &*shell_user_library(runtime));
     buffer.replace_with_lines(lines);
     Ok(())
 }
@@ -22179,7 +22303,7 @@ fn browser_state_for_kind(kind: &BufferKind) -> Option<BrowserBufferState> {
     buffer_is_browser(kind).then(BrowserBufferState::default)
 }
 
-fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
+fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibrary) -> Vec<String> {
     match name {
         "*scratch*" => initial_scratch_lines(),
         "*notes*" => initial_notes_lines(),
@@ -22225,7 +22349,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
-                user::browser::buffer_lines(None)
+                user_library.browser_buffer_lines(None)
             }
             BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => vec![
                 format!("{name} is an ACP session buffer."),
@@ -22239,7 +22363,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
-                user::git::commit_buffer_template()
+                user_library.git_commit_template()
             }
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),
@@ -23516,7 +23640,7 @@ fn statusline_icon_colors(
     lsp_workspace_loaded: bool,
     connected_color: Color,
 ) -> Vec<(&'static str, Color)> {
-    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
+    let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
     let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
     let error_icon = user::statusline::LSP_ERROR_ICON;
     let warning_icon = user::statusline::LSP_WARNING_ICON;
