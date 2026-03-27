@@ -340,6 +340,7 @@ pub(super) struct ShellNotification {
     pub(super) body_lines: Vec<String>,
     pub(super) progress: Option<NotificationProgress>,
     pub(super) active: bool,
+    pub(super) action: Option<NotificationAction>,
     pub(super) updated_at: Instant,
     pub(super) expires_at: Option<Instant>,
     pub(super) sequence: u64,
@@ -359,6 +360,12 @@ pub(super) struct NotificationUpdate {
     pub(super) body_lines: Vec<String>,
     pub(super) progress: Option<NotificationProgress>,
     pub(super) active: bool,
+    pub(super) action: Option<NotificationAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NotificationAction {
+    OpenAcpPermissionPicker { request_id: u64 },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -386,6 +393,7 @@ impl NotificationCenter {
             existing.body_lines = body_lines;
             existing.progress = update.progress;
             existing.active = update.active;
+            existing.action = update.action;
             existing.updated_at = now;
             existing.expires_at = expires_at;
             existing.sequence = self.next_sequence;
@@ -401,6 +409,7 @@ impl NotificationCenter {
             body_lines,
             progress: update.progress,
             active: update.active,
+            action: update.action,
             updated_at: now,
             expires_at,
             sequence: self.next_sequence,
@@ -472,6 +481,7 @@ pub(super) struct NotificationOverlayLayout {
     pub(super) severity: NotificationSeverity,
     pub(super) progress: Option<NotificationProgress>,
     pub(super) active: bool,
+    pub(super) action: Option<NotificationAction>,
 }
 
 #[derive(Debug, Clone)]

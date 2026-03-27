@@ -909,8 +909,11 @@ pub fn package() -> PluginPackage {
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
         // acp
         leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
+        leader_binding("a n", "acp.new-session", PluginKeymapScope::Workspace),
+        leader_binding("a p", "acp.pick-session", PluginKeymapScope::Workspace),
         // buffer
         leader_binding("b b", "picker.open-buffers", PluginKeymapScope::Workspace),
+        leader_binding("b w", "pane.close", PluginKeymapScope::Workspace),
         leader_binding("d b", "buffer.close", PluginKeymapScope::Workspace),
         leader_binding("b k", "buffer.close-picker", PluginKeymapScope::Workspace),
         // Git

@@ -381,6 +381,23 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 }
 
 #[test]
+fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
+    let line = AcpRenderedTextLine {
+        prefix: vec![
+            acp_icon_segment(user::icon_font::symbols::cod::COD_COMMENT, AcpColorRole::Accent),
+            acp_text_segment(" ", AcpColorRole::Default),
+        ],
+        text: "Excellent! Now let me gather more context about the project to inform the documentation content:".to_owned(),
+        text_role: AcpColorRole::Default,
+    };
+
+    let segments = acp_rendered_text_segments(&line, 32);
+
+    assert!(segments.len() > 1);
+    assert!(segments[1].end_col.saturating_sub(segments[1].start_col) > 8);
+}
+
+#[test]
 fn block_cursor_text_override_uses_segment_relative_utf8_offsets() {
     let line = "aéz";
     let char_map = LineCharMap::new(line);
@@ -1103,6 +1120,7 @@ fn test_notification_update(
             percentage: Some(percentage),
         }),
         active,
+        action: None,
     }
 }
 
@@ -1869,6 +1887,56 @@ fn notification_center_prioritizes_active_toasts_with_visible_limit() {
 }
 
 #[test]
+fn notification_action_at_point_returns_acp_permission_action() -> Result<(), String> {
+    let now = Instant::now();
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "acp.permission.42".to_owned(),
+            severity: NotificationSeverity::Warning,
+            title: "project Read file is requesting permission".to_owned(),
+            body_lines: vec!["Allow once".to_owned(), "Reject once".to_owned()],
+            progress: None,
+            active: true,
+            action: Some(NotificationAction::OpenAcpPermissionPicker { request_id: 42 }),
+        },
+        now,
+    );
+
+    let ui = shell_ui(&state.runtime)?;
+    let layouts = notification_overlay_layouts(
+        &ui.visible_notifications(now),
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    );
+    let rect = layouts
+        .first()
+        .map(|layout| layout.rect)
+        .ok_or_else(|| "notification layout missing".to_owned())?;
+    let action = notification_action_at_point(
+        ui,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+        now,
+        (rect.x() + 4, rect.y() + 4),
+    );
+
+    assert_eq!(
+        action,
+        Some(NotificationAction::OpenAcpPermissionPicker { request_id: 42 })
+    );
+    Ok(())
+}
+
+#[test]
 fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(
@@ -1881,7 +1949,7 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
-    let layout = buffer_footer_layout(buffer, rect, 18);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
     let output_bottom = layout.body_y + layout.visible_rows as i32 * 18;
     let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
 
@@ -1908,7 +1976,7 @@ fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> 
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    let layout = buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 800, 400), 18);
+    let layout = buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 800, 400), 18, 8);
     assert_eq!(buffer.viewport_lines(), layout.visible_rows);
 
     buffer.scroll_output_to_end();
@@ -2000,6 +2068,192 @@ fn acp_tool_call_updates_replace_existing_output_item() -> Result<(), String> {
 }
 
 #[test]
+fn acp_plan_height_caps_wrapped_content_at_ten_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_set_plan(Plan::new(
+        (0..4)
+            .map(|index| {
+                PlanEntry::new(
+                    format!(
+                        "ACP plan item {index} should wrap several visual rows in a narrow pane so the plan height clamp is exercised"
+                    ),
+                    PlanEntryPriority::Medium,
+                    PlanEntryStatus::Pending,
+                )
+            })
+            .collect(),
+    ));
+
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16);
+
+    let acp = buffer.acp_state.as_ref().expect("ACP state missing");
+    assert_eq!(acp.plan_pane.visible_rows(), 10);
+    assert!(acp.output_pane.visible_rows() >= 1);
+    Ok(())
+}
+
+#[test]
+fn acp_scroll_output_to_end_reaches_last_rendered_line() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_set_plan(Plan::new(vec![PlanEntry::new(
+        "Keep the plan compact",
+        PlanEntryPriority::Medium,
+        PlanEntryStatus::InProgress,
+    )]));
+    for index in 0..48 {
+        buffer.acp_push_system_message(format!("output line {index}"));
+    }
+
+    buffer.sync_acp_viewport_metrics(800, 400, 8, 16);
+    buffer.scroll_output_to_end();
+
+    assert!(
+        buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
+            >= buffer.line_count()
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_visual_selection_uses_output_text_without_prefix() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_push_system_message("alpha beta");
+    let line_index = buffer.line_count().saturating_sub(1);
+    buffer.set_cursor(TextPoint::new(line_index, 4));
+
+    let selection = visual_selection(
+        buffer,
+        TextPoint::new(line_index, 0),
+        VisualSelectionKind::Character,
+    )
+    .ok_or_else(|| "visual selection should not be empty".to_owned())?;
+    let VisualSelection::Range(range) = selection else {
+        return Err("expected a range selection".to_owned());
+    };
+
+    assert_eq!(buffer.slice(range), "alpha");
+    Ok(())
+}
+
+#[test]
+fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_push_system_message("alpha beta");
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let selection_color = Color::RGBA(55, 71, 99, 255);
+    let line_index = buffer.line_count().saturating_sub(1);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(line_index, 0),
+            TextPoint::new(line_index, 5),
+        ))),
+        None,
+        InputMode::Visual,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        selection_color,
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "missing ACP layout".to_owned())?;
+    let header_height = (16 + 10) as u32;
+    let header_radius = 9.min(header_height / 2);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    for pane in [acp_layout.plan, acp_layout.output] {
+        assert!(scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRoundedRect { rect, radius, .. }
+                if rect.x == pane.rect.x() + 1
+                    && rect.y == pane.rect.y() + 1
+                    && rect.width == pane.rect.width().saturating_sub(2)
+                    && rect.height == header_height
+                    && *radius == header_radius
+        )));
+    }
+    Ok(())
+}
+
+#[test]
 fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Result<(), String> {
     let render_width = 640;
     let render_height = 320;
@@ -2027,11 +2281,13 @@ fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Resul
         buffer,
         PixelRectToRect::rect(pane_rect.x, pane_rect.y, pane_rect.width, pane_rect.height),
         line_height,
+        8,
     );
     let full_layout = buffer_footer_layout(
         buffer,
         PixelRectToRect::rect(0, 0, render_width, render_height),
         line_height,
+        8,
     );
 
     assert_eq!(buffer.viewport_lines(), pane_layout.visible_rows);
@@ -2816,7 +3072,7 @@ fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
         .buffer(buffer_id)
         .ok_or_else(|| "browser shell buffer missing".to_owned())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
-    let layout = buffer_footer_layout(buffer, rect, 18);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
     let viewport = browser_viewport_rect(buffer, rect, 18)
         .ok_or_else(|| "browser viewport missing".to_owned())?;
     let viewport_bottom = viewport.y + viewport.height as i32;
@@ -3539,7 +3795,7 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
         .buffer(buffer_id)
         .ok_or_else(|| "terminal test buffer missing".to_owned())?;
     let rect = PixelRectToRect::rect(0, 0, 320, 180);
-    let layout = buffer_footer_layout(buffer, rect, 16);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(

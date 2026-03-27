@@ -124,6 +124,10 @@ pub fn package() -> PluginPackage {
         PluginKeyBinding::new("Shift+Tab", "acp.cycle-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
         PluginKeyBinding::new("Ctrl+Tab", "acp.switch-pane", PluginKeymapScope::Global),
+        PluginKeyBinding::new("Ctrl+m", "acp.pick-model", PluginKeymapScope::Workspace)
+            .with_vim_mode(PluginVimMode::Normal),
+        PluginKeyBinding::new("Ctrl+s", "acp.pick-session", PluginKeymapScope::Workspace)
+            .with_vim_mode(PluginVimMode::Normal),
     ];
 
     PluginPackage::new("acp", true, "Agent Client Protocol integrations.")

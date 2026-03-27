@@ -246,6 +246,8 @@ struct DesktopBrowserHostService {
     event_tx: Sender<BrowserHostEvent>,
     event_rx: Receiver<BrowserHostEvent>,
     instances: BTreeMap<BufferId, BrowserInstance>,
+    #[cfg(target_os = "linux")]
+    gtk_initialized: bool,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -257,8 +259,39 @@ impl DesktopBrowserHostService {
             event_tx,
             event_rx,
             instances: BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            gtk_initialized: false,
         }
     }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_platform_ready(&mut self) -> Result<(), String> {
+        if self.gtk_initialized {
+            return Ok(());
+        }
+        gtk::init()
+            .map_err(|error| format!("failed to initialize GTK for embedded browser: {error}"))?;
+        self.gtk_initialized = true;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn ensure_platform_ready(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pump_platform_events(&self) {
+        if !self.gtk_initialized {
+            return;
+        }
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn pump_platform_events(&self) {}
 
     fn sync_window(
         &mut self,
@@ -280,6 +313,12 @@ impl DesktopBrowserHostService {
             .copied()
             .map(|surface| (surface.buffer_id, surface))
             .collect::<BTreeMap<_, _>>();
+
+        if (!visible_surfaces.is_empty() || !self.instances.is_empty())
+            && let Err(error) = self.ensure_platform_ready()
+        {
+            return Err(self.disable(error));
+        }
 
         let known_ids = known_buffers.keys().copied().collect::<BTreeSet<_>>();
         self.instances.retain(|buffer_id, instance| {
@@ -322,6 +361,7 @@ impl DesktopBrowserHostService {
             return Err(self.disable(error));
         }
 
+        self.pump_platform_events();
         Ok(location_updates)
     }
 

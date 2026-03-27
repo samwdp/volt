@@ -3,763 +3,426 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Volt Editor - Architecture</title>
+    <title>Volt Docs</title>
+    <meta
+        name="description"
+        content="Volt editor documentation covering the architecture, runtime model, workspace crates, and launch paths."
+    >
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-dark: #0a0e14;
-            --bg-layer: #151b24;
-            --accent-rust: #f74c00;
-            --accent-cyan: #00e8ff;
-            --accent-purple: #b877db;
-            --accent-green: #bae67e;
-            --text-primary: #e6e6e6;
-            --text-dim: #8a919e;
-            --border: #1f2937;
-            --glow: rgba(0, 232, 255, 0.3);
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'JetBrains Mono', monospace;
-            background: var(--bg-dark);
-            color: var(--text-primary);
-            overflow-x: hidden;
-            min-height: 100vh;
-            position: relative;
-        }
-
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: 
-                radial-gradient(circle at 20% 30%, rgba(247, 76, 0, 0.05) 0%, transparent 50%),
-                radial-gradient(circle at 80% 70%, rgba(0, 232, 255, 0.05) 0%, transparent 50%),
-                repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 232, 255, 0.03) 2px, rgba(0, 232, 255, 0.03) 4px);
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        .container {
-            max-width: 1800px;
-            margin: 0 auto;
-            padding: 60px 40px;
-            position: relative;
-            z-index: 1;
-        }
-
-        header {
-            text-align: center;
-            margin-bottom: 80px;
-            animation: slideDown 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        @keyframes slideDown {
-            from {
-                opacity: 0;
-                transform: translateY(-30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        h1 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: clamp(3rem, 8vw, 6rem);
-            font-weight: 900;
-            letter-spacing: -0.02em;
-            background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 50%, var(--accent-rust) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 16px;
-            text-transform: uppercase;
-            position: relative;
-            display: inline-block;
-        }
-
-        h1::after {
-            content: '';
-            position: absolute;
-            bottom: -10px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 120px;
-            height: 3px;
-            background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
-            box-shadow: 0 0 20px var(--glow);
-        }
-
-        .subtitle {
-            font-size: 1.2rem;
-            color: var(--text-dim);
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            font-weight: 400;
-            margin-top: 30px;
-        }
-
-        .subtitle span {
-            color: var(--accent-rust);
-            font-weight: 600;
-        }
-
-        .architecture {
-            display: flex;
-            flex-direction: column;
-            gap: 32px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
-        }
-
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .layer {
-            background: var(--bg-layer);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 32px;
-            position: relative;
-            overflow: hidden;
-            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .layer::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            transition: opacity 0.4s;
-            opacity: 0;
-        }
-
-        .layer:hover {
-            border-color: var(--accent-cyan);
-            transform: translateY(-4px);
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 40px var(--glow);
-        }
-
-        .layer:hover::before {
-            opacity: 1;
-        }
-
-        .layer:nth-child(1) { animation-delay: 0.4s; }
-        .layer:nth-child(2) { animation-delay: 0.5s; }
-        .layer:nth-child(3) { animation-delay: 0.6s; }
-        .layer:nth-child(4) { animation-delay: 0.7s; }
-        .layer:nth-child(5) { animation-delay: 0.8s; }
-
-        .layer-ui::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan)); }
-        .layer-plugins::before { background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green)); }
-        .layer-core::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-rust)); }
-        .layer-runtime::before { background: linear-gradient(90deg, var(--accent-rust), var(--accent-purple)); }
-        .layer-platform::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan)); }
-
-        .layer-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .layer-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.8rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .layer-ui .layer-title { color: var(--accent-purple); }
-        .layer-plugins .layer-title { color: var(--accent-cyan); }
-        .layer-core .layer-title { color: var(--accent-green); }
-        .layer-runtime .layer-title { color: var(--accent-rust); }
-        .layer-platform .layer-title { color: var(--accent-purple); }
-
-        .layer-badge {
-            font-size: 0.75rem;
-            padding: 6px 12px;
-            border-radius: 6px;
-            background: rgba(0, 232, 255, 0.1);
-            border: 1px solid var(--accent-cyan);
-            color: var(--accent-cyan);
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            font-weight: 600;
-        }
-
-        .components {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-        }
-
-        .component {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .component::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 4px;
-            height: 100%;
-            background: var(--accent-cyan);
-            transform: scaleY(0);
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            transform-origin: bottom;
-        }
-
-        .component:hover {
-            background: rgba(255, 255, 255, 0.05);
-            border-color: var(--accent-cyan);
-            transform: translateX(4px);
-        }
-
-        .component:hover::before {
-            transform: scaleY(1);
-        }
-
-        .component-name {
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: var(--text-primary);
-            font-size: 0.95rem;
-        }
-
-        .component-desc {
-            font-size: 0.8rem;
-            color: var(--text-dim);
-            line-height: 1.5;
-        }
-
-        .flow-indicator {
-            text-align: center;
-            padding: 16px 0;
-            position: relative;
-        }
-
-        .flow-arrow {
-            font-size: 2rem;
-            color: var(--accent-cyan);
-            animation: pulse 2s ease-in-out infinite;
-            display: inline-block;
-        }
-
-        @keyframes pulse {
-            0%, 100% {
-                opacity: 0.4;
-                transform: translateY(0);
-            }
-            50% {
-                opacity: 1;
-                transform: translateY(8px);
-            }
-        }
-
-        .integrations {
-            margin-top: 60px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1s both;
-        }
-
-        .integrations-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 2rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 32px;
-            color: var(--accent-cyan);
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-        }
-
-        .integration-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 24px;
-        }
-
-        .integration-card {
-            background: var(--bg-layer);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .integration-card:hover {
-            border-color: var(--accent-rust);
-            box-shadow: 0 10px 40px rgba(247, 76, 0, 0.2);
-            transform: translateY(-4px);
-        }
-
-        .integration-card h3 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.3rem;
-            color: var(--accent-rust);
-            margin-bottom: 16px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .integration-items {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-
-        .integration-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            font-size: 0.9rem;
-            color: var(--text-dim);
-        }
-
-        .integration-item::before {
-            content: '▸';
-            color: var(--accent-rust);
-            font-weight: bold;
-            font-size: 1.2rem;
-        }
-
-        .tech-stack {
-            margin-top: 60px;
-            text-align: center;
-            padding: 40px;
-            background: rgba(0, 232, 255, 0.03);
-            border-radius: 16px;
-            border: 1px solid rgba(0, 232, 255, 0.1);
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.2s both;
-        }
-
-        .tech-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.5rem;
-            color: var(--accent-green);
-            margin-bottom: 24px;
-            text-transform: uppercase;
-            letter-spacing: 0.15em;
-        }
-
-        .tech-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            justify-content: center;
-        }
-
-        .tech-tag {
-            padding: 10px 20px;
-            background: rgba(186, 230, 126, 0.1);
-            border: 1px solid var(--accent-green);
-            border-radius: 24px;
-            color: var(--accent-green);
-            font-size: 0.85rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .tech-tag:hover {
-            background: var(--accent-green);
-            color: var(--bg-dark);
-            transform: scale(1.1);
-            box-shadow: 0 0 20px rgba(186, 230, 126, 0.4);
-        }
-
-        footer {
-            margin-top: 80px;
-            text-align: center;
-            color: var(--text-dim);
-            font-size: 0.9rem;
-            padding: 20px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.4s both;
-        }
-
-        footer strong {
-            color: var(--accent-rust);
-        }
-
-        @media (max-width: 768px) {
-            .container {
-                padding: 40px 20px;
-            }
-
-            h1 {
-                font-size: 3rem;
-            }
-
-            .components {
-                grid-template-columns: 1fr;
-            }
-
-            .integration-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        /* Scrollbar styling */
-        ::-webkit-scrollbar {
-            width: 12px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: var(--bg-dark);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--accent-cyan);
-            border-radius: 6px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--accent-purple);
-        }
-    </style>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@700;800;900&display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>VOLT</h1>
-            <p class="subtitle">Modal Text Editor Architecture • <span>Rust-Powered</span></p>
+    <div class="site-shell">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+
+        <header class="topbar">
+            <a class="brand" href="#top" aria-label="Volt Docs home">
+                <span class="brand-mark">V</span>
+                <span class="brand-copy">
+                    <strong>Volt Docs</strong>
+                    <small>Editor architecture and runtime</small>
+                </span>
+            </a>
+
+            <button
+                class="nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="primary-nav"
+            >
+                Menu
+            </button>
+
+            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
+                <a href="#overview">Overview</a>
+                <a href="#architecture">Architecture</a>
+                <a href="#crates">Crates</a>
+                <a href="#workflows">Workflows</a>
+                <a href="#commands">Commands</a>
+            </nav>
+
+            <div class="topbar-actions">
+                <a class="button button-ghost" href="architecture-diagram.html">Open Diagram</a>
+                <a class="button button-primary" href="#commands">Get Started</a>
+            </div>
         </header>
 
-        <div class="architecture">
-            <!-- UI Layer -->
-            <div class="layer layer-ui">
-                <div class="layer-header">
-                    <h2 class="layer-title">User Interface Layer</h2>
-                    <span class="layer-badge">Presentation</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Statusline</div>
-                        <div class="component-desc">Real-time editor status display</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Picker UI</div>
-                        <div class="component-desc">Fuzzy finder interface</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Oil File Browser</div>
-                        <div class="component-desc">Directory navigation</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal Buffer</div>
-                        <div class="component-desc">Integrated shell interface</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Undotree UI</div>
-                        <div class="component-desc">Visual undo history</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Hover Info</div>
-                        <div class="component-desc">Contextual information display</div>
-                    </div>
-                </div>
-            </div>
+        <main id="top">
+            <section class="hero section">
+                <div class="hero-copy">
+                    <p class="eyebrow">Rust-powered modal editor platform</p>
+                    <h1>Volt is a modal editor with a layered, programmable core.</h1>
+                    <p class="hero-text">
+                        Volt combines a central runtime, compiled user packages, language tooling,
+                        and an SDL shell into one cohesive editing environment. The architecture is
+                        intentionally modular so the editor can grow without losing its shape.
+                    </p>
 
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
+                    <div class="hero-actions">
+                        <a class="button button-primary" href="#architecture">Explore the system</a>
+                        <a class="button button-ghost" href="architecture-diagram.html">View full diagram</a>
+                    </div>
 
-            <!-- Plugin Layer -->
-            <div class="layer layer-plugins">
-                <div class="layer-header">
-                    <h2 class="layer-title">Plugin Packages</h2>
-                    <span class="layer-badge">Extensibility</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Buffer</div>
-                        <div class="component-desc">Buffer management & save operations</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Workspace</div>
-                        <div class="component-desc">Project & workspace control</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Vim</div>
-                        <div class="component-desc">Modal editing keybindings</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">LSP</div>
-                        <div class="component-desc">Language server lifecycle</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">DAP</div>
-                        <div class="component-desc">Debug adapter protocol</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Git</div>
-                        <div class="component-desc">Version control integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal</div>
-                        <div class="component-desc">Shell integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Autocomplete</div>
-                        <div class="component-desc">Completion providers</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">TreeSitter</div>
-                        <div class="component-desc">Grammar installer</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Multicursor</div>
-                        <div class="component-desc">Multi-cursor editing</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Theme</div>
-                        <div class="component-desc">Color scheme management</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Lang Support</div>
-                        <div class="component-desc">Rust, TS, JS, C#, YAML, TOML, MD</div>
+                    <div class="hero-metrics">
+                        <article class="metric-card reveal">
+                            <span class="metric-value">16</span>
+                            <span class="metric-label">workspace crates</span>
+                        </article>
+                        <article class="metric-card reveal">
+                            <span class="metric-value">1</span>
+                            <span class="metric-label">compiled user layer</span>
+                        </article>
+                        <article class="metric-card reveal">
+                            <span class="metric-value">3</span>
+                            <span class="metric-label">primary launch paths</span>
+                        </article>
                     </div>
                 </div>
-            </div>
 
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
+                <aside class="hero-panel reveal" aria-label="Volt architecture snapshot">
+                    <div class="panel-heading">
+                        <span class="panel-kicker">Runtime topology</span>
+                        <strong>From shell to platform</strong>
+                    </div>
 
-            <!-- Core Layer -->
-            <div class="layer layer-core">
-                <div class="layer-header">
-                    <h2 class="layer-title">Editor Core Crates</h2>
-                    <span class="layer-badge">Engine</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">editor-buffer</div>
-                        <div class="component-desc">Text buffer & undo/redo</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-core</div>
-                        <div class="component-desc">Cursor & selection ops</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-syntax</div>
-                        <div class="component-desc">Tree-sitter highlighting</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-theme</div>
-                        <div class="component-desc">Theme system & tokens</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-render</div>
-                        <div class="component-desc">Rendering pipeline</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-fs</div>
-                        <div class="component-desc">File system operations</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-lsp</div>
-                        <div class="component-desc">LSP client integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-dap</div>
-                        <div class="component-desc">Debug adapter client</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-git</div>
-                        <div class="component-desc">Git repository ops</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-terminal</div>
-                        <div class="component-desc">Terminal emulation</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-picker</div>
-                        <div class="component-desc">Fuzzy search backend</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-plugin-api</div>
-                        <div class="component-desc">Plugin architecture</div>
-                    </div>
-                </div>
-            </div>
+                    <div class="stack">
+                        <article class="stack-layer layer-purple">
+                            <div>
+                                <h2>Experience Layer</h2>
+                                <p>SDL shell, pickers, hover, terminal buffers, status surfaces.</p>
+                            </div>
+                            <span>UI</span>
+                        </article>
 
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
+                        <article class="stack-layer layer-cyan">
+                            <div>
+                                <h2>Package Layer</h2>
+                                <p>Commands, hooks, keymaps, themes, LSP and DAP defaults.</p>
+                            </div>
+                            <span>Extensibility</span>
+                        </article>
 
-            <!-- Runtime Layer -->
-            <div class="layer layer-runtime">
-                <div class="layer-header">
-                    <h2 class="layer-title">Runtime & Systems</h2>
-                    <span class="layer-badge">Infrastructure</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Tokio Runtime</div>
-                        <div class="component-desc">Async I/O & concurrency</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal Emulation</div>
-                        <div class="component-desc">PTY & VT100 parsing</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Plugin Host</div>
-                        <div class="component-desc">ABI-stable FFI loader</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Message Passing</div>
-                        <div class="component-desc">Crossbeam channels</div>
-                    </div>
-                </div>
-            </div>
+                        <article class="stack-layer layer-green">
+                            <div>
+                                <h2>Core Layer</h2>
+                                <p>Editor runtime, buffers, syntax, rendering, picker, Git, jobs.</p>
+                            </div>
+                            <span>Engine</span>
+                        </article>
 
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
+                        <article class="stack-layer layer-rust">
+                            <div>
+                                <h2>Systems Layer</h2>
+                                <p>Tokio, plugin host, message flow, SDL platform integration.</p>
+                            </div>
+                            <span>Infrastructure</span>
+                        </article>
+                    </div>
+                </aside>
+            </section>
 
-            <!-- Platform Layer -->
-            <div class="layer layer-platform">
-                <div class="layer-header">
-                    <h2 class="layer-title">Graphics & Platform</h2>
-                    <span class="layer-badge">Foundation</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">SDL3</div>
-                        <div class="component-desc">Graphics rendering & input</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">WebView2</div>
-                        <div class="component-desc">Complex UI rendering</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Windows API</div>
-                        <div class="component-desc">Platform integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Cross-platform</div>
-                        <div class="component-desc">Windows, macOS, Linux support</div>
-                    </div>
-                </div>
-            </div>
-        </div>
+            <section class="overview-grid section" id="overview">
+                <article class="feature-panel reveal">
+                    <p class="panel-label">Editor identity</p>
+                    <h2>Modal muscle with modern editor systems.</h2>
+                    <p>
+                        Volt aims to bridge fast modal editing with the capabilities people expect
+                        from a modern IDE: workspace discovery, external tooling, rich overlays,
+                        and programmable runtime services.
+                    </p>
+                </article>
 
-        <!-- External Integrations -->
-        <div class="integrations">
-            <h2 class="integrations-title">External Integrations</h2>
-            <div class="integration-grid">
-                <div class="integration-card">
-                    <h3>Language Servers</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">rust-analyzer (Rust)</div>
-                        <div class="integration-item">typescript-language-server</div>
-                        <div class="integration-item">csharp-ls (C#)</div>
-                        <div class="integration-item">yaml-language-server</div>
-                        <div class="integration-item">taplo (TOML)</div>
-                    </div>
-                </div>
-                <div class="integration-card">
-                    <h3>Debug Adapters</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">CodeLLDB (Rust/C++)</div>
-                        <div class="integration-item">Node Debug Adapter</div>
-                        <div class="integration-item">Custom DAP clients</div>
-                    </div>
-                </div>
-                <div class="integration-card">
-                    <h3>Version Control</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">Git2 (libgit2 bindings)</div>
-                        <div class="integration-item">Staging & commit UI</div>
-                        <div class="integration-item">Diff visualization</div>
-                        <div class="integration-item">Branch management</div>
-                    </div>
-                </div>
-            </div>
-        </div>
+                <article class="feature-panel reveal">
+                    <p class="panel-label">Customization model</p>
+                    <h2>User packages shape the experience.</h2>
+                    <p>
+                        Themes, language registrations, hook declarations, keybindings, and package
+                        metadata live in the compiled user layer so behavior stays declarative where
+                        possible instead of being scattered across the core.
+                    </p>
+                </article>
 
-        <!-- Tech Stack -->
-        <div class="tech-stack">
-            <h3 class="tech-title">Core Technologies</h3>
-            <div class="tech-tags">
-                <span class="tech-tag">Rust</span>
-                <span class="tech-tag">SDL3</span>
-                <span class="tech-tag">WebView2</span>
-                <span class="tech-tag">Tree-sitter</span>
-                <span class="tech-tag">LSP</span>
-                <span class="tech-tag">DAP</span>
-                <span class="tech-tag">Tokio</span>
-                <span class="tech-tag">Serde</span>
-                <span class="tech-tag">Ropey</span>
-                <span class="tech-tag">ABI Stable</span>
-                <span class="tech-tag">Crossbeam</span>
-                <span class="tech-tag">Alacritty Terminal</span>
-            </div>
-        </div>
+                <article class="feature-panel reveal">
+                    <p class="panel-label">Workspace shape</p>
+                    <h2>Small crates, clear boundaries.</h2>
+                    <p>
+                        The workspace is split by domain: text buffers, rendering, themes, syntax,
+                        terminal execution, Git, language servers, debugging, plugins, and the SDL
+                        shell all have explicit homes.
+                    </p>
+                </article>
+            </section>
 
-        <footer>
-            <strong>Volt</strong> — A production-grade modal text editor bridging Vim keybindings with modern IDE capabilities
+            <section class="section architecture-section" id="architecture">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Architecture</p>
+                        <h2>The system map that drives everything else.</h2>
+                    </div>
+                    <a class="text-link" href="architecture-diagram.html">Open the full architecture diagram</a>
+                </div>
+
+                <div class="architecture-layout">
+                    <article class="diagram-frame reveal">
+                        <div class="frame-topline">
+                            <span>Live reference</span>
+                            <span>architecture-diagram.html</span>
+                        </div>
+                        <iframe
+                            class="diagram-embed"
+                            src="architecture-diagram.html"
+                            title="Volt architecture diagram preview"
+                            loading="lazy"
+                        ></iframe>
+                    </article>
+
+                    <div class="architecture-notes">
+                        <article class="insight-card reveal">
+                            <span class="insight-index">01</span>
+                            <h3>Thin executable, rich bootstrap.</h3>
+                            <p>
+                                `crates\volt` stays intentionally lean while the bootstrap flow
+                                assembles the runtime, user packages, registries, and shell entry
+                                points.
+                            </p>
+                        </article>
+
+                        <article class="insight-card reveal">
+                            <span class="insight-index">02</span>
+                            <h3>EditorRuntime is the gravity well.</h3>
+                            <p>
+                                The runtime binds model state, services, commands, hooks, and
+                                keymaps into one programmable center of the editor.
+                            </p>
+                        </article>
+
+                        <article class="insight-card reveal">
+                            <span class="insight-index">03</span>
+                            <h3>User packages shape the experience.</h3>
+                            <p>
+                                Themes, keybindings, language tools, hooks, and package metadata
+                                live in the compiled `user` layer rather than being hard-wired into
+                                the core.
+                            </p>
+                        </article>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section systems-section">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">System layers</p>
+                        <h2>How the runtime is partitioned.</h2>
+                    </div>
+                </div>
+
+                <div class="systems-grid">
+                    <article class="system-card reveal accent-purple">
+                        <span class="system-tag">Shell</span>
+                        <h3>Editor shell and UI state</h3>
+                        <p>
+                            `editor-sdl` owns the SDL shell, shell-local services, picker overlays,
+                            hover flows, popup handling, and workspace interactions.
+                        </p>
+                    </article>
+
+                    <article class="system-card reveal accent-cyan">
+                        <span class="system-tag">Plugins</span>
+                        <h3>Package metadata to behavior</h3>
+                        <p>
+                            `editor-plugin-api` defines the ABI-stable plugin surface and
+                            `editor-plugin-host` turns package declarations into commands, hooks,
+                            and keybindings.
+                        </p>
+                    </article>
+
+                    <article class="system-card reveal accent-green">
+                        <span class="system-tag">Core</span>
+                        <h3>Model, commands, hooks, keymaps</h3>
+                        <p>
+                            `editor-core` centers the runtime while neighboring crates handle text
+                            buffers, syntax, themes, rendering, workspace discovery, search, and
+                            external tools.
+                        </p>
+                    </article>
+
+                    <article class="system-card reveal accent-rust">
+                        <span class="system-tag">Platform</span>
+                        <h3>Async systems and integration</h3>
+                        <p>
+                            Tokio-powered jobs, terminal execution, language tooling, debugging,
+                            and SDL platform work give Volt its editor-plus-IDE feel.
+                        </p>
+                    </article>
+                </div>
+            </section>
+
+            <section class="section crates-section" id="crates">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Workspace crates</p>
+                        <h2>The pieces that make up Volt.</h2>
+                    </div>
+                    <p class="section-copy">
+                        The workspace is organized by domain so each subsystem stays legible and can
+                        evolve independently.
+                    </p>
+                </div>
+
+                <div class="crate-grid">
+                    <article class="crate-card reveal">
+                        <h3>Application entry</h3>
+                        <ul>
+                            <li><code>volt</code> executable</li>
+                            <li><code>editor-sdl</code> shell frontend</li>
+                            <li><code>user</code> compiled customization layer</li>
+                            <li><code>xtask</code> workflow automation</li>
+                        </ul>
+                    </article>
+
+                    <article class="crate-card reveal">
+                        <h3>Core model</h3>
+                        <ul>
+                            <li><code>editor-core</code></li>
+                            <li><code>editor-buffer</code></li>
+                            <li><code>editor-render</code></li>
+                            <li><code>editor-theme</code></li>
+                            <li><code>editor-syntax</code></li>
+                        </ul>
+                    </article>
+
+                    <article class="crate-card reveal">
+                        <h3>Workspace services</h3>
+                        <ul>
+                            <li><code>editor-fs</code></li>
+                            <li><code>editor-picker</code></li>
+                            <li><code>editor-jobs</code></li>
+                            <li><code>editor-terminal</code></li>
+                            <li><code>editor-git</code></li>
+                        </ul>
+                    </article>
+
+                    <article class="crate-card reveal">
+                        <h3>Language tooling</h3>
+                        <ul>
+                            <li><code>editor-lsp</code></li>
+                            <li><code>editor-dap</code></li>
+                            <li><code>editor-plugin-api</code></li>
+                            <li><code>editor-plugin-host</code></li>
+                        </ul>
+                    </article>
+                </div>
+            </section>
+
+            <section class="section workflows-section" id="workflows">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Operator workflows</p>
+                        <h2>Common ways to understand and validate the editor.</h2>
+                    </div>
+                </div>
+
+                <div class="workflow-timeline">
+                    <article class="workflow-step reveal">
+                        <span>01</span>
+                        <div>
+                            <h3>Boot the hidden shell smoke test</h3>
+                            <p>
+                                Use the single-frame shell path to confirm the runtime launches
+                                cleanly without staying interactive.
+                            </p>
+                        </div>
+                    </article>
+
+                    <article class="workflow-step reveal">
+                        <span>02</span>
+                        <div>
+                            <h3>Exercise the bootstrap path</h3>
+                            <p>
+                                The non-UI bootstrap demo is the clearest snapshot of runtime
+                                registration for commands, hooks, themes, syntax, and external
+                                tooling.
+                            </p>
+                        </div>
+                    </article>
+
+                    <article class="workflow-step reveal">
+                        <span>03</span>
+                        <div>
+                            <h3>Validate the workspace pipeline</h3>
+                            <p>
+                                `cargo xtask ci` matches the CI-quality path when you need the full
+                                formatting, lint, and test sweep across the workspace.
+                            </p>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="section commands-section" id="commands">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Commands</p>
+                        <h2>High-signal entry points.</h2>
+                    </div>
+                </div>
+
+                <div class="command-grid">
+                    <article class="command-card reveal">
+                        <div class="command-header">
+                            <h3>Launch the editor shell</h3>
+                            <button class="copy-button" type="button" data-copy="cargo run -p volt">Copy</button>
+                        </div>
+                        <pre><code>cargo run -p volt</code></pre>
+                        <p>Starts the SDL shell demo and lets you explore the interactive editor surface.</p>
+                    </article>
+
+                    <article class="command-card reveal">
+                        <div class="command-header">
+                            <h3>Run the hidden smoke test</h3>
+                            <button class="copy-button" type="button" data-copy="cargo run -p volt -- --shell-hidden">Copy</button>
+                        </div>
+                        <pre><code>cargo run -p volt -- --shell-hidden</code></pre>
+                        <p>Useful for runtime verification when you want a non-interactive shell boot.</p>
+                    </article>
+
+                    <article class="command-card reveal">
+                        <div class="command-header">
+                            <h3>Inspect the bootstrap flow</h3>
+                            <button class="copy-button" type="button" data-copy="cargo run -p volt -- --bootstrap-demo">Copy</button>
+                        </div>
+                        <pre><code>cargo run -p volt -- --bootstrap-demo</code></pre>
+                        <p>Prints the subsystem summary for the clearest non-UI runtime overview.</p>
+                    </article>
+
+                    <article class="command-card reveal">
+                        <div class="command-header">
+                            <h3>Run the full validation path</h3>
+                            <button class="copy-button" type="button" data-copy="cargo xtask ci">Copy</button>
+                        </div>
+                        <pre><code>cargo xtask ci</code></pre>
+                        <p>Executes the CI-grade format, lint, and test pipeline used across the workspace.</p>
+                    </article>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <p>
+                <strong>Volt</strong> pairs Vim-style editing with a layered Rust runtime, compiled
+                customization, and modern tooling integration.
+            </p>
+            <a href="#top">Back to top</a>
         </footer>
     </div>
 
-    <script>
-        // Intersection Observer for staggered animations
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.style.opacity = '1';
-                    entry.target.style.transform = 'translateY(0)';
-                }
-            });
-        }, {
-            threshold: 0.1
-        });
-
-        document.querySelectorAll('.layer, .integration-card').forEach(el => {
-            observer.observe(el);
-        });
-
-        // Add subtle parallax effect on mouse move
-        document.addEventListener('mousemove', (e) => {
-            const x = e.clientX / window.innerWidth - 0.5;
-            const y = e.clientY / window.innerHeight - 0.5;
-            
-            document.querySelector('body::before')?.style.setProperty('transform', `translate(${x * 20}px, ${y * 20}px)`);
-        });
-    </script>
+    <script src="script.js"></script>
 </body>
 </html>

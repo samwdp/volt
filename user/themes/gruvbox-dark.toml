@@ -3,7 +3,7 @@ name = "Gruvbox Dark"
 
 
 [pallet]
-background = "#181818"
+background = "#101010"
 surface = "#282828"
 surface-muted = "#3e3e3e"
 surface-header = "#404040"

@@ -696,6 +696,7 @@ dependencies = [
  "editor-terminal",
  "editor-theme",
  "fontdue",
+ "gtk",
  "image",
  "sdl3",
  "sdl3-ttf-sys",

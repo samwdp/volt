@@ -879,7 +879,7 @@ pub(super) fn acp_permission_deny(runtime: &mut EditorRuntime) -> Result<(), Str
 
 pub(super) fn acp_resolve_permission_option(
     runtime: &mut EditorRuntime,
-    session_id: &str,
+    request_id: u64,
     option_id: &str,
 ) -> Result<(), String> {
     let manager = runtime
@@ -890,10 +890,45 @@ pub(super) fn acp_resolve_permission_option(
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.resolve_permission_option(
-        agent_client_protocol::SessionId::new(session_id.to_owned()),
-        PermissionOptionId::new(option_id.to_owned()),
-    );
+    manager.resolve_permission_option(request_id, PermissionOptionId::new(option_id.to_owned()));
+    Ok(())
+}
+
+pub(super) fn acp_open_permission_request(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.open_permission_request(runtime, request_id)
+}
+
+pub(super) fn acp_permission_picker_closed(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.permission_picker_closed(request_id);
+    Ok(())
+}
+
+pub(super) fn acp_permission_picker_submitted(
+    _runtime: &mut EditorRuntime,
+    _request_id: u64,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -908,7 +943,6 @@ fn resolve_permission(
     runtime: &mut EditorRuntime,
     decision: PermissionDecision,
 ) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
@@ -917,44 +951,51 @@ fn resolve_permission(
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    let Some(session_id) = manager.session_for_buffer(buffer_id) else {
+    let request_id =
+        if let Some(PickerKind::AcpPermission { request_id }) = shell_ui(runtime)?.picker_kind() {
+            Some(request_id)
+        } else {
+            let buffer_id = active_shell_buffer_id(runtime)?;
+            manager
+                .session_for_buffer(buffer_id)
+                .and_then(|session_id| manager.permission_request_for_session(&session_id))
+        };
+    let Some(request_id) = request_id else {
         return Ok(());
     };
-    manager.resolve_permission(session_id, decision);
+    manager.resolve_permission(request_id, decision);
     Ok(())
 }
 
 fn open_permission_picker(
     runtime: &mut EditorRuntime,
-    session_id: &agent_client_protocol::SessionId,
-    workspace_name: &str,
-    tool_call: &ToolCallUpdate,
-    options: &[PermissionOption],
+    request: &AcpPendingPermissionUi,
 ) -> Result<(), String> {
-    let title = tool_call
-        .fields
-        .title
-        .clone()
-        .unwrap_or_else(|| "Tool".to_owned());
-    let entries = options
+    let entries = request
+        .options
         .iter()
         .map(|option| PickerEntry {
             item: PickerItem::new(
                 option.option_id.to_string(),
                 option.name.clone(),
                 format!(
-                    "{workspace_name} · {}",
+                    "{} · {}",
+                    request.workspace_name,
                     format_permission_option_kind(option.kind)
                 ),
                 None::<String>,
             ),
             action: PickerAction::AcpResolvePermission {
-                session_id: session_id.to_string(),
+                request_id: request.request_id,
                 option_id: option.option_id.to_string(),
             },
         })
         .collect::<Vec<_>>();
-    let picker = PickerOverlay::from_entries(format!("ACP Permission · {title}"), entries);
+    let picker =
+        PickerOverlay::from_entries(format!("ACP Permission · {}", request.title()), entries)
+            .with_kind(PickerKind::AcpPermission {
+                request_id: request.request_id,
+            });
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
 }
@@ -966,6 +1007,7 @@ fn apply_acp_notification(
     title: String,
     body_lines: Vec<String>,
     active: bool,
+    action: Option<NotificationAction>,
 ) -> Result<(), String> {
     shell_ui_mut(runtime)?.apply_notification(
         NotificationUpdate {
@@ -975,6 +1017,7 @@ fn apply_acp_notification(
             body_lines,
             progress: None,
             active,
+            action,
         },
         Instant::now(),
     );
@@ -1116,6 +1159,9 @@ struct AcpManager {
     pending_clients: HashMap<BufferId, PendingAcpClient>,
     pending_slash: HashMap<BufferId, PendingSlashTrigger>,
     pending_ui_actions: Vec<AcpUiAction>,
+    pending_permissions: VecDeque<AcpPendingPermissionUi>,
+    active_permission_request: Option<u64>,
+    permission_queue_paused: bool,
 }
 
 impl AcpManager {
@@ -1130,6 +1176,9 @@ impl AcpManager {
             pending_clients: HashMap::new(),
             pending_slash: HashMap::new(),
             pending_ui_actions: Vec::new(),
+            pending_permissions: VecDeque::new(),
+            active_permission_request: None,
+            permission_queue_paused: false,
         })
     }
 
@@ -1331,26 +1380,151 @@ impl AcpManager {
         let _ = self.runtime.send(AcpCommand::Disconnect { session_id });
     }
 
-    fn resolve_permission(
-        &mut self,
-        session_id: agent_client_protocol::SessionId,
-        decision: PermissionDecision,
-    ) {
+    fn permission_request_for_session(
+        &self,
+        session_id: &agent_client_protocol::SessionId,
+    ) -> Option<u64> {
+        self.pending_permissions
+            .iter()
+            .find(|pending| pending.session_id == *session_id)
+            .map(|pending| pending.request_id)
+    }
+
+    fn resolve_permission(&mut self, request_id: u64, decision: PermissionDecision) {
         let _ = self.runtime.send(AcpCommand::ResolvePermission {
-            session_id,
+            request_id,
             decision,
         });
     }
 
     fn resolve_permission_option(
         &mut self,
-        session_id: agent_client_protocol::SessionId,
+        request_id: u64,
         option_id: agent_client_protocol::PermissionOptionId,
     ) {
         let _ = self.runtime.send(AcpCommand::ResolvePermissionOption {
-            session_id,
+            request_id,
             option_id,
         });
+    }
+
+    fn queue_permission_request(&mut self, request: AcpPendingPermissionUi) {
+        self.pending_permissions.push_back(request);
+    }
+
+    fn open_permission_request(
+        &mut self,
+        runtime: &mut EditorRuntime,
+        request_id: u64,
+    ) -> Result<(), String> {
+        let Some(index) = self
+            .pending_permissions
+            .iter()
+            .position(|pending| pending.request_id == request_id)
+        else {
+            return Ok(());
+        };
+        let Some(request) = self.pending_permissions.remove(index) else {
+            return Ok(());
+        };
+        self.pending_permissions.push_front(request.clone());
+        open_permission_picker(runtime, &request)?;
+        self.active_permission_request = Some(request_id);
+        self.permission_queue_paused = false;
+        Ok(())
+    }
+
+    fn maybe_open_next_permission_request(
+        &mut self,
+        runtime: &mut EditorRuntime,
+    ) -> Result<(), String> {
+        if self.active_permission_request.is_some()
+            || self.permission_queue_paused
+            || shell_ui(runtime)?.picker_visible()
+        {
+            return Ok(());
+        }
+        let Some(request_id) = self
+            .pending_permissions
+            .front()
+            .map(|pending| pending.request_id)
+        else {
+            return Ok(());
+        };
+        self.open_permission_request(runtime, request_id)
+    }
+
+    fn remove_permission_request(&mut self, request_id: u64) -> Option<AcpPendingPermissionUi> {
+        let index = self
+            .pending_permissions
+            .iter()
+            .position(|pending| pending.request_id == request_id)?;
+        self.pending_permissions.remove(index)
+    }
+
+    fn remove_permission_requests_for_session(
+        &mut self,
+        session_id: &agent_client_protocol::SessionId,
+    ) -> Vec<AcpPendingPermissionUi> {
+        let mut removed = Vec::new();
+        let mut index = 0;
+        while index < self.pending_permissions.len() {
+            if self.pending_permissions[index].session_id == *session_id {
+                if let Some(request) = self.pending_permissions.remove(index) {
+                    removed.push(request);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        removed
+    }
+
+    fn permission_picker_closed(&mut self, request_id: u64) {
+        if self.active_permission_request == Some(request_id) {
+            self.active_permission_request = None;
+            self.permission_queue_paused = true;
+        }
+    }
+
+    fn permission_request_resolved(
+        &mut self,
+        runtime: &mut EditorRuntime,
+        request_id: u64,
+    ) -> Result<(), String> {
+        let _ = self.remove_permission_request(request_id);
+        if self.active_permission_request == Some(request_id) {
+            self.active_permission_request = None;
+        }
+        if self.pending_permissions.is_empty() {
+            self.permission_queue_paused = false;
+        }
+        self.maybe_open_next_permission_request(runtime)
+    }
+
+    fn dismiss_permission_picker_for_requests(
+        &mut self,
+        runtime: &mut EditorRuntime,
+        request_ids: &[u64],
+    ) -> Result<(), String> {
+        if request_ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(PickerKind::AcpPermission { request_id }) = shell_ui(runtime)?.picker_kind()
+            && request_ids.contains(&request_id)
+        {
+            shell_ui_mut(runtime)?.close_picker();
+        }
+        if request_ids
+            .iter()
+            .any(|request_id| self.active_permission_request == Some(*request_id))
+        {
+            self.active_permission_request = None;
+        }
+        if self.pending_permissions.is_empty() {
+            self.permission_queue_paused = false;
+        }
+        self.maybe_open_next_permission_request(runtime)
     }
 
     fn drain_events(&mut self, runtime: &mut EditorRuntime) -> Result<bool, String> {
@@ -1379,7 +1553,7 @@ impl AcpManager {
                 self.sessions.insert(
                     session_id.clone(),
                     AcpSessionInfo {
-                        client_id,
+                        client_id: client_id.clone(),
                         buffer_id,
                         workspace_name: pending.workspace_name.clone(),
                         title: None,
@@ -1391,6 +1565,20 @@ impl AcpManager {
                         model_config_id: None,
                     },
                 );
+
+                // Update buffer name to include session ID for uniqueness
+                let buffer_name = format!("*acp {} [{}]*", client_id, session_id);
+                if let Ok(workspace_id) = runtime.model().active_workspace_id() {
+                    let _ = runtime.model_mut().set_buffer_name(
+                        workspace_id,
+                        buffer_id,
+                        buffer_name.clone(),
+                    );
+                }
+                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                    buffer.name = buffer_name;
+                }
+
                 if let Some(session) = self.sessions.get(&session_id) {
                     let mode_id = session
                         .mode_state
@@ -1497,6 +1685,7 @@ impl AcpManager {
                 }
             }
             AcpEvent::PermissionRequested {
+                request_id,
                 session_id,
                 tool_call,
                 options,
@@ -1507,44 +1696,46 @@ impl AcpManager {
                 if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
                     buffer.acp_update_tool_call(tool_call.clone());
                 }
-                open_permission_picker(
-                    runtime,
-                    &session_id,
-                    &session.workspace_name,
-                    &tool_call,
-                    &options,
-                )?;
+                let request = AcpPendingPermissionUi {
+                    request_id,
+                    session_id: session_id.clone(),
+                    workspace_name: session.workspace_name.clone(),
+                    tool_call,
+                    options,
+                };
                 apply_acp_notification(
                     runtime,
-                    format!("acp.permission.{session_id}"),
+                    request.notification_key(),
                     NotificationSeverity::Warning,
-                    format!(
-                        "{} {} is requesting permission",
-                        session.workspace_name,
-                        tool_call
-                            .fields
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| "Tool".to_owned())
-                    ),
-                    options.iter().map(|option| option.name.clone()).collect(),
+                    request.notification_title(),
+                    request
+                        .options
+                        .iter()
+                        .map(|option| option.name.clone())
+                        .collect(),
                     true,
+                    Some(NotificationAction::OpenAcpPermissionPicker { request_id }),
                 )?;
+                self.queue_permission_request(request);
+                self.maybe_open_next_permission_request(runtime)?;
             }
             AcpEvent::PermissionResolved {
+                request_id,
                 session_id,
                 message,
             } => {
                 if let Some(session) = self.sessions.get(&session_id) {
                     apply_acp_notification(
                         runtime,
-                        format!("acp.permission.{session_id}"),
+                        format!("acp.permission.{request_id}"),
                         NotificationSeverity::Info,
                         format!("{} permission resolved", session.workspace_name),
                         vec![message],
                         false,
+                        None,
                     )?;
                 }
+                self.permission_request_resolved(runtime, request_id)?;
             }
             AcpEvent::SessionFinished { session_id } => {
                 if let Some(session) = self.sessions.get(&session_id) {
@@ -1559,6 +1750,7 @@ impl AcpManager {
                         format!("{} {} has finished", session.workspace_name, title),
                         Vec::new(),
                         false,
+                        None,
                     )?;
                 }
             }
@@ -1878,16 +2070,34 @@ impl AcpManager {
                 message,
             } => {
                 if let Some(session) = self.sessions.remove(&session_id) {
+                    let removed_requests = self.remove_permission_requests_for_session(&session_id);
+                    let removed_request_ids = removed_requests
+                        .iter()
+                        .map(|request| request.request_id)
+                        .collect::<Vec<_>>();
                     self.buffers.remove(&session.buffer_id);
                     self.pending_slash.remove(&session.buffer_id);
                     update_acp_input_hint(runtime, session.buffer_id, None, None, &[]);
+                    self.dismiss_permission_picker_for_requests(runtime, &removed_request_ids)?;
+                    for request_id in removed_request_ids {
+                        apply_acp_notification(
+                            runtime,
+                            format!("acp.permission.{request_id}"),
+                            NotificationSeverity::Info,
+                            format!("{} ACP session disconnected", session.workspace_name),
+                            vec![message.clone()],
+                            false,
+                            None,
+                        )?;
+                    }
                     apply_acp_notification(
                         runtime,
-                        format!("acp.permission.{session_id}"),
+                        format!("acp.disconnect.{session_id}"),
                         NotificationSeverity::Info,
                         format!("{} ACP session disconnected", session.workspace_name),
                         vec![message],
                         false,
+                        None,
                     )?;
                 }
             }
@@ -1915,6 +2125,37 @@ struct AcpSessionInfo {
     config_options: Vec<SessionConfigOption>,
     mode_config_id: Option<SessionConfigId>,
     model_config_id: Option<SessionConfigId>,
+}
+
+#[derive(Debug, Clone)]
+struct AcpPendingPermissionUi {
+    request_id: u64,
+    session_id: agent_client_protocol::SessionId,
+    workspace_name: String,
+    tool_call: ToolCallUpdate,
+    options: Vec<PermissionOption>,
+}
+
+impl AcpPendingPermissionUi {
+    fn title(&self) -> String {
+        self.tool_call
+            .fields
+            .title
+            .clone()
+            .unwrap_or_else(|| "Tool".to_owned())
+    }
+
+    fn notification_key(&self) -> String {
+        format!("acp.permission.{}", self.request_id)
+    }
+
+    fn notification_title(&self) -> String {
+        format!(
+            "{} {} is requesting permission",
+            self.workspace_name,
+            self.title()
+        )
+    }
 }
 
 enum AcpEvent {
@@ -1958,11 +2199,13 @@ enum AcpEvent {
         update: SessionInfoUpdate,
     },
     PermissionRequested {
+        request_id: u64,
         session_id: agent_client_protocol::SessionId,
         tool_call: ToolCallUpdate,
         options: Vec<PermissionOption>,
     },
     PermissionResolved {
+        request_id: u64,
         session_id: agent_client_protocol::SessionId,
         message: String,
     },
@@ -2053,11 +2296,11 @@ enum AcpCommand {
         session_id: agent_client_protocol::SessionId,
     },
     ResolvePermission {
-        session_id: agent_client_protocol::SessionId,
+        request_id: u64,
         decision: PermissionDecision,
     },
     ResolvePermissionOption {
-        session_id: agent_client_protocol::SessionId,
+        request_id: u64,
         option_id: PermissionOptionId,
     },
 }
@@ -2229,16 +2472,16 @@ async fn acp_runtime_loop(
                 });
             }
             AcpCommand::ResolvePermission {
-                session_id,
+                request_id,
                 decision,
             } => {
-                resolve_permission_response(state.clone(), session_id, decision);
+                resolve_permission_response(state.clone(), request_id, decision);
             }
             AcpCommand::ResolvePermissionOption {
-                session_id,
+                request_id,
                 option_id,
             } => {
-                resolve_permission_option(state.clone(), session_id, option_id);
+                resolve_permission_option(state.clone(), request_id, option_id);
             }
         }
     }
@@ -2547,7 +2790,7 @@ fn resolve_all_pending_permissions(
 
 fn resolve_permission_response(
     state: Rc<RefCell<AcpRuntimeState>>,
-    session_id: agent_client_protocol::SessionId,
+    request_id: u64,
     decision: PermissionDecision,
 ) {
     let pending = {
@@ -2555,7 +2798,7 @@ fn resolve_permission_response(
         let index = state
             .pending_permissions
             .iter()
-            .position(|pending| pending.session_id == session_id);
+            .position(|pending| pending.request_id == request_id);
         index.and_then(|index| state.pending_permissions.remove(index))
     };
     let Some(pending) = pending else {
@@ -2579,14 +2822,15 @@ fn resolve_permission_response(
         PermissionDecision::Deny => "Permission denied.",
     };
     let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
-        session_id,
+        request_id,
+        session_id: pending.session_id.clone(),
         message: label.to_owned(),
     });
 }
 
 fn resolve_permission_option(
     state: Rc<RefCell<AcpRuntimeState>>,
-    session_id: agent_client_protocol::SessionId,
+    request_id: u64,
     option_id: PermissionOptionId,
 ) {
     let pending = {
@@ -2594,7 +2838,7 @@ fn resolve_permission_option(
         let index = state
             .pending_permissions
             .iter()
-            .position(|pending| pending.session_id == session_id);
+            .position(|pending| pending.request_id == request_id);
         index.and_then(|index| state.pending_permissions.remove(index))
     };
     let Some(pending) = pending else {
@@ -2610,7 +2854,8 @@ fn resolve_permission_option(
         SelectedPermissionOutcome::new(option_id.clone()),
     ));
     let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
-        session_id,
+        request_id,
+        session_id: pending.session_id.clone(),
         message,
     });
 }
@@ -2688,6 +2933,7 @@ struct AcpRuntimeState {
     sessions: HashMap<agent_client_protocol::SessionId, AcpSession>,
     terminals: HashMap<TerminalId, AcpTerminal>,
     pending_permissions: VecDeque<PendingPermission>,
+    next_permission_request_id: u64,
     event_tx: mpsc::Sender<AcpEvent>,
 }
 
@@ -2697,6 +2943,7 @@ impl AcpRuntimeState {
             sessions: HashMap::new(),
             terminals: HashMap::new(),
             pending_permissions: VecDeque::new(),
+            next_permission_request_id: 1,
             event_tx,
         }
     }
@@ -2708,6 +2955,7 @@ struct AcpSession {
 }
 
 struct PendingPermission {
+    request_id: u64,
     session_id: agent_client_protocol::SessionId,
     options: Vec<PermissionOption>,
     responder: oneshot::Sender<RequestPermissionOutcome>,
@@ -2729,12 +2977,16 @@ impl Client for AcpClient {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = self.state.borrow_mut();
+            let request_id = state.next_permission_request_id;
+            state.next_permission_request_id = state.next_permission_request_id.saturating_add(1);
             state.pending_permissions.push_back(PendingPermission {
+                request_id,
                 session_id: args.session_id.clone(),
                 options: args.options.clone(),
                 responder: tx,
             });
             let _ = state.event_tx.send(AcpEvent::PermissionRequested {
+                request_id,
                 session_id: args.session_id.clone(),
                 tool_call: args.tool_call.clone(),
                 options: args.options.clone(),
@@ -3166,6 +3418,9 @@ mod tests {
                 pending_clients: HashMap::new(),
                 pending_slash: HashMap::new(),
                 pending_ui_actions: Vec::new(),
+                pending_permissions: VecDeque::new(),
+                active_permission_request: None,
+                permission_queue_paused: false,
             },
             command_rx,
         )
@@ -3188,6 +3443,44 @@ mod tests {
                 None,
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn test_permission_options() -> Vec<PermissionOption> {
+        vec![
+            PermissionOption::new(
+                PermissionOptionId::new("allow-once"),
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                PermissionOptionId::new("reject-once"),
+                "Reject once",
+                PermissionOptionKind::RejectOnce,
+            ),
+        ]
+    }
+
+    fn test_tool_call_update(title: &str) -> ToolCallUpdate {
+        ToolCallUpdate::new(
+            "tool-1",
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::Pending)
+                .title(title),
+        )
+    }
+
+    fn test_pending_permission_request(
+        request_id: u64,
+        session_id: &str,
+        title: &str,
+    ) -> AcpPendingPermissionUi {
+        AcpPendingPermissionUi {
+            request_id,
+            session_id: agent_client_protocol::SessionId::new(session_id),
+            workspace_name: "project".to_owned(),
+            tool_call: test_tool_call_update(title),
+            options: test_permission_options(),
+        }
     }
 
     #[test]
@@ -3316,6 +3609,133 @@ mod tests {
                 session_id: disconnected
             } if disconnected == session_id
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn permission_requests_queue_and_advance_after_resolution() -> Result<(), String> {
+        let (mut manager, _command_rx) = test_acp_manager();
+        let buffer_id = test_buffer_id()?;
+        let session_id = agent_client_protocol::SessionId::new("session-1");
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        manager.sessions.insert(
+            session_id.clone(),
+            AcpSessionInfo {
+                client_id: "copilot".to_owned(),
+                buffer_id,
+                workspace_name: "project".to_owned(),
+                title: None,
+                available_commands: Vec::new(),
+                mode_state: None,
+                model_state: None,
+                config_options: Vec::new(),
+                mode_config_id: None,
+                model_config_id: None,
+            },
+        );
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::PermissionRequested {
+                request_id: 1,
+                session_id: session_id.clone(),
+                tool_call: test_tool_call_update("Read file"),
+                options: test_permission_options(),
+            },
+        )?;
+        assert_eq!(
+            shell_ui(&state.runtime)?.picker_kind(),
+            Some(PickerKind::AcpPermission { request_id: 1 })
+        );
+        assert_eq!(manager.active_permission_request, Some(1));
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::PermissionRequested {
+                request_id: 2,
+                session_id: session_id.clone(),
+                tool_call: test_tool_call_update("Write file"),
+                options: test_permission_options(),
+            },
+        )?;
+        assert_eq!(
+            manager
+                .pending_permissions
+                .iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            shell_ui(&state.runtime)?.picker_kind(),
+            Some(PickerKind::AcpPermission { request_id: 1 })
+        );
+
+        shell_ui_mut(&mut state.runtime)?.close_picker();
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::PermissionResolved {
+                request_id: 1,
+                session_id,
+                message: "Permission approved.".to_owned(),
+            },
+        )?;
+
+        assert_eq!(
+            manager
+                .pending_permissions
+                .iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(manager.active_permission_request, Some(2));
+        assert_eq!(
+            shell_ui(&state.runtime)?.picker_kind(),
+            Some(PickerKind::AcpPermission { request_id: 2 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_permission_request_reorders_queue_for_requested_picker() -> Result<(), String> {
+        let (mut manager, _command_rx) = test_acp_manager();
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        manager.queue_permission_request(test_pending_permission_request(
+            1,
+            "session-1",
+            "Read file",
+        ));
+        manager.queue_permission_request(test_pending_permission_request(
+            2,
+            "session-1",
+            "Write file",
+        ));
+
+        manager.open_permission_request(&mut state.runtime, 1)?;
+        assert_eq!(
+            shell_ui(&state.runtime)?.picker_kind(),
+            Some(PickerKind::AcpPermission { request_id: 1 })
+        );
+
+        shell_ui_mut(&mut state.runtime)?.close_picker();
+        manager.permission_picker_closed(1);
+        manager.open_permission_request(&mut state.runtime, 2)?;
+
+        assert_eq!(
+            manager
+                .pending_permissions
+                .iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(manager.active_permission_request, Some(2));
+        assert!(!manager.permission_queue_paused);
+        assert_eq!(
+            shell_ui(&state.runtime)?.picker_kind(),
+            Some(PickerKind::AcpPermission { request_id: 2 })
+        );
         Ok(())
     }
 }

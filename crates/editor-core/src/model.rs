@@ -85,6 +85,11 @@ impl Buffer {
         &self.name
     }
 
+    /// Updates the display name of the buffer.
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     /// Returns the buffer kind.
     pub const fn kind(&self) -> &BufferKind {
         &self.kind
@@ -577,6 +582,22 @@ impl EditorModel {
             .ok_or(ModelError::NoActivePane(workspace_id))?
             .add_buffer(buffer_id);
 
+        Ok(())
+    }
+
+    /// Updates the display name of a buffer.
+    pub fn set_buffer_name(
+        &mut self,
+        workspace_id: WorkspaceId,
+        buffer_id: BufferId,
+        name: String,
+    ) -> Result<(), ModelError> {
+        let workspace = self.workspace_mut(workspace_id)?;
+        let buffer = workspace
+            .buffers
+            .get_mut(&buffer_id)
+            .ok_or(ModelError::BufferNotFound(buffer_id))?;
+        buffer.set_name(name);
         Ok(())
     }
 

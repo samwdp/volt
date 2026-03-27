@@ -942,6 +942,7 @@ fn undo_tree_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, St
         actions,
         submit_action: None,
         mode: PickerMode::Static,
+        kind: PickerKind::Generic,
     })
 }
 
@@ -1036,6 +1037,7 @@ pub(super) fn render_picker_overlay(
     );
     let muted = blend_color(foreground, base_background, 0.5);
     let subtle = blend_color(foreground, base_background, 0.7);
+    // Border using two rounded rectangles (outer border color, inner background)
     fill_rounded_rect(
         target,
         PixelRectToRect::rect(
@@ -1045,18 +1047,16 @@ pub(super) fn render_picker_overlay(
             popup_rect.height,
         ),
         picker_roundness,
-        popup_background,
-    )?;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            popup_rect.x + 14,
-            popup_rect.y,
-            popup_rect.width.saturating_sub(28),
-            2,
-        ),
         picker_highlight,
     )?;
+    let inner_rect = PixelRectToRect::rect(
+        popup_rect.x + 2,
+        popup_rect.y + 2,
+        popup_rect.width.saturating_sub(4),
+        popup_rect.height.saturating_sub(4),
+    );
+    let inner_radius = picker_roundness.saturating_sub(2);
+    fill_rounded_rect(target, inner_rect, inner_radius, popup_background)?;
 
     draw_text(
         target,

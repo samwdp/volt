@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -98,7 +99,7 @@ impl GrammarSource {
         &self.source_dir
     }
 
-    /// Returns the stable install directory name used under `user/lang/grammars`.
+    /// Returns the stable install directory name used under the configured grammar install root.
     pub fn install_dir_name(&self) -> &str {
         &self.install_dir_name
     }
@@ -603,7 +604,7 @@ impl Default for SyntaxRegistry {
 }
 
 impl SyntaxRegistry {
-    /// Creates a syntax registry using the default `user/lang/grammars` install root.
+    /// Creates a syntax registry using Volt's default per-user grammar install root.
     pub fn new() -> Self {
         Self::with_install_root(default_install_root())
     }
@@ -1676,10 +1677,22 @@ fn command_failure_message(command_name: &str, output: &std::process::Output) ->
 }
 
 fn default_install_root() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("user")
-        .join("lang")
+    if let Some(path) = env::var_os("VOLT_GRAMMAR_DIR").map(PathBuf::from) {
+        return path;
+    }
+
+    let base = if cfg!(target_os = "windows") {
+        env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("APPDATA"))
+            .map(PathBuf::from)
+    } else {
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+    };
+
+    base.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("volt")
         .join("grammars")
 }
 
@@ -1986,7 +1999,7 @@ fn main() {
             "tree-sitter-rust",
             "tree_sitter_rust",
         );
-        let install_root = PathBuf::from("P:\\volt\\user\\lang\\grammars");
+        let install_root = PathBuf::from("volt-grammars");
 
         assert_eq!(
             grammar.install_directory(&install_root),

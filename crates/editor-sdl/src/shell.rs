@@ -1069,19 +1069,57 @@ impl InputField {
         self.hint = hint;
     }
 
-    fn text_len(&self) -> usize {
-        let (line, col) = self.cursor_line_col();
-        let _ = line;
-        col
-    }
-
     fn text_line_count(&self) -> usize {
         self.line_starts().len().max(1)
     }
 
-    fn cursor_row(&self) -> usize {
-        let (line, _) = self.cursor_line_col();
-        line
+    fn wrapped_visual_rows(&self, available_cols: usize) -> Vec<String> {
+        let prompt_len = self.prompt.chars().count();
+        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let mut rows = Vec::new();
+        for line in self.text.split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.is_empty() {
+                rows.push(String::new());
+            } else {
+                let mut start = 0;
+                while start < chars.len() {
+                    let end = (start + cols_per_row).min(chars.len());
+                    rows.push(chars[start..end].iter().collect());
+                    start = end;
+                }
+            }
+        }
+        if rows.is_empty() {
+            rows.push(String::new());
+        }
+        rows
+    }
+
+    fn visual_line_count(&self, available_cols: usize) -> usize {
+        self.wrapped_visual_rows(available_cols).len().max(1)
+    }
+
+    fn cursor_visual_row_col(&self, available_cols: usize) -> (usize, usize) {
+        let prompt_len = self.prompt.chars().count();
+        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let (logical_line, col_in_logical_line) = self.cursor_line_col();
+        let mut visual_row = 0usize;
+        for (idx, line) in self.text.split('\n').enumerate() {
+            if idx == logical_line {
+                break;
+            }
+            let char_count = line.chars().count();
+            visual_row += if char_count == 0 {
+                1
+            } else {
+                char_count.div_ceil(cols_per_row)
+            };
+        }
+        let wrap_row = col_in_logical_line / cols_per_row;
+        let col_in_wrap_row = col_in_logical_line % cols_per_row;
+        visual_row += wrap_row;
+        (visual_row, col_in_wrap_row)
     }
 
     fn append_text(&mut self, text: &str) {
@@ -1952,7 +1990,7 @@ fn push_number_after_keyword(
 #[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
-    name: String,
+    pub(crate) name: String,
     pub(crate) kind: BufferKind,
     read_only: bool,
     input: Option<InputField>,
@@ -2008,6 +2046,8 @@ struct AcpPaneState {
     text: TextBuffer,
     render_lines: Vec<AcpRenderedLine>,
     scroll_row: usize,
+    viewport_rows: usize,
+    wrap_cols: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2075,6 +2115,8 @@ impl Default for AcpPaneState {
             text: TextBuffer::new(),
             render_lines: Vec::new(),
             scroll_row: 0,
+            viewport_rows: 1,
+            wrap_cols: 1,
         }
     }
 }
@@ -2111,11 +2153,50 @@ impl AcpPaneState {
         self.text.set_cursor(point);
     }
 
+    fn visible_rows(&self) -> usize {
+        self.viewport_rows.max(1)
+    }
+
+    fn wrap_cols(&self) -> usize {
+        self.wrap_cols.max(1)
+    }
+
+    fn set_view_metrics(&mut self, visible_rows: usize, wrap_cols: usize) {
+        self.viewport_rows = visible_rows.max(1);
+        self.wrap_cols = wrap_cols.max(1);
+        self.scroll_row = self.scroll_row.min(self.max_scroll_row());
+    }
+
+    fn max_scroll_row_for(&self, visible_rows: usize) -> usize {
+        if self.render_lines.is_empty() {
+            return 0;
+        }
+        let visible_rows = visible_rows.max(1);
+        let mut rows = 0usize;
+        for line_index in (0..self.render_lines.len()).rev() {
+            let row_count =
+                acp_rendered_line_row_count(&self.render_lines[line_index], self.wrap_cols());
+            if rows.saturating_add(row_count) > visible_rows {
+                return if rows == 0 {
+                    line_index
+                } else {
+                    line_index.saturating_add(1)
+                };
+            }
+            rows = rows.saturating_add(row_count);
+        }
+        0
+    }
+
+    fn max_scroll_row(&self) -> usize {
+        self.max_scroll_row_for(self.visible_rows())
+    }
+
     fn should_follow_output(&self, visible_rows: usize) -> bool {
-        if self.line_count() == 0 {
+        if self.render_lines.is_empty() {
             return true;
         }
-        self.scroll_row.saturating_add(visible_rows.max(1)) + 1 >= self.line_count()
+        self.scroll_row >= self.max_scroll_row_for(visible_rows)
     }
 
     fn replace_render_lines(
@@ -2135,6 +2216,7 @@ impl AcpPaneState {
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        self.viewport_rows = visible_rows.max(1);
         self.text = text;
         self.text.mark_clean();
         self.render_lines = render_lines;
@@ -2148,28 +2230,129 @@ impl AcpPaneState {
         let column = cursor.column.min(self.line_len_chars(line));
         self.text.set_cursor(TextPoint::new(line, column));
         if follow_output {
-            self.scroll_row = line_count.saturating_sub(visible_rows.max(1));
+            self.scroll_row = self.max_scroll_row();
         } else {
-            self.scroll_row = scroll_row.min(line_count.saturating_sub(1));
+            self.scroll_row = scroll_row.min(self.max_scroll_row());
         }
+    }
+
+    fn line_at_viewport_offset(&self, offset: usize) -> usize {
+        if self.render_lines.is_empty() {
+            return 0;
+        }
+        let mut line_index = self
+            .scroll_row
+            .min(self.render_lines.len().saturating_sub(1));
+        let mut remaining = offset;
+        while line_index + 1 < self.render_lines.len() {
+            let row_count =
+                acp_rendered_line_row_count(&self.render_lines[line_index], self.wrap_cols());
+            if remaining < row_count {
+                return line_index;
+            }
+            remaining = remaining.saturating_sub(row_count);
+            line_index = line_index.saturating_add(1);
+        }
+        line_index
+    }
+
+    fn cursor_viewport_offset(&self) -> usize {
+        if self.render_lines.is_empty() {
+            return 0;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            return 0;
+        }
+        let mut offset = 0usize;
+        for line_index in self.scroll_row..cursor.line {
+            offset = offset.saturating_add(acp_rendered_line_row_count(
+                &self.render_lines[line_index],
+                self.wrap_cols(),
+            ));
+        }
+        let cursor_segment = self
+            .render_lines
+            .get(cursor.line)
+            .and_then(|line| match line {
+                AcpRenderedLine::Text(line) => Some(segment_index_for_column(
+                    &acp_rendered_text_segments(line, self.wrap_cols()),
+                    cursor.column,
+                )),
+                _ => None,
+            })
+            .unwrap_or(0);
+        offset.saturating_add(cursor_segment)
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        if self.render_lines.is_empty() {
+            self.scroll_row = 0;
+            return;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            self.scroll_row = cursor.line;
+            return;
+        }
+        let visible_rows = self.visible_rows();
+        let mut offset = self.cursor_viewport_offset();
+        if offset < visible_rows {
+            return;
+        }
+        let mut new_scroll = self.scroll_row;
+        while offset >= visible_rows && new_scroll < cursor.line {
+            offset = offset.saturating_sub(acp_rendered_line_row_count(
+                &self.render_lines[new_scroll],
+                self.wrap_cols(),
+            ));
+            new_scroll = new_scroll.saturating_add(1);
+        }
+        self.scroll_row = new_scroll.min(self.max_scroll_row());
     }
 }
 
 impl AcpRenderedLine {
     fn plain_text(&self) -> String {
         match self {
-            Self::Text(line) => {
-                let mut text = String::new();
-                for segment in &line.prefix {
-                    text.push_str(&segment.text);
-                }
-                text.push_str(&line.text);
-                text
-            }
+            Self::Text(line) => line.text.clone(),
             Self::Image(line) => line.label.clone(),
             Self::ImageContinuation | Self::Spacer => String::new(),
         }
     }
+}
+
+fn acp_rendered_text_wrap_cols(line: &AcpRenderedTextLine, wrap_cols: usize) -> usize {
+    wrap_cols
+        .saturating_sub(acp_prefix_columns(&line.prefix, acp_spinner_frame()))
+        .max(1)
+}
+
+fn acp_rendered_text_segments(
+    line: &AcpRenderedTextLine,
+    wrap_cols: usize,
+) -> Vec<LineWrapSegment> {
+    let text_wrap_cols = acp_rendered_text_wrap_cols(line, wrap_cols);
+    wrap_line_segments(
+        &LineCharMap::new(&line.text),
+        text_wrap_cols,
+        text_wrap_cols,
+    )
+}
+
+fn acp_rendered_line_row_count(line: &AcpRenderedLine, wrap_cols: usize) -> usize {
+    match line {
+        AcpRenderedLine::Text(line) => acp_rendered_text_segments(line, wrap_cols).len().max(1),
+        AcpRenderedLine::Image(image) => image.rows.max(1),
+        AcpRenderedLine::ImageContinuation | AcpRenderedLine::Spacer => 1,
+    }
+}
+
+fn acp_pane_content_rows(pane: &AcpPaneState, wrap_cols: usize) -> usize {
+    pane.render_lines
+        .iter()
+        .map(|line| acp_rendered_line_row_count(line, wrap_cols))
+        .sum()
 }
 
 fn acp_text_segment(text: impl Into<String>, role: AcpColorRole) -> AcpRenderedSegment {
@@ -2420,20 +2603,18 @@ impl ShellBuffer {
         self.acp_state.as_ref().map(|state| state.active_pane)
     }
 
-    fn acp_total_viewport_lines(&self) -> usize {
-        self.viewport_lines.max(2)
-    }
-
     fn acp_plan_viewport_lines(&self) -> usize {
-        let total = self.acp_total_viewport_lines();
-        let plan = ((total as f32) * 0.4).round() as usize;
-        plan.max(1).min(total.saturating_sub(1))
+        self.acp_state
+            .as_ref()
+            .map(|state| state.plan_pane.visible_rows())
+            .unwrap_or(1)
     }
 
     fn acp_output_viewport_lines(&self) -> usize {
-        self.acp_total_viewport_lines()
-            .saturating_sub(self.acp_plan_viewport_lines())
-            .max(1)
+        self.acp_state
+            .as_ref()
+            .map(|state| state.output_pane.visible_rows())
+            .unwrap_or(1)
     }
 
     fn acp_active_pane_state(&self) -> Option<&AcpPaneState> {
@@ -2506,7 +2687,12 @@ impl ShellBuffer {
             .unwrap_or(true);
         if let Some(state) = self.acp_state.as_mut() {
             match state.output_items.last_mut() {
-                Some(AcpOutputItem::AgentBlocks(blocks)) => blocks.push(content),
+                Some(AcpOutputItem::AgentBlocks(blocks)) => match (blocks.last_mut(), content) {
+                    (Some(ContentBlock::Text(existing)), ContentBlock::Text(text)) => {
+                        existing.text.push_str(&text.text);
+                    }
+                    (_, content) => blocks.push(content),
+                },
                 _ => state
                     .output_items
                     .push(AcpOutputItem::AgentBlocks(vec![content])),
@@ -2828,10 +3014,8 @@ impl ShellBuffer {
     }
 
     fn scroll_output_to_end(&mut self) {
-        let output_rows = self.acp_output_viewport_lines();
         if let Some(state) = self.acp_state.as_mut() {
-            state.output_pane.scroll_row =
-                state.output_pane.line_count().saturating_sub(output_rows);
+            state.output_pane.scroll_row = state.output_pane.max_scroll_row();
             return;
         }
         self.scroll_row = self.line_count().saturating_sub(self.viewport_lines());
@@ -3278,7 +3462,9 @@ impl ShellBuffer {
     }
 
     fn point_after(&self, point: TextPoint) -> Option<TextPoint> {
-        self.text.point_after(point)
+        self.acp_active_pane_state()
+            .map(|pane| pane.text.point_after(point))
+            .unwrap_or_else(|| self.text.point_after(point))
     }
 
     fn move_line_start(&mut self) -> bool {
@@ -3469,11 +3655,15 @@ impl ShellBuffer {
     }
 
     fn slice(&self, range: TextRange) -> String {
-        self.text.slice(range)
+        self.acp_active_pane_state()
+            .map(|pane| pane.text.slice(range))
+            .unwrap_or_else(|| self.text.slice(range))
     }
 
     pub(crate) fn line_range(&self, line_index: usize) -> Option<TextRange> {
-        self.text.line_range(line_index)
+        self.acp_active_pane_state()
+            .and_then(|pane| pane.text.line_range(line_index))
+            .or_else(|| self.text.line_range(line_index))
     }
 
     pub(crate) fn line_span_range(&self, start_line: usize, count: usize) -> Option<TextRange> {
@@ -3574,7 +3764,7 @@ impl ShellBuffer {
 
     fn scroll_by(&mut self, delta: i32) {
         if let Some(pane) = self.acp_active_pane_state_mut() {
-            let max_scroll = pane.line_count().saturating_sub(1) as i32;
+            let max_scroll = pane.max_scroll_row() as i32;
             let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
             pane.scroll_row = next as usize;
             return;
@@ -3586,21 +3776,39 @@ impl ShellBuffer {
 
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
-        let plan_rows = self.acp_plan_viewport_lines();
-        let output_rows = self.acp_output_viewport_lines();
         if let Some(state) = self.acp_state.as_mut() {
-            state.plan_pane.scroll_row = state.plan_pane.scroll_row.min(
-                state
-                    .plan_pane
-                    .line_count()
-                    .saturating_sub(plan_rows.max(1)),
-            );
-            state.output_pane.scroll_row = state.output_pane.scroll_row.min(
-                state
-                    .output_pane
-                    .line_count()
-                    .saturating_sub(output_rows.max(1)),
-            );
+            let plan_rows = state.plan_pane.visible_rows();
+            let plan_wrap_cols = state.plan_pane.wrap_cols();
+            state.plan_pane.set_view_metrics(plan_rows, plan_wrap_cols);
+            let output_rows = state.output_pane.visible_rows();
+            let output_wrap_cols = state.output_pane.wrap_cols();
+            state
+                .output_pane
+                .set_view_metrics(output_rows, output_wrap_cols);
+        }
+    }
+
+    fn sync_acp_viewport_metrics(
+        &mut self,
+        width: u32,
+        height: u32,
+        cell_width: i32,
+        line_height: i32,
+    ) {
+        let rect = PixelRectToRect::rect(0, 0, width.max(1), height.max(1));
+        let layout = buffer_footer_layout(self, rect, line_height, cell_width);
+        self.viewport_lines = layout.visible_rows.max(1);
+        let Some(acp_layout) = acp_buffer_layout(self, rect, layout, cell_width, line_height)
+        else {
+            return;
+        };
+        if let Some(state) = self.acp_state.as_mut() {
+            state
+                .plan_pane
+                .set_view_metrics(acp_layout.plan.visible_rows, acp_layout.plan.wrap_cols);
+            state
+                .output_pane
+                .set_view_metrics(acp_layout.output.visible_rows, acp_layout.output.wrap_cols);
         }
     }
 
@@ -3615,9 +3823,15 @@ impl ShellBuffer {
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
         let max_line = self.line_count().saturating_sub(1);
         if let Some(pane) = self.acp_active_pane_state() {
-            return pane.scroll_row.saturating_add(offset).min(max_line);
+            return pane.line_at_viewport_offset(offset).min(max_line);
         }
         self.scroll_row.saturating_add(offset).min(max_line)
+    }
+
+    fn cursor_viewport_offset(&self) -> usize {
+        self.acp_active_pane_state()
+            .map(AcpPaneState::cursor_viewport_offset)
+            .unwrap_or_else(|| self.cursor_row().saturating_sub(self.scroll_row))
     }
 
     fn move_to_viewport_offset(&mut self, offset: usize) -> bool {
@@ -3635,19 +3849,8 @@ impl ShellBuffer {
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
         if self.is_acp_buffer() {
-            let visible_rows = visible_rows.max(1);
-            let cursor_row = self.cursor_row();
             if let Some(pane) = self.acp_active_pane_state_mut() {
-                if cursor_row < pane.scroll_row {
-                    pane.scroll_row = cursor_row;
-                } else {
-                    let bottom = pane
-                        .scroll_row
-                        .saturating_add(visible_rows.saturating_sub(1));
-                    if cursor_row > bottom {
-                        pane.scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
-                    }
-                }
+                pane.ensure_cursor_visible();
             }
             return;
         }
@@ -4243,10 +4446,16 @@ enum PickerAction {
         model_id: String,
     },
     AcpResolvePermission {
-        session_id: String,
+        request_id: u64,
         option_id: String,
     },
     CopyToClipboard(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerKind {
+    Generic,
+    AcpPermission { request_id: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -4267,6 +4476,7 @@ pub(crate) struct PickerOverlay {
     actions: BTreeMap<String, PickerAction>,
     submit_action: Option<PickerAction>,
     mode: PickerMode,
+    kind: PickerKind,
 }
 
 impl PickerOverlay {
@@ -4286,6 +4496,7 @@ impl PickerOverlay {
             actions,
             submit_action: None,
             mode: PickerMode::Static,
+            kind: PickerKind::Generic,
         }
     }
 
@@ -4311,6 +4522,7 @@ impl PickerOverlay {
             actions,
             submit_action: Some(PickerAction::VimSearch(direction)),
             mode: PickerMode::VimSearch(direction),
+            kind: PickerKind::Generic,
         }
     }
 
@@ -4322,11 +4534,21 @@ impl PickerOverlay {
             actions: BTreeMap::new(),
             submit_action: Some(PickerAction::NoOp),
             mode: PickerMode::WorkspaceSearch { root },
+            kind: PickerKind::Generic,
         }
     }
 
     pub(crate) fn session(&self) -> &PickerSession {
         &self.session
+    }
+
+    fn kind(&self) -> PickerKind {
+        self.kind
+    }
+
+    fn with_kind(mut self, kind: PickerKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     fn selected_action(&self) -> Option<PickerAction> {
@@ -4863,6 +5085,10 @@ impl ShellUiState {
 
     pub(crate) fn picker(&self) -> Option<&PickerOverlay> {
         self.picker.as_ref()
+    }
+
+    fn picker_kind(&self) -> Option<PickerKind> {
+        self.picker.as_ref().map(PickerOverlay::kind)
     }
 
     fn picker_mut(&mut self) -> Option<&mut PickerOverlay> {
@@ -5916,11 +6142,31 @@ impl ShellState {
                 y,
                 ..
             } => {
+                let mouse_x = x as i32;
+                let mouse_y = y as i32;
+                let now = Instant::now();
+                if mouse_btn == MouseButton::Left
+                    && let Some(action) = notification_action_at_point(
+                        self.ui()?,
+                        render_width,
+                        render_height,
+                        cell_width,
+                        line_height,
+                        now,
+                        (mouse_x, mouse_y),
+                    )
+                {
+                    match action {
+                        NotificationAction::OpenAcpPermissionPicker { request_id } => {
+                            acp::acp_open_permission_request(&mut self.runtime, request_id)
+                                .map_err(ShellError::Runtime)?;
+                        }
+                    }
+                    return Ok(false);
+                }
                 if picker_visible {
                     return Ok(false);
                 }
-                let mouse_x = x as i32;
-                let mouse_y = y as i32;
                 let runtime_popup = self.runtime_popup()?;
                 let popup_height = runtime_popup
                     .as_ref()
@@ -8296,13 +8542,14 @@ impl ShellState {
             visible_buffers.push((popup.active_buffer, render_width, popup_height.max(1)));
         }
         for (buffer_id, width, height) in visible_buffers {
-            let (language_id, visible_rows) = {
+            let (language_id, visible_rows, is_acp) = {
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
                 (
                     buffer.language_id().map(str::to_owned),
                     buffer_visible_rows_for_height(buffer, height, line_height),
+                    buffer.is_acp_buffer(),
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -8314,7 +8561,11 @@ impl ShellState {
                 .ui_mut()?
                 .buffer_mut(buffer_id)
                 .ok_or_else(|| ShellError::Runtime(format!("buffer `{buffer_id}` is missing")))?;
-            buffer.set_viewport_lines(visible_rows);
+            if is_acp {
+                buffer.sync_acp_viewport_metrics(width, height, cell_width, line_height);
+            } else {
+                buffer.set_viewport_lines(visible_rows);
+            }
             buffer.ensure_visible(visible_rows, wrap_cols, indent_size);
         }
         Ok(())
@@ -10107,7 +10358,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_CANCEL, "shell.picker-cancel", |_, runtime| {
+            let picker_kind = shell_ui(runtime)?.picker_kind();
             shell_ui_mut(runtime)?.close_picker();
+            if let Some(PickerKind::AcpPermission { request_id }) = picker_kind {
+                acp::acp_permission_picker_closed(runtime, request_id)?;
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -10462,7 +10717,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
-            let (action, query) = {
+            let (action, query, picker_kind) = {
                 let ui = shell_ui_mut(runtime)?;
                 let action = ui
                     .picker()
@@ -10472,8 +10727,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     .picker()
                     .map(|picker| picker.session().query().to_owned())
                     .unwrap_or_default();
+                let picker_kind = ui.picker_kind();
                 ui.close_picker();
-                (action, query)
+                (action, query, picker_kind)
             };
 
             match action {
@@ -10642,15 +10898,19 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::AcpResolvePermission {
-                    session_id,
+                    request_id,
                     option_id,
                 } => {
-                    acp::acp_resolve_permission_option(runtime, &session_id, &option_id)?;
+                    acp::acp_resolve_permission_option(runtime, request_id, &option_id)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::CopyToClipboard(text) => {
                     write_system_clipboard(&text);
                 }
+            }
+
+            if let Some(PickerKind::AcpPermission { request_id }) = picker_kind {
+                acp::acp_permission_picker_submitted(runtime, request_id)?;
             }
 
             Ok(())
@@ -15161,9 +15421,7 @@ fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> 
 }
 
 fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
-    let screen_offset = buffer
-        .cursor_row()
-        .saturating_sub(buffer.current_scroll_row());
+    let screen_offset = buffer.cursor_viewport_offset();
     buffer.scroll_by(delta);
     let target_line = buffer.line_at_viewport_offset(screen_offset);
     let _ = buffer.goto_line(target_line);
@@ -19621,6 +19879,7 @@ fn apply_lsp_notifications(
                 body_lines: notification.body_lines().to_vec(),
                 progress,
                 active: notification.active(),
+                action: None,
             },
             now,
         );
@@ -22773,10 +23032,33 @@ fn notification_overlay_layouts(
             severity: notification.severity,
             progress: notification.progress,
             active: notification.active,
+            action: notification.action.clone(),
         });
         bottom = y - NOTIFICATION_STACK_GAP;
     }
     layouts
+}
+
+fn notification_action_at_point(
+    state: &ShellUiState,
+    width: u32,
+    height: u32,
+    cell_width: i32,
+    line_height: i32,
+    now: Instant,
+    point: (i32, i32),
+) -> Option<NotificationAction> {
+    let (x, y) = point;
+    let notifications = state.visible_notifications(now);
+    notification_overlay_layouts(&notifications, width, height, cell_width, line_height)
+        .into_iter()
+        .find(|layout| {
+            let rect = layout.rect;
+            let right = rect.x().saturating_add(rect.width() as i32);
+            let bottom = rect.y().saturating_add(rect.height() as i32);
+            x >= rect.x() && y >= rect.y() && x < right && y < bottom
+        })
+        .and_then(|layout| layout.action)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -22963,14 +23245,31 @@ struct BufferFooterLayout {
     pane_bottom: i32,
 }
 
-fn buffer_footer_layout(buffer: &ShellBuffer, rect: Rect, line_height: i32) -> BufferFooterLayout {
+fn buffer_footer_layout(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    line_height: i32,
+    cell_width: i32,
+) -> BufferFooterLayout {
     let line_height = line_height.max(1);
     let body_y = rect.y() + BUFFER_BODY_TOP_PADDING;
     let statusline_y =
         rect.y() + rect.height() as i32 - line_height - BUFFER_STATUSLINE_BOTTOM_PADDING;
+    let available_input_cols = if cell_width > 0 {
+        ((rect.width() as i32 - 16) / cell_width).max(1) as usize
+    } else {
+        0
+    };
     let (input_text_lines, has_hint) = buffer
         .input_field()
-        .map(|input| (input.text_line_count(), input.hint().is_some()))
+        .map(|input| {
+            let line_count = if available_input_cols > 0 {
+                input.visual_line_count(available_input_cols)
+            } else {
+                input.text_line_count()
+            };
+            (line_count, input.hint().is_some())
+        })
         .unwrap_or((0, false));
     let input_box_height = if input_text_lines > 0 {
         (line_height * input_text_lines as i32 + BUFFER_INPUT_BOX_EXTRA_HEIGHT).max(line_height)
@@ -23003,7 +23302,7 @@ fn browser_viewport_rect(
     rect: Rect,
     line_height: i32,
 ) -> Option<BrowserViewportRect> {
-    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let layout = buffer_footer_layout(buffer, rect, line_height, 0);
     let x = rect.x().saturating_add(8);
     let y = layout.body_y.saturating_sub(2);
     let width = rect.width().saturating_sub(16);
@@ -23029,7 +23328,13 @@ fn browser_surface_buffer_at_point(plan: &BrowserSyncPlan, x: i32, y: i32) -> Op
 }
 
 fn buffer_visible_rows_for_height(buffer: &ShellBuffer, height: u32, line_height: i32) -> usize {
-    buffer_footer_layout(buffer, PixelRectToRect::rect(0, 0, 1, height), line_height).visible_rows
+    buffer_footer_layout(
+        buffer,
+        PixelRectToRect::rect(0, 0, 1, height),
+        line_height,
+        0,
+    )
+    .visible_rows
 }
 
 fn autocomplete_preview_lines(
@@ -23224,8 +23529,8 @@ fn buffer_cursor_screen_anchor(
     cell_width: i32,
     line_height: i32,
 ) -> Option<CursorScreenAnchor> {
-    let layout = buffer_footer_layout(buffer, rect, line_height);
     let cell_width = cell_width.max(1);
+    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -23286,9 +23591,9 @@ fn buffer_point_at_screen(
     clamp_body: bool,
 ) -> Option<TextPoint> {
     let line_height = line_height.max(1);
-    let layout = buffer_footer_layout(buffer, rect, line_height);
-    let body_height = layout.visible_rows as i32 * line_height;
+    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
     let body_top = layout.body_y;
+    let body_height = layout.visible_rows as i32 * line_height;
     let body_bottom = body_top + body_height;
     if body_height <= 0 {
         return None;
@@ -23342,7 +23647,7 @@ fn fallback_overlay_anchor(
     rect: Rect,
     line_height: i32,
 ) -> CursorScreenAnchor {
-    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let layout = buffer_footer_layout(buffer, rect, line_height, 0);
     CursorScreenAnchor {
         x: rect.x() + 24,
         y: layout.body_y + 6,
@@ -23521,7 +23826,7 @@ fn render_buffer(
         cell_width,
     );
 
-    let layout = buffer_footer_layout(buffer, rect, line_height);
+    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
     if buffer_is_terminal(&buffer.kind)
         && let Some(terminal_render) = buffer.terminal_render()
     {
@@ -23554,6 +23859,8 @@ fn render_buffer(
             rect,
             layout,
             active,
+            visual_selection,
+            yank_flash,
             input_mode,
             theme_registry,
             base_background,
@@ -23561,6 +23868,7 @@ fn render_buffer(
             muted,
             border_color,
             selection,
+            yank_flash_color,
             cursor,
             cursor_roundness,
             cell_width,
@@ -23824,7 +24132,13 @@ fn render_buffer(
                 draw_text(target, input_x, layout.input_y, prompt, input_foreground)?;
             }
         } else {
-            for (index, line) in input.text().split('\n').enumerate() {
+            let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
+            let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
+            for (index, line) in input
+                .wrapped_visual_rows(available_input_cols)
+                .into_iter()
+                .enumerate()
+            {
                 let prefix = if index == 0 { prompt } else { &prompt_padding };
                 let rendered = format!("{prefix}{line}");
                 draw_text(
@@ -23856,8 +24170,10 @@ fn render_buffer(
             }
         }
         if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
-            let input_col = prompt_len + input.text_len();
-            let input_row = input.cursor_row();
+            let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
+            let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
+            let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
+            let input_col = prompt_len + col_in_visual_row;
             let cursor_width = (cell_width / 4).max(2) as u32;
             fill_rounded_rect(
                 target,
@@ -23926,6 +24242,68 @@ fn render_buffer(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AcpPaneLayout {
+    rect: Rect,
+    visible_rows: usize,
+    wrap_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AcpBufferLayout {
+    plan: AcpPaneLayout,
+    output: AcpPaneLayout,
+}
+
+fn acp_buffer_layout(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    cell_width: i32,
+    line_height: i32,
+) -> Option<AcpBufferLayout> {
+    let state = buffer.acp_state.as_ref()?;
+    let line_height = line_height.max(1);
+    let panel_x = rect.x() + 8;
+    let panel_width = rect.width().saturating_sub(16);
+    let gap = 8i32;
+    let header_height = (line_height + 10).max(line_height);
+    let pane_chrome = header_height + 12;
+    let total_height = layout
+        .pane_bottom
+        .saturating_sub(layout.body_y)
+        .max(pane_chrome * 2 + gap + line_height * 2);
+    let body_width = panel_width.saturating_sub(20);
+    let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
+    let total_row_budget =
+        ((total_height - pane_chrome * 2 - gap).max(line_height * 2) / line_height).max(2) as usize;
+    let plan_target_rows = acp_pane_content_rows(&state.plan_pane, wrap_cols).clamp(1, 10);
+    let plan_rows = plan_target_rows.min(total_row_budget.saturating_sub(1).max(1));
+    let output_rows = total_row_budget.saturating_sub(plan_rows).max(1);
+    let used_height =
+        pane_chrome * 2 + gap + ((plan_rows.saturating_add(output_rows)) as i32 * line_height);
+    let output_extra = total_height.saturating_sub(used_height);
+    let plan_height = pane_chrome + plan_rows as i32 * line_height;
+    let output_height = pane_chrome + output_rows as i32 * line_height + output_extra;
+    Some(AcpBufferLayout {
+        plan: AcpPaneLayout {
+            rect: Rect::new(panel_x, layout.body_y, panel_width, plan_height as u32),
+            visible_rows: plan_rows,
+            wrap_cols,
+        },
+        output: AcpPaneLayout {
+            rect: Rect::new(
+                panel_x,
+                layout.body_y + plan_height + gap,
+                panel_width,
+                output_height as u32,
+            ),
+            visible_rows: output_rows,
+            wrap_cols,
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_acp_buffer_body(
     target: &mut DrawTarget<'_>,
@@ -23933,6 +24311,8 @@ fn render_acp_buffer_body(
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     theme_registry: Option<&ThemeRegistry>,
     base_background: Color,
@@ -23940,6 +24320,7 @@ fn render_acp_buffer_body(
     muted: Color,
     border_color: Color,
     selection: Color,
+    yank_flash_color: Color,
     cursor: Color,
     cursor_roundness: u32,
     cell_width: i32,
@@ -23948,28 +24329,9 @@ fn render_acp_buffer_body(
     let Some(state) = buffer.acp_state.as_ref() else {
         return Ok(());
     };
-    let panel_x = rect.x() + 8;
-    let panel_width = rect.width().saturating_sub(16);
-    let gap = 8i32;
-    let total_height = layout
-        .pane_bottom
-        .saturating_sub(layout.body_y)
-        .max(line_height * 2);
-    let mut plan_height = ((total_height * 2) / 5).max(line_height * 3);
-    let min_output_height = line_height * 4;
-    if total_height - plan_height - gap < min_output_height {
-        plan_height = (total_height - gap - min_output_height).max(line_height * 2);
-    }
-    let output_height = total_height
-        .saturating_sub(plan_height + gap)
-        .max(line_height * 2);
-    let plan_rect = Rect::new(panel_x, layout.body_y, panel_width, plan_height as u32);
-    let output_rect = Rect::new(
-        panel_x,
-        layout.body_y + plan_height + gap,
-        panel_width,
-        output_height as u32,
-    );
+    let Some(acp_layout) = acp_buffer_layout(buffer, rect, layout, cell_width, line_height) else {
+        return Ok(());
+    };
     let panel_background = theme_color(
         theme_registry,
         "ui.panel.background",
@@ -24001,9 +24363,19 @@ fn render_acp_buffer_body(
         target,
         &state.plan_pane,
         active_pane == AcpPane::Plan,
-        plan_rect,
+        acp_layout.plan,
         "Plan",
         active,
+        if active_pane == AcpPane::Plan {
+            visual_selection
+        } else {
+            None
+        },
+        if active_pane == AcpPane::Plan {
+            yank_flash
+        } else {
+            None
+        },
         input_mode,
         theme_registry,
         panel_background,
@@ -24013,6 +24385,7 @@ fn render_acp_buffer_body(
         border_color,
         active_border,
         selection,
+        yank_flash_color,
         cursor,
         cursor_roundness,
         cell_width,
@@ -24022,9 +24395,19 @@ fn render_acp_buffer_body(
         target,
         &state.output_pane,
         active_pane == AcpPane::Output,
-        output_rect,
+        acp_layout.output,
         "Output",
         active,
+        if active_pane == AcpPane::Output {
+            visual_selection
+        } else {
+            None
+        },
+        if active_pane == AcpPane::Output {
+            yank_flash
+        } else {
+            None
+        },
         input_mode,
         theme_registry,
         panel_background,
@@ -24034,6 +24417,7 @@ fn render_acp_buffer_body(
         border_color,
         active_border,
         selection,
+        yank_flash_color,
         cursor,
         cursor_roundness,
         cell_width,
@@ -24047,9 +24431,11 @@ fn render_acp_pane(
     target: &mut DrawTarget<'_>,
     pane: &AcpPaneState,
     pane_active: bool,
-    rect: Rect,
+    pane_layout: AcpPaneLayout,
     title: &str,
     shell_active: bool,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     theme_registry: Option<&ThemeRegistry>,
     panel_background: Color,
@@ -24059,11 +24445,13 @@ fn render_acp_pane(
     border_color: Color,
     active_border: Color,
     selection: Color,
+    yank_flash_color: Color,
     cursor: Color,
     cursor_roundness: u32,
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
+    let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
@@ -24078,50 +24466,99 @@ fn render_acp_pane(
     );
     fill_rounded_rect(target, inner_rect, 9, panel_background)?;
     let header_height = (line_height + 10).max(line_height);
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x() + 1,
-            rect.y() + 1,
-            rect.width().saturating_sub(2),
-            header_height as u32,
-        ),
-        if pane_active {
-            blend_color(selection, header_background, 0.45)
-        } else {
-            header_background
-        },
-    )?;
+    let header_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        header_height as u32,
+    );
+    let header_color = if pane_active {
+        blend_color(selection, header_background, 0.45)
+    } else {
+        header_background
+    };
+    let header_radius = 9.min(header_rect.height() / 2);
+    fill_rounded_rect(target, header_rect, header_radius, header_color)?;
+    if header_rect.height() > header_radius {
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                header_rect.x(),
+                header_rect.y() + header_radius as i32,
+                header_rect.width(),
+                header_rect.height().saturating_sub(header_radius),
+            ),
+            header_color,
+        )?;
+    }
     draw_text(target, rect.x() + 12, rect.y() + 6, title, foreground)?;
     let body_x = rect.x() + 10;
     let body_y = rect.y() + header_height + 4;
     let body_width = rect.width().saturating_sub(20);
-    let body_height = rect
-        .height()
-        .saturating_sub(header_height as u32)
-        .saturating_sub(12);
-    let visible_rows = (body_height / line_height.max(1) as u32).max(1) as usize;
-    let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
     let spinner_frame = acp_spinner_frame();
     let cursor_point = pane.cursor();
     let show_text_cursor = pane_active
         && shell_active
         && !matches!(input_mode, InputMode::Insert | InputMode::Replace);
     let mut visual_row = 0usize;
-    let mut line_index = pane.scroll_row.min(pane.render_lines.len());
-    while line_index < pane.render_lines.len() && visual_row < visible_rows {
+    let mut line_index = pane
+        .scroll_row
+        .min(pane.render_lines.len().saturating_sub(1));
+    while line_index < pane.render_lines.len() && visual_row < pane_layout.visible_rows {
         match &pane.render_lines[line_index] {
             AcpRenderedLine::Text(line) => {
                 let prefix_cols = acp_prefix_columns(&line.prefix, spinner_frame);
-                let available_cols = wrap_cols.saturating_sub(prefix_cols).max(1);
-                let segments =
-                    wrap_line_segments_for_line(&line.text, available_cols, available_cols);
+                let line_len = pane.line_len_chars(line_index);
+                let selection_range = visual_selection.and_then(|selection_state| {
+                    selection_columns_for_visual(selection_state, line_index, line_len)
+                });
+                let yank_range = yank_flash.and_then(|selection_state| {
+                    selection_columns_for_visual(selection_state, line_index, line_len)
+                });
+                let segments = acp_rendered_text_segments(line, pane_layout.wrap_cols);
                 let cursor_segment = segment_index_for_column(&segments, cursor_point.column);
                 for (segment_index, segment) in segments.iter().enumerate() {
-                    if visual_row >= visible_rows {
+                    if visual_row >= pane_layout.visible_rows {
                         break;
                     }
                     let y = body_y + visual_row as i32 * line_height;
+                    let segment_x = body_x + (prefix_cols as i32 * cell_width);
+                    if let Some((selection_start, selection_end)) = selection_range {
+                        let start = selection_start.max(segment.start_col);
+                        let end = selection_end.min(segment.end_col);
+                        if start < end {
+                            fill_rect(
+                                target,
+                                PixelRectToRect::rect(
+                                    segment_x
+                                        + (start.saturating_sub(segment.start_col) as i32
+                                            * cell_width),
+                                    y,
+                                    (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                    line_height.max(1) as u32,
+                                ),
+                                selection,
+                            )?;
+                        }
+                    }
+                    if let Some((selection_start, selection_end)) = yank_range {
+                        let start = selection_start.max(segment.start_col);
+                        let end = selection_end.min(segment.end_col);
+                        if start < end {
+                            fill_rect(
+                                target,
+                                PixelRectToRect::rect(
+                                    segment_x
+                                        + (start.saturating_sub(segment.start_col) as i32
+                                            * cell_width),
+                                    y,
+                                    (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                    line_height.max(1) as u32,
+                                ),
+                                yank_flash_color,
+                            )?;
+                        }
+                    }
                     if show_text_cursor
                         && cursor_point.line == line_index
                         && cursor_segment == segment_index
@@ -24166,7 +24603,7 @@ fn render_acp_pane(
                         acp_slice_chars(&line.text, segment.start_col, segment.end_col);
                     draw_text(
                         target,
-                        body_x + (prefix_cols as i32 * cell_width),
+                        segment_x,
                         y,
                         &segment_text,
                         acp_color(line.text_role, theme_registry, foreground, muted, cursor),
@@ -24176,7 +24613,7 @@ fn render_acp_pane(
                 line_index = line_index.saturating_add(1);
             }
             AcpRenderedLine::Image(image) => {
-                let remaining_rows = visible_rows.saturating_sub(visual_row);
+                let remaining_rows = pane_layout.visible_rows.saturating_sub(visual_row);
                 let image_rows = image.rows.min(remaining_rows).max(1);
                 let y = body_y + visual_row as i32 * line_height;
                 let image_rect = PixelRectToRect::rect(
