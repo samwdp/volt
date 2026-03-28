@@ -76,8 +76,8 @@ fn terminal_buffers_are_read_only_without_prompt_input() {
 
 #[test]
 fn directory_view_state_uses_user_oil_defaults() {
-    let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new());
     let defaults = editor_plugin_host::NullUserLibrary.oil_defaults();
+    let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new(), defaults);
 
     assert_eq!(state.show_hidden, defaults.show_hidden);
     assert_eq!(state.sort_mode, defaults.sort_mode);

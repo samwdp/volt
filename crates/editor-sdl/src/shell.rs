@@ -60,7 +60,7 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
-    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilKeyAction, autocomplete_hooks,
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, autocomplete_hooks,
     browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
     oil_hooks, oil_protocol,
 };
@@ -1494,13 +1494,13 @@ struct DirectoryViewState {
 }
 
 impl DirectoryViewState {
-    fn new(root: PathBuf, entries: Vec<DirectoryEntry>) -> Self {
+    fn new(root: PathBuf, entries: Vec<DirectoryEntry>, defaults: OilDefaults) -> Self {
         Self {
             root,
             entries,
-            show_hidden: false,
-            sort_mode: DirectorySortMode::TypeThenName,
-            trash_enabled: false,
+            show_hidden: defaults.show_hidden,
+            sort_mode: defaults.sort_mode,
+            trash_enabled: defaults.trash_enabled,
             edit_snapshot: Vec::new(),
         }
     }
@@ -2442,14 +2442,18 @@ impl WrapRowCache {
 }
 
 impl ShellBuffer {
-    fn from_runtime_buffer(buffer: &Buffer, lines: Vec<String>) -> Self {
+    fn from_runtime_buffer(
+        buffer: &Buffer,
+        lines: Vec<String>,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
         let text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
 
         Self {
             id: buffer.id(),
@@ -2488,9 +2492,13 @@ impl ShellBuffer {
         }
     }
 
-    fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
+    fn from_text_buffer(
+        buffer: &Buffer,
+        text: TextBuffer,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
             Some(GitFringeState::new())
         } else {
@@ -2548,7 +2556,7 @@ impl ShellBuffer {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(&kind);
+        let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind);
 
         Self {
@@ -6042,8 +6050,12 @@ impl ShellState {
                 ShellError::Runtime("notes buffer missing after bootstrap".to_owned())
             })?;
             (
-                ShellBuffer::from_runtime_buffer(scratch, initial_scratch_lines()),
-                ShellBuffer::from_runtime_buffer(notes, initial_notes_lines()),
+                ShellBuffer::from_runtime_buffer(
+                    scratch,
+                    initial_scratch_lines(),
+                    &*user_library,
+                ),
+                ShellBuffer::from_runtime_buffer(notes, initial_notes_lines(), &*user_library),
                 pane_id,
             )
         };
@@ -16405,7 +16417,8 @@ fn refresh_directory_buffer(
             return Err(message);
         }
     };
-    let mut state = DirectoryViewState::new(root, entries);
+    let defaults = shell_user_library(runtime).oil_defaults();
+    let mut state = DirectoryViewState::new(root, entries, defaults);
     state.show_hidden = show_hidden;
     state.sort_mode = sort_mode;
     state.trash_enabled = trash_enabled;
@@ -16443,7 +16456,7 @@ fn set_directory_root(
             return Err(message);
         }
     };
-    let mut state = DirectoryViewState::new(root, entries);
+    let mut state = DirectoryViewState::new(root, entries, defaults);
     state.show_hidden = show_hidden;
     state.sort_mode = sort_mode;
     state.trash_enabled = trash_enabled;
@@ -16986,7 +16999,8 @@ fn open_oil_preview_popup(runtime: &mut EditorRuntime, path: &Path) -> Result<()
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let text = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
-    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     queue_buffer_syntax_refresh(runtime, buffer_id)?;
     Ok(())
@@ -17025,7 +17039,8 @@ fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let user_library = shell_user_library(runtime);
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, user_library.oil_help_lines());
+    let shell_buffer =
+        ShellBuffer::from_runtime_buffer(buffer, user_library.oil_help_lines(), &*user_library);
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     Ok(())
 }
@@ -17102,7 +17117,8 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let template = shell_user_library(runtime).git_commit_template();
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template, &*user_library);
     shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
         let ui = shell_ui_mut(runtime)?;
@@ -17424,7 +17440,8 @@ fn open_git_view_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &*user_library);
     shell_buffer.set_git_view(view);
     let ui = shell_ui_mut(runtime)?;
     ui.insert_buffer(shell_buffer);
@@ -20510,10 +20527,12 @@ pub(crate) fn open_workspace_from_project(
             ShellBuffer::from_runtime_buffer(
                 scratch,
                 workspace_scratch_lines(workspace.name(), workspace.root()),
+                &*shell_user_library(runtime),
             ),
             ShellBuffer::from_runtime_buffer(
                 notes,
                 workspace_notes_lines(workspace.name(), workspace.root()),
+                &*shell_user_library(runtime),
             ),
             pane_id,
         )
@@ -21103,7 +21122,8 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("new file buffer `{buffer_id}` is missing"))?;
-    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
 
     {
         let ui = shell_ui_mut(runtime)?;
@@ -22279,14 +22299,17 @@ fn workspace_notes_lines(name: &str, root: Option<&std::path::Path>) -> Vec<Stri
     lines
 }
 
-fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
+fn buffer_interaction(
+    kind: &BufferKind,
+    user_library: &dyn UserLibrary,
+) -> (bool, Option<InputField>) {
     match kind {
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
-            (true, Some(browser_input_field()))
+            (true, Some(browser_input_field(user_library)))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => {
             let mut input = InputField::new("> ");
@@ -22306,8 +22329,7 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
     }
 }
 
-fn browser_input_field() -> InputField {
-    let user_library = shell_user_library(runtime);
+fn browser_input_field(user_library: &dyn UserLibrary) -> InputField {
     let prompt = user_library.browser_url_prompt();
     let mut input = InputField::new(prompt);
     input.set_placeholder(Some(user_library.browser_url_placeholder()));

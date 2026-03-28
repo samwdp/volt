@@ -4,6 +4,7 @@ use editor_plugin_host::UserLibrary;
 use editor_render::{RenderBackend, RenderError};
 
 /// Configures the demo shell loop.
+#[derive(Clone)]
 pub struct ShellConfig {
     /// Window title.
     pub title: String,
@@ -39,6 +40,23 @@ impl Default for ShellConfig {
             profile_input_latency: false,
             user_library: None,
         }
+    }
+}
+
+impl fmt::Debug for ShellConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShellConfig")
+            .field("title", &self.title)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("font_size", &self.font_size)
+            .field("hidden", &self.hidden)
+            .field("render_backend", &self.render_backend)
+            .field("frame_limit", &self.frame_limit)
+            .field("profile_input_latency", &self.profile_input_latency)
+            .field("user_library_loaded", &self.user_library.is_some())
+            .finish()
     }
 }
 
