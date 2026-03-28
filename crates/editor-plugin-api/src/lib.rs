@@ -101,6 +101,10 @@ pub mod plugin_hooks {
     /// for the active workspace.  If no command has been run yet the host
     /// falls back to [`RUN_COMMAND`].
     pub const RERUN_COMMAND: &str = "plugin.rerun-command";
+
+    /// Emitted when a plugin wants the host to switch focus between its
+    /// currently active split panes (for example between input and output).
+    pub const SWITCH_PANE: &str = "plugin.switch-pane";
 }
 
 // ─── Git action / section ID constants ───────────────────────────────────────

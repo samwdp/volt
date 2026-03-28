@@ -55,15 +55,15 @@ use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, buffer_kinds,
     plugin_hooks,
 };
+use editor_plugin_host::PluginBufferSections;
 
 // ─── Public constants ─────────────────────────────────────────────────────────
 
 pub use buffer_kinds::CALCULATOR as CALCULATOR_KIND;
 
 pub const BUFFER_NAME: &str = "*calculator*";
-pub const OUTPUT_SEPARATOR: &str =
-    "─── Output ──────────────────────────────────────────────────────";
-const HEADER_COMMENT: &str = "# Write expressions below. Press Ctrl+c Ctrl+c to evaluate.";
+const HEADER_COMMENT: &str =
+    "# Write expressions below. Press Ctrl+c Ctrl+c to evaluate, or Ctrl+Tab to switch panes.";
 
 // ─── Package ─────────────────────────────────────────────────────────────────
 
@@ -88,6 +88,14 @@ pub fn package() -> PluginPackage {
                 "Evaluate the calculator input and write results to the output section.",
                 vec![PluginAction::emit_hook(plugin_hooks::EVALUATE, None::<&str>)],
             ),
+            PluginCommand::new(
+                "calculator.switch-pane",
+                "Switch focus between the calculator input and output panes.",
+                vec![PluginAction::emit_hook(
+                    plugin_hooks::SWITCH_PANE,
+                    None::<&str>,
+                )],
+            ),
         ])
         // No hook declarations: plugin.evaluate is a host-owned hook.
         .with_key_bindings(vec![PluginKeyBinding::new(
@@ -107,9 +115,17 @@ pub fn initial_buffer_lines() -> Vec<String> {
         "a = 1".to_owned(),
         "b = 2".to_owned(),
         "sqrt(a + b)".to_owned(),
-        OUTPUT_SEPARATOR.to_owned(),
-        "(press Ctrl+c Ctrl+c to evaluate)".to_owned(),
     ]
+}
+
+/// Returns the split-pane layout used by the calculator buffer.
+pub fn buffer_sections() -> PluginBufferSections {
+    PluginBufferSections::new(
+        "Input",
+        "Output",
+        1,
+        vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()],
+    )
 }
 
 // ─── Evaluator ───────────────────────────────────────────────────────────────
@@ -643,8 +659,37 @@ mod tests {
     }
 
     #[test]
-    fn initial_buffer_lines_contain_separator() {
+    fn initial_buffer_lines_only_seed_input_examples() {
         let lines = initial_buffer_lines();
-        assert!(lines.iter().any(|l| l.starts_with("─── Output")));
+        assert!(lines.iter().all(|line| !line.starts_with("─── Output")));
+        assert!(lines.iter().any(|line| line == "sqrt(a + b)"));
+    }
+
+    #[test]
+    fn calculator_buffer_sections_start_with_single_output_row() {
+        let sections = buffer_sections();
+        assert_eq!(sections.input_title(), "Input");
+        assert_eq!(sections.output_title(), "Output");
+        assert_eq!(sections.output_min_rows(), 1);
+        assert_eq!(
+            sections.output_initial_lines(),
+            ["(press Ctrl+c Ctrl+c to evaluate)"]
+        );
+    }
+
+    #[test]
+    fn calculator_switch_pane_command_emits_generic_switch_hook() {
+        let pkg = package();
+        let cmd = pkg
+            .commands()
+            .iter()
+            .find(|c| c.name() == "calculator.switch-pane")
+            .expect("calculator.switch-pane command must exist");
+        assert!(
+            cmd.actions()
+                .iter()
+                .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::SWITCH_PANE)),
+            "calculator.switch-pane must emit the generic plugin.switch-pane hook"
+        );
     }
 }

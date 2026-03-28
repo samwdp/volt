@@ -64,7 +64,10 @@ use editor_plugin_api::{
     browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
     oil_hooks, oil_protocol,
 };
-use editor_plugin_host::{NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages};
+use editor_plugin_host::{
+    NullUserLibrary, PluginBufferSections, StatuslineContext as HostStatuslineContext, UserLibrary,
+    load_auto_loaded_packages,
+};
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
     find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
@@ -193,6 +196,7 @@ const HOOK_PLUGIN_EVALUATE: &str = plugin_hooks::EVALUATE;
 const PLUGIN_EVALUATE_SEPARATOR_PREFIX: &str = plugin_hooks::EVALUATE_SEPARATOR_PREFIX;
 const HOOK_PLUGIN_RUN_COMMAND: &str = plugin_hooks::RUN_COMMAND;
 const HOOK_PLUGIN_RERUN_COMMAND: &str = plugin_hooks::RERUN_COMMAND;
+const HOOK_PLUGIN_SWITCH_PANE: &str = plugin_hooks::SWITCH_PANE;
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
 const HOOK_GIT_DIFF_OPEN: &str = git_hooks::DIFF_OPEN;
 const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
@@ -2028,6 +2032,7 @@ pub(crate) struct ShellBuffer {
     read_only: bool,
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
+    plugin_section_state: Option<PluginSectionBufferState>,
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
@@ -2061,6 +2066,29 @@ pub(crate) struct ShellBuffer {
 enum AcpPane {
     Plan,
     Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginSectionPane {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone)]
+struct PluginSectionBufferState {
+    input_title: String,
+    output_title: String,
+    output_min_rows: usize,
+    active_pane: PluginSectionPane,
+    output_pane: PlainTextPaneState,
+}
+
+#[derive(Debug, Clone)]
+struct PlainTextPaneState {
+    text: TextBuffer,
+    scroll_row: usize,
+    viewport_rows: usize,
+    wrap_cols: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2141,6 +2169,31 @@ enum AcpColorRole {
 }
 
 const ACP_IMAGE_ROWS: usize = 12;
+
+impl Default for PlainTextPaneState {
+    fn default() -> Self {
+        Self {
+            text: TextBuffer::new(),
+            scroll_row: 0,
+            viewport_rows: 1,
+            wrap_cols: 1,
+        }
+    }
+}
+
+impl PluginSectionBufferState {
+    fn new(config: PluginBufferSections) -> Self {
+        let mut output_pane = PlainTextPaneState::default();
+        output_pane.replace_lines(config.output_initial_lines().to_vec(), true);
+        Self {
+            input_title: config.input_title().to_owned(),
+            output_title: config.output_title().to_owned(),
+            output_min_rows: config.output_min_rows(),
+            active_pane: PluginSectionPane::Input,
+            output_pane,
+        }
+    }
+}
 
 impl Default for AcpPaneState {
     fn default() -> Self {
@@ -2345,6 +2398,166 @@ impl AcpPaneState {
     }
 }
 
+impl PlainTextPaneState {
+    fn line_count(&self) -> usize {
+        self.text.line_count()
+    }
+
+    fn line_len_chars(&self, line_index: usize) -> usize {
+        self.text.line_len_chars(line_index).unwrap_or(0)
+    }
+
+    fn cursor(&self) -> TextPoint {
+        self.text.cursor()
+    }
+
+    fn set_cursor(&mut self, point: TextPoint) {
+        self.text.set_cursor(point);
+    }
+
+    fn visible_rows(&self) -> usize {
+        self.viewport_rows.max(1)
+    }
+
+    fn wrap_cols(&self) -> usize {
+        self.wrap_cols.max(1)
+    }
+
+    fn set_view_metrics(&mut self, visible_rows: usize, wrap_cols: usize) {
+        self.viewport_rows = visible_rows.max(1);
+        self.wrap_cols = wrap_cols.max(1);
+        self.scroll_row = self.scroll_row.min(self.max_scroll_row());
+    }
+
+    fn row_count_for_line(&self, line_index: usize) -> usize {
+        let line = self.text.line(line_index).unwrap_or_default();
+        wrap_line_segments(
+            &LineCharMap::new(&line),
+            self.wrap_cols(),
+            self.wrap_cols(),
+        )
+        .len()
+        .max(1)
+    }
+
+    fn max_scroll_row_for(&self, visible_rows: usize) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let visible_rows = visible_rows.max(1);
+        let mut rows = 0usize;
+        for line_index in (0..line_count).rev() {
+            let row_count = self.row_count_for_line(line_index);
+            if rows.saturating_add(row_count) > visible_rows {
+                return if rows == 0 {
+                    line_index
+                } else {
+                    line_index.saturating_add(1)
+                };
+            }
+            rows = rows.saturating_add(row_count);
+        }
+        0
+    }
+
+    fn max_scroll_row(&self) -> usize {
+        self.max_scroll_row_for(self.visible_rows())
+    }
+
+    fn should_follow_output(&self) -> bool {
+        self.scroll_row >= self.max_scroll_row()
+    }
+
+    fn replace_lines(&mut self, lines: Vec<String>, follow_output: bool) {
+        let cursor = self.cursor();
+        let scroll_row = self.scroll_row;
+        self.text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text.mark_clean();
+        if self.line_count() == 0 {
+            self.text.set_cursor(TextPoint::default());
+            self.scroll_row = 0;
+            return;
+        }
+        let line = cursor.line.min(self.line_count().saturating_sub(1));
+        let column = cursor.column.min(self.line_len_chars(line));
+        self.text.set_cursor(TextPoint::new(line, column));
+        if follow_output {
+            self.scroll_row = self.max_scroll_row();
+        } else {
+            self.scroll_row = scroll_row.min(self.max_scroll_row());
+        }
+    }
+
+    fn line_at_viewport_offset(&self, offset: usize) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let mut line_index = self.scroll_row.min(line_count.saturating_sub(1));
+        let mut remaining = offset;
+        while line_index + 1 < line_count {
+            let row_count = self.row_count_for_line(line_index);
+            if remaining < row_count {
+                return line_index;
+            }
+            remaining = remaining.saturating_sub(row_count);
+            line_index = line_index.saturating_add(1);
+        }
+        line_index
+    }
+
+    fn cursor_viewport_offset(&self) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            return 0;
+        }
+        let mut offset = 0usize;
+        for line_index in self.scroll_row..cursor.line {
+            offset = offset.saturating_add(self.row_count_for_line(line_index));
+        }
+        let line = self.text.line(cursor.line).unwrap_or_default();
+        let segments = wrap_line_segments(
+            &LineCharMap::new(&line),
+            self.wrap_cols(),
+            self.wrap_cols(),
+        );
+        offset.saturating_add(segment_index_for_column(&segments, cursor.column))
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            self.scroll_row = 0;
+            return;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            self.scroll_row = cursor.line;
+            return;
+        }
+        let visible_rows = self.visible_rows();
+        let mut offset = self.cursor_viewport_offset();
+        if offset < visible_rows {
+            return;
+        }
+        let mut new_scroll = self.scroll_row;
+        while offset >= visible_rows && new_scroll < cursor.line {
+            offset = offset.saturating_sub(self.row_count_for_line(new_scroll));
+            new_scroll = new_scroll.saturating_add(1);
+        }
+        self.scroll_row = new_scroll.min(self.max_scroll_row());
+    }
+}
+
 impl AcpRenderedLine {
     fn plain_text(&self) -> String {
         match self {
@@ -2460,6 +2673,7 @@ impl ShellBuffer {
         };
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
+        let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
 
         Self {
             id: buffer.id(),
@@ -2468,6 +2682,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2505,6 +2720,7 @@ impl ShellBuffer {
     ) -> Self {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
+        let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
         let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
             Some(GitFringeState::new())
         } else {
@@ -2519,6 +2735,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2564,6 +2781,7 @@ impl ShellBuffer {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind);
+        let plugin_section_state = plugin_section_state_for_kind(&kind, user_library);
 
         Self {
             id: buffer_id,
@@ -2572,6 +2790,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2611,11 +2830,53 @@ impl ShellBuffer {
     }
 
     fn is_read_only(&self) -> bool {
-        self.read_only
+        self.read_only || self.plugin_section_active_pane() == Some(PluginSectionPane::Output)
     }
 
     fn has_input_field(&self) -> bool {
         self.input.is_some()
+    }
+
+    fn has_plugin_sections(&self) -> bool {
+        self.plugin_section_state.is_some()
+    }
+
+    fn plugin_section_active_pane(&self) -> Option<PluginSectionPane> {
+        self.plugin_section_state.as_ref().map(|state| state.active_pane)
+    }
+
+    fn plugin_output_pane_state(&self) -> Option<&PlainTextPaneState> {
+        self.plugin_section_state.as_ref().map(|state| &state.output_pane)
+    }
+
+    fn plugin_output_pane_state_mut(&mut self) -> Option<&mut PlainTextPaneState> {
+        self.plugin_section_state
+            .as_mut()
+            .filter(|state| state.active_pane == PluginSectionPane::Output)
+            .map(|state| &mut state.output_pane)
+    }
+
+    fn plugin_switch_pane(&mut self) -> bool {
+        let Some(state) = self.plugin_section_state.as_mut() else {
+            return false;
+        };
+        state.active_pane = match state.active_pane {
+            PluginSectionPane::Input => PluginSectionPane::Output,
+            PluginSectionPane::Output => PluginSectionPane::Input,
+        };
+        true
+    }
+
+    fn plugin_sections(&self) -> Option<&PluginSectionBufferState> {
+        self.plugin_section_state.as_ref()
+    }
+
+    fn set_plugin_output_lines(&mut self, lines: Vec<String>) {
+        let Some(state) = self.plugin_section_state.as_mut() else {
+            return;
+        };
+        let follow_output = state.output_pane.should_follow_output();
+        state.output_pane.replace_lines(lines, follow_output);
     }
 
     fn is_acp_buffer(&self) -> bool {
@@ -2672,6 +2933,9 @@ impl ShellBuffer {
     }
 
     fn current_scroll_row(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.scroll_row;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.scroll_row)
             .unwrap_or(self.scroll_row)
@@ -3017,30 +3281,45 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_row(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor().line;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.cursor().line)
             .unwrap_or_else(|| self.text.cursor().line)
     }
 
     pub(crate) fn cursor_col(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor().column;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.cursor().column)
             .unwrap_or_else(|| self.text.cursor().column)
     }
 
     pub(crate) fn cursor_point(&self) -> TextPoint {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::cursor)
             .unwrap_or_else(|| self.text.cursor())
     }
 
     fn line_count(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_count();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::line_count)
             .unwrap_or_else(|| self.text.line_count())
     }
 
     fn line_len_chars(&self, line_index: usize) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_len_chars(line_index);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.line_len_chars(line_index))
             .unwrap_or_else(|| self.text.line_len_chars(line_index).unwrap_or(0))
@@ -3068,6 +3347,9 @@ impl ShellBuffer {
     }
 
     fn path(&self) -> Option<&Path> {
+        if self.plugin_output_pane_state().is_some() {
+            return None;
+        }
         self.text.path()
     }
 
@@ -3381,6 +3663,9 @@ impl ShellBuffer {
     }
 
     fn move_left(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_left();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_left();
         }
@@ -3388,6 +3673,9 @@ impl ShellBuffer {
     }
 
     fn move_right(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_right();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_right();
         }
@@ -3395,6 +3683,9 @@ impl ShellBuffer {
     }
 
     fn move_up(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_up();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_up();
         }
@@ -3402,6 +3693,9 @@ impl ShellBuffer {
     }
 
     fn move_down(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_down();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_down();
         }
@@ -3409,6 +3703,9 @@ impl ShellBuffer {
     }
 
     fn move_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_forward();
         }
@@ -3416,6 +3713,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_forward();
         }
@@ -3423,6 +3723,9 @@ impl ShellBuffer {
     }
 
     fn move_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_backward();
         }
@@ -3430,6 +3733,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_backward();
         }
@@ -3437,6 +3743,9 @@ impl ShellBuffer {
     }
 
     fn move_word_end(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_end_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_end_forward();
         }
@@ -3444,6 +3753,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_end_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_end_forward();
         }
@@ -3451,6 +3763,9 @@ impl ShellBuffer {
     }
 
     fn move_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_end_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_end_backward();
         }
@@ -3458,6 +3773,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_end_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_end_backward();
         }
@@ -3465,6 +3783,9 @@ impl ShellBuffer {
     }
 
     fn move_matching_delimiter(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_matching_delimiter();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_matching_delimiter();
         }
@@ -3472,6 +3793,9 @@ impl ShellBuffer {
     }
 
     fn move_sentence_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_sentence_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_sentence_forward();
         }
@@ -3479,6 +3803,9 @@ impl ShellBuffer {
     }
 
     fn move_sentence_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_sentence_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_sentence_backward();
         }
@@ -3486,6 +3813,9 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_paragraph_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_paragraph_forward();
         }
@@ -3493,6 +3823,9 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_paragraph_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_paragraph_backward();
         }
@@ -3500,6 +3833,10 @@ impl ShellBuffer {
     }
 
     pub(crate) fn set_cursor(&mut self, point: TextPoint) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            pane.set_cursor(point);
+            return;
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             pane.set_cursor(point);
             return;
@@ -3508,6 +3845,9 @@ impl ShellBuffer {
     }
 
     fn point_after(&self, point: TextPoint) -> Option<TextPoint> {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.point_after(point);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.text.point_after(point))
             .unwrap_or_else(|| self.text.point_after(point))
@@ -3522,7 +3862,11 @@ impl ShellBuffer {
     fn move_line_first_non_blank(&mut self) -> bool {
         let before = self.cursor_point();
         let row = self.cursor_row();
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(row) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(row) {
                 pane.text.set_cursor(point);
             }
@@ -3542,7 +3886,11 @@ impl ShellBuffer {
 
     fn goto_first_line(&mut self) -> bool {
         let before = self.cursor_point();
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(0) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(0) {
                 pane.text.set_cursor(point);
             }
@@ -3555,7 +3903,11 @@ impl ShellBuffer {
     fn goto_last_line(&mut self) -> bool {
         let before = self.cursor_point();
         let line = self.line_count().saturating_sub(1);
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(line) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(line) {
                 pane.text.set_cursor(point);
             }
@@ -3568,7 +3920,13 @@ impl ShellBuffer {
     fn goto_line(&mut self, line_index: usize) -> bool {
         let before = self.cursor_point();
         let line = line_index.min(self.line_count().saturating_sub(1));
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            let point = pane
+                .text
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            pane.text.set_cursor(point);
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             let point = pane
                 .text
                 .first_non_blank_in_line(line)
@@ -3701,12 +4059,18 @@ impl ShellBuffer {
     }
 
     fn slice(&self, range: TextRange) -> String {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.slice(range);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.text.slice(range))
             .unwrap_or_else(|| self.text.slice(range))
     }
 
     pub(crate) fn line_range(&self, line_index: usize) -> Option<TextRange> {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.line_range(line_index);
+        }
         self.acp_active_pane_state()
             .and_then(|pane| pane.text.line_range(line_index))
             .or_else(|| self.text.line_range(line_index))
@@ -3809,6 +4173,12 @@ impl ShellBuffer {
     }
 
     fn scroll_by(&mut self, delta: i32) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            let max_scroll = pane.max_scroll_row() as i32;
+            let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
+            pane.scroll_row = next as usize;
+            return;
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             let max_scroll = pane.max_scroll_row() as i32;
             let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
@@ -3822,6 +4192,11 @@ impl ShellBuffer {
 
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
+        if let Some(state) = self.plugin_section_state.as_mut() {
+            let rows = state.output_pane.visible_rows();
+            let wrap_cols = state.output_pane.wrap_cols();
+            state.output_pane.set_view_metrics(rows, wrap_cols);
+        }
         if let Some(state) = self.acp_state.as_mut() {
             let plan_rows = state.plan_pane.visible_rows();
             let plan_wrap_cols = state.plan_pane.wrap_cols();
@@ -3858,7 +4233,36 @@ impl ShellBuffer {
         }
     }
 
+    fn sync_plugin_section_viewport_metrics(
+        &mut self,
+        width: u32,
+        height: u32,
+        cell_width: i32,
+        line_height: i32,
+    ) {
+        let rect = PixelRectToRect::rect(0, 0, width.max(1), height.max(1));
+        let layout = buffer_footer_layout(self, rect, line_height, cell_width);
+        let Some(section_layout) =
+            plugin_section_buffer_layout(self, rect, layout, cell_width, line_height)
+        else {
+            return;
+        };
+        self.viewport_lines = section_layout.input.visible_rows.max(1);
+        if let Some(state) = self.plugin_section_state.as_mut() {
+            state
+                .output_pane
+                .set_view_metrics(section_layout.output.visible_rows, section_layout.output.wrap_cols);
+        }
+    }
+
     fn viewport_lines(&self) -> usize {
+        if let Some(PluginSectionPane::Output) = self.plugin_section_active_pane() {
+            return self
+                .plugin_section_state
+                .as_ref()
+                .map(|state| state.output_pane.visible_rows())
+                .unwrap_or(1);
+        }
         match self.acp_active_pane() {
             Some(AcpPane::Plan) => self.acp_plan_viewport_lines(),
             Some(AcpPane::Output) => self.acp_output_viewport_lines(),
@@ -3868,6 +4272,9 @@ impl ShellBuffer {
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
         let max_line = self.line_count().saturating_sub(1);
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_at_viewport_offset(offset).min(max_line);
+        }
         if let Some(pane) = self.acp_active_pane_state() {
             return pane.line_at_viewport_offset(offset).min(max_line);
         }
@@ -3875,6 +4282,9 @@ impl ShellBuffer {
     }
 
     fn cursor_viewport_offset(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor_viewport_offset();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::cursor_viewport_offset)
             .unwrap_or_else(|| self.cursor_row().saturating_sub(self.scroll_row))
@@ -3894,6 +4304,10 @@ impl ShellBuffer {
     }
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            pane.ensure_cursor_visible();
+            return;
+        }
         if self.is_acp_buffer() {
             if let Some(pane) = self.acp_active_pane_state_mut() {
                 pane.ensure_cursor_visible();
@@ -8644,7 +9058,7 @@ impl ShellState {
             visible_buffers.push((popup.active_buffer, render_width, popup_height.max(1)));
         }
         for (buffer_id, width, height) in visible_buffers {
-            let (language_id, visible_rows, is_acp) = {
+            let (language_id, visible_rows, is_acp, has_plugin_sections) = {
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
@@ -8652,6 +9066,7 @@ impl ShellState {
                     buffer.language_id().map(str::to_owned),
                     buffer_visible_rows_for_height(buffer, height, line_height),
                     buffer.is_acp_buffer(),
+                    buffer.has_plugin_sections(),
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -8665,6 +9080,8 @@ impl ShellState {
                 .ok_or_else(|| ShellError::Runtime(format!("buffer `{buffer_id}` is missing")))?;
             if is_acp {
                 buffer.sync_acp_viewport_metrics(width, height, cell_width, line_height);
+            } else if has_plugin_sections {
+                buffer.sync_plugin_section_viewport_metrics(width, height, cell_width, line_height);
             } else {
                 buffer.set_viewport_lines(visible_rows);
             }
@@ -9831,6 +10248,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_PLUGIN_RERUN_COMMAND,
         "Re-runs the last build command for the active workspace.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SWITCH_PANE,
+        "Switches focus between the active plugin buffer's split panes.",
+    )?;
 
     runtime
         .subscribe_hook(
@@ -9840,6 +10262,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 let buffer_id = active_shell_buffer_id(runtime)?;
                 evaluate_active_plugin_buffer(runtime, buffer_id)
             },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SWITCH_PANE,
+            "shell.plugin-switch-pane",
+            |_, runtime| switch_active_plugin_pane(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -17308,32 +17737,45 @@ fn evaluate_active_plugin_buffer(
     buffer_id: BufferId,
 ) -> Result<(), String> {
     // Read the buffer kind (needed to route the evaluate call).
-    let (input_lines, sep_line, kind_str) = {
+    let (input_lines, sep_line, kind_str, has_plugin_sections) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let kind_str = if let BufferKind::Plugin(k) = &buffer.kind {
             k.clone()
         } else {
             return Ok(()); // not a plugin buffer; nothing to do
         };
-        let line_count = buffer.text.line_count();
-        let all_lines: Vec<String> = (0..line_count)
-            .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
-            .collect();
-        if let Some(idx) = all_lines
-            .iter()
-            .position(|l| l.starts_with(PLUGIN_EVALUATE_SEPARATOR_PREFIX))
-        {
-            let input = all_lines[..idx].to_vec();
-            let sep = all_lines[idx].clone();
-            (input, sep, kind_str)
+        if buffer.has_plugin_sections() {
+            let line_count = buffer.text.line_count();
+            let all_lines: Vec<String> = (0..line_count)
+                .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
+                .collect();
+            (
+                all_lines,
+                String::new(),
+                kind_str,
+                true,
+            )
         } else {
-            // No separator — treat everything as input; add a fresh separator.
-            let sep = format!(
-                "{} {}",
-                PLUGIN_EVALUATE_SEPARATOR_PREFIX,
-                "─".repeat(48)
-            );
-            (all_lines, sep, kind_str)
+            let line_count = buffer.text.line_count();
+            let all_lines: Vec<String> = (0..line_count)
+                .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
+                .collect();
+            if let Some(idx) = all_lines
+                .iter()
+                .position(|l| l.starts_with(PLUGIN_EVALUATE_SEPARATOR_PREFIX))
+            {
+                let input = all_lines[..idx].to_vec();
+                let sep = all_lines[idx].clone();
+                (input, sep, kind_str, false)
+            } else {
+                // No separator — treat everything as input; add a fresh separator.
+                let sep = format!(
+                    "{} {}",
+                    PLUGIN_EVALUATE_SEPARATOR_PREFIX,
+                    "─".repeat(48)
+                );
+                (all_lines, sep, kind_str, false)
+            }
         }
     };
 
@@ -17342,12 +17784,33 @@ fn evaluate_active_plugin_buffer(
     // Call user library evaluator (no mutable borrow of runtime required).
     let output = shell_user_library(runtime).handle_plugin_evaluate(&kind_str, &input_text);
 
+    if has_plugin_sections {
+        shell_buffer_mut(runtime, buffer_id)?.set_plugin_output_lines(output);
+        return Ok(());
+    }
+
     // Rebuild: input + separator + output.
     let mut new_lines = input_lines;
     new_lines.push(sep_line);
     new_lines.extend(output);
 
     shell_buffer_mut(runtime, buffer_id)?.replace_with_lines(new_lines);
+    Ok(())
+}
+
+fn switch_active_plugin_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let switched_to_output = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if buffer.plugin_switch_pane() {
+            matches!(buffer.plugin_section_active_pane(), Some(PluginSectionPane::Output))
+        } else {
+            return acp::acp_switch_pane(runtime);
+        }
+    };
+    if switched_to_output {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+    }
     Ok(())
 }
 
@@ -22796,6 +23259,18 @@ fn browser_state_for_kind(kind: &BufferKind) -> Option<BrowserBufferState> {
     buffer_is_browser(kind).then(BrowserBufferState::default)
 }
 
+fn plugin_section_state_for_kind(
+    kind: &BufferKind,
+    user_library: &dyn UserLibrary,
+) -> Option<PluginSectionBufferState> {
+    let BufferKind::Plugin(plugin_kind) = kind else {
+        return None;
+    };
+    user_library
+        .plugin_buffer_sections(plugin_kind)
+        .map(PluginSectionBufferState::new)
+}
+
 fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibrary) -> Vec<String> {
     match name {
         "*scratch*" => initial_scratch_lines(),
@@ -24532,6 +25007,24 @@ fn render_buffer(
             cell_width,
             line_height,
         )?;
+    } else if buffer.has_plugin_sections() {
+        render_plugin_section_buffer_body(
+            target,
+            buffer,
+            rect,
+            layout,
+            active,
+            input_mode,
+            theme_registry,
+            base_background,
+            foreground,
+            muted,
+            border_color,
+            cursor,
+            cursor_roundness,
+            cell_width,
+            line_height,
+        )?;
     } else {
         let fringe_width = cell_width;
         let line_number_width = cell_width * 5;
@@ -24904,6 +25397,312 @@ fn render_buffer(
         border_color,
     )?;
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextPaneLayout {
+    rect: Rect,
+    visible_rows: usize,
+    wrap_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PluginSectionLayout {
+    input: TextPaneLayout,
+    output: TextPaneLayout,
+}
+
+fn plain_text_pane_content_rows(pane: &PlainTextPaneState, wrap_cols: usize) -> usize {
+    let wrap_cols = wrap_cols.max(1);
+    (0..pane.line_count())
+        .map(|line_index| {
+            let line = pane.text.line(line_index).unwrap_or_default();
+            wrap_line_segments(&LineCharMap::new(&line), wrap_cols, wrap_cols)
+                .len()
+                .max(1)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+fn plugin_section_buffer_layout(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    cell_width: i32,
+    line_height: i32,
+) -> Option<PluginSectionLayout> {
+    let state = buffer.plugin_sections()?;
+    let line_height = line_height.max(1);
+    let panel_x = rect.x() + 8;
+    let panel_width = rect.width().saturating_sub(16);
+    let gap = 8i32;
+    let header_height = (line_height + 10).max(line_height);
+    let pane_chrome = header_height + 12;
+    let total_height = layout
+        .pane_bottom
+        .saturating_sub(layout.body_y)
+        .max(pane_chrome * 2 + gap + line_height * 2);
+    let body_width = panel_width.saturating_sub(20);
+    let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
+    let total_row_budget =
+        ((total_height - pane_chrome * 2 - gap).max(line_height * 2) / line_height).max(2) as usize;
+    let output_target_rows =
+        plain_text_pane_content_rows(&state.output_pane, wrap_cols).max(state.output_min_rows);
+    let output_rows = output_target_rows.min(total_row_budget.saturating_sub(1).max(1));
+    let input_rows = total_row_budget.saturating_sub(output_rows).max(1);
+    let used_height =
+        pane_chrome * 2 + gap + ((input_rows.saturating_add(output_rows)) as i32 * line_height);
+    let input_extra = total_height.saturating_sub(used_height);
+    let input_height = pane_chrome + input_rows as i32 * line_height + input_extra;
+    let output_height = pane_chrome + output_rows as i32 * line_height;
+    Some(PluginSectionLayout {
+        input: TextPaneLayout {
+            rect: Rect::new(panel_x, layout.body_y, panel_width, input_height as u32),
+            visible_rows: input_rows,
+            wrap_cols,
+        },
+        output: TextPaneLayout {
+            rect: Rect::new(
+                panel_x,
+                layout.body_y + input_height + gap,
+                panel_width,
+                output_height as u32,
+            ),
+            visible_rows: output_rows,
+            wrap_cols,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_plugin_section_buffer_body(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    input_mode: InputMode,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(state) = buffer.plugin_sections() else {
+        return Ok(());
+    };
+    let Some(section_layout) =
+        plugin_section_buffer_layout(buffer, rect, layout, cell_width, line_height)
+    else {
+        return Ok(());
+    };
+    let panel_background = theme_color(
+        theme_registry,
+        "ui.panel.background",
+        adjust_color(
+            base_background,
+            if is_dark_color(base_background) { 8 } else { -8 },
+        ),
+    );
+    let header_background = theme_color(
+        theme_registry,
+        "ui.panel.header.background",
+        adjust_color(
+            panel_background,
+            if is_dark_color(panel_background) { 12 } else { -12 },
+        ),
+    );
+    let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
+    let active_pane = state.active_pane;
+    render_text_panel(
+        target,
+        &buffer.text,
+        buffer.scroll_row,
+        if active_pane == PluginSectionPane::Input {
+            Some(buffer.text.cursor())
+        } else {
+            None
+        },
+        active && active_pane == PluginSectionPane::Input,
+        section_layout.input,
+        &state.input_title,
+        input_mode,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    render_text_panel(
+        target,
+        &state.output_pane.text,
+        state.output_pane.scroll_row,
+        (active_pane == PluginSectionPane::Output).then_some(state.output_pane.cursor()),
+        active && active_pane == PluginSectionPane::Output,
+        section_layout.output,
+        &state.output_title,
+        InputMode::Normal,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_text_panel(
+    target: &mut DrawTarget<'_>,
+    text: &TextBuffer,
+    scroll_row: usize,
+    cursor_point: Option<TextPoint>,
+    pane_active: bool,
+    pane_layout: TextPaneLayout,
+    title: &str,
+    input_mode: InputMode,
+    _theme_registry: Option<&ThemeRegistry>,
+    panel_background: Color,
+    header_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    active_border: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let rect = pane_layout.rect;
+    let border = if pane_active { active_border } else { border_color };
+    fill_rect(target, rect, panel_background)?;
+    draw_panel_border(target, rect, border)?;
+    let header_height = (line_height.max(1) + 10).max(line_height.max(1));
+    fill_rect(
+        target,
+        PixelRectToRect::rect(rect.x(), rect.y(), rect.width(), header_height as u32),
+        header_background,
+    )?;
+    draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
+    let body_x = rect.x() + 10;
+    let body_y = rect.y() + header_height + 6;
+    let mut visual_row = 0usize;
+    let line_count = text.line_count();
+    let mut cursor_screen: Option<(usize, usize)> = None;
+    for line_index in scroll_row.min(line_count.saturating_sub(1))..line_count {
+        let line = text.line(line_index).unwrap_or_default();
+        let segments = wrap_line_segments(
+            &LineCharMap::new(&line),
+            pane_layout.wrap_cols,
+            pane_layout.wrap_cols,
+        );
+        for segment in &segments {
+            if visual_row >= pane_layout.visible_rows {
+                break;
+            }
+            if cursor_screen.is_none()
+                && let Some(cursor_point) = cursor_point
+                && cursor_point.line == line_index
+                && cursor_point.column >= segment.start_col
+                && cursor_point.column <= segment.end_col
+            {
+                cursor_screen = Some((
+                    visual_row,
+                    cursor_point.column.saturating_sub(segment.start_col),
+                ));
+            }
+            let rendered = acp_slice_chars(&line, segment.start_col, segment.end_col);
+            draw_text(
+                target,
+                body_x,
+                body_y + visual_row as i32 * line_height,
+                &rendered,
+                foreground,
+            )?;
+            visual_row = visual_row.saturating_add(1);
+        }
+        if visual_row >= pane_layout.visible_rows {
+            break;
+        }
+    }
+    if let Some((cursor_row, cursor_col)) = cursor_screen
+        && pane_active
+        && cursor_row < pane_layout.visible_rows
+    {
+        let cursor_width = match input_mode {
+            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+            InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
+        };
+        fill_rounded_rect(
+            target,
+            PixelRectToRect::rect(
+                body_x + (cursor_col as i32 * cell_width),
+                body_y + cursor_row as i32 * line_height,
+                cursor_width,
+                line_height.max(2) as u32,
+            ),
+            cursor_roundness,
+            cursor,
+        )?;
+    } else if line_count == 0 {
+        draw_text(target, body_x, body_y, "", muted)?;
+    }
+    Ok(())
+}
+
+fn draw_panel_border(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    color: Color,
+) -> Result<(), ShellError> {
+    fill_rect(
+        target,
+        PixelRectToRect::rect(rect.x(), rect.y(), rect.width(), 1),
+        color,
+    )?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x(),
+            rect.y() + rect.height() as i32 - 1,
+            rect.width(),
+            1,
+        ),
+        color,
+    )?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(rect.x(), rect.y(), 1, rect.height()),
+        color,
+    )?;
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + rect.width() as i32 - 1,
+            rect.y(),
+            1,
+            rect.height(),
+        ),
+        color,
+    )?;
     Ok(())
 }
 

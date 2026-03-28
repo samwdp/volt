@@ -1,5 +1,6 @@
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    plugin_hooks,
 };
 
 pub const ACP_BUFFER_KIND: &str = "acp";
@@ -91,7 +92,7 @@ pub fn package() -> PluginPackage {
         hook_command(
             "acp.switch-pane",
             "Switches focus between the ACP plan and output panes.",
-            "ui.acp.switch-pane",
+            plugin_hooks::SWITCH_PANE,
             None,
         ),
         hook_command(

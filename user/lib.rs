@@ -141,7 +141,7 @@ use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilDefaults, OilKeyAction,
     OilKeybindings, TerminalConfig, WorkspaceRoot,
 };
-use editor_plugin_host::{StatuslineContext, UserLibrary};
+use editor_plugin_host::{PluginBufferSections, StatuslineContext, UserLibrary};
 
 impl UserLibrary for UserLibraryImpl {
     fn packages(&self) -> Vec<PluginPackage> {
@@ -469,6 +469,13 @@ impl UserLibrary for UserLibraryImpl {
         match kind {
             calculator::CALCULATOR_KIND => calculator::initial_buffer_lines(),
             _ => Vec::new(),
+        }
+    }
+
+    fn plugin_buffer_sections(&self, kind: &str) -> Option<PluginBufferSections> {
+        match kind {
+            calculator::CALCULATOR_KIND => Some(calculator::buffer_sections()),
+            _ => None,
         }
     }
 
