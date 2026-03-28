@@ -60,13 +60,12 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
-    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, autocomplete_hooks,
-    browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
-    oil_hooks, oil_protocol,
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, PluginBufferSections,
+    autocomplete_hooks, browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks,
+    git_sections, hover_hooks, lsp_hooks, oil_hooks, oil_protocol,
 };
 use editor_plugin_host::{
-    NullUserLibrary, PluginBufferSections, StatuslineContext as HostStatuslineContext, UserLibrary,
-    load_auto_loaded_packages,
+    NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages,
 };
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
@@ -25592,15 +25591,45 @@ fn render_text_panel(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let rect = pane_layout.rect;
-    let border = if pane_active { active_border } else { border_color };
-    fill_rect(target, rect, panel_background)?;
-    draw_panel_border(target, rect, border)?;
+    let border = if pane_active {
+        active_border
+    } else {
+        border_color
+    };
+    fill_rounded_rect(target, rect, 10, border)?;
+    let inner_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        rect.height().saturating_sub(2),
+    );
+    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
     let header_height = (line_height.max(1) + 10).max(line_height.max(1));
-    fill_rect(
-        target,
-        PixelRectToRect::rect(rect.x(), rect.y(), rect.width(), header_height as u32),
-        header_background,
-    )?;
+    let header_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        header_height as u32,
+    );
+    let header_color = if pane_active {
+        blend_color(cursor, header_background, 0.25)
+    } else {
+        header_background
+    };
+    let header_radius = 9.min(header_rect.height() / 2);
+    fill_rounded_rect(target, header_rect, header_radius, header_color)?;
+    if header_rect.height() > header_radius {
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                header_rect.x(),
+                header_rect.y() + header_radius as i32,
+                header_rect.width(),
+                header_rect.height().saturating_sub(header_radius),
+            ),
+            header_color,
+        )?;
+    }
     draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
     let body_x = rect.x() + 10;
     let body_y = rect.y() + header_height + 6;
@@ -25665,44 +25694,6 @@ fn render_text_panel(
     } else if line_count == 0 {
         draw_text(target, body_x, body_y, "", muted)?;
     }
-    Ok(())
-}
-
-fn draw_panel_border(
-    target: &mut DrawTarget<'_>,
-    rect: Rect,
-    color: Color,
-) -> Result<(), ShellError> {
-    fill_rect(
-        target,
-        PixelRectToRect::rect(rect.x(), rect.y(), rect.width(), 1),
-        color,
-    )?;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x(),
-            rect.y() + rect.height() as i32 - 1,
-            rect.width(),
-            1,
-        ),
-        color,
-    )?;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(rect.x(), rect.y(), 1, rect.height()),
-        color,
-    )?;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x() + rect.width() as i32 - 1,
-            rect.y(),
-            1,
-            rect.height(),
-        ),
-        color,
-    )?;
     Ok(())
 }
 

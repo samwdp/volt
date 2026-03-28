@@ -72,6 +72,53 @@ pub mod buffer_kinds {
     pub const CALCULATOR: &str = "calculator";
 }
 
+/// Generic split-pane metadata for plugin buffers that want an editable input
+/// area plus a dedicated read-only output pane rendered by the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginBufferSections {
+    input_title: String,
+    output_title: String,
+    output_min_rows: usize,
+    output_initial_lines: Vec<String>,
+}
+
+impl PluginBufferSections {
+    /// Creates a two-pane plugin buffer configuration.
+    pub fn new(
+        input_title: impl Into<String>,
+        output_title: impl Into<String>,
+        output_min_rows: usize,
+        output_initial_lines: Vec<String>,
+    ) -> Self {
+        Self {
+            input_title: input_title.into(),
+            output_title: output_title.into(),
+            output_min_rows: output_min_rows.max(1),
+            output_initial_lines,
+        }
+    }
+
+    /// Returns the title shown in the editable input pane.
+    pub fn input_title(&self) -> &str {
+        &self.input_title
+    }
+
+    /// Returns the title shown in the read-only output pane.
+    pub fn output_title(&self) -> &str {
+        &self.output_title
+    }
+
+    /// Returns the minimum number of wrapped rows reserved for the output pane.
+    pub fn output_min_rows(&self) -> usize {
+        self.output_min_rows
+    }
+
+    /// Returns the initial output lines shown before the first evaluation.
+    pub fn output_initial_lines(&self) -> &[String] {
+        &self.output_initial_lines
+    }
+}
+
 // ─── Generic plugin hooks ─────────────────────────────────────────────────────
 
 /// Hook names owned by the host application's generic plugin infrastructure.

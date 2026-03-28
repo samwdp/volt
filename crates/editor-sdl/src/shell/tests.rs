@@ -651,6 +651,56 @@ fn install_acp_test_buffer(
     Ok(buffer_id)
 }
 
+fn install_plugin_sections_test_buffer(
+    state: &mut ShellState,
+    input_lines: &[&str],
+    output_lines: &[&str],
+) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            "*calculator test*",
+            BufferKind::Plugin(buffer_kinds::CALCULATOR.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| "plugin test buffer is missing".to_owned())?;
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(
+        buffer,
+        input_lines.iter().map(|line| (*line).to_owned()).collect(),
+        &NullUserLibrary,
+    );
+    let output = if output_lines.is_empty() {
+        vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()]
+    } else {
+        output_lines.iter().map(|line| (*line).to_owned()).collect()
+    };
+    shell_buffer.plugin_section_state = Some(PluginSectionBufferState::new(
+        PluginBufferSections::new("Input", "Output", 1, output),
+    ));
+    shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
 fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<BufferId, String> {
     let workspace_id = state
         .runtime
@@ -1963,6 +2013,60 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
     assert!(output_bottom <= layout.input_y);
     assert!(layout.input_y < hint_y);
     assert!(hint_y < layout.statusline_y);
+    Ok(())
+}
+
+#[test]
+fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_plugin_sections_test_buffer(
+        &mut state,
+        &["a = 1", "b = 2", "sqrt(a + b)"],
+        &["(press Ctrl+c Ctrl+c to evaluate)"],
+    )?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
+    let panes = plugin_section_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "plugin section layout missing".to_owned())?;
+
+    assert_eq!(panes.output.visible_rows, 1);
+    assert!(panes.input.rect.y() >= layout.body_y);
+    assert!(panes.input.rect.y() + panes.input.rect.height() as i32 <= panes.output.rect.y());
+    assert!(panes.output.rect.y() + panes.output.rect.height() as i32 <= layout.pane_bottom);
+    Ok(())
+}
+
+#[test]
+fn plugin_sections_switching_output_pane_changes_focus_and_read_only_state() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id =
+        install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["1"])?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Input)
+    );
+    assert!(!buffer.is_read_only());
+
+    assert!(buffer.plugin_switch_pane());
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Output)
+    );
+    assert!(buffer.is_read_only());
+
+    assert!(buffer.plugin_switch_pane());
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Input)
+    );
+    assert!(!buffer.is_read_only());
     Ok(())
 }
 

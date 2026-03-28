@@ -52,10 +52,9 @@
 //! - Constants: `pi`, `e`, `tau`, `inf`, `nan`
 
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, buffer_kinds,
-    plugin_hooks,
+    PluginAction, PluginBufferSections, PluginCommand, PluginKeyBinding, PluginKeymapScope,
+    PluginPackage, buffer_kinds, plugin_hooks,
 };
-use editor_plugin_host::PluginBufferSections;
 
 // ─── Public constants ─────────────────────────────────────────────────────────
 
@@ -98,11 +97,18 @@ pub fn package() -> PluginPackage {
             ),
         ])
         // No hook declarations: plugin.evaluate is a host-owned hook.
-        .with_key_bindings(vec![PluginKeyBinding::new(
-            "C-c C-c",
-            "calculator.evaluate",
-            PluginKeymapScope::Workspace,
-        )])
+        .with_key_bindings(vec![
+            PluginKeyBinding::new(
+                "C-c C-c",
+                "calculator.evaluate",
+                PluginKeymapScope::Workspace,
+            ),
+            PluginKeyBinding::new(
+                "Ctrl+Tab",
+                "calculator.switch-pane",
+                PluginKeymapScope::Workspace,
+            ),
+        ])
 }
 
 // ─── Initial content ──────────────────────────────────────────────────────────
@@ -574,6 +580,15 @@ mod tests {
     fn calculator_package_binds_ctrl_c_ctrl_c() {
         let pkg = package();
         assert!(pkg.key_bindings().iter().any(|kb| kb.chord() == "C-c C-c"));
+    }
+
+    #[test]
+    fn calculator_package_binds_ctrl_tab_to_switch_panes() {
+        let pkg = package();
+        assert!(pkg
+            .key_bindings()
+            .iter()
+            .any(|kb| kb.chord() == "Ctrl+Tab" && kb.command_name() == "calculator.switch-pane"));
     }
 
     #[test]

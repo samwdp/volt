@@ -141,7 +141,8 @@ use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilDefaults, OilKeyAction,
     OilKeybindings, TerminalConfig, WorkspaceRoot,
 };
-use editor_plugin_host::{PluginBufferSections, StatuslineContext, UserLibrary};
+use editor_plugin_api::PluginBufferSections;
+use editor_plugin_host::{StatuslineContext, UserLibrary};
 
 impl UserLibrary for UserLibraryImpl {
     fn packages(&self) -> Vec<PluginPackage> {
