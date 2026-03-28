@@ -20,6 +20,8 @@ pub mod autocomplete;
 pub mod browser;
 /// Buffer management and save commands.
 pub mod buffer;
+/// Expression evaluator buffer plugin.
+pub mod calculator;
 /// Debug adapter integration hooks and commands.
 pub mod dap;
 /// Git workflows and repository-oriented commands.
@@ -74,6 +76,7 @@ pub fn packages() -> Vec<PluginPackage> {
         acp::package(),
         autocomplete::package(),
         browser::package(),
+        calculator::package(),
         interactive::package(),
         pane::package(),
         hover::package(),
@@ -450,6 +453,24 @@ impl UserLibrary for UserLibraryImpl {
 
     fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
         editor_icons::all_symbols()
+    }
+
+    fn supports_plugin_evaluate(&self, kind: &str) -> bool {
+        matches!(kind, calculator::CALCULATOR_KIND)
+    }
+
+    fn handle_plugin_evaluate(&self, kind: &str, input: &str) -> Vec<String> {
+        match kind {
+            calculator::CALCULATOR_KIND => calculator::evaluate(input),
+            _ => vec![format!("no evaluator registered for plugin kind `{kind}`")],
+        }
+    }
+
+    fn plugin_buffer_initial_lines(&self, kind: &str) -> Vec<String> {
+        match kind {
+            calculator::CALCULATOR_KIND => calculator::initial_buffer_lines(),
+            _ => Vec::new(),
+        }
     }
 }
 

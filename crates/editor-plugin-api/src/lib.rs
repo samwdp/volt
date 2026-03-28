@@ -69,6 +69,26 @@ pub mod buffer_kinds {
     pub const GIT_STASH: &str = "git-stash";
     pub const ACP: &str = "acp";
     pub const BROWSER: &str = "browser";
+    pub const CALCULATOR: &str = "calculator";
+}
+
+// ─── Generic plugin hooks ─────────────────────────────────────────────────────
+
+/// Hook names owned by the host application's generic plugin infrastructure.
+/// User plugins emit these hooks; the host handles them without needing to know
+/// which specific plugin fired them.
+pub mod plugin_hooks {
+    /// Emitted by any user plugin that wants the host to evaluate the active
+    /// buffer's input section and write the result to the output section.
+    /// The host calls `UserLibrary::handle_plugin_evaluate` (defined in
+    /// `editor-plugin-host`) with the active buffer's kind string.
+    /// The separator line that divides input from output is
+    /// [`EVALUATE_SEPARATOR_PREFIX`].
+    pub const EVALUATE: &str = "plugin.evaluate";
+
+    /// A line whose text starts with this prefix is treated as the output
+    /// separator in an evaluatable plugin buffer.
+    pub const EVALUATE_SEPARATOR_PREFIX: &str = "─── Output";
 }
 
 // ─── Git action / section ID constants ───────────────────────────────────────

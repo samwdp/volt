@@ -184,6 +184,24 @@ pub trait UserLibrary: Send + Sync {
 
     /// Returns the full icon font symbol table.
     fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol];
+
+    // ── Plugin evaluation ─────────────────────────────────────────────────
+
+    /// Returns `true` if the user library has an evaluator for the given
+    /// plugin buffer kind.  The host uses this to decide whether Ctrl+c Ctrl+c
+    /// should trigger evaluation or fall through to normal Vim handling.
+    fn supports_plugin_evaluate(&self, kind: &str) -> bool;
+
+    /// Called by the shell when a plugin buffer triggers an evaluation request
+    /// (e.g. Ctrl+c Ctrl+c in an evaluatable buffer).  `kind` is the plugin
+    /// buffer kind string; `input` is the text from the buffer's input area.
+    /// Returns the lines to display in the output section.
+    fn handle_plugin_evaluate(&self, kind: &str, input: &str) -> Vec<String>;
+
+    /// Returns the initial content lines for a freshly-opened plugin buffer of
+    /// the given `kind`.  Called by the shell when creating a placeholder for a
+    /// plugin buffer whose content has not yet been populated.
+    fn plugin_buffer_initial_lines(&self, kind: &str) -> Vec<String>;
 }
 
 // ─── NullUserLibrary ─────────────────────────────────────────────────────────
@@ -404,6 +422,15 @@ impl UserLibrary for NullUserLibrary {
     }
     fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
         editor_icons::all_symbols()
+    }
+    fn handle_plugin_evaluate(&self, _kind: &str, _input: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn supports_plugin_evaluate(&self, _kind: &str) -> bool {
+        false
+    }
+    fn plugin_buffer_initial_lines(&self, _kind: &str) -> Vec<String> {
+        Vec::new()
     }
 }
 

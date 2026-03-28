@@ -61,7 +61,7 @@ use editor_lsp::{
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
     LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, autocomplete_hooks,
-    browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
+    browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
     oil_hooks, oil_protocol,
 };
 use editor_plugin_host::{NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages};
@@ -189,6 +189,8 @@ const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
 const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
 const GIT_LOG_KIND: &str = buffer_kinds::GIT_LOG;
 const GIT_STASH_KIND: &str = buffer_kinds::GIT_STASH;
+const HOOK_PLUGIN_EVALUATE: &str = plugin_hooks::EVALUATE;
+const PLUGIN_EVALUATE_SEPARATOR_PREFIX: &str = plugin_hooks::EVALUATE_SEPARATOR_PREFIX;
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
 const HOOK_GIT_DIFF_OPEN: &str = git_hooks::DIFF_OPEN;
 const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
@@ -1445,6 +1447,7 @@ struct ActiveBufferEventContext {
     is_directory: bool,
     is_browser: bool,
     is_terminal: bool,
+    is_plugin_evaluatable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -6432,6 +6435,35 @@ impl ShellState {
                         return Ok(false);
                     }
                 }
+                if active_buffer.is_plugin_evaluatable {
+                    let mut should_evaluate = false;
+                    let mut consume = false;
+                    {
+                        let ui = self.ui_mut()?;
+                        if ui.pending_ctrl_c.is_some() {
+                            if is_ctrl_c {
+                                ui.pending_ctrl_c = None;
+                                should_evaluate = true;
+                                consume = true;
+                            } else if is_ctrl_key {
+                                consume = true;
+                            } else {
+                                ui.pending_ctrl_c = None;
+                            }
+                        } else if is_ctrl_c {
+                            ui.pending_ctrl_c = Some(Instant::now());
+                            consume = true;
+                        }
+                    }
+                    if should_evaluate {
+                        evaluate_active_plugin_buffer(&mut self.runtime, active_buffer.buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                        return Ok(false);
+                    }
+                    if consume {
+                        return Ok(false);
+                    }
+                }
                 if !is_ctrl_c
                     && !is_ctrl_k
                     && !is_ctrl_key
@@ -9768,7 +9800,22 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_INPUT_CLEAR,
         "Clears the active input buffer prompt.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_EVALUATE,
+        "Evaluates the active plugin buffer's input section and writes the output section.",
+    )?;
 
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_EVALUATE,
+            "shell.plugin-evaluate",
+            |_, runtime| {
+                let buffer_id = active_shell_buffer_id(runtime)?;
+                evaluate_active_plugin_buffer(runtime, buffer_id)
+            },
+        )
+        .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MOVE_LEFT, "shell.move-left", |_, runtime| {
             apply_motion_command(runtime, ShellMotion::Left)?;
@@ -11674,6 +11721,7 @@ fn active_buffer_event_context(
         is_directory: buffer_is_directory(&buffer.kind),
         is_browser: buffer_is_browser(&buffer.kind),
         is_terminal: buffer_is_terminal(&buffer.kind),
+        is_plugin_evaluatable: plugin_evaluatable_kind(&buffer.kind, runtime),
     })
 }
 
@@ -11723,6 +11771,16 @@ fn buffer_is_acp(kind: &BufferKind) -> bool {
 
 fn buffer_is_browser(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND)
+}
+
+/// Returns `true` when the user library has an evaluator for the given buffer
+/// kind.  Used to decide whether Ctrl+c Ctrl+c should trigger evaluation.
+fn plugin_evaluatable_kind(kind: &BufferKind, runtime: &EditorRuntime) -> bool {
+    if let BufferKind::Plugin(plugin_kind) = kind {
+        shell_user_library(runtime).supports_plugin_evaluate(plugin_kind)
+    } else {
+        false
+    }
 }
 
 fn buffer_is_terminal(kind: &BufferKind) -> bool {
@@ -17190,6 +17248,57 @@ fn cancel_git_commit_buffer(
     Ok(())
 }
 
+/// Evaluate the input section of any evaluatable plugin buffer and replace the
+/// output section with the result.  Called both by the generic Ctrl+c Ctrl+c
+/// handler and by the `plugin.evaluate` hook subscriber.
+fn evaluate_active_plugin_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    // Read the buffer kind (needed to route the evaluate call).
+    let (input_lines, sep_line, kind_str) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let kind_str = if let BufferKind::Plugin(k) = &buffer.kind {
+            k.clone()
+        } else {
+            return Ok(()); // not a plugin buffer; nothing to do
+        };
+        let line_count = buffer.text.line_count();
+        let all_lines: Vec<String> = (0..line_count)
+            .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
+            .collect();
+        if let Some(idx) = all_lines
+            .iter()
+            .position(|l| l.starts_with(PLUGIN_EVALUATE_SEPARATOR_PREFIX))
+        {
+            let input = all_lines[..idx].to_vec();
+            let sep = all_lines[idx].clone();
+            (input, sep, kind_str)
+        } else {
+            // No separator — treat everything as input; add a fresh separator.
+            let sep = format!(
+                "{} {}",
+                PLUGIN_EVALUATE_SEPARATOR_PREFIX,
+                "─".repeat(48)
+            );
+            (all_lines, sep, kind_str)
+        }
+    };
+
+    let input_text = input_lines.join("\n");
+
+    // Call user library evaluator (no mutable borrow of runtime required).
+    let output = shell_user_library(runtime).handle_plugin_evaluate(&kind_str, &input_text);
+
+    // Rebuild: input + separator + output.
+    let mut new_lines = input_lines;
+    new_lines.push(sep_line);
+    new_lines.extend(output);
+
+    shell_buffer_mut(runtime, buffer_id)?.replace_with_lines(new_lines);
+    Ok(())
+}
+
 fn stage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
@@ -22415,10 +22524,19 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
                 format!("{name} is a file-backed buffer placeholder."),
                 "File loading is not yet wired into the SDL shell event loop.".to_owned(),
             ],
-            BufferKind::Plugin(plugin_kind) => vec![
-                format!("{name} was opened for plugin kind `{plugin_kind}`."),
-                "Users can change this behavior by editing the matching user package and recompiling.".to_owned(),
-            ],
+            BufferKind::Plugin(plugin_kind) => {
+                // Ask the user library for initial content.  If none is provided,
+                // fall back to the generic plugin placeholder message.
+                let initial = user_library.plugin_buffer_initial_lines(plugin_kind);
+                if initial.is_empty() {
+                    vec![
+                        format!("{name} was opened for plugin kind `{plugin_kind}`."),
+                        "Users can change this behavior by editing the matching user package and recompiling.".to_owned(),
+                    ]
+                } else {
+                    initial
+                }
+            }
         },
     }
 }
