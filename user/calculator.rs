@@ -22,8 +22,8 @@
 //! To add a new evaluatable plugin a user:
 //! 1. Creates `user/myplugin.rs` with a `package()` and `evaluate()`.
 //! 2. Adds `myplugin::package()` to `user/lib.rs::packages()`.
-//! 3. Implements `handle_plugin_evaluate` and `supports_plugin_evaluate`
-//!    for `"myplugin"` in `UserLibraryImpl`.
+//! 3. Exports a package-declared plugin buffer with an evaluator handler id.
+//! 4. Wires that evaluator handler id into `UserLibraryImpl::run_plugin_buffer_evaluator`.
 //! No changes to the host application are required.
 //!
 //! # Buffer layout
@@ -52,8 +52,8 @@
 //! - Constants: `pi`, `e`, `tau`, `inf`, `nan`
 
 use editor_plugin_api::{
-    PluginAction, PluginBufferSections, PluginCommand, PluginKeyBinding, PluginKeymapScope,
-    PluginPackage, buffer_kinds, plugin_hooks,
+    PluginAction, PluginBuffer, PluginBufferSections, PluginCommand, PluginKeyBinding,
+    PluginKeymapScope, PluginPackage, buffer_kinds, plugin_hooks,
 };
 
 // ─── Public constants ─────────────────────────────────────────────────────────
@@ -61,8 +61,9 @@ use editor_plugin_api::{
 pub use buffer_kinds::CALCULATOR as CALCULATOR_KIND;
 
 pub const BUFFER_NAME: &str = "*calculator*";
-const HEADER_COMMENT: &str =
-    "# Write expressions below. Press Ctrl+c Ctrl+c to evaluate, or Ctrl+Tab to switch panes.";
+pub const EVALUATE_HANDLER: &str = "calculator.evaluate-buffer";
+pub const EVALUATE_CHORD: &str = "C-c C-c";
+pub const SWITCH_PANE_CHORD: &str = "Ctrl+Tab";
 
 // ─── Package ─────────────────────────────────────────────────────────────────
 
@@ -96,15 +97,20 @@ pub fn package() -> PluginPackage {
                 )],
             ),
         ])
+        .with_buffers(vec![
+            PluginBuffer::new(CALCULATOR_KIND, initial_buffer_lines())
+                .with_sections(buffer_sections())
+                .with_evaluate_handler(EVALUATE_HANDLER),
+        ])
         // No hook declarations: plugin.evaluate is a host-owned hook.
         .with_key_bindings(vec![
             PluginKeyBinding::new(
-                "C-c C-c",
+                EVALUATE_CHORD,
                 "calculator.evaluate",
                 PluginKeymapScope::Workspace,
             ),
             PluginKeyBinding::new(
-                "Ctrl+Tab",
+                SWITCH_PANE_CHORD,
                 "calculator.switch-pane",
                 PluginKeymapScope::Workspace,
             ),
@@ -116,7 +122,9 @@ pub fn package() -> PluginPackage {
 /// Returns the initial lines placed in a freshly-opened calculator buffer.
 pub fn initial_buffer_lines() -> Vec<String> {
     vec![
-        HEADER_COMMENT.to_owned(),
+        format!(
+            "# Write expressions below. Press {EVALUATE_CHORD} to evaluate, or {SWITCH_PANE_CHORD} to switch panes."
+        ),
         String::new(),
         "a = 1".to_owned(),
         "b = 2".to_owned(),
@@ -579,7 +587,10 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_c_ctrl_c() {
         let pkg = package();
-        assert!(pkg.key_bindings().iter().any(|kb| kb.chord() == "C-c C-c"));
+        assert!(pkg
+            .key_bindings()
+            .iter()
+            .any(|kb| kb.chord() == EVALUATE_CHORD));
     }
 
     #[test]
@@ -588,7 +599,7 @@ mod tests {
         assert!(pkg
             .key_bindings()
             .iter()
-            .any(|kb| kb.chord() == "Ctrl+Tab" && kb.command_name() == "calculator.switch-pane"));
+            .any(|kb| kb.chord() == SWITCH_PANE_CHORD && kb.command_name() == "calculator.switch-pane"));
     }
 
     #[test]
@@ -687,8 +698,12 @@ mod tests {
         assert_eq!(sections.output_title(), "Output");
         assert_eq!(sections.output_min_rows(), 1);
         assert_eq!(
-            sections.output_initial_lines(),
-            ["(press Ctrl+c Ctrl+c to evaluate)"]
+            sections
+                .output_initial_lines()
+                .iter()
+                .map(|line| line.as_str())
+                .collect::<Vec<_>>(),
+            vec!["(press Ctrl+c Ctrl+c to evaluate)"]
         );
     }
 
@@ -705,6 +720,31 @@ mod tests {
                 .iter()
                 .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::SWITCH_PANE)),
             "calculator.switch-pane must emit the generic plugin.switch-pane hook"
+        );
+    }
+
+    #[test]
+    fn calculator_package_declares_its_buffer_through_package_metadata() {
+        let pkg = package();
+        let buffer = pkg
+            .buffer(CALCULATOR_KIND)
+            .expect("calculator package should declare its plugin buffer");
+        assert_eq!(buffer.kind(), CALCULATOR_KIND);
+        assert_eq!(buffer.evaluate_handler(), Some(EVALUATE_HANDLER));
+        assert_eq!(
+            buffer
+                .initial_lines()
+                .iter()
+                .map(|line| line.as_str())
+                .collect::<Vec<_>>(),
+            initial_buffer_lines()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            buffer.sections().map(|sections| sections.output_title()),
+            Some("Output")
         );
     }
 }

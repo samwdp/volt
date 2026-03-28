@@ -5,6 +5,15 @@ use abi_stable::{
     std_types::{ROption, RString, RVec},
 };
 
+pub use editor_core::{Section, SectionAction, SectionItem, SectionTree};
+pub use editor_dap::DebugAdapterSpec;
+pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
+pub use editor_git::{GitStatusSnapshot, StatusEntry};
+pub use editor_icons::{IconFontCategory, IconFontSymbol};
+pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind};
+pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+pub use editor_theme::{Color, Theme, ThemeOption};
+
 // ─── Protocol hook name constants ───────────────────────────────────────────
 //
 // These string identifiers form the stable "protocol" between the host editor
@@ -74,38 +83,43 @@ pub mod buffer_kinds {
 
 /// Generic split-pane metadata for plugin buffers that want an editable input
 /// area plus a dedicated read-only output pane rendered by the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct PluginBufferSections {
-    input_title: String,
-    output_title: String,
+    input_title: RString,
+    output_title: RString,
     output_min_rows: usize,
-    output_initial_lines: Vec<String>,
+    output_initial_lines: RVec<RString>,
 }
 
 impl PluginBufferSections {
     /// Creates a two-pane plugin buffer configuration.
     pub fn new(
-        input_title: impl Into<String>,
-        output_title: impl Into<String>,
+        input_title: impl Into<RString>,
+        output_title: impl Into<RString>,
         output_min_rows: usize,
-        output_initial_lines: Vec<String>,
+        output_initial_lines: Vec<impl Into<RString>>,
     ) -> Self {
         Self {
             input_title: input_title.into(),
             output_title: output_title.into(),
             output_min_rows: output_min_rows.max(1),
-            output_initial_lines,
+            output_initial_lines: output_initial_lines
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
         }
     }
 
     /// Returns the title shown in the editable input pane.
     pub fn input_title(&self) -> &str {
-        &self.input_title
+        self.input_title.as_str()
     }
 
     /// Returns the title shown in the read-only output pane.
     pub fn output_title(&self) -> &str {
-        &self.output_title
+        self.output_title.as_str()
     }
 
     /// Returns the minimum number of wrapped rows reserved for the output pane.
@@ -114,8 +128,185 @@ impl PluginBufferSections {
     }
 
     /// Returns the initial output lines shown before the first evaluation.
-    pub fn output_initial_lines(&self) -> &[String] {
-        &self.output_initial_lines
+    pub fn output_initial_lines(&self) -> &[RString] {
+        self.output_initial_lines.as_slice()
+    }
+}
+
+/// Declares a plugin-owned buffer kind and the host behavior it needs.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PluginBuffer {
+    kind: RString,
+    initial_lines: RVec<RString>,
+    sections: ROption<PluginBufferSections>,
+    evaluate_handler: ROption<RString>,
+}
+
+/// Context passed to the user library when rendering the statusline.
+#[derive(Debug, Clone, Copy)]
+pub struct StatuslineContext<'a> {
+    pub vim_mode: &'a str,
+    pub recording_macro: Option<char>,
+    pub workspace_name: &'a str,
+    pub buffer_name: &'a str,
+    pub buffer_modified: bool,
+    pub language_id: Option<&'a str>,
+    pub line: usize,
+    pub column: usize,
+    pub lsp_server: Option<&'a str>,
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
+    pub acp_connected: bool,
+    pub git_branch: Option<&'a str>,
+    pub git_added: usize,
+    pub git_removed: usize,
+}
+
+/// Stable contract implemented by the compiled user extension library.
+pub trait UserLibrary: Send + Sync {
+    fn packages(&self) -> Vec<PluginPackage>;
+    fn themes(&self) -> Vec<Theme>;
+    fn syntax_languages(&self) -> Vec<LanguageConfiguration>;
+    fn language_servers(&self) -> Vec<LanguageServerSpec>;
+    fn debug_adapters(&self) -> Vec<DebugAdapterSpec>;
+    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider>;
+    fn autocomplete_result_limit(&self) -> usize;
+    fn autocomplete_token_icon(&self) -> &'static str;
+    fn hover_providers(&self) -> Vec<HoverProvider>;
+    fn hover_line_limit(&self) -> usize;
+    fn hover_token_icon(&self) -> &'static str;
+    fn hover_signature_icon(&self) -> &'static str;
+    fn acp_clients(&self) -> Vec<AcpClient>;
+    fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
+    fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
+    fn terminal_config(&self) -> TerminalConfig;
+    fn oil_defaults(&self) -> OilDefaults;
+    fn oil_keybindings(&self) -> OilKeybindings;
+    fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction>;
+    fn oil_chord_action(&self, had_prefix: bool, chord: &str) -> Option<OilKeyAction>;
+    fn oil_help_lines(&self) -> Vec<String>;
+    fn oil_directory_sections(
+        &self,
+        root: &std::path::Path,
+        entries: &[DirectoryEntry],
+        show_hidden: bool,
+        sort_mode: OilSortMode,
+        trash_enabled: bool,
+    ) -> SectionTree;
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str;
+    fn git_status_sections(&self, snapshot: &GitStatusSnapshot) -> SectionTree;
+    fn git_commit_template(&self) -> Vec<String>;
+    fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix>;
+    fn git_command_for_chord(
+        &self,
+        prefix: Option<GitStatusPrefix>,
+        chord: &str,
+    ) -> Option<&'static str>;
+    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String>;
+    fn browser_input_hint(&self, url: Option<&str>) -> String;
+    fn browser_url_prompt(&self) -> String;
+    fn browser_url_placeholder(&self) -> String;
+    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String;
+    fn statusline_lsp_connected_icon(&self) -> &'static str;
+    fn statusline_lsp_error_icon(&self) -> &'static str;
+    fn statusline_lsp_warning_icon(&self) -> &'static str;
+    fn lsp_diagnostic_icon(&self) -> &'static str;
+    fn lsp_diagnostic_line_limit(&self) -> usize;
+    fn lsp_show_buffer_diagnostics(&self) -> bool;
+    fn gitfringe_token_added(&self) -> &'static str;
+    fn gitfringe_token_modified(&self) -> &'static str;
+    fn gitfringe_token_removed(&self) -> &'static str;
+    fn gitfringe_symbol(&self) -> &'static str;
+    fn icon_symbols(&self) -> &'static [IconFontSymbol];
+    fn supports_plugin_evaluate(&self, kind: &str) -> bool {
+        self.plugin_buffer(kind)
+            .and_then(|buffer| buffer.evaluate_handler().map(str::to_owned))
+            .is_some()
+    }
+    fn handle_plugin_evaluate(&self, kind: &str, input: &str) -> Vec<String> {
+        match self
+            .plugin_buffer(kind)
+            .and_then(|buffer| buffer.evaluate_handler().map(str::to_owned))
+        {
+            Some(handler) => self.run_plugin_buffer_evaluator(&handler, input),
+            None => vec![format!("no evaluator registered for plugin kind `{kind}`")],
+        }
+    }
+    fn plugin_buffer_initial_lines(&self, kind: &str) -> Vec<String> {
+        self.plugin_buffer(kind)
+            .map(|buffer| {
+                buffer
+                    .initial_lines()
+                    .iter()
+                    .map(|line| line.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn plugin_buffer_sections(&self, kind: &str) -> Option<PluginBufferSections> {
+        self.plugin_buffer(kind)
+            .and_then(|buffer| buffer.sections().cloned())
+    }
+    fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String>;
+    fn plugin_buffer(&self, kind: &str) -> Option<PluginBuffer> {
+        self.packages()
+            .into_iter()
+            .find_map(|package| package.buffer(kind).cloned())
+    }
+    fn default_build_command(&self, language: &str) -> Option<String>;
+}
+
+impl PluginBuffer {
+    /// Creates a new plugin buffer declaration for the given kind.
+    pub fn new(kind: impl Into<RString>, initial_lines: Vec<impl Into<RString>>) -> Self {
+        Self {
+            kind: kind.into(),
+            initial_lines: initial_lines
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+            sections: ROption::RNone,
+            evaluate_handler: ROption::RNone,
+        }
+    }
+
+    /// Attaches split-pane metadata for the buffer.
+    pub fn with_sections(mut self, sections: PluginBufferSections) -> Self {
+        self.sections = ROption::RSome(sections);
+        self
+    }
+
+    /// Declares the evaluator handler id used when `plugin.evaluate` fires.
+    pub fn with_evaluate_handler(mut self, handler: impl Into<RString>) -> Self {
+        self.evaluate_handler = ROption::RSome(handler.into());
+        self
+    }
+
+    /// Returns the plugin buffer kind.
+    pub fn kind(&self) -> &str {
+        self.kind.as_str()
+    }
+
+    /// Returns the initial text content for the buffer.
+    pub fn initial_lines(&self) -> &[RString] {
+        self.initial_lines.as_slice()
+    }
+
+    /// Returns the optional split-pane metadata for this buffer.
+    pub fn sections(&self) -> Option<&PluginBufferSections> {
+        match &self.sections {
+            ROption::RSome(sections) => Some(sections),
+            ROption::RNone => None,
+        }
+    }
+
+    /// Returns the optional evaluator handler id for this buffer.
+    pub fn evaluate_handler(&self) -> Option<&str> {
+        match &self.evaluate_handler {
+            ROption::RSome(handler) => Some(handler.as_str()),
+            ROption::RNone => None,
+        }
     }
 }
 
@@ -716,6 +907,7 @@ pub struct PluginPackage {
     key_bindings: RVec<PluginKeyBinding>,
     hook_declarations: RVec<PluginHookDeclaration>,
     hook_bindings: RVec<PluginHookBinding>,
+    buffers: RVec<PluginBuffer>,
 }
 
 impl PluginPackage {
@@ -729,6 +921,7 @@ impl PluginPackage {
             key_bindings: RVec::new(),
             hook_declarations: RVec::new(),
             hook_bindings: RVec::new(),
+            buffers: RVec::new(),
         }
     }
 
@@ -753,6 +946,12 @@ impl PluginPackage {
     /// Adds hook subscriptions to the package.
     pub fn with_hook_bindings(mut self, hook_bindings: Vec<PluginHookBinding>) -> Self {
         self.hook_bindings = hook_bindings.into();
+        self
+    }
+
+    /// Adds plugin-owned buffer declarations to the package.
+    pub fn with_buffers(mut self, buffers: Vec<PluginBuffer>) -> Self {
+        self.buffers = buffers.into();
         self
     }
 
@@ -790,13 +989,23 @@ impl PluginPackage {
     pub fn hook_bindings(&self) -> &[PluginHookBinding] {
         self.hook_bindings.as_slice()
     }
+
+    /// Returns the plugin-owned buffer declarations.
+    pub fn buffers(&self) -> &[PluginBuffer] {
+        self.buffers.as_slice()
+    }
+
+    /// Returns the declared plugin buffer for the given kind, if any.
+    pub fn buffer(&self, kind: &str) -> Option<&PluginBuffer> {
+        self.buffers.iter().find(|buffer| buffer.kind() == kind)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginKeyBinding,
-        PluginKeymapScope, PluginPackage, PluginVimMode,
+        PluginAction, PluginBuffer, PluginBufferSections, PluginCommand, PluginHookBinding,
+        PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
     };
 
     #[test]
@@ -815,6 +1024,14 @@ mod tests {
                 "lsp.startup",
                 "Runs after an LSP startup command executes.",
             )])
+            .with_buffers(vec![PluginBuffer::new("calculator", vec!["1 + 1"])
+                .with_sections(PluginBufferSections::new(
+                    "Input",
+                    "Output",
+                    1,
+                    vec!["(press enter)".to_owned()],
+                ))
+                .with_evaluate_handler("calculator.evaluate")])
             .with_hook_bindings(vec![PluginHookBinding::new(
                 "buffer.file-open",
                 "lsp.auto-start",
@@ -830,5 +1047,22 @@ mod tests {
         assert_eq!(package.key_bindings()[0].vim_mode(), PluginVimMode::Normal);
         assert_eq!(package.hook_declarations()[0].name(), "lsp.startup");
         assert_eq!(package.hook_bindings()[0].detail_filter(), Some(".rs"));
+        assert_eq!(package.buffers()[0].kind(), "calculator");
+        assert_eq!(
+            package.buffers()[0]
+                .initial_lines()
+                .iter()
+                .map(|line| line.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1 + 1"]
+        );
+        assert_eq!(
+            package.buffers()[0].sections().map(|sections| sections.output_title()),
+            Some("Output")
+        );
+        assert_eq!(
+            package.buffers()[0].evaluate_handler(),
+            Some("calculator.evaluate")
+        );
     }
 }

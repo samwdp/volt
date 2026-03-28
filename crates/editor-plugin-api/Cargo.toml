@@ -10,3 +10,11 @@ workspace = true
 
 [dependencies]
 abi_stable = "0.11"
+editor-core = { path = "../editor-core" }
+editor-dap = { path = "../editor-dap" }
+editor-fs = { path = "../editor-fs" }
+editor-git = { path = "../editor-git" }
+editor-icons = { path = "../editor-icons" }
+editor-lsp = { path = "../editor-lsp" }
+editor-syntax = { path = "../editor-syntax" }
+editor-theme = { path = "../editor-theme" }

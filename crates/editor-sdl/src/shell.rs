@@ -2183,7 +2183,14 @@ impl Default for PlainTextPaneState {
 impl PluginSectionBufferState {
     fn new(config: PluginBufferSections) -> Self {
         let mut output_pane = PlainTextPaneState::default();
-        output_pane.replace_lines(config.output_initial_lines().to_vec(), true);
+        output_pane.replace_lines(
+            config
+                .output_initial_lines()
+                .iter()
+                .map(|line| line.to_string())
+                .collect(),
+            true,
+        );
         Self {
             input_title: config.input_title().to_owned(),
             output_title: config.output_title().to_owned(),

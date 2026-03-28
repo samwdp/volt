@@ -35,7 +35,7 @@ pub mod hover;
 /// Bundled icon-font symbols and metadata (backed by editor-icons).
 pub mod icon_font;
 /// Bundled icon-font symbol modules (re-exported from editor-icons).
-pub use editor_icons::symbols as icon_font_symbols;
+pub use editor_plugin_api::symbols as icon_font_symbols;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
 /// Language-specific registrations.
@@ -65,11 +65,8 @@ pub mod vim;
 /// Workspace creation and project discovery.
 pub mod workspace;
 
-use editor_dap::DebugAdapterSpec;
-use editor_lsp::LanguageServerSpec;
 use editor_plugin_api::PluginPackage;
-use editor_syntax::LanguageConfiguration;
-use editor_theme::Theme;
+use editor_plugin_api::{DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme};
 
 /// Returns the packages currently compiled into the user library.
 pub fn packages() -> Vec<PluginPackage> {
@@ -139,10 +136,8 @@ pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilDefaults, OilKeyAction,
-    OilKeybindings, TerminalConfig, WorkspaceRoot,
+    OilKeybindings, StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
 };
-use editor_plugin_api::PluginBufferSections;
-use editor_plugin_host::{StatuslineContext, UserLibrary};
 
 impl UserLibrary for UserLibraryImpl {
     fn packages(&self) -> Vec<PluginPackage> {
@@ -455,28 +450,10 @@ impl UserLibrary for UserLibraryImpl {
         editor_icons::all_symbols()
     }
 
-    fn supports_plugin_evaluate(&self, kind: &str) -> bool {
-        matches!(kind, calculator::CALCULATOR_KIND)
-    }
-
-    fn handle_plugin_evaluate(&self, kind: &str, input: &str) -> Vec<String> {
-        match kind {
-            calculator::CALCULATOR_KIND => calculator::evaluate(input),
-            _ => vec![format!("no evaluator registered for plugin kind `{kind}`")],
-        }
-    }
-
-    fn plugin_buffer_initial_lines(&self, kind: &str) -> Vec<String> {
-        match kind {
-            calculator::CALCULATOR_KIND => calculator::initial_buffer_lines(),
-            _ => Vec::new(),
-        }
-    }
-
-    fn plugin_buffer_sections(&self, kind: &str) -> Option<PluginBufferSections> {
-        match kind {
-            calculator::CALCULATOR_KIND => Some(calculator::buffer_sections()),
-            _ => None,
+    fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
+        match handler {
+            calculator::EVALUATE_HANDLER => calculator::evaluate(input),
+            _ => vec![format!("no plugin buffer evaluator registered for `{handler}`")],
         }
     }
 
@@ -510,15 +487,17 @@ fn map_oil_key_action(action: oil::OilKeyAction) -> OilKeyAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_adapters, language_servers, packages, syntax_languages, themes};
+    use super::{UserLibraryImpl, debug_adapters, language_servers, packages, syntax_languages, themes};
     use crate::lsp::{
         SERVER_CSHARP_LS, SERVER_MARKSMAN, SERVER_RUST_ANALYZER, SERVER_TOMBI,
         SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
         SERVER_YAML_LANGUAGE_SERVER,
     };
+    use crate::calculator;
     use std::collections::BTreeSet;
     use editor_buffer::TextBuffer;
     use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
+    use editor_plugin_host::UserLibrary;
 
     fn mapped_theme_token<'a>(
         language: &'a LanguageConfiguration,
@@ -575,6 +554,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn user_library_derives_plugin_buffer_behavior_from_package_metadata() {
+        let library = UserLibraryImpl;
+        assert!(library.supports_plugin_evaluate(calculator::CALCULATOR_KIND));
+        assert_eq!(
+            library.plugin_buffer_initial_lines(calculator::CALCULATOR_KIND),
+            calculator::initial_buffer_lines()
+        );
+        assert_eq!(
+            library
+                .plugin_buffer_sections(calculator::CALCULATOR_KIND)
+                .map(|sections| sections.output_title().to_owned()),
+            Some("Output".to_owned())
+        );
+        assert_eq!(
+            library.handle_plugin_evaluate(calculator::CALCULATOR_KIND, "1 + 1"),
+            vec!["2".to_owned()]
+        );
     }
 
     #[test]
