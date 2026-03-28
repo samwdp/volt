@@ -666,6 +666,14 @@ name = "editor-plugin-api"
 version = "0.1.0"
 dependencies = [
  "abi_stable",
+ "editor-core",
+ "editor-dap",
+ "editor-fs",
+ "editor-git",
+ "editor-icons",
+ "editor-lsp",
+ "editor-syntax",
+ "editor-theme",
 ]
 
 [[package]]
@@ -3264,16 +3272,8 @@ name = "volt-user"
 version = "0.1.0"
 dependencies = [
  "editor-buffer",
- "editor-core",
- "editor-dap",
- "editor-fs",
- "editor-git",
- "editor-icons",
- "editor-lsp",
  "editor-plugin-api",
- "editor-plugin-host",
  "editor-syntax",
- "editor-theme",
  "toml",
 ]
 
