@@ -508,6 +508,7 @@ mod tests {
         SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
         SERVER_YAML_LANGUAGE_SERVER,
     };
+    use std::collections::BTreeSet;
     use editor_buffer::TextBuffer;
     use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
 
@@ -546,6 +547,26 @@ mod tests {
                 .iter()
                 .any(|package| !package.key_bindings().is_empty())
         );
+    }
+
+    #[test]
+    fn user_library_keybindings_do_not_conflict() {
+        let mut seen = BTreeSet::new();
+        for package in packages() {
+            for keybinding in package.key_bindings() {
+                let identity = (
+                    format!("{:?}", keybinding.scope()),
+                    format!("{:?}", keybinding.vim_mode()),
+                    keybinding.chord().to_owned(),
+                );
+                assert!(
+                    seen.insert(identity.clone()),
+                    "duplicate keybinding {:?} in package `{}`",
+                    identity,
+                    package.name()
+                );
+            }
+        }
     }
 
     #[test]

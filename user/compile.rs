@@ -117,7 +117,7 @@ pub fn parse_error_location(line: &str) -> Option<(String, u32, u32)> {
                 .map_or_else(|| col_str.trim().parse::<u32>().ok(), |(n, _)| n.parse().ok())
                 .unwrap_or(1);
             if !path.is_empty() && line_num > 0 {
-                return Some((path.to_owned(), line_num, col_num));
+                return Some(((*path).to_owned(), line_num, col_num));
             }
             None
         }
@@ -125,7 +125,7 @@ pub fn parse_error_location(line: &str) -> Option<(String, u32, u32)> {
         [path, line_str] => {
             let line_num = line_str.trim().parse::<u32>().ok()?;
             if !path.is_empty() && line_num > 0 {
-                return Some((path.to_owned(), line_num, 1));
+                return Some(((*path).to_owned(), line_num, 1));
             }
             None
         }

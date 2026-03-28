@@ -9846,8 +9846,8 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_RUN_COMMAND,
             "shell.plugin-run-command",
-            |detail, runtime| {
-                open_compile_buffer(runtime, detail.as_deref())
+            |event, runtime| {
+                open_compile_buffer(runtime, event.detail.as_deref())
             },
         )
         .map_err(|error| error.to_string())?;
@@ -17383,7 +17383,12 @@ fn open_compile_buffer(
     // Reuse an existing buffer if present.
     let existing = shell_ui(runtime)
         .ok()
-        .and_then(|ui| ui.buffers().find(|b| b.name() == buf_name).map(|b| b.id()));
+        .and_then(|ui| {
+            ui.buffers
+                .iter()
+                .find(|b| b.display_name() == buf_name)
+                .map(|b| b.id())
+        });
 
     let buffer_id = if let Some(existing) = existing {
         runtime
@@ -17457,7 +17462,12 @@ fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
         let buf_name = compile_buffer_name(&workspace_name);
         let buf_id = shell_ui(runtime)
             .ok()
-            .and_then(|ui| ui.buffers().find(|b| b.name() == buf_name).map(|b| b.id()));
+            .and_then(|ui| {
+                ui.buffers
+                    .iter()
+                    .find(|b| b.display_name() == buf_name)
+                    .map(|b| b.id())
+            });
         if let Some(buffer_id) = buf_id {
             run_compile_command_in_buffer(runtime, buffer_id, &cmd)
         } else {
@@ -17544,7 +17554,7 @@ fn jump_to_compilation_error(runtime: &mut EditorRuntime) -> Result<(), String> 
     let buffer_id = active_shell_buffer_id(runtime)?;
     let line_text = {
         let buf = shell_buffer(runtime, buffer_id)?;
-        let cursor_line = buf.cursor_line();
+        let cursor_line = buf.cursor_point().line;
         buf.text.line(cursor_line).unwrap_or_default().to_owned()
     };
 
@@ -17589,14 +17599,14 @@ fn parse_compilation_error_line(line: &str) -> Option<(String, u32, u32)> {
                 .or_else(|| col_str.trim().parse().ok())
                 .unwrap_or(1);
             if !path.is_empty() && line_num > 0 {
-                return Some((path.to_owned(), line_num, col_num));
+                return Some(((*path).to_owned(), line_num, col_num));
             }
             None
         }
         [path, line_str] => {
             let line_num = line_str.trim().parse::<u32>().ok()?;
             if !path.is_empty() && line_num > 0 {
-                return Some((path.to_owned(), line_num, 1));
+                return Some(((*path).to_owned(), line_num, 1));
             }
             None
         }
@@ -17611,68 +17621,12 @@ fn open_file_at_line(
     path: &Path,
     line_num: u32,
 ) -> Result<(), String> {
-    // Look for an already-open buffer with this path.
-    let existing = shell_ui(runtime).ok().and_then(|ui| {
-        ui.buffers()
-            .find(|b| b.file_path().is_some_and(|p| p == path))
-            .map(|b| b.id())
-    });
-
-    let buffer_id = if let Some(id) = existing {
-        id
-    } else {
-        // Create a new scratch buffer named after the path and flag it as a file.
-        let workspace_id = runtime
-            .model()
-            .active_workspace_id()
-            .map_err(|e| e.to_string())?;
-        let name = path.to_string_lossy().into_owned();
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-        let id = runtime
-            .model_mut()
-            .create_buffer(workspace_id, &name, BufferKind::File, None)
-            .map_err(|e| e.to_string())?;
-        let rt_buf = runtime
-            .model()
-            .workspace(workspace_id)
-            .map_err(|e| e.to_string())?
-            .buffer(id)
-            .ok_or_else(|| format!("buffer `{id}` is missing"))?;
-        let user_library = shell_user_library(runtime);
-        let lines: Vec<String> = content.lines().map(str::to_owned).collect();
-        let mut shell_buf = ShellBuffer::from_runtime_buffer(rt_buf, lines, &*user_library);
-        shell_buf.set_file_path(Some(path.to_path_buf()));
-        let lang = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_owned);
-        if let Some(lang) = lang {
-            shell_buf.set_language_id(Some(lang));
-        }
-        let ui = shell_ui_mut(runtime)?;
-        ui.insert_buffer(shell_buf);
-        ui.focus_buffer_in_active_pane(id);
-        id
-    };
-
-    // Focus the buffer and jump to the line.
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|e| e.to_string())?;
-    runtime
-        .model_mut()
-        .focus_buffer(workspace_id, buffer_id)
-        .map_err(|e| e.to_string())?;
-    {
-        let ui = shell_ui_mut(runtime)?;
-        ui.focus_buffer_in_active_pane(buffer_id);
-        ui.enter_normal_mode();
-    }
-    let zero_line = line_num.saturating_sub(1) as usize;
-    let buf = shell_buffer_mut(runtime, buffer_id)?;
-    buf.move_to_line(zero_line);
+    open_workspace_file_at(
+        runtime,
+        path,
+        TextPoint::new(line_num.saturating_sub(1) as usize, 0),
+    )?;
+    shell_ui_mut(runtime)?.enter_normal_mode();
     Ok(())
 }
 
