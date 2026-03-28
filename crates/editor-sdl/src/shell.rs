@@ -60,9 +60,9 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
-    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilKeyAction, autocomplete_hooks, browser_hooks,
-    buffer_kinds, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks, oil_hooks,
-    oil_protocol,
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilKeyAction, autocomplete_hooks,
+    browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, lsp_hooks, hover_hooks,
+    oil_hooks, oil_protocol,
 };
 use editor_plugin_host::{NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages};
 use editor_render::{
@@ -303,13 +303,6 @@ const NOTIFICATION_MAX_BODY_LINES: usize = 4;
 
 // ─── Local constants (formerly from user modules) ────────────────────────────
 const BROWSER_BUFFER_NAME: &str = "*browser*";
-const BROWSER_URL_PROMPT: &str = "URL > ";
-const BROWSER_URL_PLACEHOLDER: &str = "https://example.com";
-const GIT_FRINGE_TOKEN_ADDED: &str = "git.fringe.added";
-const GIT_FRINGE_TOKEN_MODIFIED: &str = "git.fringe.modified";
-const GIT_FRINGE_TOKEN_REMOVED: &str = "git.fringe.removed";
-const GIT_FRINGE_SYMBOL: &str = "⏽";
-const SHOW_BUFFER_DIAGNOSTICS: bool = true;
 const AUTOCOMPLETE_NEXT_CHORD: &str = "Ctrl+n";
 const AUTOCOMPLETE_PREVIOUS_CHORD: &str = "Ctrl+p";
 const HOVER_NEXT_CHORD: &str = "Ctrl+n";
@@ -6941,6 +6934,7 @@ impl ShellState {
             fonts,
             ui,
             runtime_popup.as_ref(),
+            &*self.user_library,
             &workspace_name,
             ui.attached_lsp_server(),
             lsp_workspace_loaded,
@@ -6952,7 +6946,6 @@ impl ShellState {
             line_height,
             ascent,
             Instant::now(),
-            &*self.user_library,
         )
     }
 
@@ -16243,7 +16236,8 @@ fn apply_git_status_snapshot(
     buffer_id: BufferId,
     snapshot: GitStatusSnapshot,
 ) -> Result<(), String> {
-    let sections = user::git::status_sections(&snapshot);
+    let user_library = shell_user_library(runtime);
+    let sections = user_library.git_status_sections(&snapshot);
     let collapsed = shell_buffer(runtime, buffer_id)?
         .section_state()
         .map(|state| state.collapsed.clone())
@@ -16423,7 +16417,7 @@ fn set_directory_root(
     buffer_id: BufferId,
     root: PathBuf,
 ) -> Result<(), String> {
-    let defaults = user::oil::defaults();
+    let defaults = shell_user_library(runtime).oil_defaults();
     let (show_hidden, sort_mode, trash_enabled, previous_root) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let state = buffer.directory_state();
@@ -16500,7 +16494,8 @@ fn apply_directory_state(
         .section_state()
         .map(|state| state.collapsed.clone())
         .unwrap_or_default();
-    let lines = user::oil::directory_sections(
+    let user_library = shell_user_library(runtime);
+    let lines = user_library.oil_directory_sections(
         &state.root,
         &entries,
         state.show_hidden,
@@ -16570,7 +16565,7 @@ fn directory_entry_at_cursor(
         .section_line_meta(line)
         .and_then(|meta| meta.action.as_ref())
         .ok_or_else(|| "no directory entry selected".to_owned())?;
-    if meta.id() != user::oil::ACTION_OIL_ENTRY {
+    if meta.id() != oil_protocol::ACTION_OIL_ENTRY {
         return Err("no directory entry selected".to_owned());
     }
     let detail = meta
@@ -16600,7 +16595,7 @@ enum DirectoryEditAction {
     Rename { from: PathBuf, to: PathBuf },
 }
 
-fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
+fn directory_edit_lines(buffer: &ShellBuffer, user_library: &dyn UserLibrary) -> Vec<String> {
     let mut lines = Vec::new();
     for line_index in 0..buffer.line_count() {
         let raw = buffer.text.line(line_index).unwrap_or_default();
@@ -16611,13 +16606,16 @@ fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
         if line_index == 0 && trimmed.starts_with("Directory ") {
             continue;
         }
-        lines.push(user::oil::strip_entry_icon_prefix(trimmed).to_owned());
+        lines.push(user_library.oil_strip_entry_icon_prefix(trimmed).to_owned());
     }
     lines
 }
 
-fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
-    let trimmed = user::oil::strip_entry_icon_prefix(line.trim());
+fn parse_directory_line(
+    line: &str,
+    user_library: &dyn UserLibrary,
+) -> Result<DirectoryLine, String> {
+    let trimmed = user_library.oil_strip_entry_icon_prefix(line.trim());
     let is_dir = trimmed.ends_with('/');
     let raw = trimmed.trim_end_matches('/');
     if raw.is_empty() {
@@ -16642,13 +16640,16 @@ fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
 
 #[cfg(test)]
 mod directory_line_tests {
+    use editor_plugin_host::NullUserLibrary;
     use super::parse_directory_line;
     use std::path::PathBuf;
 
     #[test]
     fn parse_directory_line_strips_file_icons() {
         let line = format!("{} Cargo.toml", editor_icons::symbols::seti::CUSTOM_TOML);
-        let parsed = parse_directory_line(&line).expect("icon-prefixed file line should parse");
+        let user_library = NullUserLibrary;
+        let parsed =
+            parse_directory_line(&line, &user_library).expect("icon-prefixed file line should parse");
         assert_eq!(parsed.label, "Cargo.toml");
         assert_eq!(parsed.rel_path, PathBuf::from("Cargo.toml"));
         assert!(!parsed.is_dir);
@@ -16657,19 +16658,23 @@ mod directory_line_tests {
     #[test]
     fn parse_directory_line_strips_directory_icons() {
         let line = format!("{} src/", editor_icons::symbols::seti::CUSTOM_FOLDER);
-        let parsed =
-            parse_directory_line(&line).expect("icon-prefixed directory line should parse");
+        let user_library = NullUserLibrary;
+        let parsed = parse_directory_line(&line, &user_library)
+            .expect("icon-prefixed directory line should parse");
         assert_eq!(parsed.label, "src/");
         assert_eq!(parsed.rel_path, PathBuf::from("src"));
         assert!(parsed.is_dir);
     }
 }
 
-fn parse_directory_lines(lines: &[String]) -> Result<Vec<DirectoryLine>, String> {
+fn parse_directory_lines(
+    lines: &[String],
+    user_library: &dyn UserLibrary,
+) -> Result<Vec<DirectoryLine>, String> {
     let mut seen = BTreeSet::new();
     let mut parsed = Vec::with_capacity(lines.len());
     for line in lines {
-        let entry = parse_directory_line(line)?;
+        let entry = parse_directory_line(line, user_library)?;
         if !seen.insert(entry.rel_path.clone()) {
             return Err(format!("duplicate entry `{}`", entry.label));
         }
@@ -16700,12 +16705,13 @@ fn directory_edit_actions(
     root: &Path,
     before: &[String],
     after: &[String],
+    user_library: &dyn UserLibrary,
 ) -> Result<Vec<DirectoryEditAction>, String> {
     if before == after {
         return Ok(Vec::new());
     }
-    let before_parsed = parse_directory_lines(before)?;
-    let after_parsed = parse_directory_lines(after)?;
+    let before_parsed = parse_directory_lines(before, user_library)?;
+    let after_parsed = parse_directory_lines(after, user_library)?;
     let (removed_indices, added_indices) = diff_directory_lines(before, after);
     let removed = removed_indices
         .iter()
@@ -16817,9 +16823,11 @@ fn apply_directory_edit_queue(
     };
     let after = {
         let buffer = shell_buffer(runtime, buffer_id)?;
-        directory_edit_lines(buffer)
+        let user_library = shell_user_library(runtime);
+        directory_edit_lines(buffer, &*user_library)
     };
-    let actions = directory_edit_actions(&root, &before, &after)?;
+    let user_library = shell_user_library(runtime);
+    let actions = directory_edit_actions(&root, &before, &after, &*user_library)?;
     if actions.is_empty() {
         return Ok(());
     }
@@ -17016,7 +17024,8 @@ fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, user::oil::help_lines());
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, user_library.oil_help_lines());
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     Ok(())
 }
@@ -17092,7 +17101,7 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let template = user::git::commit_buffer_template();
+    let template = shell_user_library(runtime).git_commit_template();
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
     shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
@@ -17524,10 +17533,10 @@ fn diff_git_dwim(
     if let Some(meta) = meta
         && let SectionRenderLineKind::Header { id, .. } = &meta.kind
     {
-        if id == user::git::SECTION_STAGED {
+        if id == GIT_SECTION_STAGED {
             return open_git_diff_staged(runtime);
         }
-        if id == user::git::SECTION_UNSTAGED || id == user::git::SECTION_UNTRACKED {
+        if id == GIT_SECTION_UNSTAGED || id == GIT_SECTION_UNTRACKED {
             return open_git_diff_unstaged(runtime);
         }
     }
@@ -19206,8 +19215,12 @@ fn git_status_discard_or_reset_command(runtime: &mut EditorRuntime) -> Result<()
     reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Mixed)
 }
 
-fn git_status_command_name(prefix: Option<GitPrefix>, chord: &str) -> Option<&'static str> {
-    user::git::status_command_name(prefix, chord)
+fn git_status_command_name(
+    user_library: &dyn UserLibrary,
+    prefix: Option<GitPrefix>,
+    chord: &str,
+) -> Option<&'static str> {
+    user_library.git_command_for_chord(prefix, chord)
 }
 
 fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<bool, String> {
@@ -19333,8 +19346,9 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
     }
 
     let prefix = take_git_prefix(runtime)?;
-    if let Some(command_name) =
-        git_status_command_name(prefix, chord).or_else(|| git_status_command_name(None, chord))
+    let user_library = shell_user_library(runtime);
+    if let Some(command_name) = git_status_command_name(&*user_library, prefix, chord)
+        .or_else(|| git_status_command_name(&*user_library, None, chord))
     {
         runtime
             .execute_command(command_name)
@@ -19342,7 +19356,7 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         return Ok(true);
     }
 
-    if let Some(prefix) = user::git::status_prefix_for_chord(chord) {
+    if let Some(prefix) = user_library.git_prefix_for_chord(chord) {
         set_git_prefix(runtime, prefix)?;
         return Ok(true);
     }
@@ -19385,18 +19399,19 @@ fn handle_directory_keydown_chord(
         return Ok(false);
     }
     shell_ui_mut(runtime)?.pending_directory_prefix = None;
-    match user::oil::keydown_action(chord) {
-        Some(user::oil::OilKeyAction::OpenEntry) => {
+    let user_library = shell_user_library(runtime);
+    match user_library.oil_keydown_action(chord) {
+        Some(OilKeyAction::OpenEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenVerticalSplit) => {
+        Some(OilKeyAction::OpenVerticalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenHorizontalSplit) => {
+        Some(OilKeyAction::OpenHorizontalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(
                 runtime,
@@ -19406,21 +19421,21 @@ fn handle_directory_keydown_chord(
             )?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenNewPane) => {
+        Some(OilKeyAction::OpenNewPane) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::PreviewEntry) => {
+        Some(OilKeyAction::PreviewEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::Refresh) => {
+        Some(OilKeyAction::Refresh) => {
             refresh_directory_buffer(runtime, buffer_id)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::Close) => {
+        Some(OilKeyAction::Close) => {
             close_buffer_discard(runtime, buffer_id)?;
             Ok(true)
         }
@@ -19435,54 +19450,55 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
         return Ok(false);
     }
     let had_prefix = take_directory_prefix(runtime)?;
-    match user::oil::chord_action(had_prefix, chord) {
-        Some(user::oil::OilKeyAction::ShowHelp) => {
+    let user_library = shell_user_library(runtime);
+    match user_library.oil_chord_action(had_prefix, chord) {
+        Some(OilKeyAction::ShowHelp) => {
             open_oil_help_popup(runtime)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::ToggleHidden) => {
+        Some(OilKeyAction::ToggleHidden) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.show_hidden = !state.show_hidden;
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::ToggleTrash) => {
+        Some(OilKeyAction::ToggleTrash) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.trash_enabled = !state.trash_enabled;
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::CycleSort) => {
+        Some(OilKeyAction::CycleSort) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.sort_mode = state.sort_mode.cycle();
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenExternal) => {
+        Some(OilKeyAction::OpenExternal) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_external_path(entry.path())?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::SetTabLocalRoot) | Some(user::oil::OilKeyAction::SetRoot) => {
+        Some(OilKeyAction::SetTabLocalRoot) | Some(OilKeyAction::SetRoot) => {
             directory_cd_from_cursor(runtime, buffer_id)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::StartPrefix) => {
+        Some(OilKeyAction::StartPrefix) => {
             set_directory_prefix(runtime)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenParent) => {
+        Some(OilKeyAction::OpenParent) => {
             let root = oil_parent_root(runtime)?;
             set_directory_root(runtime, buffer_id, root)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenWorkspaceRoot) => {
+        Some(OilKeyAction::OpenWorkspaceRoot) => {
             let root = oil_workspace_root(runtime)?;
             set_directory_root(runtime, buffer_id, root)?;
             Ok(true)
         }
         None if had_prefix => {
-            let prefix = user::oil::keybindings().prefix;
+            let prefix = user_library.oil_keybindings().prefix;
             record_runtime_error(
                 runtime,
                 "oil.directory",
@@ -19772,12 +19788,10 @@ fn terminal_spawn_config(
     cols: u16,
 ) -> Result<LiveTerminalConfig, String> {
     let title = shell_buffer(runtime, buffer_id)?.display_name().to_owned();
-    let mut config = LiveTerminalConfig::new(
-        title,
-        user::terminal::default_shell_program(),
-        user::terminal::default_shell_args(),
-    )
-    .with_size(rows, cols);
+    let terminal_config = shell_user_library(runtime).terminal_config();
+    let mut config =
+        LiveTerminalConfig::new(title, terminal_config.program, terminal_config.args)
+            .with_size(rows, cols);
     if let Some(cwd) = terminal_working_dir(runtime)? {
         config = config.with_cwd(cwd);
     }
@@ -22293,9 +22307,11 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
 }
 
 fn browser_input_field() -> InputField {
-    let mut input = InputField::new(user::browser::URL_PROMPT);
-    input.set_placeholder(Some(user::browser::URL_PLACEHOLDER.to_owned()));
-    input.set_hint(Some(user::browser::input_hint(None)));
+    let user_library = shell_user_library(runtime);
+    let prompt = user_library.browser_url_prompt();
+    let mut input = InputField::new(prompt);
+    input.set_placeholder(Some(user_library.browser_url_placeholder()));
+    input.set_hint(Some(user_library.browser_input_hint(None)));
     input
 }
 
@@ -22415,6 +22431,7 @@ fn render_shell_state(
     fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -22475,21 +22492,22 @@ fn render_shell_state(
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
-            render_buffer(
-                target,
-                fonts,
-                buffer,
-                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
-                active,
-                visual_range,
-                yank_flash,
-                input_mode,
-                state.vim().recording_macro,
-                workspace_name,
-                lsp_server,
-                lsp_workspace_loaded,
-                acp_connected,
-                git_summary.as_ref(),
+        render_buffer(
+            target,
+            fonts,
+            buffer,
+            PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+            active,
+            visual_range,
+            yank_flash,
+            input_mode,
+            state.vim().recording_macro,
+            user_library,
+            workspace_name,
+            lsp_server,
+            lsp_workspace_loaded,
+            acp_connected,
+            git_summary.as_ref(),
                 theme_registry,
                 cell_width,
                 line_height,
@@ -22505,6 +22523,7 @@ fn render_shell_state(
             state,
             popup,
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
+            user_library,
             workspace_name,
             lsp_server,
             lsp_workspace_loaded,
@@ -22532,6 +22551,7 @@ fn render_shell_state(
                 active_rect.width,
                 active_rect.height,
             ),
+            user_library,
             theme_registry,
             cell_width,
             line_height,
@@ -22551,6 +22571,7 @@ fn render_shell_state(
                 active_rect.width,
                 active_rect.height,
             ),
+            user_library,
             theme_registry,
             cell_width,
             line_height,
@@ -22597,6 +22618,7 @@ fn render_runtime_popup_overlay(
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
     popup_rect: Rect,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -22633,6 +22655,7 @@ fn render_runtime_popup_overlay(
             yank_flash,
             input_mode,
             state.vim().recording_macro,
+            user_library,
             workspace_name,
             lsp_server,
             lsp_workspace_loaded,
@@ -22774,6 +22797,7 @@ fn render_autocomplete_overlay(
     state: &ShellUiState,
     autocomplete: &AutocompleteOverlay,
     pane_rect: Rect,
+    user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -22836,14 +22860,16 @@ fn render_autocomplete_overlay(
         .min(width.saturating_sub((cell_width.max(1) as u32) * 18));
     let docs_width = width.saturating_sub(list_width).saturating_sub(1);
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
+    let result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
-        .clamp(4, user::autocomplete::RESULT_LIMIT.max(6) as u32 + 2)
+        .clamp(4, result_limit.max(6) as u32 + 2)
         as usize;
     let preview_lines = autocomplete_preview_lines(
         autocomplete.selected(),
         &autocomplete.query.token,
         docs_columns,
         max_body_rows,
+        user_library.autocomplete_token_icon(),
     );
     let body_rows = autocomplete
         .entries()
@@ -22925,6 +22951,7 @@ fn render_hover_overlay(
     state: &ShellUiState,
     hover: &HoverOverlay,
     pane_rect: Rect,
+    _user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -23483,14 +23510,12 @@ fn autocomplete_preview_lines(
     token: &str,
     max_columns: usize,
     max_lines: usize,
+    token_icon: &str,
 ) -> Vec<String> {
     let max_lines = max_lines.max(1);
     let Some(entry) = entry else {
         return wrap_overlay_text(
-            &format!(
-                "{} {token}\n\nSelect a completion to preview details.",
-                user::autocomplete::TOKEN_ICON
-            ),
+            &format!("{token_icon} {token}\n\nSelect a completion to preview details."),
             max_columns,
             max_lines,
         );
@@ -23635,15 +23660,16 @@ fn statusline_icon_segments<'a>(text: &'a str, icons: &[&'a str]) -> Vec<(&'a st
 
 fn statusline_icon_colors(
     statusline: &str,
+    user_library: &dyn UserLibrary,
     acp_connected: bool,
     lsp_server_visible: bool,
     lsp_workspace_loaded: bool,
     connected_color: Color,
 ) -> Vec<(&'static str, Color)> {
     let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
-    let error_icon = user::statusline::LSP_ERROR_ICON;
-    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
+    let error_icon = user_library.statusline_lsp_error_icon();
+    let warning_icon = user_library.statusline_lsp_warning_icon();
     let mut icon_colors = Vec::new();
     if acp_connected && statusline.contains(acp_icon) {
         icon_colors.push((acp_icon, connected_color));
@@ -23853,6 +23879,7 @@ fn render_buffer(
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     recording_macro: Option<char>,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -23914,30 +23941,29 @@ fn render_buffer(
     );
     let git_fringe_added = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_ADDED,
+        user_library.gitfringe_token_added(),
         git_added_fallback,
     );
     let git_fringe_modified = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_MODIFIED,
+        user_library.gitfringe_token_modified(),
         git_modified_fallback,
     );
     let git_fringe_removed = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_REMOVED,
+        user_library.gitfringe_token_removed(),
         git_removed_fallback,
     );
     let cell_width = cell_width.max(1);
-    let git_info = git_summary.and_then(|summary| {
-        summary
-            .branch
-            .as_deref()
-            .map(|branch| user::statusline::GitStatuslineInfo {
-                branch,
-                added: summary.added,
-                removed: summary.removed,
-            })
-    });
+    let (git_branch, git_added, git_removed) = git_summary
+        .map(|summary| {
+            (
+                summary.branch.as_deref(),
+                summary.added,
+                summary.removed,
+            )
+        })
+        .unwrap_or((None, 0, 0));
     let lsp_diagnostics = statusline_lsp_diagnostics(buffer.lsp_diagnostics());
     let terminal_cursor = buffer
         .terminal_render()
@@ -23948,21 +23974,24 @@ fn render_buffer(
     let statusline_column = terminal_cursor
         .map(|cursor| cursor.col() as usize + 1)
         .unwrap_or(buffer.cursor_col() + 1);
+    let statusline_context = HostStatuslineContext {
+        vim_mode: input_mode.label(),
+        recording_macro,
+        workspace_name,
+        buffer_name: buffer.display_name(),
+        buffer_modified: buffer.is_dirty(),
+        language_id: buffer.language_id(),
+        line: statusline_line,
+        column: statusline_column,
+        lsp_server,
+        lsp_diagnostics,
+        acp_connected,
+        git_branch,
+        git_added,
+        git_removed,
+    };
     let statusline = truncate_text_to_width(
-        &user::statusline::compose(&user::statusline::StatuslineContext {
-            vim_mode: input_mode.label(),
-            recording_macro,
-            workspace_name,
-            buffer_name: buffer.display_name(),
-            buffer_modified: buffer.is_dirty(),
-            language_id: buffer.language_id(),
-            line: statusline_line,
-            column: statusline_column,
-            lsp_server,
-            lsp_diagnostics,
-            acp_connected,
-            git: git_info,
-        }),
+        &user_library.statusline_render(&statusline_context),
         rect.width().saturating_sub(24),
         cell_width,
     );
@@ -24141,19 +24170,25 @@ fn render_buffer(
                     }
                 }
                 if segment_index == 0 {
-                    let diagnostic_severity = user::lsp::SHOW_BUFFER_DIAGNOSTICS
+                    let diagnostic_severity = user_library.lsp_show_buffer_diagnostics()
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
                     if let Some(severity) = diagnostic_severity {
                         let color = diagnostic_color(severity);
-                        draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
+                        draw_text(
+                            target,
+                            fringe_x,
+                            y,
+                            user_library.lsp_diagnostic_icon(),
+                            color,
+                        )?;
                     } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
                         let color = match kind {
                             GitFringeKind::Added => git_fringe_added,
                             GitFringeKind::Modified => git_fringe_modified,
                             GitFringeKind::Removed => git_fringe_removed,
                         };
-                        draw_text(target, fringe_x, y, user::gitfringe::SYMBOL, color)?;
+                        draw_text(target, fringe_x, y, user_library.gitfringe_symbol(), color)?;
                     }
                     let line_number = if relative_line_numbers {
                         if line_index == cursor_row {
@@ -24195,7 +24230,7 @@ fn render_buffer(
                             .then_some(base_background),
                     ),
                 )?;
-                if user::lsp::SHOW_BUFFER_DIAGNOSTICS && buffer.lsp_enabled() {
+                if user_library.lsp_show_buffer_diagnostics() && buffer.lsp_enabled() {
                     draw_diagnostic_underlines_for_segment(
                         target,
                         buffer.lsp_diagnostic_line_spans(line_index),
@@ -24343,6 +24378,7 @@ fn render_buffer(
     let statusline_x = rect.x() + 12;
     let statusline_icon_colors = statusline_icon_colors(
         &statusline,
+        user_library,
         acp_connected,
         lsp_server.is_some(),
         lsp_workspace_loaded,

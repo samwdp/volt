@@ -43,10 +43,25 @@ pub trait UserLibrary: Send + Sync {
     /// Returns the ordered list of autocomplete providers.
     fn autocomplete_providers(&self) -> Vec<AutocompleteProvider>;
 
+    /// Returns the maximum number of autocomplete results to display.
+    fn autocomplete_result_limit(&self) -> usize;
+
+    /// Returns the icon used for autocomplete provider labels.
+    fn autocomplete_token_icon(&self) -> &'static str;
+
     // ── Hover ─────────────────────────────────────────────────────────────
 
     /// Returns the ordered list of hover providers.
     fn hover_providers(&self) -> Vec<HoverProvider>;
+
+    /// Returns the maximum number of hover lines to display.
+    fn hover_line_limit(&self) -> usize;
+
+    /// Returns the icon used for hover tokens.
+    fn hover_token_icon(&self) -> &'static str;
+
+    /// Returns the icon used for hover signature blocks.
+    fn hover_signature_icon(&self) -> &'static str;
 
     // ── ACP ───────────────────────────────────────────────────────────────
 
@@ -122,6 +137,12 @@ pub trait UserLibrary: Send + Sync {
     /// Returns the input hint text for the browser URL bar.
     fn browser_input_hint(&self, url: Option<&str>) -> String;
 
+    /// Returns the prompt label shown in the browser URL input.
+    fn browser_url_prompt(&self) -> String;
+
+    /// Returns the placeholder shown in the browser URL input.
+    fn browser_url_placeholder(&self) -> String;
+
     // ── Statusline ────────────────────────────────────────────────────────
 
     /// Renders the complete statusline string from a context snapshot.
@@ -144,6 +165,21 @@ pub trait UserLibrary: Send + Sync {
     /// Returns the maximum number of diagnostic lines shown in hover popups.
     fn lsp_diagnostic_line_limit(&self) -> usize;
 
+    /// Returns whether inline buffer diagnostic markers should render.
+    fn lsp_show_buffer_diagnostics(&self) -> bool;
+
+    /// Returns the theme token used for git fringe added lines.
+    fn gitfringe_token_added(&self) -> &'static str;
+
+    /// Returns the theme token used for git fringe modified lines.
+    fn gitfringe_token_modified(&self) -> &'static str;
+
+    /// Returns the theme token used for git fringe removed lines.
+    fn gitfringe_token_removed(&self) -> &'static str;
+
+    /// Returns the glyph used for git fringe markers.
+    fn gitfringe_symbol(&self) -> &'static str;
+
     // ── Icons ─────────────────────────────────────────────────────────────
 
     /// Returns the full icon font symbol table.
@@ -152,9 +188,9 @@ pub trait UserLibrary: Send + Sync {
 
 // ─── NullUserLibrary ─────────────────────────────────────────────────────────
 
-/// A no-op [`UserLibrary`] implementation that returns empty collections and
-/// safe constant defaults.  Used as a fall-back when no user library has been
-/// registered (e.g. in tests or minimal shell invocations).
+/// A fallback [`UserLibrary`] implementation that returns safe defaults and
+/// minimal built-in providers.  Used when no user library has been registered
+/// (e.g. in tests or minimal shell invocations).
 pub struct NullUserLibrary;
 
 impl UserLibrary for NullUserLibrary {
@@ -174,10 +210,65 @@ impl UserLibrary for NullUserLibrary {
         Vec::new()
     }
     fn autocomplete_providers(&self) -> Vec<AutocompleteProvider> {
-        Vec::new()
+        vec![
+            AutocompleteProvider {
+                id: "lsp".to_owned(),
+                label: "LSP".to_owned(),
+                icon: editor_icons::symbols::md::MD_COMMENT_TEXT_OUTLINE.to_owned(),
+                item_icon: editor_icons::symbols::cod::COD_SYMBOL_MISC.to_owned(),
+                or_group: Some("source".to_owned()),
+            },
+            AutocompleteProvider {
+                id: "buffer".to_owned(),
+                label: "Buffer".to_owned(),
+                icon: editor_icons::symbols::cod::COD_TEXT_SIZE.to_owned(),
+                item_icon: editor_icons::symbols::cod::COD_TEXT_SIZE.to_owned(),
+                or_group: Some("source".to_owned()),
+            },
+        ]
+    }
+    fn autocomplete_result_limit(&self) -> usize {
+        8
+    }
+    fn autocomplete_token_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_FORM_TEXTBOX
     }
     fn hover_providers(&self) -> Vec<HoverProvider> {
-        Vec::new()
+        vec![
+            HoverProvider {
+                id: "lsp".to_owned(),
+                label: "LSP".to_owned(),
+                icon: editor_icons::symbols::md::MD_COMMENT_TEXT_OUTLINE.to_owned(),
+                line_limit: 10,
+            },
+            HoverProvider {
+                id: "signature-help".to_owned(),
+                label: "Signature".to_owned(),
+                icon: editor_icons::symbols::md::MD_SIGNATURE.to_owned(),
+                line_limit: 10,
+            },
+            HoverProvider {
+                id: "diagnostics".to_owned(),
+                label: "Diagnostics".to_owned(),
+                icon: editor_icons::symbols::md::MD_ALERT_CIRCLE_OUTLINE.to_owned(),
+                line_limit: 10,
+            },
+            HoverProvider {
+                id: "test-hover".to_owned(),
+                label: "Token".to_owned(),
+                icon: editor_icons::symbols::cod::COD_INFO.to_owned(),
+                line_limit: 10,
+            },
+        ]
+    }
+    fn hover_line_limit(&self) -> usize {
+        10
+    }
+    fn hover_token_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE
+    }
+    fn hover_signature_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_SIGNATURE
     }
     fn acp_clients(&self) -> Vec<AcpClient> {
         Vec::new()
@@ -248,7 +339,7 @@ impl UserLibrary for NullUserLibrary {
         SectionTree::default()
     }
     fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
-        label
+        strip_icon_prefix(label, editor_icons::all_symbols())
     }
     fn git_status_sections(&self, _snapshot: &editor_git::GitStatusSnapshot) -> SectionTree {
         SectionTree::default()
@@ -272,17 +363,23 @@ impl UserLibrary for NullUserLibrary {
     fn browser_input_hint(&self, _url: Option<&str>) -> String {
         String::new()
     }
+    fn browser_url_prompt(&self) -> String {
+        "URL > ".to_owned()
+    }
+    fn browser_url_placeholder(&self) -> String {
+        "https://example.com".to_owned()
+    }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
         format!(" {} | {}:{} ", context.buffer_name, context.line, context.column)
     }
     fn statusline_lsp_connected_icon(&self) -> &'static str {
-        ""
+        editor_icons::symbols::md::MD_LAN_CONNECT
     }
     fn statusline_lsp_error_icon(&self) -> &'static str {
-        "E"
+        editor_icons::symbols::cod::COD_ERROR
     }
     fn statusline_lsp_warning_icon(&self) -> &'static str {
-        "W"
+        editor_icons::symbols::cod::COD_WARNING
     }
     fn lsp_diagnostic_icon(&self) -> &'static str {
         "●"
@@ -290,8 +387,38 @@ impl UserLibrary for NullUserLibrary {
     fn lsp_diagnostic_line_limit(&self) -> usize {
         8
     }
+    fn lsp_show_buffer_diagnostics(&self) -> bool {
+        true
+    }
+    fn gitfringe_token_added(&self) -> &'static str {
+        "git.fringe.added"
+    }
+    fn gitfringe_token_modified(&self) -> &'static str {
+        "git.fringe.modified"
+    }
+    fn gitfringe_token_removed(&self) -> &'static str {
+        "git.fringe.removed"
+    }
+    fn gitfringe_symbol(&self) -> &'static str {
+        "⏽"
+    }
     fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
         editor_icons::all_symbols()
+    }
+}
+
+fn strip_icon_prefix<'a>(
+    label: &'a str,
+    symbols: &[editor_icons::IconFontSymbol],
+) -> &'a str {
+    let trimmed = label.trim_start();
+    let Some((maybe_icon, rest)) = trimmed.split_once(' ') else {
+        return trimmed;
+    };
+    if symbols.iter().any(|symbol| symbol.glyph == maybe_icon) {
+        rest.trim_start()
+    } else {
+        trimmed
     }
 }
 

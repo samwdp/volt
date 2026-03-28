@@ -175,6 +175,14 @@ impl UserLibrary for UserLibraryImpl {
             .collect()
     }
 
+    fn autocomplete_result_limit(&self) -> usize {
+        autocomplete::RESULT_LIMIT
+    }
+
+    fn autocomplete_token_icon(&self) -> &'static str {
+        autocomplete::TOKEN_ICON
+    }
+
     fn hover_providers(&self) -> Vec<HoverProvider> {
         hover::providers()
             .into_iter()
@@ -185,6 +193,18 @@ impl UserLibrary for UserLibraryImpl {
                 line_limit: hover::LINE_LIMIT,
             })
             .collect()
+    }
+
+    fn hover_line_limit(&self) -> usize {
+        hover::LINE_LIMIT
+    }
+
+    fn hover_token_icon(&self) -> &'static str {
+        hover::TOKEN_ICON
+    }
+
+    fn hover_signature_icon(&self) -> &'static str {
+        hover::SIGNATURE_ICON
     }
 
     fn acp_clients(&self) -> Vec<AcpClient> {
@@ -356,6 +376,14 @@ impl UserLibrary for UserLibraryImpl {
         browser::input_hint(url)
     }
 
+    fn browser_url_prompt(&self) -> String {
+        browser::URL_PROMPT.to_owned()
+    }
+
+    fn browser_url_placeholder(&self) -> String {
+        browser::URL_PLACEHOLDER.to_owned()
+    }
+
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
         statusline::compose(&statusline::StatuslineContext {
             vim_mode: context.vim_mode,
@@ -398,6 +426,26 @@ impl UserLibrary for UserLibraryImpl {
 
     fn lsp_diagnostic_line_limit(&self) -> usize {
         lsp::DIAGNOSTIC_LINE_LIMIT
+    }
+
+    fn lsp_show_buffer_diagnostics(&self) -> bool {
+        lsp::SHOW_BUFFER_DIAGNOSTICS
+    }
+
+    fn gitfringe_token_added(&self) -> &'static str {
+        gitfringe::TOKEN_ADDED
+    }
+
+    fn gitfringe_token_modified(&self) -> &'static str {
+        gitfringe::TOKEN_MODIFIED
+    }
+
+    fn gitfringe_token_removed(&self) -> &'static str {
+        gitfringe::TOKEN_REMOVED
+    }
+
+    fn gitfringe_symbol(&self) -> &'static str {
+        gitfringe::SYMBOL
     }
 
     fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {

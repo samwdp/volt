@@ -26,6 +26,7 @@ use agent_client_protocol::{
     WriteTextFileResponse,
 };
 use async_trait::async_trait;
+use editor_plugin_api::AcpClient as AcpClientConfig;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::Command,
@@ -123,7 +124,7 @@ pub(super) fn close_acp_workspace_buffers(
         .filter(|buffer| {
             matches!(
                 buffer.kind(),
-                BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+                BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
             )
         })
         .map(|buffer| buffer.id())
@@ -143,14 +144,15 @@ fn open_acp_client_buffer(
     reuse_existing: bool,
     load_session_id: Option<agent_client_protocol::SessionId>,
 ) -> Result<BufferId, String> {
-    let client = user::acp::client_by_id(client_id)
+    let client = shell_user_library(runtime)
+        .acp_client_by_id(client_id)
         .ok_or_else(|| format!("unknown ACP client `{client_id}`"))?;
     open_acp_client_with_config(runtime, client, reuse_existing, load_session_id)
 }
 
 fn open_acp_client_with_config(
     runtime: &mut EditorRuntime,
-    client: user::acp::AcpClientConfig,
+    client: AcpClientConfig,
     reuse_existing: bool,
     load_session_id: Option<agent_client_protocol::SessionId>,
 ) -> Result<BufferId, String> {
@@ -206,7 +208,7 @@ fn open_acp_client_with_config(
 
 fn create_acp_buffer(
     runtime: &mut EditorRuntime,
-    client: &user::acp::AcpClientConfig,
+    client: &AcpClientConfig,
 ) -> Result<(BufferId, WorkspaceId, String), String> {
     let workspace_id = runtime
         .model()
@@ -224,7 +226,7 @@ fn create_acp_buffer(
         .create_buffer(
             workspace_id,
             buffer_name.as_str(),
-            BufferKind::Plugin(user::acp::ACP_BUFFER_KIND.to_owned()),
+            BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
             None,
         )
         .map_err(|error| error.to_string())?;
@@ -260,7 +262,7 @@ fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<
     Ok(())
 }
 
-fn active_acp_client(runtime: &EditorRuntime) -> Result<user::acp::AcpClientConfig, String> {
+fn active_acp_client(runtime: &EditorRuntime) -> Result<AcpClientConfig, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let manager = runtime
         .services()
@@ -275,7 +277,9 @@ fn active_acp_client(runtime: &EditorRuntime) -> Result<user::acp::AcpClientConf
             .client_id_for_buffer(buffer_id)
             .ok_or_else(|| "acp.new-session requires an active ACP buffer".to_owned())?
     };
-    user::acp::client_by_id(&client_id).ok_or_else(|| format!("unknown ACP client `{client_id}`"))
+    shell_user_library(runtime)
+        .acp_client_by_id(&client_id)
+        .ok_or_else(|| format!("unknown ACP client `{client_id}`"))
 }
 
 pub(super) fn submit_acp_prompt(
@@ -319,7 +323,7 @@ pub(super) fn acp_complete_slash(runtime: &mut EditorRuntime) -> Result<(), Stri
     let buffer = shell_buffer(runtime, buffer_id)?;
     if !matches!(
         &buffer.kind,
-        BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+        BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
     ) {
         return Ok(());
     }
@@ -342,7 +346,7 @@ pub(super) fn maybe_open_slash_completion(
     let buffer = shell_buffer(runtime, buffer_id)?;
     if !matches!(
         &buffer.kind,
-        BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+        BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
     ) {
         return Ok(());
     }
@@ -486,7 +490,7 @@ pub(super) fn refresh_acp_input_hint(
         let buffer = shell_buffer(runtime, buffer_id)?;
         matches!(
             &buffer.kind,
-            BufferKind::Plugin(plugin_kind) if plugin_kind == user::acp::ACP_BUFFER_KIND
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
         )
     };
     if !is_acp {
@@ -1322,7 +1326,7 @@ impl AcpManager {
 
     fn connect(
         &mut self,
-        client: user::acp::AcpClientConfig,
+        client: AcpClientConfig,
         workspace_root: PathBuf,
         workspace_id: WorkspaceId,
         buffer_id: BufferId,
@@ -2010,12 +2014,11 @@ impl AcpManager {
                         },
                     );
                     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.init_acp_view(
-                            user::acp::client_by_id(&client_id)
-                                .map(|client| client.label)
-                                .unwrap_or_else(|| "ACP".to_owned())
-                                .as_str(),
-                        );
+                        let label = shell_user_library(runtime)
+                            .acp_client_by_id(&client_id)
+                            .map(|client| client.label)
+                            .unwrap_or_else(|| "ACP".to_owned());
+                        buffer.init_acp_view(label.as_str());
                         buffer.clear_input();
                     }
                     if let Some(session) = self.sessions.get(&new_session_id) {
@@ -2331,7 +2334,7 @@ enum AcpEvent {
 
 enum AcpCommand {
     Connect {
-        config: user::acp::AcpClientConfig,
+        config: AcpClientConfig,
         workspace_root: PathBuf,
         buffer_id: BufferId,
     },
@@ -2560,7 +2563,7 @@ async fn acp_runtime_loop(
 
 async fn connect_acp_client(
     state: Rc<RefCell<AcpRuntimeState>>,
-    config: user::acp::AcpClientConfig,
+    config: AcpClientConfig,
     workspace_root: PathBuf,
     buffer_id: BufferId,
 ) -> Result<(), String> {
@@ -3344,7 +3347,7 @@ fn handle_session_update(
 fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     let mut lines = vec![format!(
         "{} Permission requested by agent.",
-        user::icon_font::symbols::cod::COD_WARNING
+        editor_icons::symbols::cod::COD_WARNING
     )];
     if let Some(status) = request.tool_call.fields.status {
         lines.push(format!("  {}", format_acp_status_badge(&status)));
@@ -3352,7 +3355,7 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     if let Some(title) = request.tool_call.fields.title.clone() {
         lines.push(format!(
             "{} **{}**",
-            user::icon_font::symbols::cod::COD_TOOLS,
+            editor_icons::symbols::cod::COD_TOOLS,
             title
         ));
     }
@@ -3364,7 +3367,7 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
                 .unwrap_or_default();
             lines.push(format!(
                 "  {} `{}`{suffix}",
-                user::icon_font::symbols::cod::COD_FILE,
+                editor_icons::symbols::cod::COD_FILE,
                 location.path.display()
             ));
         }
@@ -3384,7 +3387,7 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
     }
     lines.push(format!(
         "{} Use `acp.permission-approve` or `acp.permission-deny`.",
-        user::icon_font::symbols::cod::COD_CHECKLIST
+        editor_icons::symbols::cod::COD_CHECKLIST
     ));
     lines
 }
@@ -3393,11 +3396,11 @@ fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec<String> {
 fn format_acp_status_badge(status: &impl std::fmt::Debug) -> String {
     let raw = format!("{status:?}");
     let icon = match raw.as_str() {
-        "Pending" | "Running" | "InProgress" => user::icon_font::symbols::cod::COD_LOADING,
-        "Completed" | "Success" | "Succeeded" => user::icon_font::symbols::cod::COD_CHECK,
-        "Failed" | "Error" => user::icon_font::symbols::cod::COD_ERROR,
-        "Cancelled" | "Canceled" | "Denied" => user::icon_font::symbols::cod::COD_CIRCLE_SLASH,
-        _ => user::icon_font::symbols::cod::COD_CIRCLE_SMALL_FILLED,
+        "Pending" | "Running" | "InProgress" => editor_icons::symbols::cod::COD_LOADING,
+        "Completed" | "Success" | "Succeeded" => editor_icons::symbols::cod::COD_CHECK,
+        "Failed" | "Error" => editor_icons::symbols::cod::COD_ERROR,
+        "Cancelled" | "Canceled" | "Denied" => editor_icons::symbols::cod::COD_CIRCLE_SLASH,
+        _ => editor_icons::symbols::cod::COD_CIRCLE_SMALL_FILLED,
     };
     format!("{icon} {}", humanize_debug_label(&raw))
 }

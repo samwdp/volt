@@ -77,7 +77,7 @@ fn terminal_buffers_are_read_only_without_prompt_input() {
 #[test]
 fn directory_view_state_uses_user_oil_defaults() {
     let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new());
-    let defaults = user::oil::defaults();
+    let defaults = editor_plugin_host::NullUserLibrary.oil_defaults();
 
     assert_eq!(state.show_hidden, defaults.show_hidden);
     assert_eq!(state.sort_mode, defaults.sort_mode);
@@ -324,7 +324,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
     let line = SectionRenderLine {
         text: format!(
             "{} Head: master f9d8c15 Added some more keybinds",
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+            editor_icons::symbols::dev::DEV_GIT_BRANCH
         ),
         depth: 1,
         section_id: GIT_SECTION_HEADERS.to_owned(),
@@ -366,7 +366,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
         text_segments,
         vec![
             "  ".to_owned(),
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+            editor_icons::symbols::dev::DEV_GIT_BRANCH.to_owned(),
             " ".to_owned(),
             "Head:".to_owned(),
             " ".to_owned(),
@@ -384,7 +384,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
     let line = AcpRenderedTextLine {
         prefix: vec![
-            acp_icon_segment(user::icon_font::symbols::cod::COD_COMMENT, AcpColorRole::Accent),
+            acp_icon_segment(editor_icons::symbols::cod::COD_COMMENT, AcpColorRole::Accent),
             acp_text_segment(" ", AcpColorRole::Default),
         ],
         text: "Excellent! Now let me gather more context about the project to inform the documentation content:".to_owned(),
@@ -443,7 +443,7 @@ fn statusline_lsp_diagnostics_counts_errors_and_warnings() {
 
     assert_eq!(
         statusline_lsp_diagnostics(&diagnostics),
-        Some(user::statusline::LspDiagnosticsInfo {
+        Some(editor_plugin_api::LspDiagnosticsInfo {
             errors: 1,
             warnings: 1,
         })
@@ -698,7 +698,7 @@ fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, Strin
         .model_mut()
         .create_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )
@@ -710,7 +710,7 @@ fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, Strin
         .map_err(|error| error.to_string())?;
     shell_ui_mut(&mut state.runtime)?.ensure_buffer(
         buffer_id,
-        user::browser::BUFFER_NAME,
+        BROWSER_BUFFER_NAME,
         BufferKind::Plugin(BROWSER_KIND.to_owned()),
     );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
@@ -1229,7 +1229,7 @@ fn git_status_header_spans_skip_leading_icons() {
     let line = SectionRenderLine {
         text: format!(
             "{} Head: master f9d8c15 Added some more keybinds",
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+            editor_icons::symbols::dev::DEV_GIT_BRANCH
         ),
         depth: 1,
         section_id: GIT_SECTION_HEADERS.to_owned(),
@@ -1244,7 +1244,7 @@ fn git_status_header_spans_skip_leading_icons() {
         vec![
             (
                 TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
-                user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+                editor_icons::symbols::dev::DEV_GIT_BRANCH.to_owned(),
             ),
             (TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(), "Head:".to_owned()),
             (
@@ -1268,7 +1268,7 @@ fn git_status_entry_spans_skip_leading_icons() {
     let line = SectionRenderLine {
         text: format!(
             "{} crates/editor-sdl/src/shell.rs",
-            user::icon_font::symbols::cod::COD_DIFF_MODIFIED
+            editor_icons::symbols::cod::COD_DIFF_MODIFIED
         ),
         depth: 1,
         section_id: GIT_SECTION_UNSTAGED.to_owned(),
@@ -1283,7 +1283,7 @@ fn git_status_entry_spans_skip_leading_icons() {
         vec![
             (
                 TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
-                user::icon_font::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
+                editor_icons::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
             ),
             (
                 TOKEN_GIT_STATUS_ENTRY_PATH.to_owned(),
@@ -1298,7 +1298,7 @@ fn git_status_stash_spans_handle_compact_stash_names() {
     let line = SectionRenderLine {
         text: format!(
             "{} stash[0] WIP on master: overnight todo",
-            user::icon_font::symbols::cod::COD_HISTORY
+            editor_icons::symbols::cod::COD_HISTORY
         ),
         depth: 1,
         section_id: GIT_SECTION_STASHES.to_owned(),
@@ -1313,7 +1313,7 @@ fn git_status_stash_spans_handle_compact_stash_names() {
         vec![
             (
                 TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
-                user::icon_font::symbols::cod::COD_HISTORY.to_owned(),
+                editor_icons::symbols::cod::COD_HISTORY.to_owned(),
             ),
             (
                 TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
@@ -1701,7 +1701,7 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
     let line = SectionRenderLine {
         text: format!(
             "{} Press c to commit staged changes.",
-            user::icon_font::symbols::cod::COD_GIT_COMMIT
+            editor_icons::symbols::cod::COD_GIT_COMMIT
         ),
         depth: 1,
         section_id: GIT_SECTION_COMMIT.to_owned(),
@@ -1717,7 +1717,7 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
             TOKEN_GIT_STATUS_COMMAND.to_owned(),
             format!(
                 "{} Press c to commit staged changes.",
-                user::icon_font::symbols::cod::COD_GIT_COMMIT
+                editor_icons::symbols::cod::COD_GIT_COMMIT
             ),
         )]
     );
@@ -1725,14 +1725,15 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
 
 #[test]
 fn hover_registry_includes_signature_help_provider() {
-    let registry = HoverRegistry::from_user_config();
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let registry = HoverRegistry::from_user_config(&user_library);
     assert!(matches!(registry.providers[0].kind, HoverProviderKind::Lsp));
     assert!(matches!(
         registry.providers[1].kind,
         HoverProviderKind::SignatureHelp
     ));
     assert_eq!(registry.providers[1].label, "Signature");
-    assert_eq!(registry.providers[1].icon, user::hover::SIGNATURE_ICON);
+    assert_eq!(registry.providers[1].icon, user_library.hover_signature_icon());
     assert!(matches!(
         registry.providers[2].kind,
         HoverProviderKind::Diagnostics
@@ -1741,8 +1742,9 @@ fn hover_registry_includes_signature_help_provider() {
 
 #[test]
 fn statusline_icon_segments_split_acp_and_lsp_icons() {
-    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
     let statusline = format!("NORMAL | {acp_icon} | Ln 3, Col 9 | {lsp_icon} rust-analyzer");
     assert_eq!(
         statusline_icon_segments(&statusline, &[acp_icon, lsp_icon]),
@@ -1758,9 +1760,10 @@ fn statusline_icon_segments_split_acp_and_lsp_icons() {
 
 #[test]
 fn statusline_icon_segments_split_diagnostic_icons() {
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
-    let error_icon = user::statusline::LSP_ERROR_ICON;
-    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
+    let error_icon = user_library.statusline_lsp_error_icon();
+    let warning_icon = user_library.statusline_lsp_warning_icon();
     let prefix = format!("NORMAL | {lsp_icon} rust-analyzer ");
     let statusline = format!("NORMAL | {lsp_icon} rust-analyzer {error_icon} 2 {warning_icon} 4");
     assert_eq!(
@@ -2377,7 +2380,7 @@ fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
     let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
     let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
         .map_err(|error| error.to_string())?;
-    let material_icon = user::icon_font_symbols::md::MD_FORMAT_BOLD
+    let material_icon = editor_icons::symbols::md::MD_FORMAT_BOLD
         .chars()
         .next()
         .ok_or_else(|| "material icon glyph missing".to_owned())?;
@@ -2405,7 +2408,7 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
     let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
     let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
         .map_err(|error| error.to_string())?;
-    let codicon = user::icon_font_symbols::cod::COD_DIFF_ADDED
+    let codicon = editor_icons::symbols::cod::COD_DIFF_ADDED
         .chars()
         .next()
         .ok_or_else(|| "codicon glyph missing".to_owned())?;
@@ -2426,7 +2429,7 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
 
 #[test]
 fn font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint() -> Result<(), String> {
-    let branch = user::icon_font_symbols::ple::PL_BRANCH
+    let branch = editor_icons::symbols::ple::PL_BRANCH
         .chars()
         .next()
         .ok_or_else(|| "powerline branch glyph missing".to_owned())?;
@@ -3250,7 +3253,7 @@ fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
         .model_mut()
         .create_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )

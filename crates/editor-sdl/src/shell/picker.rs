@@ -1,5 +1,5 @@
 use super::*;
-use editor_fs::discover_projects;
+use editor_fs::{ProjectSearchRoot, discover_projects};
 
 pub(super) fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(), String> {
     let bindings = [
@@ -46,8 +46,8 @@ pub(super) fn picker_overlay(
         "workspace.search" => workspace_search_picker_overlay(runtime),
         "undo-tree" => undo_tree_picker_overlay(runtime),
         "themes" => theme_picker_overlay(runtime),
-        "icon-fonts" => Ok(icon_font_picker_overlay()),
-        "acp-clients" => Ok(acp_clients_picker_overlay()),
+        "icon-fonts" => Ok(icon_font_picker_overlay(runtime)),
+        "acp-clients" => Ok(acp_clients_picker_overlay(runtime)),
         other => Err(format!("unknown picker provider `{other}`")),
     }
 }
@@ -163,7 +163,12 @@ fn treesitter_install_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOv
 }
 
 fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let entries = discover_projects(&user::workspace::project_search_roots())
+    let roots = shell_user_library(runtime)
+        .workspace_roots()
+        .into_iter()
+        .map(|root| ProjectSearchRoot::new(root.path, root.max_depth))
+        .collect::<Vec<_>>();
+    let entries = discover_projects(&roots)
         .map_err(|error| error.to_string())?
         .into_iter()
         .map(|project| {
@@ -373,8 +378,9 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
     PickerOverlay::from_entries("Keybindings", entries)
 }
 
-fn icon_font_picker_overlay() -> PickerOverlay {
-    let entries = user::icon_font::symbols()
+fn icon_font_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
+    let entries = shell_user_library(runtime)
+        .icon_symbols()
         .iter()
         .map(|symbol| {
             let label = format!("{} {}", symbol.glyph, symbol.name);
@@ -388,8 +394,9 @@ fn icon_font_picker_overlay() -> PickerOverlay {
     PickerOverlay::from_entries("Bundled Icon Fonts", entries)
 }
 
-fn acp_clients_picker_overlay() -> PickerOverlay {
-    let entries = user::acp::clients()
+fn acp_clients_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
+    let entries = shell_user_library(runtime)
+        .acp_clients()
         .into_iter()
         .map(|client| {
             let detail = format!("{} {}", client.command, client.args.join(" "));

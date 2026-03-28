@@ -3,7 +3,10 @@
     windows_subsystem = "windows"
 )]
 
-use std::{error::Error, sync::Mutex};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use editor_buffer::TextBuffer;
 use editor_core::{BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, builtins};
@@ -72,10 +75,12 @@ struct LaunchOptions {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_launch_options(std::env::args().skip(1))?;
+    let user_library = user::UserLibraryImpl;
     match options.mode {
         LaunchMode::ShellDemo => {
             let summary = run_demo_shell(ShellConfig {
                 profile_input_latency: options.profile_input_latency,
+                user_library: Some(Arc::new(user_library)),
                 ..ShellConfig::default()
             })?;
             print_shell_summary("Volt", &summary);
@@ -86,6 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 hidden: true,
                 frame_limit: Some(1),
                 profile_input_latency: options.profile_input_latency,
+                user_library: Some(Arc::new(user_library)),
                 ..ShellConfig::default()
             })?;
             print_shell_summary("volt hidden shell smoke test", &summary);
@@ -371,23 +377,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         CommandSource::Core,
     )?;
 
-    let loaded_packages = load_auto_loaded_packages(&mut runtime, &user::packages())?;
+    let loaded_packages = load_auto_loaded_packages(&mut runtime, &user_library.packages())?;
     let mut command_palette_preview =
         PickerSession::new("Command Palette", command_palette_items(&runtime))
             .with_result_limit(16);
     command_palette_preview.set_query("term");
     let mut lsp_registry = LanguageServerRegistry::new();
-    lsp_registry.register_all(user::language_servers())?;
+    lsp_registry.register_all(user_library.language_servers())?;
     runtime.services_mut().insert(lsp_registry);
     runtime.services_mut().insert(LspState::default());
     let mut dap_registry = DebugAdapterRegistry::new();
-    dap_registry.register_all(user::debug_adapters())?;
+    dap_registry.register_all(user_library.debug_adapters())?;
     runtime.services_mut().insert(dap_registry);
     runtime.services_mut().insert(DapState::default());
     let mut syntax_registry = SyntaxRegistry::new();
-    syntax_registry.register_all(user::syntax_languages())?;
+    syntax_registry.register_all(user_library.syntax_languages())?;
     let mut theme_registry = ThemeRegistry::new();
-    theme_registry.register_all(user::themes())?;
+    theme_registry.register_all(user_library.themes())?;
     let rust_syntax = syntax_registry.highlight_buffer_for_extension(
         "rs",
         &TextBuffer::from_text(
