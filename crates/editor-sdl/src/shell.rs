@@ -6000,14 +6000,6 @@ impl ShellState {
         Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
-    pub(crate) fn new_with_log(
-        log_file_path: PathBuf,
-        profile_input_latency: bool,
-    ) -> Result<Self, ShellError> {
-        let user_library: Arc<dyn UserLibrary> = Arc::new(NullUserLibrary);
-        Self::new_with_user_library(log_file_path, profile_input_latency, user_library)
-    }
-
     pub(crate) fn new_with_user_library(
         log_file_path: PathBuf,
         profile_input_latency: bool,
@@ -11325,8 +11317,9 @@ fn ensure_lsp_log_buffer(
         .create_popup_buffer(workspace_id, &buffer_name, BufferKind::Diagnostics, None)
         .map_err(|error| error.to_string())?;
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics, &*shell_user_library(runtime))
+        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics, &*user_library)
             .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
     }
     runtime
@@ -14390,12 +14383,15 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .model_mut()
         .open_popup_buffer(workspace_id, "Browser", buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(
-        buffer_id,
-        BROWSER_BUFFER_NAME,
-        BufferKind::Plugin(BROWSER_KIND.to_owned()),
-        &*shell_user_library(runtime),
-    );
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(
+            buffer_id,
+            BROWSER_BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            &*user_library,
+        );
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
     navigate_browser_buffer(runtime, buffer_id, raw_url)
@@ -14435,10 +14431,11 @@ fn apply_browser_location_updates(
     runtime: &mut EditorRuntime,
     updates: &[BrowserLocationUpdate],
 ) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
     let ui = shell_ui_mut(runtime)?;
     for update in updates {
         if let Some(buffer) = ui.buffer_mut(update.buffer_id) {
-            set_browser_buffer_location(buffer, &update.current_url, false);
+            set_browser_buffer_location(buffer, &update.current_url, false, &*user_library);
         }
     }
     Ok(())
@@ -16112,6 +16109,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         (ui.active_pane_id(), ui.active_buffer_id())
     };
     let should_enter_insert = {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
         if previous_pane != Some(pane_id) {
             ui.focus_pane(pane_id);
@@ -16120,7 +16118,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             ui.close_hover();
         }
         let has_input = ui
-            .ensure_buffer(buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime))
+            .ensure_buffer(buffer_id, &buffer_name, buffer_kind, &*user_library)
             .has_input_field();
         ui.focus_buffer_in_active_pane(buffer_id);
         if !is_git_commit {
@@ -16181,7 +16179,8 @@ fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resu
             .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
         (buffer.name().to_owned(), buffer.kind().clone())
     };
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime));
+    let user_library = shell_user_library(runtime);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind, &*user_library);
     Ok(())
 }
 
@@ -16283,12 +16282,15 @@ fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup(workspace_id, "Git Status", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(
-        buffer_id,
-        "*git-status*",
-        BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
-        &*shell_user_library(runtime),
-    );
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(
+            buffer_id,
+            "*git-status*",
+            BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+            &*user_library,
+        );
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     refresh_git_status_buffer(runtime, buffer_id)
 }
@@ -16373,8 +16375,9 @@ fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), 
             .map_err(|error| error.to_string())?
     };
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory, &*shell_user_library(runtime));
+        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory, &*user_library);
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
     }
@@ -20649,7 +20652,10 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics, &*shell_user_library(runtime));
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics, &*user_library);
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
 }
@@ -20701,8 +20707,9 @@ fn split_runtime_pane(
         (buffer.name().to_owned(), buffer.kind().clone())
     };
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind, &*shell_user_library(runtime));
+        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind, &*user_library);
         ui.split_pane(pane_id, split_buffer_id, direction);
     }
     let window_id = active_window_id(runtime)?;
@@ -22122,8 +22129,9 @@ fn update_error_buffer(
     buffer_id: BufferId,
     lines: Vec<String>,
 ) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
     let ui = shell_ui_mut(runtime)?;
-    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics, &*shell_user_library(runtime));
+    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics, &*user_library);
     buffer.replace_with_lines(lines);
     Ok(())
 }
@@ -22814,6 +22822,7 @@ fn rects_intersect(left: Rect, right: Rect) -> bool {
         && left_bottom > right.y()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_autocomplete_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
@@ -22968,6 +22977,7 @@ fn render_autocomplete_overlay(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_hover_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,

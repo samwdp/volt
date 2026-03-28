@@ -69,7 +69,7 @@ fn terminal_key_for_event_maps_special_keys() {
 
 #[test]
 fn terminal_buffers_are_read_only_without_prompt_input() {
-    let (read_only, input) = buffer_interaction(&BufferKind::Terminal);
+    let (read_only, input) = buffer_interaction(&BufferKind::Terminal, &NullUserLibrary);
     assert!(read_only);
     assert!(input.is_none());
 }
@@ -111,7 +111,7 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
 
 #[test]
 fn terminal_placeholder_lines_describe_shell_launch_not_vertical_slice() {
-    let lines = placeholder_lines("*terminal*", &BufferKind::Terminal);
+    let lines = placeholder_lines("*terminal*", &BufferKind::Terminal, &NullUserLibrary);
     let body = lines.join("\n");
 
     assert!(body.contains("*terminal* is launching the configured shell."));
@@ -640,6 +640,7 @@ fn install_acp_test_buffer(
         (1..=output_lines)
             .map(|index| format!("line {index}"))
             .collect(),
+        &NullUserLibrary,
     );
     if let Some(input) = shell_buffer.input_field_mut() {
         input.set_text(input_text);
@@ -666,7 +667,7 @@ fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<Buf
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     sync_active_buffer(&mut state.runtime)?;
     Ok(buffer_id)
@@ -712,6 +713,7 @@ fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, Strin
         buffer_id,
         BROWSER_BUFFER_NAME,
         BufferKind::Plugin(BROWSER_KIND.to_owned()),
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -733,7 +735,7 @@ fn install_terminal_test_buffer(state: &mut ShellState) -> Result<BufferId, Stri
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
 }
@@ -758,6 +760,7 @@ fn install_terminal_popup_test_buffer(state: &mut ShellState) -> Result<BufferId
         buffer_id,
         "*terminal-popup*",
         BufferKind::Terminal,
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.set_popup_focus(true);
     Ok(buffer_id)
@@ -788,6 +791,7 @@ fn install_git_status_test_buffer(state: &mut ShellState) -> Result<BufferId, St
         buffer_id,
         "*git-status*",
         BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -869,7 +873,7 @@ fn install_text_test_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| "text test buffer is missing".to_owned())?;
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -1360,35 +1364,35 @@ fn git_status_sequence_commands_are_registered() -> Result<(), String> {
 #[test]
 fn git_status_command_name_maps_sequences_to_picker_commands() {
     assert_eq!(
-        git_status_command_name(None, "S"),
+        git_status_command_name(&NullUserLibrary, None, "S"),
         Some("git.status.stage-all")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Pull), "u"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Pull), "u"),
         Some("git.status.pull-upstream")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Branch), "b"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Branch), "b"),
         Some("git.status.branches")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Diff), "w"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Diff), "w"),
         Some("git.diff")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Log), "l"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Log), "l"),
         Some("git.log")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Stash), "l"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Stash), "l"),
         Some("git.stash-list")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Rebase), "f"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Rebase), "f"),
         Some("git.status.rebase-autosquash")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Reset), "f"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Reset), "f"),
         Some("git.status.checkout-file")
     );
 }

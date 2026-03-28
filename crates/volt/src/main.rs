@@ -16,7 +16,7 @@ use editor_git::parse_status;
 use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_host::{bootstrap, load_auto_loaded_packages};
+use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
 use editor_terminal::TerminalSession;

@@ -240,7 +240,8 @@ fn create_acp_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new());
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &*user_library);
     shell_buffer.init_acp_view(&client.label);
     shell_buffer.clear_input();
     shell_buffer.set_language_id(Some("markdown".to_owned()));
@@ -2013,13 +2014,15 @@ impl AcpManager {
                             model_config_id: None,
                         },
                     );
-                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                    {
                         let label = shell_user_library(runtime)
                             .acp_client_by_id(&client_id)
                             .map(|client| client.label)
                             .unwrap_or_else(|| "ACP".to_owned());
-                        buffer.init_acp_view(label.as_str());
-                        buffer.clear_input();
+                        if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                            buffer.init_acp_view(label.as_str());
+                            buffer.clear_input();
+                        }
                     }
                     if let Some(session) = self.sessions.get(&new_session_id) {
                         let mode_id = session
