@@ -4,11 +4,11 @@ use editor_core::{
     BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode, ModelError,
     SectionTree,
 };
+pub use editor_plugin_api::{StatuslineContext, UserLibrary};
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, DebugAdapterSpec, GitStatusPrefix, HoverProvider,
-    IconFontSymbol, LanguageConfiguration, LanguageServerSpec, OilDefaults, OilKeyAction,
-    OilKeybindings, PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage,
-    PluginVimMode, StatuslineContext, TerminalConfig, Theme, UserLibrary, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilKeyAction, PluginAction,
+    PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode, TerminalConfig,
+    WorkspaceRoot,
 };
 
 // ─── NullUserLibrary ─────────────────────────────────────────────────────────

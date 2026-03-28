@@ -38,8 +38,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build volt (release)
-        run: cargo build -p volt --release --locked
+      - name: Build volt release artifacts
+        run: cargo build -p volt -p volt-user --release --locked
 
       - name: Stage release artifact
         shell: pwsh
@@ -51,6 +51,13 @@ jobs:
           $bundleRoot = Join-Path $releaseAssets "bundle-root"
           $sourceRoot = Join-Path $PWD "target/release"
           $sourceBinary = Join-Path $sourceRoot "volt$ext"
+          $userLib = if ($env:RUNNER_OS -eq 'Windows') {
+            Join-Path $sourceRoot "user.dll"
+          } elseif ($env:RUNNER_OS -eq 'macOS') {
+            Join-Path $sourceRoot "libuser.dylib"
+          } else {
+            Join-Path $sourceRoot "libuser.so"
+          }
           $sourceAssets = Join-Path $sourceRoot "assets"
           $sourceUser = Join-Path $sourceRoot "user"
           $bundlePath = Join-Path $releaseAssets $bundleName
@@ -59,6 +66,7 @@ jobs:
           Copy-Item -Path $sourceAssets -Destination (Join-Path $bundleRoot "assets") -Recurse
           Copy-Item -Path $sourceUser -Destination (Join-Path $bundleRoot "user") -Recurse
           Copy-Item -Path $sourceBinary -Destination (Join-Path $bundleRoot "volt$ext")
+          Copy-Item -Path $userLib -Destination (Join-Path $bundleRoot (Split-Path $userLib -Leaf))
 
           if (Test-Path $bundlePath) {
             Remove-Item -Path $bundlePath -Force

@@ -3272,8 +3272,13 @@ name = "volt-user"
 version = "0.1.0"
 dependencies = [
  "editor-buffer",
+ "editor-core",
+ "editor-fs",
+ "editor-git",
+ "editor-icons",
  "editor-plugin-api",
  "editor-syntax",
+ "editor-theme",
  "toml",
 ]
 

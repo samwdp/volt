@@ -7,10 +7,11 @@
 //! # Distribution model
 //!
 //! The user library is compiled as both a `cdylib` (for runtime loading by
-//! `volt.exe`) and an `rlib` (for linking during development).  The public
-//! [`UserLibraryImpl`] struct implements the [`editor_plugin_host::UserLibrary`]
-//! trait so the host can call into the user library without direct source-level
-//! coupling.
+//! `volt.exe`) and an `rlib` (for linking during development). `user/sdk`
+//! is the only stable ABI crate; this crate sits on top of that ABI surface
+//! and provides the compiled customization layer. The public [`UserLibraryImpl`]
+//! struct implements the [`editor_plugin_host::UserLibrary`] trait so the host
+//! can call into the user library without direct source-level coupling.
 
 /// Agent Client Protocol integrations.
 pub mod acp;

@@ -32,7 +32,7 @@
 - `crates/editor-git` - magit-style git workflows
 - `crates/editor-fs` - workspace file system services
 - `crates/editor-picker` - fuzzy picker and list UI abstractions
-- `crates/editor-plugin-api` - extension API shared with the user library
+- `user/sdk` - the only stable ABI crate shared between the host and the compiled user library
 - `crates/editor-plugin-host` - plugin hosting and loading services
 - `user` - compiled user extension library and packages
 - `xtask` - developer automation commands

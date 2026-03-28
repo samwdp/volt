@@ -14,6 +14,8 @@ pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompleti
 pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 pub use editor_theme::{Color, Theme, ThemeOption};
 
+pub use editor_icons::symbols;
+
 // ─── Protocol hook name constants ───────────────────────────────────────────
 //
 // These string identifiers form the stable "protocol" between the host editor

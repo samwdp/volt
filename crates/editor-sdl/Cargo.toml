@@ -21,7 +21,7 @@ editor-icons = { path = "../editor-icons" }
 editor-jobs = { path = "../editor-jobs" }
 editor-lsp = { path = "../editor-lsp" }
 editor-picker = { path = "../editor-picker" }
-editor-plugin-api = { path = "../editor-plugin-api" }
+editor-plugin-api = { path = "../../user/sdk" }
 editor-plugin-host = { path = "../editor-plugin-host" }
 editor-render = { path = "../editor-render" }
 editor-syntax = { path = "../editor-syntax" }
