@@ -22,6 +22,22 @@ pub mod yaml;
 
 mod web_queries;
 
+/// Returns plugin packages for all compiled-in languages.
+/// Adding a new language only requires creating `user/lang/newlang.rs` and
+/// adding `pub mod newlang;` + the two calls below — no changes to `user/lib.rs`.
+pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
+    vec![
+        csharp::package(),
+        javascript::package(),
+        json::package(),
+        markdown::package(),
+        rust::package(),
+        toml::package(),
+        typescript::package(),
+        yaml::package(),
+    ]
+}
+
 /// Returns syntax languages compiled into the user library.
 pub fn syntax_languages() -> Vec<LanguageConfiguration> {
     vec![

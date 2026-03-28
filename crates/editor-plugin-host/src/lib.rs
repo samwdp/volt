@@ -202,6 +202,13 @@ pub trait UserLibrary: Send + Sync {
     /// the given `kind`.  Called by the shell when creating a placeholder for a
     /// plugin buffer whose content has not yet been populated.
     fn plugin_buffer_initial_lines(&self, kind: &str) -> Vec<String>;
+
+    // ── Compile / build ───────────────────────────────────────────────────
+
+    /// Returns the default build command for the given language name.
+    /// The host pre-fills the compilation buffer input field with this value.
+    /// Returns `None` when no default is configured for that language.
+    fn default_build_command(&self, language: &str) -> Option<String>;
 }
 
 // ─── NullUserLibrary ─────────────────────────────────────────────────────────
@@ -431,6 +438,9 @@ impl UserLibrary for NullUserLibrary {
     }
     fn plugin_buffer_initial_lines(&self, _kind: &str) -> Vec<String> {
         Vec::new()
+    }
+    fn default_build_command(&self, _language: &str) -> Option<String> {
+        None
     }
 }
 

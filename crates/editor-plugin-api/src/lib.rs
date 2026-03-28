@@ -89,6 +89,18 @@ pub mod plugin_hooks {
     /// A line whose text starts with this prefix is treated as the output
     /// separator in an evaluatable plugin buffer.
     pub const EVALUATE_SEPARATOR_PREFIX: &str = "─── Output";
+
+    /// Emitted when a plugin wants the host to run a build/compile command.
+    /// Detail format: `{language}` (e.g. `"rust"`).  The host looks up the
+    /// default command via `UserLibrary::default_build_command`, opens a
+    /// `*compile <workspace>*` popup buffer with an input field pre-filled
+    /// with the default, and runs the command on Ctrl+Enter.
+    pub const RUN_COMMAND: &str = "plugin.run-command";
+
+    /// Emitted when a plugin wants the host to re-run the last build command
+    /// for the active workspace.  If no command has been run yet the host
+    /// falls back to [`RUN_COMMAND`].
+    pub const RERUN_COMMAND: &str = "plugin.rerun-command";
 }
 
 // ─── Git action / section ID constants ───────────────────────────────────────

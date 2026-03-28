@@ -22,6 +22,8 @@ pub mod browser;
 pub mod buffer;
 /// Expression evaluator buffer plugin.
 pub mod calculator;
+/// Workspace build/compile commands.
+pub mod compile;
 /// Debug adapter integration hooks and commands.
 pub mod dap;
 /// Git workflows and repository-oriented commands.
@@ -71,12 +73,13 @@ use editor_theme::Theme;
 
 /// Returns the packages currently compiled into the user library.
 pub fn packages() -> Vec<PluginPackage> {
-    vec![
+    let mut pkgs = vec![
         buffer::package(),
         acp::package(),
         autocomplete::package(),
         browser::package(),
         calculator::package(),
+        compile::package(),
         interactive::package(),
         pane::package(),
         hover::package(),
@@ -91,15 +94,11 @@ pub fn packages() -> Vec<PluginPackage> {
         git::package(),
         terminal::package(),
         vim::package(),
-        lang::csharp::package(),
-        lang::javascript::package(),
-        lang::json::package(),
-        lang::markdown::package(),
-        lang::rust::package(),
-        lang::toml::package(),
-        lang::typescript::package(),
-        lang::yaml::package(),
-    ]
+    ];
+    // Language packages are managed entirely inside user/lang/mod.rs so that
+    // adding a new language only requires changes in that one file.
+    pkgs.extend(lang::packages());
+    pkgs
 }
 
 /// Returns syntax languages currently compiled into the user library.
@@ -471,6 +470,10 @@ impl UserLibrary for UserLibraryImpl {
             calculator::CALCULATOR_KIND => calculator::initial_buffer_lines(),
             _ => Vec::new(),
         }
+    }
+
+    fn default_build_command(&self, language: &str) -> Option<String> {
+        compile::default_build_command(language).map(str::to_owned)
     }
 }
 
