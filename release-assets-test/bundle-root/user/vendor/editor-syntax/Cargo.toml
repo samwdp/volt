@@ -1,0 +1,25 @@
+[package]
+name = "editor-syntax"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+unsafe_code = "allow"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+editor-buffer = { path = "../editor-buffer" }
+libloading = "0.8.9"
+tree-sitter = "0.26.7"
+tree-sitter-language = "0.1.7"
+
+[dev-dependencies]
+tree-sitter-rust = "0.24.1"
+

@@ -1,5 +1,18 @@
 use std::{fs, path::Path};
 
+const STANDALONE_USER_VENDOR_CRATES: &[&str] = &[
+    "editor-buffer",
+    "editor-core",
+    "editor-dap",
+    "editor-fs",
+    "editor-git",
+    "editor-icons",
+    "editor-jobs",
+    "editor-lsp",
+    "editor-syntax",
+    "editor-theme",
+];
+
 fn main() {
     if let Err(error) = copy_user_directory() {
         panic!("failed to copy user directory: {error}");
@@ -33,8 +46,98 @@ fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
         fs::remove_dir_all(&destination)?;
     }
     copy_dir_recursive(&user_dir, &destination)?;
+    vendor_user_support_crates(workspace_root, &destination)?;
+    rewrite_standalone_user_manifests(&destination)?;
 
     Ok(())
+}
+
+fn vendor_user_support_crates(
+    workspace_root: &Path,
+    user_destination: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vendor_dir = user_destination.join("vendor");
+    if vendor_dir.exists() {
+        fs::remove_dir_all(&vendor_dir)?;
+    }
+    fs::create_dir_all(&vendor_dir)?;
+
+    for crate_name in STANDALONE_USER_VENDOR_CRATES {
+        let source = workspace_root.join("crates").join(crate_name);
+        let destination = vendor_dir.join(crate_name);
+        copy_dir_recursive(&source, &destination)?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_standalone_user_manifests(
+    user_destination: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    rewrite_manifest(
+        &user_destination.join("Cargo.toml"),
+        &[
+            ("../crates/editor-core", "vendor/editor-core"),
+            ("../crates/editor-fs", "vendor/editor-fs"),
+            ("../crates/editor-git", "vendor/editor-git"),
+            ("../crates/editor-icons", "vendor/editor-icons"),
+            ("../crates/editor-syntax", "vendor/editor-syntax"),
+            ("../crates/editor-theme", "vendor/editor-theme"),
+            ("../crates/editor-buffer", "vendor/editor-buffer"),
+        ],
+    )?;
+    rewrite_manifest(
+        &user_destination.join("sdk").join("Cargo.toml"),
+        &[
+            ("../../crates/editor-core", "../vendor/editor-core"),
+            ("../../crates/editor-dap", "../vendor/editor-dap"),
+            ("../../crates/editor-fs", "../vendor/editor-fs"),
+            ("../../crates/editor-git", "../vendor/editor-git"),
+            ("../../crates/editor-icons", "../vendor/editor-icons"),
+            ("../../crates/editor-lsp", "../vendor/editor-lsp"),
+            ("../../crates/editor-syntax", "../vendor/editor-syntax"),
+            ("../../crates/editor-theme", "../vendor/editor-theme"),
+        ],
+    )?;
+    for crate_name in STANDALONE_USER_VENDOR_CRATES {
+        rewrite_manifest(
+            &user_destination
+                .join("vendor")
+                .join(crate_name)
+                .join("Cargo.toml"),
+            &[],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_manifest(
+    manifest_path: &Path,
+    path_replacements: &[(&str, &str)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut manifest = fs::read_to_string(manifest_path)?;
+    manifest = inline_workspace_package_fields(manifest);
+    for (from, to) in path_replacements {
+        manifest = manifest.replace(from, to);
+    }
+    fs::write(manifest_path, manifest)?;
+    Ok(())
+}
+
+fn inline_workspace_package_fields(mut manifest: String) -> String {
+    manifest = manifest.replace("rust-version.workspace = true", "rust-version = \"1.91\"");
+    manifest = manifest.replace("version.workspace = true", "version = \"0.1.0\"");
+    manifest = manifest.replace("edition.workspace = true", "edition = \"2024\"");
+    manifest = manifest.replace(
+        "license.workspace = true",
+        "license = \"MIT OR Apache-2.0\"",
+    );
+    manifest = manifest.replace(
+        "[lints]\nworkspace = true\n",
+        "[lints.rust]\nunsafe_code = \"forbid\"\nunused_crate_dependencies = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunwrap_used = \"deny\"\n",
+    );
+    manifest
 }
 
 fn copy_assets_directory() -> Result<(), Box<dyn std::error::Error>> {

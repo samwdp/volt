@@ -1,0 +1,23 @@
+[package]
+name = "editor-lsp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+editor-buffer = { path = "../editor-buffer" }
+editor-jobs = { path = "../editor-jobs" }
+lsp-types = "0.97.0"
+serde = "1.0.228"
+serde_json = "1.0.149"
+
