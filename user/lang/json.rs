@@ -15,7 +15,10 @@ pub fn package() -> PluginPackage {
         "Attaches JSON language defaults to the active workspace.",
         vec![
             PluginAction::log_message("JSON language package attached."),
-            PluginAction::emit_hook("workspace.formatter.register", Some("json|prettier")),
+            PluginAction::emit_hook(
+                "workspace.formatter.register",
+                Some("json|prettier|--write"),
+            ),
             PluginAction::emit_hook("lang.json.attached", Some("json")),
         ],
     )])

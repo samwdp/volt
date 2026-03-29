@@ -17,8 +17,11 @@ pub fn package() -> PluginPackage {
         "Attaches JavaScript and JSX language defaults to the active workspace.",
         vec![
             PluginAction::log_message("JavaScript language package attached."),
-            PluginAction::emit_hook("workspace.formatter.register", Some("javascript|prettier")),
-            PluginAction::emit_hook("workspace.formatter.register", Some("jsx|prettier")),
+            PluginAction::emit_hook(
+                "workspace.formatter.register",
+                Some("javascript|prettier|--write"),
+            ),
+            PluginAction::emit_hook("workspace.formatter.register", Some("jsx|prettier|--write")),
             PluginAction::emit_hook("lang.javascript.attached", Some("javascript")),
         ],
     )])

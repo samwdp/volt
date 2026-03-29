@@ -893,9 +893,11 @@ mod tests {
     };
     use crate::calculator;
     use crate::lsp::{
-        SERVER_CSHARP_LS, SERVER_MARKSMAN, SERVER_RUST_ANALYZER, SERVER_TOMBI,
-        SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
-        SERVER_YAML_LANGUAGE_SERVER,
+        SERVER_CLANGD, SERVER_CSHARP_LS, SERVER_GOPLS, SERVER_MAKEFILE_LANGUAGE_SERVER,
+        SERVER_MARKSMAN, SERVER_OLS, SERVER_PYRIGHT_LANGSERVER, SERVER_RUST_ANALYZER, SERVER_SQLS,
+        SERVER_TOMBI, SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_CSS_LANGUAGE_SERVER,
+        SERVER_VSCODE_HTML_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
+        SERVER_YAML_LANGUAGE_SERVER, SERVER_ZLS,
     };
     use editor_buffer::TextBuffer;
     use editor_plugin_api::UserLibrary;
@@ -990,27 +992,65 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 12);
+        assert!(languages.len() >= 23);
         let ids = languages
             .iter()
             .map(|language| language.id())
             .collect::<Vec<_>>();
+        assert!(ids.contains(&"c"));
         assert!(ids.contains(&"csharp"));
+        assert!(ids.contains(&"cpp"));
+        assert!(ids.contains(&"css"));
         assert!(ids.contains(&"rust"));
         assert!(ids.contains(&"gitcommit"));
+        assert!(ids.contains(&"go"));
+        assert!(ids.contains(&"html"));
         assert!(ids.contains(&"javascript"));
         assert!(ids.contains(&"jsx"));
         assert!(ids.contains(&"json"));
+        assert!(ids.contains(&"make"));
         assert!(ids.contains(&"markdown"));
         assert!(ids.contains(&"markdown-inline"));
+        assert!(ids.contains(&"odin"));
+        assert!(ids.contains(&"python"));
+        assert!(ids.contains(&"scss"));
+        assert!(ids.contains(&"sql"));
         assert!(ids.contains(&"toml"));
         assert!(ids.contains(&"typescript"));
         assert!(ids.contains(&"tsx"));
         assert!(ids.contains(&"yaml"));
+        assert!(ids.contains(&"zig"));
 
+        assert_eq!(
+            language_extensions(&languages, "c"),
+            Some(vec!["c".to_owned(), "h".to_owned()])
+        );
         assert_eq!(
             language_extensions(&languages, "csharp"),
             Some(vec!["cs".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "cpp"),
+            Some(vec![
+                "cc".to_owned(),
+                "cpp".to_owned(),
+                "cxx".to_owned(),
+                "hpp".to_owned(),
+                "hh".to_owned(),
+                "hxx".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "css"),
+            Some(vec!["css".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "go"),
+            Some(vec!["go".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "html"),
+            Some(vec!["html".to_owned(), "htm".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "rust"),
@@ -1029,8 +1069,28 @@ mod tests {
             Some(vec!["json".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "make"),
+            Some(vec!["mk".to_owned(), "mak".to_owned(), "make".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "markdown"),
             Some(vec!["md".to_owned(), "markdown".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "odin"),
+            Some(vec!["odin".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "python"),
+            Some(vec!["py".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "scss"),
+            Some(vec!["scss".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "sql"),
+            Some(vec!["sql".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "toml"),
@@ -1048,6 +1108,10 @@ mod tests {
             language_extensions(&languages, "yaml"),
             Some(vec!["yaml".to_owned(), "yml".to_owned()])
         );
+        assert_eq!(
+            language_extensions(&languages, "zig"),
+            Some(vec!["zig".to_owned()])
+        );
     }
 
     #[test]
@@ -1056,14 +1120,23 @@ mod tests {
         let server_ids = servers.iter().map(|server| server.id()).collect::<Vec<_>>();
         let adapters = debug_adapters();
 
-        assert_eq!(servers.len(), 7);
+        assert_eq!(servers.len(), 16);
+        assert!(server_ids.contains(&SERVER_CLANGD));
         assert!(server_ids.contains(&SERVER_RUST_ANALYZER));
         assert!(server_ids.contains(&SERVER_MARKSMAN));
         assert!(server_ids.contains(&SERVER_CSHARP_LS));
+        assert!(server_ids.contains(&SERVER_GOPLS));
+        assert!(server_ids.contains(&SERVER_MAKEFILE_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_OLS));
+        assert!(server_ids.contains(&SERVER_PYRIGHT_LANGSERVER));
+        assert!(server_ids.contains(&SERVER_SQLS));
         assert!(server_ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_VSCODE_CSS_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_VSCODE_HTML_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_TOMBI));
         assert!(server_ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_ZLS));
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].id(), "codelldb");
 
@@ -1094,6 +1167,31 @@ mod tests {
         assert_eq!(
             typescript.document_language_id_for_extension(".jsx"),
             "javascriptreact"
+        );
+
+        let css = servers
+            .iter()
+            .find(|server| server.id() == SERVER_VSCODE_CSS_LANGUAGE_SERVER)
+            .expect("vscode-css-language-server missing");
+        assert_eq!(css.document_language_id_for_extension(".scss"), "scss");
+
+        let clangd = servers
+            .iter()
+            .find(|server| server.id() == SERVER_CLANGD)
+            .expect("clangd missing");
+        assert_eq!(clangd.document_language_id_for_extension(".c"), "c");
+        assert_eq!(clangd.document_language_id_for_extension(".cpp"), "cpp");
+
+        let html = servers
+            .iter()
+            .find(|server| server.id() == SERVER_VSCODE_HTML_LANGUAGE_SERVER)
+            .expect("vscode-html-language-server missing");
+        assert_eq!(
+            html.file_extensions()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["html", "htm"]
         );
     }
 

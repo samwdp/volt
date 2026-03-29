@@ -264,11 +264,13 @@
                 <a href="#core-concepts">Concepts</a>
                 <a href="#creating-a-new-plugin">Create a Plugin</a>
                 <a href="#editing-builtin-plugins">Edit Builtins</a>
+                <a href="#adding-language-support">Languages</a>
                 <a href="#building-and-testing">Build &amp; Test</a>
             </nav>
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="language.html">Add a Language</a>
                 <a class="button button-primary" href="#creating-a-new-plugin">Get Started</a>
             </div>
         </header>
@@ -929,6 +931,9 @@ const LEADER_KEY: &amp;str = "Comma";</code></pre>
                     <p class="reveal">
                         Adding a new language requires creating a module in <code>user/lang/</code>
                         and registering it.
+                        See the dedicated <a href="language.html">Adding a Language</a> guide for
+                        the full walkthrough, including the common helper, manual implementation,
+                        LSP registration, theme tokens, and testing checklist.
                     </p>
 
                     <div class="step-card reveal">
