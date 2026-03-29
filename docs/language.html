@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adding a Language &#8211; Volt Docs</title>
+    <meta
+        name="description"
+        content="Step-by-step guide for adding a new language to Volt: module layout, tree-sitter grammar, theme mappings, hook bindings, LSP registration, and testing."
+    >
+    <link rel="icon" type="image/x-icon" href="assets/logo.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@400;600;700&amp;family=Orbitron:wght@700;800;900&amp;display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        /* page-local styles shared with the user-packages guide layout */
+
+        .guide-body {
+            max-width: 880px;
+            margin: 0 auto;
+        }
+
+        .guide-body h2 {
+            font-family: "Orbitron", sans-serif;
+            font-size: clamp(1.6rem, 3.5vw, 2.4rem);
+            margin: 56px 0 18px;
+            letter-spacing: -0.02em;
+        }
+
+        .guide-body h3 {
+            font-size: 1.18rem;
+            margin: 36px 0 12px;
+            color: var(--accent-cyan);
+        }
+
+        .guide-body h4 {
+            font-size: 1rem;
+            margin: 24px 0 8px;
+            color: var(--accent-green);
+        }
+
+        .guide-body p,
+        .guide-body li {
+            color: var(--text-dim);
+            line-height: 1.8;
+            font-size: 1.02rem;
+        }
+
+        .guide-body ul,
+        .guide-body ol {
+            padding-left: 22px;
+            margin: 10px 0 18px;
+        }
+
+        .guide-body li {
+            margin-bottom: 6px;
+        }
+
+        .guide-body a {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+            text-decoration-color: rgba(0, 232, 255, 0.3);
+            text-underline-offset: 3px;
+            transition: text-decoration-color 180ms ease;
+        }
+
+        .guide-body a:hover {
+            text-decoration-color: var(--accent-cyan);
+        }
+
+        .guide-body strong {
+            color: var(--text);
+        }
+
+        .guide-body code {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.9em;
+            padding: 2px 7px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--accent-green);
+        }
+
+        .guide-body pre {
+            margin: 14px 0 22px;
+            padding: 20px 22px;
+            overflow-x: auto;
+            background: rgba(7, 11, 17, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-md);
+            line-height: 1.65;
+        }
+
+        .guide-body pre code {
+            padding: 0;
+            background: none;
+            color: var(--text);
+            font-size: 0.88rem;
+        }
+
+        .guide-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0 22px;
+            font-size: 0.95rem;
+        }
+
+        .guide-body th {
+            text-align: left;
+            padding: 12px 14px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--accent-cyan);
+            border-bottom: 2px solid rgba(0, 232, 255, 0.22);
+            background: rgba(0, 232, 255, 0.04);
+        }
+
+        .guide-body td {
+            padding: 10px 14px;
+            color: var(--text-dim);
+            border-bottom: 1px solid var(--line);
+        }
+
+        .guide-body td code {
+            font-size: 0.85em;
+        }
+
+        .guide-body hr {
+            border: none;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--line-strong), transparent);
+            margin: 48px 0;
+        }
+
+        .arch-box {
+            margin: 18px 0 24px;
+            padding: 22px 26px;
+            background: rgba(7, 11, 17, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.84rem;
+            line-height: 1.55;
+            color: var(--text-dim);
+            white-space: pre;
+        }
+
+        .arch-box .hl-cyan  { color: var(--accent-cyan); }
+        .arch-box .hl-green { color: var(--accent-green); }
+        .arch-box .hl-purple{ color: var(--accent-purple); }
+        .arch-box .hl-rust  { color: var(--accent-rust); }
+
+        .step-card {
+            position: relative;
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            margin: 18px 0;
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(14px);
+        }
+
+        .step-card::before {
+            content: "";
+            position: absolute;
+            inset: 0 0 auto;
+            height: 3px;
+            border-radius: inherit;
+            background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-purple), transparent);
+        }
+
+        .step-card h3 {
+            margin-top: 0;
+        }
+
+        .toc-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 26px 30px;
+            margin: 28px 0 44px;
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(14px);
+        }
+
+        .toc-card h2 {
+            font-size: 1.1rem !important;
+            margin: 0 0 14px !important;
+            color: var(--accent-cyan);
+        }
+
+        .toc-card ul {
+            columns: 2;
+            column-gap: 28px;
+        }
+
+        .toc-card li {
+            break-inside: avoid;
+        }
+
+        @media (max-width: 640px) {
+            .toc-card ul {
+                columns: 1;
+            }
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 232, 255, 0.25);
+            background: rgba(0, 232, 255, 0.06);
+            color: var(--text);
+            font-size: 0.88rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            transition: border-color 180ms ease, background 180ms ease;
+        }
+
+        .back-link:hover {
+            border-color: rgba(0, 232, 255, 0.5);
+            background: rgba(0, 232, 255, 0.12);
+        }
+    </style>
+</head>
+<body>
+    <div class="site-shell">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+
+        <header class="topbar">
+            <a class="brand" href="index.html" aria-label="Volt Docs home">
+                <span class="brand-mark">
+                    <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
+                </span>
+                <span class="brand-copy">
+                    <strong>Volt Docs</strong>
+                    <small>Adding a language</small>
+                </span>
+            </a>
+
+            <button
+                class="nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="primary-nav"
+            >
+                Menu
+            </button>
+
+            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
+                <a href="#overview">Overview</a>
+                <a href="#module-layout">Module Layout</a>
+                <a href="#common-helper">Common Helper</a>
+                <a href="#full-implementation">Full Implementation</a>
+                <a href="#registration">Registration</a>
+                <a href="#lsp">LSP</a>
+                <a href="#theme-tokens">Theme Tokens</a>
+                <a href="#testing">Testing</a>
+            </nav>
+
+            <div class="topbar-actions">
+                <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="user-packages.html">User Packages</a>
+                <a class="button button-primary" href="#common-helper">Quick Start</a>
+            </div>
+        </header>
+
+        <main id="top">
+            <!-- Hero -->
+            <section class="hero section" style="display:block;">
+                <div class="hero-copy reveal" style="max-width:880px;margin:0 auto;">
+                    <a class="back-link" href="index.html">&#8592; Back to Volt Docs</a>
+                    <p class="eyebrow">Language support guide</p>
+                    <h1 style="max-width:none;font-size:clamp(2.2rem,4.6vw,4.4rem);">Adding a Language</h1>
+                    <p class="hero-text">
+                        Every language in Volt is a self-contained Rust module under
+                        <code>user/lang/</code>. It exports two functions: <code>package()</code>
+                        for the plugin metadata (hook bindings, commands, formatter registration) and
+                        <code>syntax_language()</code> for the tree-sitter grammar and theme-token
+                        mappings. This guide walks through both the shorthand helper path and the full
+                        manual implementation, then covers LSP registration and testing.
+                    </p>
+                </div>
+            </section>
+
+            <div class="guide-body">
+
+                <!-- Table of contents -->
+                <nav class="toc-card reveal" aria-label="Table of contents">
+                    <h2>Contents</h2>
+                    <ul>
+                        <li><a href="#overview">Overview</a></li>
+                        <li><a href="#module-layout">Module Layout</a></li>
+                        <li><a href="#common-helper">Using the Common Helper</a></li>
+                        <li><a href="#full-implementation">Full Manual Implementation</a></li>
+                        <li><a href="#registration">Registering the Module</a></li>
+                        <li><a href="#lsp">Adding an LSP Server</a></li>
+                        <li><a href="#theme-tokens">Theme Tokens Reference</a></li>
+                        <li><a href="#testing">Building and Testing</a></li>
+                    </ul>
+                </nav>
+
+                <!-- Overview -->
+                <section id="overview">
+                    <h2 class="reveal">Overview</h2>
+
+                    <div class="arch-box reveal"><span class="hl-cyan">user/lang/</span>
+<span class="hl-green">&#9500;&#9472; mod.rs</span>          &#8212; module declarations + <span class="hl-rust">packages()</span> and <span class="hl-rust">syntax_languages()</span> registries
+<span class="hl-green">&#9500;&#9472; common.rs</span>       &#8212; shared helper that builds standard <span class="hl-purple">package()</span> and <span class="hl-purple">syntax_language()</span>
+<span class="hl-green">&#9500;&#9472; rust.rs</span>         &#8212; full manual implementation (custom highlight query)
+<span class="hl-green">&#9500;&#9472; python.rs</span>       &#8212; one-liner using <span class="hl-cyan">common::package()</span> and <span class="hl-cyan">common::syntax_language()</span>
+<span class="hl-green">&#9500;&#9472; gitcommit.rs</span>    &#8212; syntax-only (no plugin package; not added to <span class="hl-rust">packages()</span>)
+<span class="hl-green">&#9492;&#9472; &lt;newlang&gt;.rs</span>    &#8212; your new file goes here</div>
+
+                    <p class="reveal">
+                        A language module must provide:
+                    </p>
+                    <ul class="reveal">
+                        <li>
+                            <strong><code>package() -&gt; PluginPackage</code></strong> &#8212; registers the
+                            attach command, the <code>lang.&lt;id&gt;.attached</code> hook declaration, and a
+                            <code>buffer.file-open</code> hook binding for each file extension.
+                        </li>
+                        <li>
+                            <strong><code>syntax_language() -&gt; LanguageConfiguration</code></strong> &#8212;
+                            maps a tree-sitter grammar source and capture names to theme tokens.
+                        </li>
+                    </ul>
+                    <p class="reveal">
+                        After creating the file you add two lines to <code>user/lang/mod.rs</code>:
+                        a <code>pub mod</code> declaration and a call in each of the two registry
+                        functions.  No changes to <code>user/lib.rs</code> are needed for a standard
+                        language module.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Module Layout -->
+                <section id="module-layout">
+                    <h2 class="reveal">Module Layout</h2>
+                    <p class="reveal">
+                        The minimal file structure for a language module called <strong>lua</strong>:
+                    </p>
+<pre class="reveal"><code>user/lang/lua.rs          ← new file you create
+user/lang/mod.rs          ← add pub mod + two registry entries</code></pre>
+
+                    <p class="reveal">
+                        A language module imports from two crates:
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Import</th><th>Purpose</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>editor_plugin_api::{PluginPackage, &#8230;}</code></td>
+                                <td>Plugin metadata types (commands, hooks, keybindings)</td>
+                            </tr>
+                            <tr>
+                                <td><code>editor_syntax::{GrammarSource, LanguageConfiguration, &#8230;}</code></td>
+                                <td>Syntax registration and tree-sitter theme mappings</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <hr>
+
+                <!-- Common Helper -->
+                <section id="common-helper">
+                    <h2 class="reveal">Using the Common Helper</h2>
+                    <p class="reveal">
+                        Most languages follow an identical pattern, so <code>user/lang/common.rs</code>
+                        provides two helper functions that cover the standard case:
+                    </p>
+                    <ul class="reveal">
+                        <li>
+                            <code>common::package(language_id, display_name, extensions, formatters)</code>
+                            &#8212; builds the full <code>PluginPackage</code> with one hook binding per
+                            extension and one <code>workspace.formatter.register</code> action per formatter.
+                        </li>
+                        <li>
+                            <code>common::syntax_language(language_id, extensions, repository, install_dir, symbol)</code>
+                            &#8212; creates a <code>LanguageConfiguration</code> with the
+                            <a href="#theme-tokens">standard set of capture mappings</a>.
+                        </li>
+                    </ul>
+
+                    <div class="step-card reveal">
+                        <h3>Example &#8212; Adding Lua with the common helper</h3>
+                        <p>Create <code>user/lang/lua.rs</code>:</p>
+<pre><code>use editor_plugin_api::PluginPackage;
+use editor_syntax::LanguageConfiguration;
+
+use super::common;
+
+/// Lua language support and theme mappings.
+pub fn package() -&gt; PluginPackage {
+    common::package("lua", "Lua", &amp;["lua"], &amp;["lua|stylua"])
+}
+
+/// Returns the syntax registration for the Lua tree-sitter language.
+pub fn syntax_language() -&gt; LanguageConfiguration {
+    common::syntax_language(
+        "lua",
+        &amp;["lua"],
+        "https://github.com/tree-sitter-grammars/tree-sitter-lua.git",
+        "tree-sitter-lua",
+        "tree_sitter_lua",
+    )
+}</code></pre>
+                    </div>
+
+                    <h3 class="reveal"><code>common::package</code> parameter reference</h3>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Parameter</th><th>Type</th><th>Example</th><th>Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>language_id</code></td>
+                                <td><code>&amp;str</code></td>
+                                <td><code>"lua"</code></td>
+                                <td>
+                                    Lowercase identifier. Used in the package name
+                                    (<code>lang-lua</code>), command name
+                                    (<code>lang-lua.attach</code>), and hook name
+                                    (<code>lang.lua.attached</code>).
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>display_name</code></td>
+                                <td><code>&amp;str</code></td>
+                                <td><code>"Lua"</code></td>
+                                <td>Human-readable name used in log messages and descriptions.</td>
+                            </tr>
+                            <tr>
+                                <td><code>extensions</code></td>
+                                <td><code>&amp;[&amp;str]</code></td>
+                                <td><code>&amp;["lua"]</code></td>
+                                <td>
+                                    File extensions (without the dot) that trigger auto-attach. One
+                                    <code>buffer.file-open</code> hook binding is created per extension.
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>formatters</code></td>
+                                <td><code>&amp;[&amp;str]</code></td>
+                                <td><code>&amp;["lua|stylua"]</code></td>
+                                <td>
+                                    Formatter registration strings in <code>"lang|tool"</code> format.
+                                    Each emits a <code>workspace.formatter.register</code> hook action.
+                                    Pass an empty slice if there is no formatter.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <h3 class="reveal"><code>common::syntax_language</code> parameter reference</h3>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Parameter</th><th>Example</th><th>Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>language_id</code></td>
+                                <td><code>"lua"</code></td>
+                                <td>Tree-sitter language name (matches the package name used by the runtime).</td>
+                            </tr>
+                            <tr>
+                                <td><code>extensions</code></td>
+                                <td><code>&amp;["lua"]</code></td>
+                                <td>File extensions that select this language for syntax highlighting.</td>
+                            </tr>
+                            <tr>
+                                <td><code>repository</code></td>
+                                <td><code>"https://github.com/…/tree-sitter-lua.git"</code></td>
+                                <td>Git URL of the tree-sitter grammar repository.</td>
+                            </tr>
+                            <tr>
+                                <td><code>install_dir_name</code></td>
+                                <td><code>"tree-sitter-lua"</code></td>
+                                <td>
+                                    Directory name the grammar is cloned into under the Volt grammar
+                                    directory (<code>$XDG_DATA_HOME/volt/grammars</code> on Linux,
+                                    <code>%LOCALAPPDATA%\volt\grammars</code> on Windows).
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>symbol_name</code></td>
+                                <td><code>"tree_sitter_lua"</code></td>
+                                <td>
+                                    Name of the exported C symbol in the compiled grammar
+                                    (e.g. <code>tree_sitter_lua</code> expands to the
+                                    <code>tree_sitter_lua()</code> function).
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <hr>
+
+                <!-- Full Manual Implementation -->
+                <section id="full-implementation">
+                    <h2 class="reveal">Full Manual Implementation</h2>
+                    <p class="reveal">
+                        Use the manual form when you need any of the following:
+                    </p>
+                    <ul class="reveal">
+                        <li>A custom tree-sitter highlight query (injections, extra captures)</li>
+                        <li>Multiple grammar variants for the same language (e.g. JSX, TSX)</li>
+                        <li>A syntax-only registration with no plugin package (e.g. <code>gitcommit</code>)</li>
+                        <li>Custom hook declarations beyond <code>lang.&lt;id&gt;.attached</code></li>
+                    </ul>
+
+                    <h3 class="reveal">Full <code>package()</code> implementation</h3>
+<pre class="reveal"><code>use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginHookBinding,
+    PluginHookDeclaration, PluginPackage,
+};
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new(
+        "lang-lua",
+        true,
+        "Lua language defaults, tree-sitter mapping, and startup hooks.",
+    )
+    .with_commands(vec![PluginCommand::new(
+        "lang-lua.attach",
+        "Attaches Lua language defaults to the active workspace.",
+        vec![
+            PluginAction::log_message("Lua language package attached."),
+            // Register the formatter; omit this line if no formatter exists.
+            PluginAction::emit_hook("workspace.formatter.register", Some("lua|stylua")),
+            // Emit the language-attached lifecycle hook.
+            PluginAction::emit_hook("lang.lua.attached", Some("lua")),
+        ],
+    )])
+    .with_hook_declarations(vec![PluginHookDeclaration::new(
+        "lang.lua.attached",
+        "Runs after the Lua language package attaches to a buffer.",
+    )])
+    .with_hook_bindings(vec![
+        // Auto-attach when a .lua file opens.
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lang-lua.auto-attach",
+            "lang-lua.attach",
+            Some(".lua"),
+        ),
+    ])
+}</code></pre>
+
+                    <h3 class="reveal">Full <code>syntax_language()</code> with an extra highlight query</h3>
+<pre class="reveal"><code>// Optional: an extra tree-sitter query that supplements the grammar's
+// built-in highlights.scm file.
+const EXTRA_HIGHLIGHT_QUERY: &amp;str = r#"
+[
+  "(" ")" "[" "]" "{" "}"
+] @punctuation.bracket
+
+[
+  "," ";" ":"
+] @punctuation.delimiter
+"#;
+
+pub fn syntax_language() -&gt; LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "lua",
+        ["lua"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter-grammars/tree-sitter-lua.git",
+            ".",
+            "src",
+            "tree-sitter-lua",
+            "tree_sitter_lua",
+        ),
+        [
+            CaptureThemeMapping::new("comment",              "syntax.comment"),
+            CaptureThemeMapping::new("constant",             "syntax.constant"),
+            CaptureThemeMapping::new("constant.builtin",     "syntax.constant.builtin"),
+            CaptureThemeMapping::new("function",             "syntax.function"),
+            CaptureThemeMapping::new("function.builtin",     "syntax.function.builtin"),
+            CaptureThemeMapping::new("function.method",      "syntax.function.method"),
+            CaptureThemeMapping::new("keyword",              "syntax.keyword"),
+            CaptureThemeMapping::new("number",               "syntax.number"),
+            CaptureThemeMapping::new("operator",             "syntax.operator"),
+            CaptureThemeMapping::new("property",             "syntax.property"),
+            CaptureThemeMapping::new("punctuation.bracket",  "syntax.punctuation.bracket"),
+            CaptureThemeMapping::new("punctuation.delimiter","syntax.punctuation.delimiter"),
+            CaptureThemeMapping::new("string",               "syntax.string"),
+            CaptureThemeMapping::new("type",                 "syntax.type"),
+            CaptureThemeMapping::new("variable",             "syntax.variable"),
+            CaptureThemeMapping::new("variable.builtin",     "syntax.variable.builtin"),
+        ],
+    )
+    .with_extra_highlight_query(EXTRA_HIGHLIGHT_QUERY)
+}</code></pre>
+
+                    <h3 class="reveal">Syntax-only registration (no plugin package)</h3>
+                    <p class="reveal">
+                        If a language only needs syntax highlighting and no hook or formatter
+                        integration, omit <code>package()</code> entirely and skip the
+                        <code>packages()</code> entry in <code>mod.rs</code>.  Only add
+                        <code>syntax_language()</code> to the <code>syntax_languages()</code>
+                        registry.  The <code>gitcommit</code> module in the Volt source is an
+                        example of this pattern.
+                    </p>
+<pre class="reveal"><code>// user/lang/gitcommit.rs
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+
+pub fn syntax_language() -&gt; LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "gitcommit",
+        ["COMMIT_EDITMSG"],
+        GrammarSource::new(
+            "https://github.com/gbprod/tree-sitter-gitcommit.git",
+            ".",
+            "src",
+            "tree-sitter-gitcommit",
+            "tree_sitter_gitcommit",
+        ),
+        [
+            CaptureThemeMapping::new("comment", "syntax.comment"),
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("string",  "syntax.string"),
+        ],
+    )
+}</code></pre>
+
+                    <h3 class="reveal">Multiple variants &#8212; JSX / TSX pattern</h3>
+                    <p class="reveal">
+                        Export additional functions when one module registers multiple grammar
+                        variants (e.g. TypeScript and TSX both live in
+                        <code>user/lang/typescript.rs</code>):
+                    </p>
+<pre class="reveal"><code>/// Base TypeScript syntax.
+pub fn syntax_language() -&gt; LanguageConfiguration { /* … */ }
+
+/// TSX variant (React).
+pub fn tsx_syntax_language() -&gt; LanguageConfiguration { /* … */ }</code></pre>
+                    <p class="reveal">
+                        Register both variants in <code>syntax_languages()</code> inside
+                        <code>mod.rs</code> — they share the same module declaration but each
+                        maps different extensions.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Registration -->
+                <section id="registration">
+                    <h2 class="reveal">Registering the Module</h2>
+                    <p class="reveal">
+                        Open <code>user/lang/mod.rs</code> and make three edits:
+                    </p>
+
+                    <div class="step-card reveal">
+                        <h3>Step 1 &#8212; Declare the module</h3>
+                        <p>Add a <code>pub mod</code> declaration in alphabetical order with the other languages:</p>
+<pre><code>/// Lua language support and theme mappings.
+pub mod lua;</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 2 &#8212; Add to <code>packages()</code></h3>
+                        <p>
+                            Inside the <code>packages()</code> function, add a call to your module&#8217;s
+                            <code>package()</code> function.  Maintain alphabetical order:
+                        </p>
+<pre><code>pub fn packages() -&gt; Vec&lt;editor_plugin_api::PluginPackage&gt; {
+    vec![
+        // … existing entries …
+        lua::package(),
+        // … existing entries …
+    ]
+}</code></pre>
+                        <p>Skip this step if your module is syntax-only and has no <code>package()</code>.</p>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 3 &#8212; Add to <code>syntax_languages()</code></h3>
+                        <p>Add a call to <code>syntax_language()</code> in the same function:</p>
+<pre><code>pub fn syntax_languages() -&gt; Vec&lt;LanguageConfiguration&gt; {
+    vec![
+        // … existing entries …
+        lua::syntax_language(),
+        // … existing entries …
+    ]
+}</code></pre>
+                        <p>
+                            If the module exports multiple variants (like JSX / TSX), add one call per
+                            variant:
+                        </p>
+<pre><code>typescript::syntax_language(),
+typescript::tsx_syntax_language(),</code></pre>
+                    </div>
+
+                    <p class="reveal">
+                        That is everything required for a standard language.  No changes to
+                        <code>user/lib.rs</code> are needed &#8212; the <code>lang::packages()</code>
+                        and <code>lang::syntax_languages()</code> calls are already wired in.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- LSP -->
+                <section id="lsp">
+                    <h2 class="reveal">Adding an LSP Server</h2>
+                    <p class="reveal">
+                        Language server support is declared separately in <code>user/lsp.rs</code>.
+                        Open that file and add a new <code>LanguageServerSpec</code> entry to the
+                        <code>language_servers()</code> function:
+                    </p>
+<pre class="reveal"><code>LanguageServerSpec::new(
+    "lua-language-server",     // unique identifier
+    "lua",                     // language_id — must match the id in package()
+    "lua-language-server",     // executable name (must be on PATH)
+)</code></pre>
+
+                    <p class="reveal">
+                        The spec supports optional builder methods for extra configuration:
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Method</th><th>Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>.with_args(vec!["--stdio"])</code></td>
+                                <td>Command-line arguments forwarded to the server process</td>
+                            </tr>
+                            <tr>
+                                <td><code>.with_initialization_options(json!({…}))</code></td>
+                                <td>JSON blob sent in the LSP <code>initialize</code> request</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <p class="reveal">
+                        The LSP session is started lazily when a file matching the language ID is
+                        opened, so no additional wiring is needed.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Theme Tokens -->
+                <section id="theme-tokens">
+                    <h2 class="reveal">Theme Tokens Reference</h2>
+                    <p class="reveal">
+                        Each <code>CaptureThemeMapping</code> maps a tree-sitter capture name
+                        (left) to a theme token key (right).  The token keys must be defined in
+                        <code>user/theme.rs</code> for them to produce color output.
+                        The <code>common::syntax_language()</code> helper automatically applies the
+                        full standard set listed below.
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Tree-sitter capture</th><th>Theme token</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>attribute</code></td><td><code>syntax.attribute</code></td></tr>
+                            <tr><td><code>comment</code></td><td><code>syntax.comment</code></td></tr>
+                            <tr><td><code>constant</code></td><td><code>syntax.constant</code></td></tr>
+                            <tr><td><code>constant.builtin</code></td><td><code>syntax.constant.builtin</code></td></tr>
+                            <tr><td><code>constructor</code></td><td><code>syntax.constructor</code></td></tr>
+                            <tr><td><code>function</code></td><td><code>syntax.function</code></td></tr>
+                            <tr><td><code>function.builtin</code></td><td><code>syntax.function.builtin</code></td></tr>
+                            <tr><td><code>function.method</code></td><td><code>syntax.function.method</code></td></tr>
+                            <tr><td><code>keyword</code></td><td><code>syntax.keyword</code></td></tr>
+                            <tr><td><code>keyword.directive</code></td><td><code>syntax.keyword.directive</code></td></tr>
+                            <tr><td><code>label</code></td><td><code>syntax.label</code></td></tr>
+                            <tr><td><code>module</code></td><td><code>syntax.module</code></td></tr>
+                            <tr><td><code>number</code></td><td><code>syntax.number</code></td></tr>
+                            <tr><td><code>operator</code></td><td><code>syntax.operator</code></td></tr>
+                            <tr><td><code>property</code></td><td><code>syntax.property</code></td></tr>
+                            <tr><td><code>punctuation.bracket</code></td><td><code>syntax.punctuation.bracket</code></td></tr>
+                            <tr><td><code>punctuation.delimiter</code></td><td><code>syntax.punctuation.delimiter</code></td></tr>
+                            <tr><td><code>string</code></td><td><code>syntax.string</code></td></tr>
+                            <tr><td><code>string.escape</code></td><td><code>syntax.string.escape</code></td></tr>
+                            <tr><td><code>string.special</code></td><td><code>syntax.string.special</code></td></tr>
+                            <tr><td><code>tag</code></td><td><code>syntax.tag</code></td></tr>
+                            <tr><td><code>tag.attribute</code></td><td><code>syntax.tag.attribute</code></td></tr>
+                            <tr><td><code>type</code></td><td><code>syntax.type</code></td></tr>
+                            <tr><td><code>type.builtin</code></td><td><code>syntax.type.builtin</code></td></tr>
+                            <tr><td><code>variable</code></td><td><code>syntax.variable</code></td></tr>
+                            <tr><td><code>variable.builtin</code></td><td><code>syntax.variable.builtin</code></td></tr>
+                        </tbody>
+                    </table>
+                    <p class="reveal">
+                        Only include mappings that the grammar&#8217;s <code>highlights.scm</code>
+                        actually emits &#8212; unmapped captures are silently ignored at runtime, but
+                        extra entries in the module add noise and slight compile-time cost.
+                    </p>
+
+                    <h3 class="reveal">Adding a new theme token</h3>
+                    <p class="reveal">
+                        If a grammar uses a capture name not in the standard list above, add a
+                        corresponding entry in <code>user/theme.rs</code>.  Find the
+                        <code>syntax.*</code> token block and insert the new key:
+                    </p>
+<pre class="reveal"><code>// In user/theme.rs — inside the token map:
+("syntax.my-capture", Color::from_rgb(200, 150, 80)),</code></pre>
+                    <p class="reveal">
+                        Then add the matching <code>CaptureThemeMapping</code> in your language
+                        module:
+                    </p>
+<pre class="reveal"><code>CaptureThemeMapping::new("my-capture", "syntax.my-capture"),</code></pre>
+                </section>
+
+                <hr>
+
+                <!-- Testing -->
+                <section id="testing">
+                    <h2 class="reveal">Building and Testing</h2>
+
+                    <div class="step-card reveal">
+                        <h3>Build the user library</h3>
+<pre><code># Fast incremental build — catches compile errors quickly
+cargo build -p volt-user
+
+# Build the full editor with the new language included
+cargo build -p volt</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Run the user-library tests</h3>
+                        <p>
+                            The <code>volt-user</code> crate contains unit tests that verify package
+                            registration, syntax language exports, and LSP defaults.  Run them after
+                            every change:
+                        </p>
+<pre><code># Run all user-library tests
+cargo test -p volt-user
+
+# Run only tests whose names match a pattern
+cargo test -p volt-user user_library_exports
+
+# Exact match
+cargo test -p volt-user tests::user_library_exports_themes -- --exact</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Smoke-test the editor</h3>
+<pre><code># One-frame headless run — verifies startup does not panic
+cargo run -p volt -- --shell-hidden
+
+# Bootstrap demo — prints every registered package and subsystem summary
+cargo run -p volt -- --bootstrap-demo</code></pre>
+                        <p>
+                            The bootstrap demo output lists all packages, including your new
+                            <code>lang-&lt;id&gt;</code> entry.  Confirm it appears and that no
+                            panics or error messages are printed.
+                        </p>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Full CI validation</h3>
+<pre><code># Runs fmt-check, cargo check, clippy (-D warnings), and test
+cargo xtask ci</code></pre>
+                        <p>All four steps must pass before submitting a new language module.</p>
+                    </div>
+
+                    <h3 class="reveal">Checklist</h3>
+                    <ul class="reveal">
+                        <li><code>cargo build -p volt-user</code> succeeds with no warnings</li>
+                        <li><code>cargo test -p volt-user</code> passes all tests</li>
+                        <li>The new package name appears in <code>cargo run -p volt -- --bootstrap-demo</code></li>
+                        <li><code>cargo run -p volt -- --shell-hidden</code> exits cleanly (exit 0)</li>
+                        <li><code>cargo xtask ci</code> passes end-to-end</li>
+                    </ul>
+                </section>
+
+            </div>
+        </main>
+
+        <footer class="site-footer">
+            <p>
+                <strong>Volt</strong> pairs Vim-style editing with a layered Rust runtime, compiled
+                customization, and modern tooling integration.
+            </p>
+            <a href="#top">Back to top</a>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
