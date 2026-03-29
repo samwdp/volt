@@ -17,8 +17,11 @@ pub fn package() -> PluginPackage {
         "Attaches TypeScript and TSX language defaults to the active workspace.",
         vec![
             PluginAction::log_message("TypeScript language package attached."),
-            PluginAction::emit_hook("workspace.formatter.register", Some("typescript|prettier")),
-            PluginAction::emit_hook("workspace.formatter.register", Some("tsx|prettier")),
+            PluginAction::emit_hook(
+                "workspace.formatter.register",
+                Some("typescript|prettier|--write"),
+            ),
+            PluginAction::emit_hook("workspace.formatter.register", Some("tsx|prettier|--write")),
             PluginAction::emit_hook("lang.typescript.attached", Some("typescript")),
         ],
     )])

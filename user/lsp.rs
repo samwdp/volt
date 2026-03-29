@@ -16,6 +16,15 @@ pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SERVER_CSHARP_LS: &str = "csharp-ls";
 pub const SERVER_TYPESCRIPT_LANGUAGE_SERVER: &str = "typescript-language-server";
 pub const SERVER_VSCODE_JSON_LANGUAGE_SERVER: &str = "vscode-json-language-server";
+pub const SERVER_VSCODE_HTML_LANGUAGE_SERVER: &str = "vscode-html-language-server";
+pub const SERVER_VSCODE_CSS_LANGUAGE_SERVER: &str = "vscode-css-language-server";
+pub const SERVER_CLANGD: &str = "clangd";
+pub const SERVER_PYRIGHT_LANGSERVER: &str = "pyright-langserver";
+pub const SERVER_MAKEFILE_LANGUAGE_SERVER: &str = "makefile-language-server";
+pub const SERVER_ZLS: &str = "zls";
+pub const SERVER_GOPLS: &str = "gopls";
+pub const SERVER_SQLS: &str = "sqls";
+pub const SERVER_OLS: &str = "ols";
 pub const SERVER_TOMBI: &str = "tombi";
 pub const SERVER_YAML_LANGUAGE_SERVER: &str = "yaml-language-server";
 pub const SHOW_BUFFER_DIAGNOSTICS: bool = true;
@@ -101,6 +110,60 @@ pub fn package() -> PluginPackage {
             "Starts vscode-json-language-server for the active JSON file.",
             HOOK_LSP_START,
             Some(SERVER_VSCODE_JSON_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-vscode-html-language-server",
+            "Starts vscode-html-language-server for the active HTML file.",
+            HOOK_LSP_START,
+            Some(SERVER_VSCODE_HTML_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-vscode-css-language-server",
+            "Starts vscode-css-language-server for the active CSS or SCSS file.",
+            HOOK_LSP_START,
+            Some(SERVER_VSCODE_CSS_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-clangd",
+            "Starts clangd for the active C or C++ file.",
+            HOOK_LSP_START,
+            Some(SERVER_CLANGD),
+        ),
+        hook_command(
+            "lsp.start-pyright-langserver",
+            "Starts pyright-langserver for the active Python file.",
+            HOOK_LSP_START,
+            Some(SERVER_PYRIGHT_LANGSERVER),
+        ),
+        hook_command(
+            "lsp.start-makefile-language-server",
+            "Starts makefile-language-server for the active Make file.",
+            HOOK_LSP_START,
+            Some(SERVER_MAKEFILE_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-zls",
+            "Starts zls for the active Zig file.",
+            HOOK_LSP_START,
+            Some(SERVER_ZLS),
+        ),
+        hook_command(
+            "lsp.start-gopls",
+            "Starts gopls for the active Go file.",
+            HOOK_LSP_START,
+            Some(SERVER_GOPLS),
+        ),
+        hook_command(
+            "lsp.start-sqls",
+            "Starts sqls for the active SQL file.",
+            HOOK_LSP_START,
+            Some(SERVER_SQLS),
+        ),
+        hook_command(
+            "lsp.start-ols",
+            "Starts ols for the active Odin file.",
+            HOOK_LSP_START,
+            Some(SERVER_OLS),
         ),
         hook_command(
             "lsp.start-tombi",
@@ -199,6 +262,126 @@ pub fn package() -> PluginPackage {
         ),
         PluginHookBinding::new(
             "buffer.file-open",
+            "lsp.auto-start-html",
+            "lsp.start",
+            Some(".html"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-htm",
+            "lsp.start",
+            Some(".htm"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-css",
+            "lsp.start",
+            Some(".css"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-scss",
+            "lsp.start",
+            Some(".scss"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-c",
+            "lsp.start",
+            Some(".c"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-header",
+            "lsp.start",
+            Some(".h"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cc",
+            "lsp.start",
+            Some(".cc"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cpp",
+            "lsp.start",
+            Some(".cpp"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cxx",
+            "lsp.start",
+            Some(".cxx"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-hpp",
+            "lsp.start",
+            Some(".hpp"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-hh",
+            "lsp.start",
+            Some(".hh"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-hxx",
+            "lsp.start",
+            Some(".hxx"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-python",
+            "lsp.start",
+            Some(".py"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-mk",
+            "lsp.start",
+            Some(".mk"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-mak",
+            "lsp.start",
+            Some(".mak"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-make",
+            "lsp.start",
+            Some(".make"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-zig",
+            "lsp.start",
+            Some(".zig"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-go",
+            "lsp.start",
+            Some(".go"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sql",
+            "lsp.start",
+            Some(".sql"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-odin",
+            "lsp.start",
+            Some(".odin"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
             "lsp.auto-start-toml",
             "lsp.start",
             Some(".toml"),
@@ -277,6 +460,113 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "vscode-json-language-server",
             ["--stdio"],
         ),
+        LanguageServerSpec::new(
+            SERVER_VSCODE_HTML_LANGUAGE_SERVER,
+            "html",
+            ["html", "htm"],
+            "vscode-html-language-server",
+            ["--stdio"],
+        )
+        .with_root_markers([
+            "package.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lock",
+            ".git",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_VSCODE_CSS_LANGUAGE_SERVER,
+            "css",
+            ["css", "scss"],
+            "vscode-css-language-server",
+            ["--stdio"],
+        )
+        .with_document_language_ids([("scss", "scss")])
+        .with_root_markers([
+            "package.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lock",
+            ".git",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_CLANGD,
+            "cpp",
+            ["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+            "clangd",
+            std::iter::empty::<&str>(),
+        )
+        .with_document_language_ids([("c", "c"), ("h", "c")])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "compile_commands.json",
+            "compile_flags.txt",
+            ".clangd",
+            "CMakeLists.txt",
+            "meson.build",
+            "configure.ac",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_PYRIGHT_LANGSERVER,
+            "python",
+            ["py"],
+            "pyright-langserver",
+            ["--stdio"],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "pyproject.toml",
+            "pyrightconfig.json",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+            "Pipfile",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_MAKEFILE_LANGUAGE_SERVER,
+            "make",
+            ["mk", "mak", "make"],
+            "makefile-language-server",
+            ["--stdio"],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["Makefile", "GNUmakefile", "makefile"]),
+        LanguageServerSpec::new(
+            SERVER_ZLS,
+            "zig",
+            ["zig"],
+            "zls",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["zls.json", "build.zig", "build.zig.zon"]),
+        LanguageServerSpec::new(
+            SERVER_GOPLS,
+            "go",
+            ["go"],
+            "gopls",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["go.work", "go.mod", "go.sum"]),
+        LanguageServerSpec::new(
+            SERVER_SQLS,
+            "sql",
+            ["sql"],
+            "sqls",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([".sqls.json", ".sqls.yaml", ".sqls.yml"]),
+        LanguageServerSpec::new(
+            SERVER_OLS,
+            "odin",
+            ["odin"],
+            "ols",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["ols.json", "ols.toml"]),
         LanguageServerSpec::new(SERVER_TOMBI, "toml", ["toml"], "tombi", ["lsp"]),
         LanguageServerSpec::new(
             SERVER_YAML_LANGUAGE_SERVER,
@@ -316,14 +606,23 @@ mod tests {
 
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 14);
-        assert_eq!(package.hook_bindings().len(), 12);
-        assert_eq!(servers.len(), 7);
+        assert_eq!(package.commands().len(), 23);
+        assert_eq!(package.hook_bindings().len(), 32);
+        assert_eq!(servers.len(), 16);
         assert!(ids.contains(&SERVER_RUST_ANALYZER));
         assert!(ids.contains(&SERVER_MARKSMAN));
         assert!(ids.contains(&SERVER_CSHARP_LS));
         assert!(ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
         assert!(ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
+        assert!(ids.contains(&SERVER_VSCODE_HTML_LANGUAGE_SERVER));
+        assert!(ids.contains(&SERVER_VSCODE_CSS_LANGUAGE_SERVER));
+        assert!(ids.contains(&SERVER_CLANGD));
+        assert!(ids.contains(&SERVER_PYRIGHT_LANGSERVER));
+        assert!(ids.contains(&SERVER_MAKEFILE_LANGUAGE_SERVER));
+        assert!(ids.contains(&SERVER_ZLS));
+        assert!(ids.contains(&SERVER_GOPLS));
+        assert!(ids.contains(&SERVER_SQLS));
+        assert!(ids.contains(&SERVER_OLS));
         assert!(ids.contains(&SERVER_TOMBI));
         assert!(ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
 
@@ -383,6 +682,55 @@ mod tests {
             typescript.document_language_id_for_extension(".jsx"),
             "javascriptreact"
         );
+
+        let css = servers
+            .iter()
+            .find(|server| server.id() == SERVER_VSCODE_CSS_LANGUAGE_SERVER)
+            .expect("vscode-css-language-server missing");
+        assert_eq!(css.language_id(), "css");
+        assert_eq!(
+            css.file_extensions()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["css", "scss"]
+        );
+        assert_eq!(
+            css.args().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["--stdio"]
+        );
+        assert_eq!(css.document_language_id_for_extension(".css"), "css");
+        assert_eq!(css.document_language_id_for_extension(".scss"), "scss");
+
+        let clangd = servers
+            .iter()
+            .find(|server| server.id() == SERVER_CLANGD)
+            .expect("clangd missing");
+        assert_eq!(clangd.language_id(), "cpp");
+        assert!(
+            clangd.args().is_empty(),
+            "clangd now speaks stdio without a `--stdio` flag"
+        );
+        assert_eq!(clangd.document_language_id_for_extension(".c"), "c");
+        assert_eq!(clangd.document_language_id_for_extension(".h"), "c");
+        assert_eq!(clangd.document_language_id_for_extension(".cpp"), "cpp");
+
+        let python = servers
+            .iter()
+            .find(|server| server.id() == SERVER_PYRIGHT_LANGSERVER)
+            .expect("pyright-langserver missing");
+        assert_eq!(python.language_id(), "python");
+        assert_eq!(
+            python.args().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["--stdio"]
+        );
+
+        let go = servers
+            .iter()
+            .find(|server| server.id() == SERVER_GOPLS)
+            .expect("gopls missing");
+        assert_eq!(go.language_id(), "go");
+        assert!(go.args().is_empty());
 
         let yaml = servers
             .iter()

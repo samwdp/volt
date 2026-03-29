@@ -3,6 +3,8 @@ use editor_syntax::LanguageConfiguration;
 /// Git commit language support and theme mappings.
 /// C# language support and theme mappings.
 pub mod csharp;
+/// Additional bundled languages requested for tree-sitter, LSP, and formatter support.
+mod extra;
 /// Git commit language support and theme mappings.
 pub mod gitcommit;
 /// JavaScript language support and theme mappings.
@@ -26,7 +28,7 @@ mod web_queries;
 /// Adding a new language only requires creating `user/lang/newlang.rs` and
 /// adding `pub mod newlang;` + the two calls below — no changes to `user/lib.rs`.
 pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
-    vec![
+    let mut packages = vec![
         csharp::package(),
         javascript::package(),
         json::package(),
@@ -35,12 +37,14 @@ pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
         toml::package(),
         typescript::package(),
         yaml::package(),
-    ]
+    ];
+    packages.extend(extra::packages());
+    packages
 }
 
 /// Returns syntax languages compiled into the user library.
 pub fn syntax_languages() -> Vec<LanguageConfiguration> {
-    vec![
+    let mut languages = vec![
         csharp::syntax_language(),
         rust::syntax_language(),
         gitcommit::syntax_language(),
@@ -53,5 +57,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         typescript::syntax_language(),
         typescript::tsx_syntax_language(),
         yaml::syntax_language(),
-    ]
+    ];
+    languages.extend(extra::syntax_languages());
+    languages
 }

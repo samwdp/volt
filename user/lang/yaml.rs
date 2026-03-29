@@ -71,6 +71,10 @@ pub fn package() -> PluginPackage {
         "Attaches YAML language defaults to the active workspace.",
         vec![
             PluginAction::log_message("YAML language package attached."),
+            PluginAction::emit_hook(
+                "workspace.formatter.register",
+                Some("yaml|prettier|--write"),
+            ),
             PluginAction::emit_hook("lang.yaml.attached", Some("yaml")),
         ],
     )])
@@ -131,6 +135,14 @@ mod tests {
     fn package_auto_attaches_for_yaml_extensions() {
         let package = package();
         let bindings = package.hook_bindings();
+        let formatter_details = package
+            .commands()
+            .iter()
+            .flat_map(|command| command.actions())
+            .filter_map(|action| action.hook())
+            .filter(|hook| hook.hook_name() == "workspace.formatter.register")
+            .filter_map(|hook| hook.detail())
+            .collect::<Vec<_>>();
 
         assert!(
             bindings
@@ -142,6 +154,7 @@ mod tests {
                 .iter()
                 .any(|binding| binding.detail_filter() == Some(".yml"))
         );
+        assert_eq!(formatter_details, vec!["yaml|prettier|--write"]);
     }
 
     #[test]
