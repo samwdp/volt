@@ -310,17 +310,17 @@ mod tests {
         DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, discover_projects,
     };
 
-    fn temp_dir() -> PathBuf {
+    fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("volt-editor-fs-{unique}"))
+        std::env::temp_dir().join(format!("volt-editor-fs-{label}-{unique}"))
     }
 
     #[test]
     fn directory_buffer_reads_and_renames_entries() -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_dir();
+        let root = temp_dir("dirbuf");
         fs::create_dir_all(root.join("subdir"))?;
         fs::write(root.join("alpha.txt"), "alpha")?;
 
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn discover_projects_finds_git_repositories_and_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_dir();
+        let root = temp_dir("discover");
         let repo = root.join("repo");
         let worktree = root.join("trees").join("feature");
         fs::create_dir_all(repo.join(".git"))?;
