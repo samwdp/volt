@@ -2226,7 +2226,7 @@ impl PluginSectionBufferState {
                     .find_map(|(index, section)| (!section.writable()).then_some(index))
             })
             .unwrap_or_else(|| config.items().len().saturating_sub(1));
-        Self {
+        Some(Self {
             base_title: base.name().to_owned(),
             base_writable: base.writable(),
             base_min_rows: base.min_lines(),
@@ -2234,8 +2234,7 @@ impl PluginSectionBufferState {
             active_section: 0,
             evaluate_target_section,
             attached_sections,
-        }
-        .into()
+        })
     }
 
     fn section_count(&self) -> usize {
