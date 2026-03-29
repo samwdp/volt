@@ -188,6 +188,10 @@ PluginKeyBinding::new(
 )
 ```
 
+Chord strings use `Ctrl+`, `Shift+`, `Alt+` prefixes (e.g. `"Ctrl+Shift+h"`).
+The shorthand `C-` is equivalent to `Ctrl+` (so `"C-c C-c"` means press
+`Ctrl+c` twice).
+
 **Scopes** control when the binding is active:
 
 | Scope                        | When active                             |
