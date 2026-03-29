@@ -46,6 +46,92 @@
 - `cargo xtask test` - run workspace tests
 - `cargo xtask ci` - run formatting, check, clippy, and tests
 
+## Building locally
+
+### Build the Volt application
+
+To build the editor binary in debug mode:
+
+```bash
+cargo build -p volt
+```
+
+For a release build:
+
+```bash
+cargo build -p volt --release
+```
+
+The executable is written to `target/debug/volt` or `target/release/volt`
+(`volt.exe` on Windows).
+
+### Build the user shared library
+
+The compiled user customization layer lives in the `volt-user` crate and is built as both
+an `rlib` and a shared library.
+
+To build it in debug mode:
+
+```bash
+cargo build -p volt-user
+```
+
+For a release build:
+
+```bash
+cargo build -p volt-user --release
+```
+
+The shared library is written next to the `volt` binary:
+
+- Linux: `target/<profile>/libuser.so`
+- macOS: `target/<profile>/libuser.dylib`
+- Windows: `target/<profile>/user.dll`
+
+### Build the packaged local distribution
+
+To build the local bundle layout used by releases, build both crates together:
+
+```bash
+cargo build -p volt -p volt-user --release
+```
+
+After that, `target/release/` contains:
+
+- `volt` / `volt.exe`
+- the compiled user shared library
+- `assets/`
+- a copied `user/` tree that can be rebuilt standalone
+
+The `volt` binary now prefers the shared library that lives next to the executable, so the
+release-style rebuild workflow is:
+
+1. build `volt` and `volt-user`
+2. edit files under `user/`
+3. rebuild just the user library with `cargo build -p volt-user --release`
+4. replace the shared library next to `volt`
+
+If you want to rebuild the copied standalone user tree that was staged into the release folder,
+you can also run:
+
+```bash
+cd target/release/user
+cargo build --release -p volt-user
+```
+
+You can also point the binary at a specific user library with `VOLT_USER_LIBRARY=/path/to/libuser.so`
+(or the platform equivalent file name).
+
+### Linux native dependencies
+
+On Linux, building the SDL/browser-enabled application requires the GTK/WebKit development
+packages used in CI. If you hit `pkg-config` errors for `glib-2.0`, `gtk`, or `webkit2gtk`,
+install the same packages as the release workflow, for example:
+
+```bash
+sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+```
+
 ## Current status
 
 The repository now has a validated multi-crate foundation that covers the major architecture slices requested for the editor:
