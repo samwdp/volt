@@ -1,5 +1,7 @@
 #![doc = r#"Shared extension-facing types used by the core editor and the compiled user library."#]
 
+pub mod abi;
+
 use abi_stable::{
     StableAbi,
     std_types::{ROption, RString, RVec},
@@ -15,6 +17,17 @@ pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguratio
 pub use editor_theme::{Color, Theme, ThemeOption};
 
 pub use editor_icons::symbols;
+pub use abi::{
+    AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor,
+    AbiDebugAdapterSpec, AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry,
+    AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
+    AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
+    AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLspDiagnosticsInfo,
+    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSection,
+    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
+    AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry,
+    AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+};
 
 // ─── Protocol hook name constants ───────────────────────────────────────────
 //

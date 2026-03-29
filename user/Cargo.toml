@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 workspace = true
 
 [dependencies]
+abi_stable = "0.11"
 editor-core = { path = "../crates/editor-core" }
 editor-fs = { path = "../crates/editor-fs" }
 editor-git = { path = "../crates/editor-git" }

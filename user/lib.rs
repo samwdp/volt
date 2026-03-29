@@ -67,7 +67,21 @@ pub mod vim;
 pub mod workspace;
 
 use editor_plugin_api::PluginPackage;
-use editor_plugin_api::{DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme};
+use editor_plugin_api::{
+    DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme,
+    abi::{
+        AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
+        AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontSymbol,
+        AbiLanguageConfiguration, AbiLanguageServerSpec, AbiOilDefaults, AbiOilKeyAction,
+        AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext,
+        AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    },
+};
+use abi_stable::{
+    export_root_module,
+    prefix_type::PrefixTypeTrait,
+    std_types::{ROption, RStr, RString, RVec},
+};
 
 /// Returns the packages currently compiled into the user library.
 pub fn packages() -> Vec<PluginPackage> {
@@ -485,6 +499,368 @@ fn map_oil_key_action(action: oil::OilKeyAction) -> OilKeyAction {
     }
 }
 
+extern "C" fn exported_packages() -> RVec<PluginPackage> {
+    packages().into()
+}
+
+extern "C" fn exported_themes() -> RVec<AbiTheme> {
+    themes().into_iter().map(Into::into).collect::<Vec<_>>().into()
+}
+
+extern "C" fn exported_syntax_languages() -> RVec<AbiLanguageConfiguration> {
+    syntax_languages()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_language_servers() -> RVec<AbiLanguageServerSpec> {
+    language_servers()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_debug_adapters() -> RVec<AbiDebugAdapterSpec> {
+    debug_adapters()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_autocomplete_providers() -> RVec<AbiAutocompleteProvider> {
+    UserLibraryImpl
+        .autocomplete_providers()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_autocomplete_result_limit() -> usize {
+    UserLibraryImpl.autocomplete_result_limit()
+}
+
+extern "C" fn exported_autocomplete_token_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.autocomplete_token_icon())
+}
+
+extern "C" fn exported_hover_providers() -> RVec<AbiHoverProvider> {
+    UserLibraryImpl
+        .hover_providers()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_hover_line_limit() -> usize {
+    UserLibraryImpl.hover_line_limit()
+}
+
+extern "C" fn exported_hover_token_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.hover_token_icon())
+}
+
+extern "C" fn exported_hover_signature_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.hover_signature_icon())
+}
+
+extern "C" fn exported_acp_clients() -> RVec<AbiAcpClient> {
+    UserLibraryImpl
+        .acp_clients()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_acp_client_by_id(id: RString) -> ROption<AbiAcpClient> {
+    UserLibraryImpl
+        .acp_client_by_id(id.as_str())
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn exported_workspace_roots() -> RVec<AbiWorkspaceRoot> {
+    UserLibraryImpl
+        .workspace_roots()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_terminal_config() -> AbiTerminalConfig {
+    UserLibraryImpl.terminal_config().into()
+}
+
+extern "C" fn exported_oil_defaults() -> AbiOilDefaults {
+    UserLibraryImpl.oil_defaults().into()
+}
+
+extern "C" fn exported_oil_keybindings() -> AbiOilKeybindings {
+    UserLibraryImpl.oil_keybindings().into()
+}
+
+extern "C" fn exported_oil_keydown_action(chord: RString) -> ROption<AbiOilKeyAction> {
+    UserLibraryImpl
+        .oil_keydown_action(chord.as_str())
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn exported_oil_chord_action(
+    had_prefix: bool,
+    chord: RString,
+) -> ROption<AbiOilKeyAction> {
+    UserLibraryImpl
+        .oil_chord_action(had_prefix, chord.as_str())
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn exported_oil_help_lines() -> RVec<RString> {
+    UserLibraryImpl
+        .oil_help_lines()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<RString>>()
+        .into()
+}
+
+extern "C" fn exported_oil_directory_sections(
+    root: RString,
+    entries: RVec<AbiDirectoryEntry>,
+    show_hidden: bool,
+    sort_mode: AbiOilSortMode,
+    trash_enabled: bool,
+) -> AbiSectionTree {
+    let entries = entries.into_iter().map(Into::into).collect::<Vec<_>>();
+    UserLibraryImpl
+        .oil_directory_sections(
+            std::path::Path::new(root.as_str()),
+            &entries,
+            show_hidden,
+            sort_mode.into(),
+            trash_enabled,
+        )
+        .into()
+}
+
+extern "C" fn exported_oil_strip_entry_icon_prefix(label: RString) -> RString {
+    UserLibraryImpl
+        .oil_strip_entry_icon_prefix(label.as_str())
+        .to_owned()
+        .into()
+}
+
+extern "C" fn exported_git_status_sections(snapshot: AbiGitStatusSnapshot) -> AbiSectionTree {
+    UserLibraryImpl.git_status_sections(&snapshot.into()).into()
+}
+
+extern "C" fn exported_git_commit_template() -> RVec<RString> {
+    UserLibraryImpl
+        .git_commit_template()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<RString>>()
+        .into()
+}
+
+extern "C" fn exported_git_prefix_for_chord(chord: RString) -> ROption<AbiGitStatusPrefix> {
+    UserLibraryImpl
+        .git_prefix_for_chord(chord.as_str())
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn exported_git_command_for_chord(
+    prefix: ROption<AbiGitStatusPrefix>,
+    chord: RString,
+) -> ROption<RStr<'static>> {
+    UserLibraryImpl
+        .git_command_for_chord(prefix.into_option().map(Into::into), chord.as_str())
+        .map(RStr::from_str)
+        .into()
+}
+
+extern "C" fn exported_browser_buffer_lines(url: ROption<RString>) -> RVec<RString> {
+    let url = url.into_option();
+    UserLibraryImpl
+        .browser_buffer_lines(url.as_deref())
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<RString>>()
+        .into()
+}
+
+extern "C" fn exported_browser_input_hint(url: ROption<RString>) -> RString {
+    let url = url.into_option();
+    UserLibraryImpl
+        .browser_input_hint(url.as_deref())
+        .into()
+}
+
+extern "C" fn exported_browser_url_prompt() -> RString {
+    UserLibraryImpl.browser_url_prompt().into()
+}
+
+extern "C" fn exported_browser_url_placeholder() -> RString {
+    UserLibraryImpl.browser_url_placeholder().into()
+}
+
+extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RString {
+    let context = StatuslineContext {
+        vim_mode: context.vim_mode.as_str(),
+        recording_macro: context
+            .recording_macro
+            .into_option()
+            .and_then(char::from_u32),
+        workspace_name: context.workspace_name.as_str(),
+        buffer_name: context.buffer_name.as_str(),
+        buffer_modified: context.buffer_modified,
+        language_id: context.language_id.as_ref().into_option().map(|value| value.as_str()),
+        line: context.line,
+        column: context.column,
+        lsp_server: context.lsp_server.as_ref().into_option().map(|value| value.as_str()),
+        lsp_diagnostics: context.lsp_diagnostics.into_option().map(Into::into),
+        acp_connected: context.acp_connected,
+        git_branch: context.git_branch.as_ref().into_option().map(|value| value.as_str()),
+        git_added: context.git_added,
+        git_removed: context.git_removed,
+    };
+    UserLibraryImpl.statusline_render(&context).into()
+}
+
+extern "C" fn exported_statusline_lsp_connected_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.statusline_lsp_connected_icon())
+}
+
+extern "C" fn exported_statusline_lsp_error_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.statusline_lsp_error_icon())
+}
+
+extern "C" fn exported_statusline_lsp_warning_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.statusline_lsp_warning_icon())
+}
+
+extern "C" fn exported_lsp_diagnostic_icon() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.lsp_diagnostic_icon())
+}
+
+extern "C" fn exported_lsp_diagnostic_line_limit() -> usize {
+    UserLibraryImpl.lsp_diagnostic_line_limit()
+}
+
+extern "C" fn exported_lsp_show_buffer_diagnostics() -> bool {
+    UserLibraryImpl.lsp_show_buffer_diagnostics()
+}
+
+extern "C" fn exported_gitfringe_token_added() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.gitfringe_token_added())
+}
+
+extern "C" fn exported_gitfringe_token_modified() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.gitfringe_token_modified())
+}
+
+extern "C" fn exported_gitfringe_token_removed() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.gitfringe_token_removed())
+}
+
+extern "C" fn exported_gitfringe_symbol() -> RStr<'static> {
+    RStr::from_str(UserLibraryImpl.gitfringe_symbol())
+}
+
+extern "C" fn exported_icon_symbols() -> RVec<AbiIconFontSymbol> {
+    UserLibraryImpl
+        .icon_symbols()
+        .iter()
+        .copied()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+extern "C" fn exported_run_plugin_buffer_evaluator(
+    handler: RString,
+    input: RString,
+) -> RVec<RString> {
+    UserLibraryImpl
+        .run_plugin_buffer_evaluator(handler.as_str(), input.as_str())
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<RString>>()
+        .into()
+}
+
+extern "C" fn exported_default_build_command(language: RString) -> ROption<RString> {
+    UserLibraryImpl
+        .default_build_command(language.as_str())
+        .map(Into::into)
+        .into()
+}
+
+pub fn user_library_module() -> UserLibraryModuleRef {
+    UserLibraryModule {
+        packages: exported_packages,
+        themes: exported_themes,
+        syntax_languages: exported_syntax_languages,
+        language_servers: exported_language_servers,
+        debug_adapters: exported_debug_adapters,
+        autocomplete_providers: exported_autocomplete_providers,
+        autocomplete_result_limit: exported_autocomplete_result_limit,
+        autocomplete_token_icon: exported_autocomplete_token_icon,
+        hover_providers: exported_hover_providers,
+        hover_line_limit: exported_hover_line_limit,
+        hover_token_icon: exported_hover_token_icon,
+        hover_signature_icon: exported_hover_signature_icon,
+        acp_clients: exported_acp_clients,
+        acp_client_by_id: exported_acp_client_by_id,
+        workspace_roots: exported_workspace_roots,
+        terminal_config: exported_terminal_config,
+        oil_defaults: exported_oil_defaults,
+        oil_keybindings: exported_oil_keybindings,
+        oil_keydown_action: exported_oil_keydown_action,
+        oil_chord_action: exported_oil_chord_action,
+        oil_help_lines: exported_oil_help_lines,
+        oil_directory_sections: exported_oil_directory_sections,
+        oil_strip_entry_icon_prefix: exported_oil_strip_entry_icon_prefix,
+        git_status_sections: exported_git_status_sections,
+        git_commit_template: exported_git_commit_template,
+        git_prefix_for_chord: exported_git_prefix_for_chord,
+        git_command_for_chord: exported_git_command_for_chord,
+        browser_buffer_lines: exported_browser_buffer_lines,
+        browser_input_hint: exported_browser_input_hint,
+        browser_url_prompt: exported_browser_url_prompt,
+        browser_url_placeholder: exported_browser_url_placeholder,
+        statusline_render: exported_statusline_render,
+        statusline_lsp_connected_icon: exported_statusline_lsp_connected_icon,
+        statusline_lsp_error_icon: exported_statusline_lsp_error_icon,
+        statusline_lsp_warning_icon: exported_statusline_lsp_warning_icon,
+        lsp_diagnostic_icon: exported_lsp_diagnostic_icon,
+        lsp_diagnostic_line_limit: exported_lsp_diagnostic_line_limit,
+        lsp_show_buffer_diagnostics: exported_lsp_show_buffer_diagnostics,
+        gitfringe_token_added: exported_gitfringe_token_added,
+        gitfringe_token_modified: exported_gitfringe_token_modified,
+        gitfringe_token_removed: exported_gitfringe_token_removed,
+        gitfringe_symbol: exported_gitfringe_symbol,
+        icon_symbols: exported_icon_symbols,
+        run_plugin_buffer_evaluator: exported_run_plugin_buffer_evaluator,
+        default_build_command: exported_default_build_command,
+    }
+    .leak_into_prefix()
+}
+
+#[export_root_module]
+pub fn exported_user_library_module() -> UserLibraryModuleRef {
+    user_library_module()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -498,7 +874,7 @@ mod tests {
     use std::collections::BTreeSet;
     use editor_buffer::TextBuffer;
     use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
-    use editor_plugin_host::UserLibrary;
+    use editor_plugin_api::UserLibrary;
 
     fn mapped_theme_token<'a>(
         language: &'a LanguageConfiguration,
@@ -575,6 +951,14 @@ mod tests {
             library.handle_plugin_evaluate(calculator::CALCULATOR_KIND, "1 + 1"),
             vec!["2".to_owned()]
         );
+    }
+
+    #[test]
+    fn exported_user_library_module_matches_static_library() {
+        let module = super::user_library_module();
+        assert_eq!(module.packages()().len(), packages().len());
+        assert_eq!(module.themes()().len(), themes().len());
+        assert_eq!(module.language_servers()().len(), language_servers().len());
     }
 
     #[test]

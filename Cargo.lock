@@ -3250,14 +3250,17 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "volt"
 version = "0.1.0"
 dependencies = [
+ "abi_stable",
  "editor-buffer",
  "editor-core",
  "editor-dap",
  "editor-fs",
  "editor-git",
+ "editor-icons",
  "editor-jobs",
  "editor-lsp",
  "editor-picker",
+ "editor-plugin-api",
  "editor-plugin-host",
  "editor-sdl",
  "editor-syntax",
@@ -3271,6 +3274,7 @@ dependencies = [
 name = "volt-user"
 version = "0.1.0"
 dependencies = [
+ "abi_stable",
  "editor-buffer",
  "editor-core",
  "editor-fs",
