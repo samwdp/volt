@@ -108,7 +108,11 @@ pub struct DirectoryEntry {
 
 impl DirectoryEntry {
     /// Creates a new directory entry.
-    pub fn new(name: impl Into<String>, path: impl Into<PathBuf>, kind: DirectoryEntryKind) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        kind: DirectoryEntryKind,
+    ) -> Self {
         Self {
             name: name.into(),
             path: path.into(),

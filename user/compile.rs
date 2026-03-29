@@ -49,16 +49,8 @@ pub fn package() -> PluginPackage {
             ),
         ])
         .with_key_bindings(vec![
-            PluginKeyBinding::new(
-                "F5",
-                "workspace.compile",
-                PluginKeymapScope::Global,
-            ),
-            PluginKeyBinding::new(
-                "S-F5",
-                "workspace.recompile",
-                PluginKeymapScope::Global,
-            ),
+            PluginKeyBinding::new("F5", "workspace.compile", PluginKeymapScope::Global),
+            PluginKeyBinding::new("S-F5", "workspace.recompile", PluginKeymapScope::Global),
         ])
 }
 
@@ -114,7 +106,10 @@ pub fn parse_error_location(line: &str) -> Option<(String, u32, u32)> {
             let col_num = col_str
                 .trim()
                 .split_once(|c: char| !c.is_ascii_digit())
-                .map_or_else(|| col_str.trim().parse::<u32>().ok(), |(n, _)| n.parse().ok())
+                .map_or_else(
+                    || col_str.trim().parse::<u32>().ok(),
+                    |(n, _)| n.parse().ok(),
+                )
                 .unwrap_or(1);
             if !path.is_empty() && line_num > 0 {
                 return Some(((*path).to_owned(), line_num, col_num));
@@ -142,8 +137,16 @@ mod tests {
     #[test]
     fn compile_package_exports_compile_and_recompile_commands() {
         let pkg = package();
-        assert!(pkg.commands().iter().any(|c| c.name() == "workspace.compile"));
-        assert!(pkg.commands().iter().any(|c| c.name() == "workspace.recompile"));
+        assert!(
+            pkg.commands()
+                .iter()
+                .any(|c| c.name() == "workspace.compile")
+        );
+        assert!(
+            pkg.commands()
+                .iter()
+                .any(|c| c.name() == "workspace.recompile")
+        );
     }
 
     #[test]
@@ -155,9 +158,9 @@ mod tests {
             .find(|c| c.name() == "workspace.compile")
             .expect("workspace.compile must exist");
         assert!(
-            cmd.actions()
-                .iter()
-                .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::RUN_COMMAND)),
+            cmd.actions().iter().any(|a| a
+                .hook()
+                .is_some_and(|h| h.hook_name() == plugin_hooks::RUN_COMMAND)),
             "workspace.compile must emit plugin.run-command"
         );
     }
@@ -171,9 +174,9 @@ mod tests {
             .find(|c| c.name() == "workspace.recompile")
             .expect("workspace.recompile must exist");
         assert!(
-            cmd.actions()
-                .iter()
-                .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::RERUN_COMMAND)),
+            cmd.actions().iter().any(|a| a
+                .hook()
+                .is_some_and(|h| h.hook_name() == plugin_hooks::RERUN_COMMAND)),
             "workspace.recompile must emit plugin.rerun-command"
         );
     }

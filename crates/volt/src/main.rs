@@ -19,7 +19,9 @@ use editor_git::parse_status;
 use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_api::abi::{AbiDirectoryEntry, AbiGitStatusPrefix, AbiStatuslineContext, UserLibraryModuleRef};
+use editor_plugin_api::abi::{
+    AbiDirectoryEntry, AbiGitStatusPrefix, AbiStatuslineContext, UserLibraryModuleRef,
+};
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
@@ -84,8 +86,7 @@ struct DynamicUserLibrary {
 
 impl DynamicUserLibrary {
     fn new(module: UserLibraryModuleRef) -> Self {
-        let icon_symbols = module
-            .icon_symbols()()
+        let icon_symbols = module.icon_symbols()()
             .into_iter()
             .map(editor_icons::IconFontSymbol::from)
             .collect::<Vec<_>>()
@@ -107,32 +108,28 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn syntax_languages(&self) -> Vec<editor_syntax::LanguageConfiguration> {
-        self.module
-            .syntax_languages()()
+        self.module.syntax_languages()()
             .into_iter()
             .map(Into::into)
             .collect()
     }
 
     fn language_servers(&self) -> Vec<editor_lsp::LanguageServerSpec> {
-        self.module
-            .language_servers()()
+        self.module.language_servers()()
             .into_iter()
             .map(Into::into)
             .collect()
     }
 
     fn debug_adapters(&self) -> Vec<editor_dap::DebugAdapterSpec> {
-        self.module
-            .debug_adapters()()
+        self.module.debug_adapters()()
             .into_iter()
             .map(Into::into)
             .collect()
     }
 
     fn autocomplete_providers(&self) -> Vec<editor_plugin_api::AutocompleteProvider> {
-        self.module
-            .autocomplete_providers()()
+        self.module.autocomplete_providers()()
             .into_iter()
             .map(Into::into)
             .collect()
@@ -147,8 +144,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn hover_providers(&self) -> Vec<editor_plugin_api::HoverProvider> {
-        self.module
-            .hover_providers()()
+        self.module.hover_providers()()
             .into_iter()
             .map(Into::into)
             .collect()
@@ -167,19 +163,20 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
-        self.module.acp_clients()().into_iter().map(Into::into).collect()
+        self.module.acp_clients()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     fn acp_client_by_id(&self, id: &str) -> Option<editor_plugin_api::AcpClient> {
-        self.module
-            .acp_client_by_id()(id.to_owned().into())
+        self.module.acp_client_by_id()(id.to_owned().into())
             .into_option()
             .map(Into::into)
     }
 
     fn workspace_roots(&self) -> Vec<editor_plugin_api::WorkspaceRoot> {
-        self.module
-            .workspace_roots()()
+        self.module.workspace_roots()()
             .into_iter()
             .map(Into::into)
             .collect()
@@ -198,8 +195,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn oil_keydown_action(&self, chord: &str) -> Option<editor_plugin_api::OilKeyAction> {
-        self.module
-            .oil_keydown_action()(chord.to_owned().into())
+        self.module.oil_keydown_action()(chord.to_owned().into())
             .into_option()
             .map(Into::into)
     }
@@ -209,15 +205,13 @@ impl UserLibrary for DynamicUserLibrary {
         had_prefix: bool,
         chord: &str,
     ) -> Option<editor_plugin_api::OilKeyAction> {
-        self.module
-            .oil_chord_action()(had_prefix, chord.to_owned().into())
+        self.module.oil_chord_action()(had_prefix, chord.to_owned().into())
             .into_option()
             .map(Into::into)
     }
 
     fn oil_help_lines(&self) -> Vec<String> {
-        self.module
-            .oil_help_lines()()
+        self.module.oil_help_lines()()
             .into_iter()
             .map(|line| line.into_string())
             .collect()
@@ -236,21 +230,18 @@ impl UserLibrary for DynamicUserLibrary {
             .cloned()
             .map(AbiDirectoryEntry::from)
             .collect::<Vec<_>>();
-        self.module
-            .oil_directory_sections()(
-                root.to_string_lossy().into_owned().into(),
-                entries.into(),
-                show_hidden,
-                sort_mode.into(),
-                trash_enabled,
-            )
-            .into()
+        self.module.oil_directory_sections()(
+            root.to_string_lossy().into_owned().into(),
+            entries.into(),
+            show_hidden,
+            sort_mode.into(),
+            trash_enabled,
+        )
+        .into()
     }
 
     fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
-        let stripped = self
-            .module
-            .oil_strip_entry_icon_prefix()(label.to_owned().into());
+        let stripped = self.module.oil_strip_entry_icon_prefix()(label.to_owned().into());
         if stripped.as_str() == label {
             label
         } else {
@@ -261,21 +252,22 @@ impl UserLibrary for DynamicUserLibrary {
         }
     }
 
-    fn git_status_sections(&self, snapshot: &editor_git::GitStatusSnapshot) -> editor_core::SectionTree {
+    fn git_status_sections(
+        &self,
+        snapshot: &editor_git::GitStatusSnapshot,
+    ) -> editor_core::SectionTree {
         self.module.git_status_sections()(snapshot.clone().into()).into()
     }
 
     fn git_commit_template(&self) -> Vec<String> {
-        self.module
-            .git_commit_template()()
+        self.module.git_commit_template()()
             .into_iter()
             .map(|line| line.into_string())
             .collect()
     }
 
     fn git_prefix_for_chord(&self, chord: &str) -> Option<editor_plugin_api::GitStatusPrefix> {
-        self.module
-            .git_prefix_for_chord()(chord.to_owned().into())
+        self.module.git_prefix_for_chord()(chord.to_owned().into())
             .into_option()
             .map(Into::into)
     }
@@ -285,20 +277,17 @@ impl UserLibrary for DynamicUserLibrary {
         prefix: Option<editor_plugin_api::GitStatusPrefix>,
         chord: &str,
     ) -> Option<&'static str> {
-        let command = self
-            .module
-            .git_command_for_chord()(
-                prefix.map(AbiGitStatusPrefix::from).into(),
-                chord.to_owned().into(),
-            )
-            .into_option();
+        let command = self.module.git_command_for_chord()(
+            prefix.map(AbiGitStatusPrefix::from).into(),
+            chord.to_owned().into(),
+        )
+        .into_option();
         command.map(|command| command.as_str())
     }
 
     fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String> {
         let url = url.map(|value| value.to_owned().into());
-        self.module
-            .browser_buffer_lines()(url.into())
+        self.module.browser_buffer_lines()(url.into())
             .into_iter()
             .map(|line| line.into_string())
             .collect()
@@ -306,9 +295,7 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn browser_input_hint(&self, url: Option<&str>) -> String {
         let url = url.map(|value| value.to_owned().into());
-        self.module
-            .browser_input_hint()(url.into())
-            .into()
+        self.module.browser_input_hint()(url.into()).into()
     }
 
     fn browser_url_prompt(&self) -> String {
@@ -320,9 +307,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
-        self.module
-            .statusline_render()(AbiStatuslineContext::from(*context))
-            .into()
+        self.module.statusline_render()(AbiStatuslineContext::from(*context)).into()
     }
 
     fn statusline_lsp_connected_icon(&self) -> &'static str {
@@ -370,16 +355,17 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
-        self.module
-            .run_plugin_buffer_evaluator()(handler.to_owned().into(), input.to_owned().into())
-            .into_iter()
-            .map(|line| line.into_string())
-            .collect()
+        self.module.run_plugin_buffer_evaluator()(
+            handler.to_owned().into(),
+            input.to_owned().into(),
+        )
+        .into_iter()
+        .map(|line| line.into_string())
+        .collect()
     }
 
     fn default_build_command(&self, language: &str) -> Option<String> {
-        self.module
-            .default_build_command()(language.to_owned().into())
+        self.module.default_build_command()(language.to_owned().into())
             .into_option()
             .map(|command| command.into_string())
     }
