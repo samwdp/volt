@@ -66,6 +66,11 @@ pub mod vim;
 /// Workspace creation and project discovery.
 pub mod workspace;
 
+use abi_stable::{
+    export_root_module,
+    prefix_type::PrefixTypeTrait,
+    std_types::{ROption, RStr, RString, RVec},
+};
 use editor_plugin_api::PluginPackage;
 use editor_plugin_api::{
     DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme,
@@ -73,14 +78,9 @@ use editor_plugin_api::{
         AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
         AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontSymbol,
         AbiLanguageConfiguration, AbiLanguageServerSpec, AbiOilDefaults, AbiOilKeyAction,
-        AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext,
-        AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig,
+        AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
     },
-};
-use abi_stable::{
-    export_root_module,
-    prefix_type::PrefixTypeTrait,
-    std_types::{ROption, RStr, RString, RVec},
 };
 
 /// Returns the packages currently compiled into the user library.
@@ -321,9 +321,7 @@ impl UserLibrary for UserLibraryImpl {
     ) -> editor_core::SectionTree {
         let user_sort = match sort_mode {
             editor_plugin_api::OilSortMode::TypeThenName => oil::OilSortMode::TypeThenName,
-            editor_plugin_api::OilSortMode::TypeThenNameDesc => {
-                oil::OilSortMode::TypeThenNameDesc
-            }
+            editor_plugin_api::OilSortMode::TypeThenNameDesc => oil::OilSortMode::TypeThenNameDesc,
         };
         oil::directory_sections(root, entries, show_hidden, user_sort, trash_enabled)
     }
@@ -332,7 +330,10 @@ impl UserLibrary for UserLibraryImpl {
         oil::strip_entry_icon_prefix(label)
     }
 
-    fn git_status_sections(&self, snapshot: &editor_git::GitStatusSnapshot) -> editor_core::SectionTree {
+    fn git_status_sections(
+        &self,
+        snapshot: &editor_git::GitStatusSnapshot,
+    ) -> editor_core::SectionTree {
         git::status_sections(snapshot)
     }
 
@@ -408,16 +409,20 @@ impl UserLibrary for UserLibraryImpl {
             line: context.line,
             column: context.column,
             lsp_server: context.lsp_server,
-            lsp_diagnostics: context.lsp_diagnostics.map(|d| statusline::LspDiagnosticsInfo {
-                errors: d.errors,
-                warnings: d.warnings,
-            }),
+            lsp_diagnostics: context
+                .lsp_diagnostics
+                .map(|d| statusline::LspDiagnosticsInfo {
+                    errors: d.errors,
+                    warnings: d.warnings,
+                }),
             acp_connected: context.acp_connected,
-            git: context.git_branch.map(|branch| statusline::GitStatuslineInfo {
-                branch,
-                added: context.git_added,
-                removed: context.git_removed,
-            }),
+            git: context
+                .git_branch
+                .map(|branch| statusline::GitStatuslineInfo {
+                    branch,
+                    added: context.git_added,
+                    removed: context.git_removed,
+                }),
         })
     }
 
@@ -468,7 +473,9 @@ impl UserLibrary for UserLibraryImpl {
     fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
         match handler {
             calculator::EVALUATE_HANDLER => calculator::evaluate(input),
-            _ => vec![format!("no plugin buffer evaluator registered for `{handler}`")],
+            _ => vec![format!(
+                "no plugin buffer evaluator registered for `{handler}`"
+            )],
         }
     }
 
@@ -504,7 +511,11 @@ extern "C" fn exported_packages() -> RVec<PluginPackage> {
 }
 
 extern "C" fn exported_themes() -> RVec<AbiTheme> {
-    themes().into_iter().map(Into::into).collect::<Vec<_>>().into()
+    themes()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
 }
 
 extern "C" fn exported_syntax_languages() -> RVec<AbiLanguageConfiguration> {
@@ -700,9 +711,7 @@ extern "C" fn exported_browser_buffer_lines(url: ROption<RString>) -> RVec<RStri
 
 extern "C" fn exported_browser_input_hint(url: ROption<RString>) -> RString {
     let url = url.into_option();
-    UserLibraryImpl
-        .browser_input_hint(url.as_deref())
-        .into()
+    UserLibraryImpl.browser_input_hint(url.as_deref()).into()
 }
 
 extern "C" fn exported_browser_url_prompt() -> RString {
@@ -723,13 +732,25 @@ extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RStri
         workspace_name: context.workspace_name.as_str(),
         buffer_name: context.buffer_name.as_str(),
         buffer_modified: context.buffer_modified,
-        language_id: context.language_id.as_ref().into_option().map(|value| value.as_str()),
+        language_id: context
+            .language_id
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
         line: context.line,
         column: context.column,
-        lsp_server: context.lsp_server.as_ref().into_option().map(|value| value.as_str()),
+        lsp_server: context
+            .lsp_server
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
         lsp_diagnostics: context.lsp_diagnostics.into_option().map(Into::into),
         acp_connected: context.acp_connected,
-        git_branch: context.git_branch.as_ref().into_option().map(|value| value.as_str()),
+        git_branch: context
+            .git_branch
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
         git_added: context.git_added,
         git_removed: context.git_removed,
     };
@@ -861,20 +882,21 @@ pub fn exported_user_library_module() -> UserLibraryModuleRef {
     user_library_module()
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{UserLibraryImpl, debug_adapters, language_servers, packages, syntax_languages, themes};
+    use super::{
+        UserLibraryImpl, debug_adapters, language_servers, packages, syntax_languages, themes,
+    };
+    use crate::calculator;
     use crate::lsp::{
         SERVER_CSHARP_LS, SERVER_MARKSMAN, SERVER_RUST_ANALYZER, SERVER_TOMBI,
         SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
         SERVER_YAML_LANGUAGE_SERVER,
     };
-    use crate::calculator;
-    use std::collections::BTreeSet;
     use editor_buffer::TextBuffer;
-    use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
     use editor_plugin_api::UserLibrary;
+    use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
+    use std::collections::BTreeSet;
 
     fn mapped_theme_token<'a>(
         language: &'a LanguageConfiguration,

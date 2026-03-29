@@ -60,12 +60,13 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
-    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, PluginBufferSections,
-    autocomplete_hooks, browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks,
-    git_sections, hover_hooks, lsp_hooks, oil_hooks, oil_protocol,
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction,
+    PluginBufferSections, autocomplete_hooks, browser_hooks, buffer_kinds, git_actions, git_hooks,
+    git_sections, hover_hooks, lsp_hooks, oil_hooks, oil_protocol, plugin_hooks,
 };
 use editor_plugin_host::{
-    NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages,
+    NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
+    load_auto_loaded_packages,
 };
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
@@ -2437,13 +2438,9 @@ impl PlainTextPaneState {
 
     fn row_count_for_line(&self, line_index: usize) -> usize {
         let line = self.text.line(line_index).unwrap_or_default();
-        wrap_line_segments(
-            &LineCharMap::new(&line),
-            self.wrap_cols(),
-            self.wrap_cols(),
-        )
-        .len()
-        .max(1)
+        wrap_line_segments(&LineCharMap::new(&line), self.wrap_cols(), self.wrap_cols())
+            .len()
+            .max(1)
     }
 
     fn max_scroll_row_for(&self, visible_rows: usize) -> usize {
@@ -2531,11 +2528,8 @@ impl PlainTextPaneState {
             offset = offset.saturating_add(self.row_count_for_line(line_index));
         }
         let line = self.text.line(cursor.line).unwrap_or_default();
-        let segments = wrap_line_segments(
-            &LineCharMap::new(&line),
-            self.wrap_cols(),
-            self.wrap_cols(),
-        );
+        let segments =
+            wrap_line_segments(&LineCharMap::new(&line), self.wrap_cols(), self.wrap_cols());
         offset.saturating_add(segment_index_for_column(&segments, cursor.column))
     }
 
@@ -2719,11 +2713,7 @@ impl ShellBuffer {
         }
     }
 
-    fn from_text_buffer(
-        buffer: &Buffer,
-        text: TextBuffer,
-        user_library: &dyn UserLibrary,
-    ) -> Self {
+    fn from_text_buffer(buffer: &Buffer, text: TextBuffer, user_library: &dyn UserLibrary) -> Self {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
@@ -2848,11 +2838,15 @@ impl ShellBuffer {
     }
 
     fn plugin_section_active_pane(&self) -> Option<PluginSectionPane> {
-        self.plugin_section_state.as_ref().map(|state| state.active_pane)
+        self.plugin_section_state
+            .as_ref()
+            .map(|state| state.active_pane)
     }
 
     fn plugin_output_pane_state(&self) -> Option<&PlainTextPaneState> {
-        self.plugin_section_state.as_ref().map(|state| &state.output_pane)
+        self.plugin_section_state
+            .as_ref()
+            .map(|state| &state.output_pane)
     }
 
     fn plugin_output_pane_state_mut(&mut self) -> Option<&mut PlainTextPaneState> {
@@ -4255,9 +4249,10 @@ impl ShellBuffer {
         };
         self.viewport_lines = section_layout.input.visible_rows.max(1);
         if let Some(state) = self.plugin_section_state.as_mut() {
-            state
-                .output_pane
-                .set_view_metrics(section_layout.output.visible_rows, section_layout.output.wrap_cols);
+            state.output_pane.set_view_metrics(
+                section_layout.output.visible_rows,
+                section_layout.output.wrap_cols,
+            );
         }
     }
 
@@ -4468,10 +4463,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
         match item {
             AcpOutputItem::UserPrompt(prompt) => {
                 let prefix = vec![
-                    acp_icon_segment(
-                        editor_icons::symbols::cod::COD_PERSON,
-                        AcpColorRole::Accent,
-                    ),
+                    acp_icon_segment(editor_icons::symbols::cod::COD_PERSON, AcpColorRole::Accent),
                     acp_text_segment(" ", AcpColorRole::Default),
                 ];
                 lines.extend(acp_multiline_text_lines(
@@ -5704,8 +5696,12 @@ impl ShellUiState {
             return &mut self.buffers[index];
         }
 
-        self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
+        self.buffers.push(ShellBuffer::placeholder(
+            buffer_id,
+            name,
+            kind,
+            user_library,
+        ));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -5725,8 +5721,12 @@ impl ShellUiState {
             return &mut self.buffers[index];
         }
 
-        self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
+        self.buffers.push(ShellBuffer::placeholder(
+            buffer_id,
+            name,
+            kind,
+            user_library,
+        ));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -6472,11 +6472,7 @@ impl ShellState {
                 ShellError::Runtime("notes buffer missing after bootstrap".to_owned())
             })?;
             (
-                ShellBuffer::from_runtime_buffer(
-                    scratch,
-                    initial_scratch_lines(),
-                    &*user_library,
-                ),
+                ShellBuffer::from_runtime_buffer(scratch, initial_scratch_lines(), &*user_library),
                 ShellBuffer::from_runtime_buffer(notes, initial_notes_lines(), &*user_library),
                 pane_id,
             )
@@ -6485,7 +6481,12 @@ impl ShellState {
         let mut ui_state =
             ShellUiState::new(workspace_id, primary_pane_id, scratch, notes, notes_id);
         ui_state
-            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics, &*user_library)
+            .ensure_buffer(
+                errors_id,
+                "*errors*",
+                BufferKind::Diagnostics,
+                &*user_library,
+            )
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
 
@@ -8165,8 +8166,7 @@ impl ShellState {
                 && active_buffer.is_compilation
                 && chord == "<CR>"
             {
-                jump_to_compilation_error(&mut self.runtime)
-                    .map_err(ShellError::Runtime)?;
+                jump_to_compilation_error(&mut self.runtime).map_err(ShellError::Runtime)?;
                 self.ui_mut()?.vim_mut().clear_transient();
                 return Ok(());
             }
@@ -8812,10 +8812,7 @@ impl ShellState {
         if !picker_visible
             && !in_text_insert_mode
             && hover_visible
-            && matches!(
-                chord.as_str(),
-                HOVER_NEXT_CHORD | HOVER_PREVIOUS_CHORD
-            )
+            && matches!(chord.as_str(), HOVER_NEXT_CHORD | HOVER_PREVIOUS_CHORD)
             && self
                 .runtime
                 .keymaps()
@@ -10281,18 +10278,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_RUN_COMMAND,
             "shell.plugin-run-command",
-            |event, runtime| {
-                open_compile_buffer(runtime, event.detail.as_deref())
-            },
+            |event, runtime| open_compile_buffer(runtime, event.detail.as_deref()),
         )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
             HOOK_PLUGIN_RERUN_COMMAND,
             "shell.plugin-rerun-command",
-            |_, runtime| {
-                rerun_compile_command(runtime)
-            },
+            |_, runtime| rerun_compile_command(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -11845,8 +11838,13 @@ fn ensure_lsp_log_buffer(
     {
         let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics, &*user_library)
-            .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
+        ui.ensure_buffer(
+            buffer_id,
+            &buffer_name,
+            BufferKind::Diagnostics,
+            &*user_library,
+        )
+        .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
     }
     runtime
         .services_mut()
@@ -13371,10 +13369,7 @@ fn hover_diagnostic_provider_lines(
             if source.is_empty() {
                 format!("{diagnostic_icon} {}", diagnostic.message())
             } else {
-                format!(
-                    "{diagnostic_icon} {} ({source})",
-                    diagnostic.message()
-                )
+                format!("{diagnostic_icon} {} ({source})", diagnostic.message())
             }
         })
         .collect::<Vec<_>>();
@@ -13438,9 +13433,7 @@ const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
     }
 }
 
-fn statusline_lsp_diagnostics(
-    diagnostics: &[LspDiagnostic],
-) -> Option<PluginLspDiagnosticsInfo> {
+fn statusline_lsp_diagnostics(diagnostics: &[LspDiagnostic]) -> Option<PluginLspDiagnosticsInfo> {
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for diagnostic in diagnostics {
@@ -13450,8 +13443,7 @@ fn statusline_lsp_diagnostics(
             LspDiagnosticSeverity::Information => {}
         }
     }
-    (errors > 0 || warnings > 0)
-        .then_some(PluginLspDiagnosticsInfo { errors, warnings })
+    (errors > 0 || warnings > 0).then_some(PluginLspDiagnosticsInfo { errors, warnings })
 }
 
 fn diagnostic_line_spans_for_diagnostics(
@@ -16725,7 +16717,12 @@ fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resu
         (buffer.name().to_owned(), buffer.kind().clone())
     };
     let user_library = shell_user_library(runtime);
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind, &*user_library);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(
+        buffer_id,
+        &buffer_name,
+        buffer_kind,
+        &*user_library,
+    );
     Ok(())
 }
 
@@ -16922,7 +16919,12 @@ fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), 
     {
         let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory, &*user_library);
+        ui.ensure_buffer(
+            buffer_id,
+            OIL_BUFFER_NAME,
+            BufferKind::Directory,
+            &*user_library,
+        );
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
     }
@@ -17056,14 +17058,15 @@ fn apply_directory_state(
         .map(|state| state.collapsed.clone())
         .unwrap_or_default();
     let user_library = shell_user_library(runtime);
-    let lines = user_library.oil_directory_sections(
-        &state.root,
-        &entries,
-        state.show_hidden,
-        state.sort_mode,
-        state.trash_enabled,
-    )
-    .render_lines(&collapsed);
+    let lines = user_library
+        .oil_directory_sections(
+            &state.root,
+            &entries,
+            state.show_hidden,
+            state.sort_mode,
+            state.trash_enabled,
+        )
+        .render_lines(&collapsed);
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     {
         let section_state = buffer.ensure_section_state();
@@ -17201,16 +17204,16 @@ fn parse_directory_line(
 
 #[cfg(test)]
 mod directory_line_tests {
-    use editor_plugin_host::NullUserLibrary;
     use super::parse_directory_line;
+    use editor_plugin_host::NullUserLibrary;
     use std::path::PathBuf;
 
     #[test]
     fn parse_directory_line_strips_file_icons() {
         let line = format!("{} Cargo.toml", editor_icons::symbols::seti::CUSTOM_TOML);
         let user_library = NullUserLibrary;
-        let parsed =
-            parse_directory_line(&line, &user_library).expect("icon-prefixed file line should parse");
+        let parsed = parse_directory_line(&line, &user_library)
+            .expect("icon-prefixed file line should parse");
         assert_eq!(parsed.label, "Cargo.toml");
         assert_eq!(parsed.rel_path, PathBuf::from("Cargo.toml"));
         assert!(!parsed.is_dir);
@@ -17755,12 +17758,7 @@ fn evaluate_active_plugin_buffer(
             let all_lines: Vec<String> = (0..line_count)
                 .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
                 .collect();
-            (
-                all_lines,
-                String::new(),
-                kind_str,
-                true,
-            )
+            (all_lines, String::new(), kind_str, true)
         } else {
             let line_count = buffer.text.line_count();
             let all_lines: Vec<String> = (0..line_count)
@@ -17775,11 +17773,7 @@ fn evaluate_active_plugin_buffer(
                 (input, sep, kind_str, false)
             } else {
                 // No separator — treat everything as input; add a fresh separator.
-                let sep = format!(
-                    "{} {}",
-                    PLUGIN_EVALUATE_SEPARATOR_PREFIX,
-                    "─".repeat(48)
-                );
+                let sep = format!("{} {}", PLUGIN_EVALUATE_SEPARATOR_PREFIX, "─".repeat(48));
                 (all_lines, sep, kind_str, false)
             }
         }
@@ -17809,7 +17803,10 @@ fn switch_active_plugin_pane(runtime: &mut EditorRuntime) -> Result<(), String> 
     let switched_to_output = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         if buffer.plugin_switch_pane() {
-            matches!(buffer.plugin_section_active_pane(), Some(PluginSectionPane::Output))
+            matches!(
+                buffer.plugin_section_active_pane(),
+                Some(PluginSectionPane::Output)
+            )
         } else {
             return acp::acp_switch_pane(runtime);
         }
@@ -17850,14 +17847,12 @@ fn open_compile_buffer(
     let buf_name = compile_buffer_name(&workspace_name);
 
     // Reuse an existing buffer if present.
-    let existing = shell_ui(runtime)
-        .ok()
-        .and_then(|ui| {
-            ui.buffers
-                .iter()
-                .find(|b| b.display_name() == buf_name)
-                .map(|b| b.id())
-        });
+    let existing = shell_ui(runtime).ok().and_then(|ui| {
+        ui.buffers
+            .iter()
+            .find(|b| b.display_name() == buf_name)
+            .map(|b| b.id())
+    });
 
     let buffer_id = if let Some(existing) = existing {
         runtime
@@ -17900,12 +17895,13 @@ fn open_compile_buffer(
     let stored = shell_ui(runtime)
         .ok()
         .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
-    if let Some(cmd) = stored {
-        if let Some(buf) = shell_ui_mut(runtime).ok().and_then(|ui| ui.buffer_mut(buffer_id)) {
-            if let Some(input) = buf.input_field_mut() {
-                input.set_text(&cmd);
-            }
-        }
+    if let Some(cmd) = stored
+        && let Some(buf) = shell_ui_mut(runtime)
+            .ok()
+            .and_then(|ui| ui.buffer_mut(buffer_id))
+        && let Some(input) = buf.input_field_mut()
+    {
+        input.set_text(&cmd);
     }
 
     Ok(())
@@ -17929,14 +17925,12 @@ fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
             .name()
             .to_owned();
         let buf_name = compile_buffer_name(&workspace_name);
-        let buf_id = shell_ui(runtime)
-            .ok()
-            .and_then(|ui| {
-                ui.buffers
-                    .iter()
-                    .find(|b| b.display_name() == buf_name)
-                    .map(|b| b.id())
-            });
+        let buf_id = shell_ui(runtime).ok().and_then(|ui| {
+            ui.buffers
+                .iter()
+                .find(|b| b.display_name() == buf_name)
+                .map(|b| b.id())
+        });
         if let Some(buffer_id) = buf_id {
             run_compile_command_in_buffer(runtime, buffer_id, &cmd)
         } else {
@@ -17982,10 +17976,7 @@ fn run_compile_command_in_buffer(
     // Write header to buffer.
     {
         let buf = shell_buffer_mut(runtime, buffer_id)?;
-        buf.append_output_lines(&[
-            format!("$ {command}"),
-            String::new(),
-        ]);
+        buf.append_output_lines(&[format!("$ {command}"), String::new()]);
         buf.clear_input();
     }
 
@@ -17995,7 +17986,9 @@ fn run_compile_command_in_buffer(
         .services()
         .get::<Mutex<JobManager>>()
         .ok_or_else(|| "job manager service missing".to_owned())?;
-    let mut manager = manager.lock().map_err(|_| "job manager lock poisoned".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
     let handle = manager.spawn(spec).map_err(|e| e.to_string())?;
     drop(manager);
     let result = handle.wait().map_err(|e| e.to_string())?;
@@ -20718,9 +20711,8 @@ fn terminal_spawn_config(
 ) -> Result<LiveTerminalConfig, String> {
     let title = shell_buffer(runtime, buffer_id)?.display_name().to_owned();
     let terminal_config = shell_user_library(runtime).terminal_config();
-    let mut config =
-        LiveTerminalConfig::new(title, terminal_config.program, terminal_config.args)
-            .with_size(rows, cols);
+    let mut config = LiveTerminalConfig::new(title, terminal_config.program, terminal_config.args)
+        .with_size(rows, cols);
     if let Some(cwd) = terminal_working_dir(runtime)? {
         config = config.with_cwd(cwd);
     }
@@ -21563,7 +21555,12 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     {
         let user_library = shell_user_library(runtime);
-        shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics, &*user_library);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(
+            buffer_id,
+            "*popup*",
+            BufferKind::Diagnostics,
+            &*user_library,
+        );
     }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
@@ -23040,7 +23037,12 @@ fn update_error_buffer(
 ) -> Result<(), String> {
     let user_library = shell_user_library(runtime);
     let ui = shell_ui_mut(runtime)?;
-    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics, &*user_library);
+    let buffer = ui.ensure_buffer(
+        buffer_id,
+        "*errors*",
+        BufferKind::Diagnostics,
+        &*user_library,
+    );
     buffer.replace_with_lines(lines);
     Ok(())
 }
@@ -23459,22 +23461,22 @@ fn render_shell_state(
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
-        render_buffer(
-            target,
-            fonts,
-            buffer,
-            PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
-            active,
-            visual_range,
-            yank_flash,
-            input_mode,
-            state.vim().recording_macro,
-            user_library,
-            workspace_name,
-            lsp_server,
-            lsp_workspace_loaded,
-            acp_connected,
-            git_summary.as_ref(),
+            render_buffer(
+                target,
+                fonts,
+                buffer,
+                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                active,
+                visual_range,
+                yank_flash,
+                input_mode,
+                state.vim().recording_macro,
+                user_library,
+                workspace_name,
+                lsp_server,
+                lsp_workspace_loaded,
+                acp_connected,
+                git_summary.as_ref(),
                 theme_registry,
                 cell_width,
                 line_height,
@@ -23830,8 +23832,7 @@ fn render_autocomplete_overlay(
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
     let result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
-        .clamp(4, result_limit.max(6) as u32 + 2)
-        as usize;
+        .clamp(4, result_limit.max(6) as u32 + 2) as usize;
     let preview_lines = autocomplete_preview_lines(
         autocomplete.selected(),
         &autocomplete.query.token,
@@ -24925,13 +24926,7 @@ fn render_buffer(
     );
     let cell_width = cell_width.max(1);
     let (git_branch, git_added, git_removed) = git_summary
-        .map(|summary| {
-            (
-                summary.branch.as_deref(),
-                summary.added,
-                summary.removed,
-            )
-        })
+        .map(|summary| (summary.branch.as_deref(), summary.added, summary.removed))
         .unwrap_or((None, 0, 0));
     let lsp_diagnostics = statusline_lsp_diagnostics(buffer.lsp_diagnostics());
     let terminal_cursor = buffer
@@ -25157,7 +25152,8 @@ fn render_buffer(
                     }
                 }
                 if segment_index == 0 {
-                    let diagnostic_severity = user_library.lsp_show_buffer_diagnostics()
+                    let diagnostic_severity = user_library
+                        .lsp_show_buffer_diagnostics()
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
                     if let Some(severity) = diagnostic_severity {
@@ -25513,7 +25509,11 @@ fn render_plugin_section_buffer_body(
         "ui.panel.background",
         adjust_color(
             base_background,
-            if is_dark_color(base_background) { 8 } else { -8 },
+            if is_dark_color(base_background) {
+                8
+            } else {
+                -8
+            },
         ),
     );
     let header_background = theme_color(
@@ -25521,7 +25521,11 @@ fn render_plugin_section_buffer_body(
         "ui.panel.header.background",
         adjust_color(
             panel_background,
-            if is_dark_color(panel_background) { 12 } else { -12 },
+            if is_dark_color(panel_background) {
+                12
+            } else {
+                -12
+            },
         ),
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);

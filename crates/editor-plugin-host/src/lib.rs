@@ -4,12 +4,12 @@ use editor_core::{
     BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode, ModelError,
     SectionTree,
 };
-pub use editor_plugin_api::{StatuslineContext, UserLibrary};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilKeyAction, PluginAction,
     PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode, TerminalConfig,
     WorkspaceRoot,
 };
+pub use editor_plugin_api::{StatuslineContext, UserLibrary};
 
 // ─── NullUserLibrary ─────────────────────────────────────────────────────────
 
@@ -195,7 +195,10 @@ impl UserLibrary for NullUserLibrary {
         "https://example.com".to_owned()
     }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
-        format!(" {} | {}:{} ", context.buffer_name, context.line, context.column)
+        format!(
+            " {} | {}:{} ",
+            context.buffer_name, context.line, context.column
+        )
     }
     fn statusline_lsp_connected_icon(&self) -> &'static str {
         editor_icons::symbols::md::MD_LAN_CONNECT
@@ -238,10 +241,7 @@ impl UserLibrary for NullUserLibrary {
     }
 }
 
-fn strip_icon_prefix<'a>(
-    label: &'a str,
-    symbols: &[editor_icons::IconFontSymbol],
-) -> &'a str {
+fn strip_icon_prefix<'a>(label: &'a str, symbols: &[editor_icons::IconFontSymbol]) -> &'a str {
     let trimmed = label.trim_start();
     let Some((maybe_icon, rest)) = trimmed.split_once(' ') else {
         return trimmed;

@@ -16,18 +16,17 @@ pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompleti
 pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 pub use editor_theme::{Color, Theme, ThemeOption};
 
-pub use editor_icons::symbols;
 pub use abi::{
-    AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor,
-    AbiDebugAdapterSpec, AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry,
-    AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
-    AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
-    AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLspDiagnosticsInfo,
-    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSection,
-    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
-    AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry,
-    AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor, AbiDebugAdapterSpec,
+    AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix,
+    AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory, AbiIconFontSymbol,
+    AbiLanguageConfiguration, AbiLanguageServerRootStrategy, AbiLanguageServerSpec,
+    AbiLspDiagnosticsInfo, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
+    AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
+    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption,
+    AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
+pub use editor_icons::symbols;
 
 // ─── Protocol hook name constants ───────────────────────────────────────────
 //
@@ -1039,14 +1038,16 @@ mod tests {
                 "lsp.startup",
                 "Runs after an LSP startup command executes.",
             )])
-            .with_buffers(vec![PluginBuffer::new("calculator", vec!["1 + 1"])
-                .with_sections(PluginBufferSections::new(
-                    "Input",
-                    "Output",
-                    1,
-                    vec!["(press enter)".to_owned()],
-                ))
-                .with_evaluate_handler("calculator.evaluate")])
+            .with_buffers(vec![
+                PluginBuffer::new("calculator", vec!["1 + 1"])
+                    .with_sections(PluginBufferSections::new(
+                        "Input",
+                        "Output",
+                        1,
+                        vec!["(press enter)".to_owned()],
+                    ))
+                    .with_evaluate_handler("calculator.evaluate"),
+            ])
             .with_hook_bindings(vec![PluginHookBinding::new(
                 "buffer.file-open",
                 "lsp.auto-start",
@@ -1072,7 +1073,9 @@ mod tests {
             vec!["1 + 1"]
         );
         assert_eq!(
-            package.buffers()[0].sections().map(|sections| sections.output_title()),
+            package.buffers()[0]
+                .sections()
+                .map(|sections| sections.output_title()),
             Some("Output")
         );
         assert_eq!(

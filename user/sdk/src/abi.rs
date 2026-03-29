@@ -183,7 +183,10 @@ impl From<CaptureThemeMapping> for AbiCaptureThemeMapping {
 
 impl From<AbiCaptureThemeMapping> for CaptureThemeMapping {
     fn from(value: AbiCaptureThemeMapping) -> Self {
-        Self::new(value.capture_name.into_string(), value.theme_token.into_string())
+        Self::new(
+            value.capture_name.into_string(),
+            value.theme_token.into_string(),
+        )
     }
 }
 
@@ -250,11 +253,7 @@ impl From<LanguageConfiguration> for AbiLanguageConfiguration {
                 .map(Into::into)
                 .collect::<Vec<_>>()
                 .into(),
-            grammar: value
-                .grammar()
-                .cloned()
-                .map(AbiGrammarSource::from)
-                .into(),
+            grammar: value.grammar().cloned().map(AbiGrammarSource::from).into(),
             extra_highlight_query: value
                 .extra_highlight_query()
                 .map(|query| RString::from(query.to_owned()))
@@ -287,7 +286,11 @@ impl From<AbiLanguageConfiguration> for LanguageConfiguration {
             value.id.into_string(),
             value.file_extensions.into_iter().map(RString::into_string),
             grammar,
-            value.capture_mappings.into_iter().map(Into::into).collect::<Vec<_>>(),
+            value
+                .capture_mappings
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>(),
         );
         if let Some(query) = value.extra_highlight_query.into_option() {
             language = language.with_extra_highlight_query(query.into_string());
@@ -348,7 +351,9 @@ impl From<LanguageServerSpec> for AbiLanguageServerSpec {
         let document_language_ids = value
             .document_language_ids()
             .iter()
-            .map(|(extension, language_id)| AbiStringPair::new(extension.clone(), language_id.clone()))
+            .map(|(extension, language_id)| {
+                AbiStringPair::new(extension.clone(), language_id.clone())
+            })
             .collect::<Vec<_>>();
         let env = value
             .env()
@@ -694,7 +699,12 @@ impl From<AcpClient> for AbiAcpClient {
             id: value.id.into(),
             label: value.label.into(),
             command: value.command.into(),
-            args: value.args.into_iter().map(Into::into).collect::<Vec<RString>>().into(),
+            args: value
+                .args
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
             env: value
                 .env
                 .into_iter()
@@ -759,7 +769,12 @@ impl From<TerminalConfig> for AbiTerminalConfig {
     fn from(value: TerminalConfig) -> Self {
         Self {
             program: value.program.into(),
-            args: value.args.into_iter().map(Into::into).collect::<Vec<RString>>().into(),
+            args: value
+                .args
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
         }
     }
 }
@@ -941,7 +956,11 @@ impl From<DirectoryEntry> for AbiDirectoryEntry {
 
 impl From<AbiDirectoryEntry> for DirectoryEntry {
     fn from(value: AbiDirectoryEntry) -> Self {
-        Self::new(value.name.into_string(), value.path.into_string(), value.kind.into())
+        Self::new(
+            value.name.into_string(),
+            value.path.into_string(),
+            value.kind.into(),
+        )
     }
 }
 
@@ -956,7 +975,10 @@ impl From<SectionAction> for AbiSectionAction {
     fn from(value: SectionAction) -> Self {
         Self {
             id: value.id().to_owned().into(),
-            detail: value.detail().map(|detail| RString::from(detail.to_owned())).into(),
+            detail: value
+                .detail()
+                .map(|detail| RString::from(detail.to_owned()))
+                .into(),
         }
     }
 }
@@ -964,7 +986,9 @@ impl From<SectionAction> for AbiSectionAction {
 impl From<AbiSectionAction> for SectionAction {
     fn from(value: AbiSectionAction) -> Self {
         match value.detail.into_option() {
-            Some(detail) => SectionAction::new(value.id.into_string()).with_detail(detail.into_string()),
+            Some(detail) => {
+                SectionAction::new(value.id.into_string()).with_detail(detail.into_string())
+            }
             None => SectionAction::new(value.id.into_string()),
         }
     }
@@ -1155,8 +1179,14 @@ pub struct AbiGitStatusSnapshot {
 impl From<GitStatusSnapshot> for AbiGitStatusSnapshot {
     fn from(value: GitStatusSnapshot) -> Self {
         Self {
-            branch: value.branch().map(|value| RString::from(value.to_owned())).into(),
-            upstream: value.upstream().map(|value| RString::from(value.to_owned())).into(),
+            branch: value
+                .branch()
+                .map(|value| RString::from(value.to_owned()))
+                .into(),
+            upstream: value
+                .upstream()
+                .map(|value| RString::from(value.to_owned()))
+                .into(),
             push_remote: value
                 .push_remote()
                 .map(|value| RString::from(value.to_owned()))
@@ -1164,7 +1194,13 @@ impl From<GitStatusSnapshot> for AbiGitStatusSnapshot {
             ahead: value.ahead(),
             behind: value.behind(),
             head: value.head().cloned().map(Into::into).into(),
-            staged: value.staged().iter().cloned().map(Into::into).collect::<Vec<_>>().into(),
+            staged: value
+                .staged()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
             unstaged: value
                 .unstaged()
                 .iter()
@@ -1179,7 +1215,13 @@ impl From<GitStatusSnapshot> for AbiGitStatusSnapshot {
                 .map(Into::into)
                 .collect::<Vec<RString>>()
                 .into(),
-            stashes: value.stashes().iter().cloned().map(Into::into).collect::<Vec<_>>().into(),
+            stashes: value
+                .stashes()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
             unpulled: value
                 .unpulled()
                 .iter()
@@ -1194,7 +1236,13 @@ impl From<GitStatusSnapshot> for AbiGitStatusSnapshot {
                 .map(Into::into)
                 .collect::<Vec<_>>()
                 .into(),
-            recent: value.recent().iter().cloned().map(Into::into).collect::<Vec<_>>().into(),
+            recent: value
+                .recent()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
             in_progress: value
                 .in_progress()
                 .iter()
@@ -1214,7 +1262,12 @@ impl From<AbiGitStatusSnapshot> for GitStatusSnapshot {
             value.behind,
             value.staged.clone().into_iter().map(Into::into).collect(),
             value.unstaged.clone().into_iter().map(Into::into).collect(),
-            value.untracked.clone().into_iter().map(RString::into_string).collect(),
+            value
+                .untracked
+                .clone()
+                .into_iter()
+                .map(RString::into_string)
+                .collect(),
         );
         GitStatusSnapshot::default()
             .with_status(status)
@@ -1227,7 +1280,13 @@ impl From<AbiGitStatusSnapshot> for GitStatusSnapshot {
             .with_unpulled(value.unpulled.into_iter().map(Into::into).collect())
             .with_unpushed(value.unpushed.into_iter().map(Into::into).collect())
             .with_recent(value.recent.into_iter().map(Into::into).collect())
-            .with_in_progress(value.in_progress.into_iter().map(RString::into_string).collect())
+            .with_in_progress(
+                value
+                    .in_progress
+                    .into_iter()
+                    .map(RString::into_string)
+                    .collect(),
+            )
     }
 }
 
@@ -1388,8 +1447,13 @@ pub struct UserLibraryModule {
     pub oil_keydown_action: extern "C" fn(RString) -> ROption<AbiOilKeyAction>,
     pub oil_chord_action: extern "C" fn(bool, RString) -> ROption<AbiOilKeyAction>,
     pub oil_help_lines: extern "C" fn() -> RVec<RString>,
-    pub oil_directory_sections:
-        extern "C" fn(RString, RVec<AbiDirectoryEntry>, bool, AbiOilSortMode, bool) -> AbiSectionTree,
+    pub oil_directory_sections: extern "C" fn(
+        RString,
+        RVec<AbiDirectoryEntry>,
+        bool,
+        AbiOilSortMode,
+        bool,
+    ) -> AbiSectionTree,
     pub oil_strip_entry_icon_prefix: extern "C" fn(RString) -> RString,
     pub git_status_sections: extern "C" fn(AbiGitStatusSnapshot) -> AbiSectionTree,
     pub git_commit_template: extern "C" fn() -> RVec<RString>,

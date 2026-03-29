@@ -717,7 +717,12 @@ fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<Buf
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch, &NullUserLibrary);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(
+        buffer_id,
+        name,
+        BufferKind::Scratch,
+        &NullUserLibrary,
+    );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     sync_active_buffer(&mut state.runtime)?;
     Ok(buffer_id)
@@ -785,7 +790,12 @@ fn install_terminal_test_buffer(state: &mut ShellState) -> Result<BufferId, Stri
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal, &NullUserLibrary);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(
+        buffer_id,
+        "*terminal*",
+        BufferKind::Terminal,
+        &NullUserLibrary,
+    );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
 }
@@ -1787,7 +1797,10 @@ fn hover_registry_includes_signature_help_provider() {
         HoverProviderKind::SignatureHelp
     ));
     assert_eq!(registry.providers[1].label, "Signature");
-    assert_eq!(registry.providers[1].icon, user_library.hover_signature_icon());
+    assert_eq!(
+        registry.providers[1].icon,
+        user_library.hover_signature_icon()
+    );
     assert!(matches!(
         registry.providers[2].kind,
         HoverProviderKind::Diagnostics
@@ -2017,7 +2030,8 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
 }
 
 #[test]
-fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String> {
+fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String>
+{
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_plugin_sections_test_buffer(
         &mut state,
@@ -2042,8 +2056,7 @@ fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() ->
 #[test]
 fn plugin_sections_switching_output_pane_changes_focus_and_read_only_state() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
-    let _buffer_id =
-        install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["1"])?;
+    let _buffer_id = install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["1"])?;
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;

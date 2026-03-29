@@ -86,7 +86,10 @@ pub fn package() -> PluginPackage {
             PluginCommand::new(
                 "calculator.evaluate",
                 "Evaluate the calculator input and write results to the output section.",
-                vec![PluginAction::emit_hook(plugin_hooks::EVALUATE, None::<&str>)],
+                vec![PluginAction::emit_hook(
+                    plugin_hooks::EVALUATE,
+                    None::<&str>,
+                )],
             ),
             PluginCommand::new(
                 "calculator.switch-pane",
@@ -186,7 +189,11 @@ fn format_value(v: f64) -> String {
         return "nan".to_owned();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "inf".to_owned() } else { "-inf".to_owned() };
+        return if v > 0.0 {
+            "inf".to_owned()
+        } else {
+            "-inf".to_owned()
+        };
     }
     if v.fract() == 0.0 && v.abs() < 1e15 {
         return format!("{}", v as i64);
@@ -243,7 +250,10 @@ struct Env {
 
 impl Env {
     fn get(&self, name: &str) -> Option<f64> {
-        self.vars.iter().rev().find_map(|(k, v)| (k == name).then_some(*v))
+        self.vars
+            .iter()
+            .rev()
+            .find_map(|(k, v)| (k == name).then_some(*v))
     }
 
     fn set(&mut self, name: &str, value: f64) {
@@ -288,9 +298,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.pos < self.input.len()
-            && self.input.as_bytes()[self.pos].is_ascii_whitespace()
-        {
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
     }
@@ -302,15 +310,42 @@ impl<'a> Lexer<'a> {
         }
         let b = self.input.as_bytes()[self.pos];
         let token = match b {
-            b'+' => { self.pos += 1; Token::Plus }
-            b'-' => { self.pos += 1; Token::Minus }
-            b'*' => { self.pos += 1; Token::Star }
-            b'/' => { self.pos += 1; Token::Slash }
-            b'%' => { self.pos += 1; Token::Percent }
-            b'^' => { self.pos += 1; Token::Caret }
-            b'(' => { self.pos += 1; Token::LParen }
-            b')' => { self.pos += 1; Token::RParen }
-            b',' => { self.pos += 1; Token::Comma }
+            b'+' => {
+                self.pos += 1;
+                Token::Plus
+            }
+            b'-' => {
+                self.pos += 1;
+                Token::Minus
+            }
+            b'*' => {
+                self.pos += 1;
+                Token::Star
+            }
+            b'/' => {
+                self.pos += 1;
+                Token::Slash
+            }
+            b'%' => {
+                self.pos += 1;
+                Token::Percent
+            }
+            b'^' => {
+                self.pos += 1;
+                Token::Caret
+            }
+            b'(' => {
+                self.pos += 1;
+                Token::LParen
+            }
+            b')' => {
+                self.pos += 1;
+                Token::RParen
+            }
+            b',' => {
+                self.pos += 1;
+                Token::Comma
+            }
             b'0'..=b'9' | b'.' => self.read_number()?,
             _ if (b as char).is_alphabetic() || b == b'_' => self.read_ident(),
             other => return Err(format!("unexpected character `{}`", other as char)),
@@ -326,18 +361,13 @@ impl<'a> Lexer<'a> {
         {
             self.pos += 1;
         }
-        if self.pos < self.input.len()
-            && matches!(self.input.as_bytes()[self.pos], b'e' | b'E')
-        {
+        if self.pos < self.input.len() && matches!(self.input.as_bytes()[self.pos], b'e' | b'E') {
             self.pos += 1;
-            if self.pos < self.input.len()
-                && matches!(self.input.as_bytes()[self.pos], b'+' | b'-')
+            if self.pos < self.input.len() && matches!(self.input.as_bytes()[self.pos], b'+' | b'-')
             {
                 self.pos += 1;
             }
-            while self.pos < self.input.len()
-                && self.input.as_bytes()[self.pos].is_ascii_digit()
-            {
+            while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
         }
@@ -373,7 +403,11 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn new(input: &'a str, env: &'b Env) -> Self {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token().unwrap_or(Token::Eof);
-        Self { lexer, current, env }
+        Self {
+            lexer,
+            current,
+            env,
+        }
     }
 
     fn advance(&mut self) -> Result<(), String> {
@@ -404,8 +438,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut left = self.multiplicative()?;
         loop {
             match self.current {
-                Token::Plus => { self.advance()?; left += self.multiplicative()?; }
-                Token::Minus => { self.advance()?; left -= self.multiplicative()?; }
+                Token::Plus => {
+                    self.advance()?;
+                    left += self.multiplicative()?;
+                }
+                Token::Minus => {
+                    self.advance()?;
+                    left -= self.multiplicative()?;
+                }
                 _ => break,
             }
         }
@@ -416,17 +456,24 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut left = self.unary()?;
         loop {
             match self.current {
-                Token::Star => { self.advance()?; left *= self.unary()?; }
+                Token::Star => {
+                    self.advance()?;
+                    left *= self.unary()?;
+                }
                 Token::Slash => {
                     self.advance()?;
                     let right = self.unary()?;
-                    if right == 0.0 { return Err("division by zero".to_owned()); }
+                    if right == 0.0 {
+                        return Err("division by zero".to_owned());
+                    }
                     left /= right;
                 }
                 Token::Percent => {
                     self.advance()?;
                     let right = self.unary()?;
-                    if right == 0.0 { return Err("modulo by zero".to_owned()); }
+                    if right == 0.0 {
+                        return Err("modulo by zero".to_owned());
+                    }
                     left %= right;
                 }
                 _ => break,
@@ -455,7 +502,10 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn primary(&mut self) -> Result<f64, String> {
         match self.current.clone() {
-            Token::Number(n) => { self.advance()?; Ok(n) }
+            Token::Number(n) => {
+                self.advance()?;
+                Ok(n)
+            }
             Token::Ident(name) => {
                 self.advance()?;
                 if self.current == Token::LParen {
@@ -504,7 +554,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             "tau" | "TAU" => Ok(std::f64::consts::TAU),
             "inf" | "INF" | "infinity" => Ok(f64::INFINITY),
             "nan" | "NAN" => Ok(f64::NAN),
-            _ => self.env.get(name)
+            _ => self
+                .env
+                .get(name)
                 .ok_or_else(|| format!("undefined variable `{name}`")),
         }
     }
@@ -526,28 +578,40 @@ fn call_function(name: &str, args: &[f64]) -> Result<f64, String> {
         }
     };
     match name {
-        "sqrt"  => Ok(one(args)?.sqrt()),
-        "cbrt"  => Ok(one(args)?.cbrt()),
-        "abs"   => Ok(one(args)?.abs()),
+        "sqrt" => Ok(one(args)?.sqrt()),
+        "cbrt" => Ok(one(args)?.cbrt()),
+        "abs" => Ok(one(args)?.abs()),
         "floor" => Ok(one(args)?.floor()),
-        "ceil"  => Ok(one(args)?.ceil()),
+        "ceil" => Ok(one(args)?.ceil()),
         "round" => Ok(one(args)?.round()),
-        "sin"   => Ok(one(args)?.sin()),
-        "cos"   => Ok(one(args)?.cos()),
-        "tan"   => Ok(one(args)?.tan()),
-        "asin"  => Ok(one(args)?.asin()),
-        "acos"  => Ok(one(args)?.acos()),
-        "atan"  => Ok(one(args)?.atan()),
-        "atan2" => { let (y, x) = two(args)?; Ok(y.atan2(x)) }
-        "ln"    => Ok(one(args)?.ln()),
-        "log"   => Ok(one(args)?.log10()),
-        "log2"  => Ok(one(args)?.log2()),
+        "sin" => Ok(one(args)?.sin()),
+        "cos" => Ok(one(args)?.cos()),
+        "tan" => Ok(one(args)?.tan()),
+        "asin" => Ok(one(args)?.asin()),
+        "acos" => Ok(one(args)?.acos()),
+        "atan" => Ok(one(args)?.atan()),
+        "atan2" => {
+            let (y, x) = two(args)?;
+            Ok(y.atan2(x))
+        }
+        "ln" => Ok(one(args)?.ln()),
+        "log" => Ok(one(args)?.log10()),
+        "log2" => Ok(one(args)?.log2()),
         "log10" => Ok(one(args)?.log10()),
-        "exp"   => Ok(one(args)?.exp()),
-        "pow"   => { let (b, e) = two(args)?; Ok(b.powf(e)) }
-        "min"   => { let (a, b) = two(args)?; Ok(a.min(b)) }
-        "max"   => { let (a, b) = two(args)?; Ok(a.max(b)) }
-        _       => Err(format!("unknown function `{name}`")),
+        "exp" => Ok(one(args)?.exp()),
+        "pow" => {
+            let (b, e) = two(args)?;
+            Ok(b.powf(e))
+        }
+        "min" => {
+            let (a, b) = two(args)?;
+            Ok(a.min(b))
+        }
+        "max" => {
+            let (a, b) = two(args)?;
+            Ok(a.max(b))
+        }
+        _ => Err(format!("unknown function `{name}`")),
     }
 }
 
@@ -565,7 +629,11 @@ mod tests {
     fn calculator_package_exports_open_and_evaluate_commands() {
         let pkg = package();
         assert!(pkg.commands().iter().any(|c| c.name() == "calculator.open"));
-        assert!(pkg.commands().iter().any(|c| c.name() == "calculator.evaluate"));
+        assert!(
+            pkg.commands()
+                .iter()
+                .any(|c| c.name() == "calculator.evaluate")
+        );
     }
 
     #[test]
@@ -577,9 +645,9 @@ mod tests {
             .find(|c| c.name() == "calculator.evaluate")
             .expect("calculator.evaluate command must exist");
         assert!(
-            cmd.actions()
-                .iter()
-                .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::EVALUATE)),
+            cmd.actions().iter().any(|a| a
+                .hook()
+                .is_some_and(|h| h.hook_name() == plugin_hooks::EVALUATE)),
             "calculator.evaluate must emit the generic plugin.evaluate hook"
         );
     }
@@ -587,19 +655,22 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_c_ctrl_c() {
         let pkg = package();
-        assert!(pkg
-            .key_bindings()
-            .iter()
-            .any(|kb| kb.chord() == EVALUATE_CHORD));
+        assert!(
+            pkg.key_bindings()
+                .iter()
+                .any(|kb| kb.chord() == EVALUATE_CHORD)
+        );
     }
 
     #[test]
     fn calculator_package_binds_ctrl_tab_to_switch_panes() {
         let pkg = package();
-        assert!(pkg
-            .key_bindings()
-            .iter()
-            .any(|kb| kb.chord() == SWITCH_PANE_CHORD && kb.command_name() == "calculator.switch-pane"));
+        assert!(
+            pkg.key_bindings()
+                .iter()
+                .any(|kb| kb.chord() == SWITCH_PANE_CHORD
+                    && kb.command_name() == "calculator.switch-pane")
+        );
     }
 
     #[test]
@@ -716,9 +787,9 @@ mod tests {
             .find(|c| c.name() == "calculator.switch-pane")
             .expect("calculator.switch-pane command must exist");
         assert!(
-            cmd.actions()
-                .iter()
-                .any(|a| a.hook().is_some_and(|h| h.hook_name() == plugin_hooks::SWITCH_PANE)),
+            cmd.actions().iter().any(|a| a
+                .hook()
+                .is_some_and(|h| h.hook_name() == plugin_hooks::SWITCH_PANE)),
             "calculator.switch-pane must emit the generic plugin.switch-pane hook"
         );
     }
