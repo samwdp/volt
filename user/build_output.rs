@@ -111,7 +111,7 @@ mod tests {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
-                .as_nanos()
+                .as_millis()
         ));
         let profile_dir = temp_root.join("target/debug");
         fs::create_dir_all(&profile_dir).expect("create profile dir");
