@@ -272,11 +272,17 @@ impl From<LanguageConfiguration> for AbiLanguageConfiguration {
 
 impl From<AbiLanguageConfiguration> for LanguageConfiguration {
     fn from(value: AbiLanguageConfiguration) -> Self {
+        let language_id = value.id.clone();
         let grammar = value
             .grammar
             .into_option()
             .map(Into::into)
-            .expect("runtime-loaded user library only supports grammar-backed languages");
+            .unwrap_or_else(|| {
+                panic!(
+                    "runtime-loaded user language `{}` must use LanguageConfiguration::from_grammar; static tree-sitter loaders are not supported across the shared-library ABI",
+                    language_id.as_str()
+                )
+            });
         let mut language = LanguageConfiguration::from_grammar(
             value.id.into_string(),
             value.file_extensions.into_iter().map(RString::into_string),
@@ -1358,7 +1364,7 @@ impl From<StatuslineContext<'_>> for AbiStatuslineContext {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+#[derive(Debug, Clone, StableAbi)]
 #[sabi(kind(Prefix(prefix_ref = UserLibraryModuleRef, prefix_fields = UserLibraryModule_Prefix)))]
 pub struct UserLibraryModule {
     pub packages: extern "C" fn() -> RVec<crate::PluginPackage>,

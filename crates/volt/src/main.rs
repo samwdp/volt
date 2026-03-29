@@ -77,7 +77,6 @@ struct LaunchOptions {
     profile_input_latency: bool,
 }
 
-#[derive(Clone)]
 struct DynamicUserLibrary {
     module: UserLibraryModuleRef,
     icon_symbols: &'static [editor_icons::IconFontSymbol],
@@ -255,7 +254,10 @@ impl UserLibrary for DynamicUserLibrary {
         if stripped.as_str() == label {
             label
         } else {
-            Box::leak(stripped.into_string().into_boxed_str())
+            label
+                .find(stripped.as_str())
+                .map(|start| &label[start..start + stripped.len()])
+                .unwrap_or(label)
         }
     }
 
@@ -1138,5 +1140,28 @@ mod tests {
             parse_launch_options(["--shell-demo".to_owned(), "--bootstrap-demo".to_owned()])
                 .expect_err("multiple launch modes should be rejected");
         assert!(error.contains("more than once"));
+    }
+
+    #[test]
+    fn user_library_candidates_prefer_env_then_executable_directory() {
+        let candidates = user_library_candidates(
+            Some(Path::new("/tmp/volt/bin/volt")),
+            Some("/tmp/custom/user/libuser.so"),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/tmp/custom/user/libuser.so"),
+                UserLibraryModuleRef::get_library_path(Path::new("/tmp/volt/bin")),
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_user_library_can_wrap_exported_module() {
+        let library = DynamicUserLibrary::new(user::user_library_module());
+        assert!(!library.packages().is_empty());
+        assert!(!library.themes().is_empty());
+        assert!(!library.icon_symbols().is_empty());
     }
 }
