@@ -1,0 +1,1108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Packages &#8211; Volt Docs</title>
+    <meta
+        name="description"
+        content="Volt user package guide covering plugin creation, editing builtin plugins, hook and command systems, and language support."
+    >
+    <link rel="icon" type="image/x-icon" href="assets/logo.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@400;600;700&amp;family=Orbitron:wght@700;800;900&amp;display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        /* page-local styles for the prose-heavy guide layout */
+
+        .guide-body {
+            max-width: 880px;
+            margin: 0 auto;
+        }
+
+        .guide-body h2 {
+            font-family: "Orbitron", sans-serif;
+            font-size: clamp(1.6rem, 3.5vw, 2.4rem);
+            margin: 56px 0 18px;
+            letter-spacing: -0.02em;
+        }
+
+        .guide-body h3 {
+            font-size: 1.18rem;
+            margin: 36px 0 12px;
+            color: var(--accent-cyan);
+        }
+
+        .guide-body h4 {
+            font-size: 1rem;
+            margin: 24px 0 8px;
+            color: var(--accent-green);
+        }
+
+        .guide-body p,
+        .guide-body li {
+            color: var(--text-dim);
+            line-height: 1.8;
+            font-size: 1.02rem;
+        }
+
+        .guide-body ul,
+        .guide-body ol {
+            padding-left: 22px;
+            margin: 10px 0 18px;
+        }
+
+        .guide-body li {
+            margin-bottom: 6px;
+        }
+
+        .guide-body a {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+            text-decoration-color: rgba(0, 232, 255, 0.3);
+            text-underline-offset: 3px;
+            transition: text-decoration-color 180ms ease;
+        }
+
+        .guide-body a:hover {
+            text-decoration-color: var(--accent-cyan);
+        }
+
+        .guide-body strong {
+            color: var(--text);
+        }
+
+        .guide-body code {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.9em;
+            padding: 2px 7px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--accent-green);
+        }
+
+        .guide-body pre {
+            margin: 14px 0 22px;
+            padding: 20px 22px;
+            overflow-x: auto;
+            background: rgba(7, 11, 17, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-md);
+            line-height: 1.65;
+        }
+
+        .guide-body pre code {
+            padding: 0;
+            background: none;
+            color: var(--text);
+            font-size: 0.88rem;
+        }
+
+        .guide-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0 22px;
+            font-size: 0.95rem;
+        }
+
+        .guide-body th {
+            text-align: left;
+            padding: 12px 14px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--accent-cyan);
+            border-bottom: 2px solid rgba(0, 232, 255, 0.22);
+            background: rgba(0, 232, 255, 0.04);
+        }
+
+        .guide-body td {
+            padding: 10px 14px;
+            color: var(--text-dim);
+            border-bottom: 1px solid var(--line);
+        }
+
+        .guide-body td code {
+            font-size: 0.85em;
+        }
+
+        .guide-body hr {
+            border: none;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--line-strong), transparent);
+            margin: 48px 0;
+        }
+
+        .arch-box {
+            margin: 18px 0 24px;
+            padding: 22px 26px;
+            background: rgba(7, 11, 17, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.84rem;
+            line-height: 1.55;
+            color: var(--text-dim);
+            white-space: pre;
+        }
+
+        .arch-box .hl-cyan  { color: var(--accent-cyan); }
+        .arch-box .hl-green { color: var(--accent-green); }
+        .arch-box .hl-purple{ color: var(--accent-purple); }
+        .arch-box .hl-rust  { color: var(--accent-rust); }
+
+        .step-card {
+            position: relative;
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            margin: 18px 0;
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(14px);
+        }
+
+        .step-card::before {
+            content: "";
+            position: absolute;
+            inset: 0 0 auto;
+            height: 3px;
+            border-radius: inherit;
+            background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-purple), transparent);
+        }
+
+        .step-card h3 {
+            margin-top: 0;
+        }
+
+        .toc-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 26px 30px;
+            margin: 28px 0 44px;
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(14px);
+        }
+
+        .toc-card h2 {
+            font-size: 1.1rem !important;
+            margin: 0 0 14px !important;
+            color: var(--accent-cyan);
+        }
+
+        .toc-card ul {
+            columns: 2;
+            column-gap: 28px;
+        }
+
+        .toc-card li {
+            break-inside: avoid;
+        }
+
+        @media (max-width: 640px) {
+            .toc-card ul {
+                columns: 1;
+            }
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 232, 255, 0.25);
+            background: rgba(0, 232, 255, 0.06);
+            color: var(--text);
+            font-size: 0.88rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            transition: border-color 180ms ease, background 180ms ease;
+        }
+
+        .back-link:hover {
+            border-color: rgba(0, 232, 255, 0.5);
+            background: rgba(0, 232, 255, 0.12);
+        }
+    </style>
+</head>
+<body>
+    <div class="site-shell">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+
+        <header class="topbar">
+            <a class="brand" href="index.html" aria-label="Volt Docs home">
+                <span class="brand-mark">
+                    <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
+                </span>
+                <span class="brand-copy">
+                    <strong>Volt Docs</strong>
+                    <small>User packages guide</small>
+                </span>
+            </a>
+
+            <button
+                class="nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="primary-nav"
+            >
+                Menu
+            </button>
+
+            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
+                <a href="#architecture-overview">Architecture</a>
+                <a href="#core-concepts">Concepts</a>
+                <a href="#creating-a-new-plugin">Create a Plugin</a>
+                <a href="#editing-builtin-plugins">Edit Builtins</a>
+                <a href="#building-and-testing">Build &amp; Test</a>
+            </nav>
+
+            <div class="topbar-actions">
+                <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-primary" href="#creating-a-new-plugin">Get Started</a>
+            </div>
+        </header>
+
+        <main id="top">
+            <!-- Hero -->
+            <section class="hero section" style="display:block;">
+                <div class="hero-copy reveal" style="max-width:880px;margin:0 auto;">
+                    <a class="back-link" href="index.html">&#8592; Back to Volt Docs</a>
+                    <p class="eyebrow">Extension system guide</p>
+                    <h1 style="max-width:none;font-size:clamp(2.2rem,4.6vw,4.4rem);">User Packages</h1>
+                    <p class="hero-text">
+                        Volt&#8217;s extension system is a <strong>compiled user library</strong> &#8212; every
+                        plugin is a Rust module that lives under the <code>user/</code> directory,
+                        compiled alongside the editor into a shared library
+                        (<code>libuser.so</code> / <code>libuser.dylib</code> / <code>user.dll</code>).
+                        This guide explains the package concepts, walks through creating a new plugin
+                        from scratch, and shows how to edit the builtin plugins that ship with Volt.
+                    </p>
+                </div>
+            </section>
+
+            <div class="guide-body">
+
+                <!-- Table of contents -->
+                <nav class="toc-card reveal" aria-label="Table of contents">
+                    <h2>Contents</h2>
+                    <ul>
+                        <li><a href="#architecture-overview">Architecture Overview</a></li>
+                        <li><a href="#core-concepts">Core Concepts</a></li>
+                        <li><a href="#creating-a-new-plugin">Creating a New Plugin</a></li>
+                        <li><a href="#complete-plugin-examples">Complete Plugin Examples</a></li>
+                        <li><a href="#editing-builtin-plugins">Editing Builtin Plugins</a></li>
+                        <li><a href="#adding-language-support">Adding Language Support</a></li>
+                        <li><a href="#building-and-testing">Building and Testing</a></li>
+                    </ul>
+                </nav>
+
+                <!-- Architecture Overview -->
+                <section id="architecture-overview">
+                    <h2 class="reveal">Architecture Overview</h2>
+
+                    <div class="arch-box reveal"><span class="hl-cyan">&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;</span>
+<span class="hl-cyan">&#9474;</span>          <span class="hl-rust">volt (binary)</span>             <span class="hl-cyan">&#9474;</span>  Editor executable
+<span class="hl-cyan">&#9500;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9508;</span>
+<span class="hl-cyan">&#9474;</span>  <span class="hl-purple">editor-plugin-host</span>                <span class="hl-cyan">&#9474;</span>  Loads packages, wires hooks &amp; commands
+<span class="hl-cyan">&#9500;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9508;</span>
+<span class="hl-cyan">&#9474;</span>  <span class="hl-green">user/sdk  (editor-plugin-api)</span>     <span class="hl-cyan">&#9474;</span>  Stable ABI surface &#8212; shared types
+<span class="hl-cyan">&#9500;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9508;</span>
+<span class="hl-cyan">&#9474;</span>  <span class="hl-rust">user/</span>  (volt-user library)        <span class="hl-cyan">&#9474;</span>  Your compiled plugins live here
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lib.rs                        <span class="hl-cyan">&#9474;</span>  Package registry &amp; trait impl
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; vim.rs                        <span class="hl-cyan">&#9474;</span>  Vim bindings
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; calculator.rs                 <span class="hl-cyan">&#9474;</span>  Calculator evaluator
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; compile.rs                    <span class="hl-cyan">&#9474;</span>  Build / compile integration
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lsp.rs                        <span class="hl-cyan">&#9474;</span>  LSP lifecycle
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lang/                         <span class="hl-cyan">&#9474;</span>  Per-language configs
+<span class="hl-cyan">&#9474;</span>   &#9492;&#9472; ...                           <span class="hl-cyan">&#9474;</span>  26+ modules
+<span class="hl-cyan">&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;</span></div>
+
+                    <p class="reveal">
+                        The <strong>plugin host</strong> (<code>crates/editor-plugin-host</code>) reads
+                        <code>PluginPackage</code> metadata from the user library and registers commands,
+                        keybindings, hooks, and buffers into the editor runtime.  The <strong>user/sdk</strong>
+                        crate (<code>editor-plugin-api</code>) is the only stable ABI boundary &#8212; both the
+                        host and the user library depend on it.
+                    </p>
+                    <p class="reveal">
+                        The user library is compiled as both a <strong>cdylib</strong> (shared library for
+                        runtime loading) and an <strong>rlib</strong> (for static linking during development).
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Core Concepts -->
+                <section id="core-concepts">
+                    <h2 class="reveal">Core Concepts</h2>
+
+                    <h3 id="packages" class="reveal">Packages</h3>
+                    <p class="reveal">
+                        A <code>PluginPackage</code> is the top-level unit of extension.  It bundles:
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Field</th><th>Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>name</code></td><td>Unique identifier (e.g. <code>"calculator"</code>, <code>"lsp"</code>)</td></tr>
+                            <tr><td><code>auto_load</code></td><td><code>true</code> to register at startup, <code>false</code> for on-demand</td></tr>
+                            <tr><td><code>description</code></td><td>Human-readable summary</td></tr>
+                            <tr><td><code>commands</code></td><td>Commands the package exports</td></tr>
+                            <tr><td><code>key_bindings</code></td><td>Keyboard chords mapped to those commands</td></tr>
+                            <tr><td><code>hook_declarations</code></td><td>Custom hooks the package introduces</td></tr>
+                            <tr><td><code>hook_bindings</code></td><td>Subscriptions &#8212; run a command when a hook fires</td></tr>
+                            <tr><td><code>buffers</code></td><td>Plugin-owned buffer types (e.g. calculator, git-status)</td></tr>
+                        </tbody>
+                    </table>
+<pre class="reveal"><code>PluginPackage::new("my-plugin", true, "A short description.")
+    .with_commands(vec![/* ... */])
+    .with_key_bindings(vec![/* ... */])
+    .with_hook_declarations(vec![/* ... */])
+    .with_hook_bindings(vec![/* ... */])
+    .with_buffers(vec![/* ... */])</code></pre>
+
+                    <h3 id="commands-concept" class="reveal">Commands</h3>
+                    <p class="reveal">
+                        A <code>PluginCommand</code> has a name, a description, and a list of
+                        <strong>actions</strong> to execute.
+                    </p>
+<pre class="reveal"><code>PluginCommand::new(
+    "my-plugin.greet",
+    "Logs a greeting message.",
+    vec![PluginAction::log_message("Hello from my-plugin!")],
+)</code></pre>
+
+                    <h3 id="actions" class="reveal">Actions</h3>
+                    <p class="reveal">
+                        Each command carries one or more <code>PluginAction</code> values.  There are three kinds:
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Factory method</th><th>What it does</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>PluginAction::log_message(msg)</code></td><td>Writes a diagnostic message through the host</td></tr>
+                            <tr><td><code>PluginAction::open_buffer(name, kind, popup_title)</code></td><td>Creates or surfaces a buffer</td></tr>
+                            <tr><td><code>PluginAction::emit_hook(hook, detail)</code></td><td>Fires a hook event for other subscribers</td></tr>
+                        </tbody>
+                    </table>
+<pre class="reveal"><code>// Log a message
+PluginAction::log_message("Build started.")
+
+// Open a workspace buffer
+PluginAction::open_buffer("*calculator*", "calculator", None::&lt;&amp;str&gt;)
+
+// Open a buffer in a popup window
+PluginAction::open_buffer("*terminal-popup*", "terminal", Some("Terminal"))
+
+// Emit a hook (other plugins or the host can react)
+PluginAction::emit_hook("lsp.server-start", Some("rust-analyzer"))</code></pre>
+
+                    <h3 id="hooks" class="reveal">Hooks</h3>
+                    <p class="reveal">
+                        Hooks are the event bus.  A package can <strong>declare</strong> new hooks and
+                        <strong>bind</strong> to existing ones.
+                    </p>
+                    <h4>Declaring a hook</h4>
+<pre class="reveal"><code>PluginHookDeclaration::new(
+    "lang.rust.attached",
+    "Runs after the Rust language package attaches to a buffer.",
+)</code></pre>
+
+                    <h4>Binding to a hook</h4>
+                    <p class="reveal">
+                        Subscribes a command so it runs when the hook fires.  An optional
+                        <code>detail_filter</code> restricts the subscription to a specific detail value:
+                    </p>
+<pre class="reveal"><code>PluginHookBinding::new(
+    "buffer.file-open",         // hook to subscribe to
+    "lang-rust.auto-attach",    // subscriber identifier
+    "lang-rust.attach",         // command to run
+    Some(".rs"),                 // only fire for .rs files
+)</code></pre>
+
+                    <h4>Common host-owned hooks</h4>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Hook</th><th>Detail</th><th>Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>buffer.file-open</code></td><td>file extension</td><td>Fires when a file buffer opens</td></tr>
+                            <tr><td><code>buffer.save</code></td><td>&#8212;</td><td>Fires to save the active buffer</td></tr>
+                            <tr><td><code>buffer.close</code></td><td>&#8212;</td><td>Fires to close the active buffer</td></tr>
+                            <tr><td><code>plugin.evaluate</code></td><td>&#8212;</td><td>Evaluates a plugin buffer</td></tr>
+                            <tr><td><code>plugin.switch-pane</code></td><td>&#8212;</td><td>Switches panes in a split buffer</td></tr>
+                            <tr><td><code>plugin.run-command</code></td><td>language name</td><td>Opens a compilation buffer</td></tr>
+                            <tr><td><code>plugin.rerun-command</code></td><td>&#8212;</td><td>Re-runs the last compilation</td></tr>
+                            <tr><td><code>ui.picker.open</code></td><td>picker variant</td><td>Opens a picker popup</td></tr>
+                            <tr><td><code>ui.popup.toggle</code></td><td>&#8212;</td><td>Toggles the popup window</td></tr>
+                            <tr><td><code>ui.pane.split-*</code></td><td>&#8212;</td><td>Splits the active pane</td></tr>
+                            <tr><td><code>workspace.save</code></td><td>&#8212;</td><td>Saves all modified buffers</td></tr>
+                            <tr><td><code>workspace.format</code></td><td>&#8212;</td><td>Formats the active buffer</td></tr>
+                        </tbody>
+                    </table>
+
+                    <h3 id="keybindings" class="reveal">Keybindings</h3>
+                    <p class="reveal">
+                        A <code>PluginKeyBinding</code> maps a keyboard chord to a command within a scope.
+                    </p>
+<pre class="reveal"><code>PluginKeyBinding::new(
+    "F5",                           // chord
+    "workspace.compile",            // command
+    PluginKeymapScope::Global,      // scope
+)</code></pre>
+                    <p class="reveal">
+                        Chord strings use <code>Ctrl+</code>, <code>Shift+</code>, <code>Alt+</code>
+                        prefixes (e.g. <code>"Ctrl+Shift+h"</code>).  The shorthand <code>C-</code>
+                        is equivalent to <code>Ctrl+</code> (so <code>"C-c C-c"</code> means press
+                        <code>Ctrl+c</code> twice).
+                    </p>
+
+                    <h4>Scopes</h4>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Scope</th><th>When active</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>PluginKeymapScope::Global</code></td><td>Always, regardless of focus</td></tr>
+                            <tr><td><code>PluginKeymapScope::Workspace</code></td><td>Only when a workspace pane is focused</td></tr>
+                            <tr><td><code>PluginKeymapScope::Popup</code></td><td>Only inside a popup window</td></tr>
+                        </tbody>
+                    </table>
+
+                    <p class="reveal">Bindings can also be restricted to a <strong>Vim mode</strong>:</p>
+<pre class="reveal"><code>PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
+    .with_vim_mode(PluginVimMode::Normal)</code></pre>
+
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Vim mode</th><th>When active</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>PluginVimMode::Any</code></td><td>Always (default)</td></tr>
+                            <tr><td><code>PluginVimMode::Normal</code></td><td>Vim normal mode only</td></tr>
+                            <tr><td><code>PluginVimMode::Insert</code></td><td>Vim insert mode only</td></tr>
+                            <tr><td><code>PluginVimMode::Visual</code></td><td>Vim visual mode only</td></tr>
+                        </tbody>
+                    </table>
+
+                    <h3 id="plugin-buffers" class="reveal">Plugin Buffers</h3>
+                    <p class="reveal">
+                        Plugins can declare custom buffer types.  The host manages the buffer lifecycle;
+                        the plugin provides initial content and an optional split-pane layout.
+                    </p>
+<pre class="reveal"><code>PluginBuffer::new("calculator", vec!["a = 1", "b = 2", "sqrt(a + b)"])
+    .with_sections(PluginBufferSections::new(
+        "Input",                                   // input pane title
+        "Output",                                  // output pane title
+        1,                                         // minimum output rows
+        vec!["(press Ctrl+c Ctrl+c to evaluate)"], // initial output lines
+    ))
+    .with_evaluate_handler("calculator.evaluate-buffer")</code></pre>
+                    <p class="reveal">
+                        When the user triggers <code>plugin.evaluate</code>, the host calls back into the
+                        user library&#8217;s evaluator for the buffer kind and replaces the output section
+                        with the returned lines.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Creating a New Plugin -->
+                <section id="creating-a-new-plugin">
+                    <h2 class="reveal">Creating a New Plugin</h2>
+                    <p class="reveal">
+                        This walkthrough creates a plugin called <strong>&#8220;hello&#8221;</strong> that logs a
+                        greeting when invoked from the command palette.
+                    </p>
+
+                    <div class="step-card reveal">
+                        <h3>Step 1 &#8212; Create the Module File</h3>
+                        <p>Create <code>user/hello.rs</code>:</p>
+<pre><code>use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope,
+    PluginPackage,
+};
+
+/// Returns the metadata for the hello package.
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new("hello", true, "A simple greeting plugin.")
+        .with_commands(vec![
+            PluginCommand::new(
+                "hello.greet",
+                "Logs a friendly greeting to the message log.",
+                vec![PluginAction::log_message("Hello from Volt!")],
+            ),
+        ])
+        .with_key_bindings(vec![
+            PluginKeyBinding::new(
+                "Ctrl+Shift+h",
+                "hello.greet",
+                PluginKeymapScope::Global,
+            ),
+        ])
+}</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 2 &#8212; Define the Package</h3>
+                        <p>
+                            There is nothing else to implement in the module &#8212; the <code>package()</code>
+                            function returns all the metadata the host needs.
+                        </p>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 3 &#8212; Register the Module</h3>
+                        <p>
+                            Open <code>user/lib.rs</code> and add the new module declaration near the top
+                            with the other <code>pub mod</code> statements:
+                        </p>
+<pre><code>/// A simple greeting plugin.
+pub mod hello;</code></pre>
+                        <p>Then add the package to the <code>packages()</code> function:</p>
+<pre><code>pub fn packages() -&gt; Vec&lt;PluginPackage&gt; {
+    let mut pkgs = vec![
+        buffer::package(),
+        acp::package(),
+        // ... existing packages ...
+        hello::package(),      // &#8592; add this line
+    ];
+    pkgs.extend(lang::packages());
+    pkgs
+}</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 4 &#8212; Build and Test</h3>
+<pre><code># Build the user library
+cargo build -p volt-user
+
+# Run the full test suite
+cargo xtask test
+
+# Smoke-test the editor (one-frame headless run)
+cargo run -p volt -- --shell-hidden
+
+# Run the bootstrap demo (prints registered packages)
+cargo run -p volt -- --bootstrap-demo</code></pre>
+                        <p>
+                            Your new <code>hello.greet</code> command will appear in the command palette
+                            (<code>F3</code> or <code>:</code>), and <code>Ctrl+Shift+h</code> will
+                            trigger it from anywhere.
+                        </p>
+                    </div>
+                </section>
+
+                <hr>
+
+                <!-- Complete Plugin Examples -->
+                <section id="complete-plugin-examples">
+                    <h2 class="reveal">Complete Plugin Examples</h2>
+
+                    <h3 class="reveal">Minimal Plugin &#8212; Hook-Only Commands</h3>
+                    <p class="reveal">
+                        The simplest plugins emit hooks and let the host handle the behavior.
+                        Here is <code>user/pane.rs</code> (builtin):
+                    </p>
+<pre class="reveal"><code>use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new("pane", true, "Pane layout and split commands.")
+        .with_commands(vec![
+            hook_command(
+                "pane.split-horizontal",
+                "Splits the active workspace horizontally.",
+                "ui.pane.split-horizontal",
+            ),
+            hook_command(
+                "pane.split-vertical",
+                "Splits the active workspace vertically.",
+                "ui.pane.split-vertical",
+            ),
+            hook_command(
+                "pane.close",
+                "Closes the currently focused split.",
+                "ui.pane.close",
+            ),
+        ])
+}
+
+fn hook_command(name: &amp;str, description: &amp;str, hook_name: &amp;str) -&gt; PluginCommand {
+    PluginCommand::new(
+        name,
+        description,
+        vec![PluginAction::emit_hook(hook_name, None::&lt;&amp;str&gt;)],
+    )
+}</code></pre>
+
+                    <h3 class="reveal">Buffer Plugin &#8212; Custom Evaluator</h3>
+                    <p class="reveal">
+                        The <strong>calculator</strong> plugin (<code>user/calculator.rs</code>) shows
+                        how to create a split-pane buffer with an evaluate cycle:
+                    </p>
+<pre class="reveal"><code>use editor_plugin_api::{
+    PluginAction, PluginBuffer, PluginBufferSections, PluginCommand,
+    PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    buffer_kinds, plugin_hooks,
+};
+
+pub const BUFFER_NAME: &amp;str = "*calculator*";
+pub const EVALUATE_HANDLER: &amp;str = "calculator.evaluate-buffer";
+pub const EVALUATE_CHORD: &amp;str = "C-c C-c";
+pub const SWITCH_PANE_CHORD: &amp;str = "Ctrl+Tab";
+
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new("calculator", true, "Expression evaluator buffer.")
+        .with_commands(vec![
+            PluginCommand::new(
+                "calculator.open",
+                "Open the calculator buffer in the active pane.",
+                vec![PluginAction::open_buffer(
+                    BUFFER_NAME,
+                    buffer_kinds::CALCULATOR,
+                    None::&lt;&amp;str&gt;,
+                )],
+            ),
+            PluginCommand::new(
+                "calculator.evaluate",
+                "Evaluate the calculator input.",
+                vec![PluginAction::emit_hook(
+                    plugin_hooks::EVALUATE,
+                    None::&lt;&amp;str&gt;,
+                )],
+            ),
+        ])
+        .with_buffers(vec![
+            PluginBuffer::new(
+                buffer_kinds::CALCULATOR,
+                initial_buffer_lines(),
+            )
+            .with_sections(PluginBufferSections::new(
+                "Input",
+                "Output",
+                1,
+                vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()],
+            ))
+            .with_evaluate_handler(EVALUATE_HANDLER),
+        ])
+        .with_key_bindings(vec![
+            PluginKeyBinding::new(
+                EVALUATE_CHORD,
+                "calculator.evaluate",
+                PluginKeymapScope::Workspace,
+            ),
+        ])
+}
+
+pub fn initial_buffer_lines() -&gt; Vec&lt;String&gt; {
+    vec![
+        "# Write expressions below.".to_owned(),
+        String::new(),
+        "a = 1".to_owned(),
+        "b = 2".to_owned(),
+        "sqrt(a + b)".to_owned(),
+    ]
+}
+
+/// Called by the host when plugin.evaluate fires for this buffer kind.
+pub fn evaluate(input: &amp;str) -&gt; Vec&lt;String&gt; {
+    // Parse and evaluate each line, returning output lines.
+    // See user/calculator.rs for the full implementation.
+    todo!()
+}</code></pre>
+
+                    <p class="reveal">
+                        The evaluate handler must also be wired into <code>UserLibraryImpl</code> in
+                        <code>user/lib.rs</code> so the host can call it:
+                    </p>
+<pre class="reveal"><code>fn run_plugin_buffer_evaluator(&amp;self, handler_id: &amp;str, input: &amp;str) -&gt; Vec&lt;String&gt; {
+    match handler_id {
+        calculator::EVALUATE_HANDLER =&gt; calculator::evaluate(input),
+        // Add your handler here:
+        // my_plugin::EVALUATE_HANDLER =&gt; my_plugin::evaluate(input),
+        _ =&gt; vec![format!("unknown evaluator: {handler_id}")],
+    }
+}</code></pre>
+
+                    <h3 class="reveal">Language Plugin &#8212; Tree-Sitter and LSP</h3>
+                    <p class="reveal">
+                        Language packages combine tree-sitter grammars, theme mappings, and hook bindings
+                        so that opening a file with a matching extension automatically attaches language
+                        features.  Here is a simplified version of the Rust language plugin
+                        (<code>user/lang/rust.rs</code>):
+                    </p>
+<pre class="reveal"><code>use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginHookBinding,
+    PluginHookDeclaration, PluginPackage,
+};
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new(
+        "lang-rust",
+        true,
+        "Rust language defaults, tree-sitter mapping, and startup hooks.",
+    )
+    .with_commands(vec![
+        PluginCommand::new(
+            "lang-rust.attach",
+            "Attaches Rust language defaults to the active workspace.",
+            vec![
+                PluginAction::log_message("Rust language package attached."),
+                PluginAction::emit_hook(
+                    "workspace.formatter.register",
+                    Some("rust|rustfmt"),
+                ),
+            ],
+        ),
+    ])
+    .with_hook_declarations(vec![
+        PluginHookDeclaration::new(
+            "lang.rust.attached",
+            "Runs after the Rust language package attaches to a buffer.",
+        ),
+    ])
+    .with_hook_bindings(vec![
+        // When a .rs file opens, automatically run lang-rust.attach
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lang-rust.auto-attach",
+            "lang-rust.attach",
+            Some(".rs"),
+        ),
+    ])
+}
+
+pub fn syntax_language() -&gt; LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "rust",
+        ["rs"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter/tree-sitter-rust.git",
+            ".",
+            "src",
+            "tree-sitter-rust",
+            "tree_sitter_rust",
+        ),
+        [
+            CaptureThemeMapping::new("comment",  "syntax.comment"),
+            CaptureThemeMapping::new("keyword",  "syntax.keyword"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("string",   "syntax.string"),
+            CaptureThemeMapping::new("type",     "syntax.type"),
+            // ... additional mappings
+        ],
+    )
+}</code></pre>
+                </section>
+
+                <hr>
+
+                <!-- Editing Builtin Plugins -->
+                <section id="editing-builtin-plugins">
+                    <h2 class="reveal">Editing Builtin Plugins</h2>
+                    <p class="reveal">
+                        All builtin plugins live as <code>.rs</code> files under <code>user/</code>.
+                        You can edit them directly &#8212; they are designed to be user-customizable.
+                    </p>
+
+                    <h3 class="reveal">Changing Keybindings</h3>
+                    <p class="reveal">
+                        Open the plugin file and find the <code>.with_key_bindings(vec![...])</code> call.
+                        Change the chord string to your preferred binding.
+                    </p>
+                    <h4>Example &#8212; change the compile keybinding from F5 to Ctrl+B</h4>
+                    <p class="reveal">In <code>user/compile.rs</code>:</p>
+<pre class="reveal"><code>// Before
+PluginKeyBinding::new("F5", "workspace.compile", PluginKeymapScope::Global),
+
+// After
+PluginKeyBinding::new("Ctrl+B", "workspace.compile", PluginKeymapScope::Global),</code></pre>
+
+                    <h4>Example &#8212; change the Vim leader key</h4>
+                    <p class="reveal">In <code>user/vim.rs</code>, change the constant at the top:</p>
+<pre class="reveal"><code>// Before
+const LEADER_KEY: &amp;str = "Space";
+
+// After
+const LEADER_KEY: &amp;str = "Comma";</code></pre>
+
+                    <h3 class="reveal">Adding a Command to an Existing Plugin</h3>
+                    <p class="reveal">
+                        Find the <code>.with_commands(vec![...])</code> block in the plugin&#8217;s
+                        <code>package()</code> function and add a new <code>PluginCommand</code> entry.
+                    </p>
+                    <h4>Example &#8212; add a &#8220;save all&#8221; command to the buffer plugin</h4>
+                    <p class="reveal">In <code>user/buffer.rs</code>:</p>
+<pre class="reveal"><code>pub fn package() -&gt; PluginPackage {
+    PluginPackage::new("buffer", true, "Buffer save and management commands.")
+        .with_commands(vec![
+            // ... existing commands ...
+            PluginCommand::new(
+                "buffer.save-all",
+                "Saves all modified file buffers.",
+                vec![PluginAction::emit_hook("workspace.save", None::&lt;&amp;str&gt;)],
+            ),
+        ])
+}</code></pre>
+
+                    <h3 class="reveal">Changing the Terminal Shell</h3>
+                    <p class="reveal">In <code>user/terminal.rs</code>, edit the <code>default_shell_program()</code> function:</p>
+<pre class="reveal"><code>pub fn default_shell_program() -&gt; String {
+    if cfg!(target_os = "windows") {
+        // Change to your preferred Windows shell:
+        "pwsh".to_owned()
+        // "bash".to_owned()
+        // "nu".to_owned()
+    } else {
+        // Change to your preferred Unix shell:
+        env::var("SHELL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_owned())
+    }
+}</code></pre>
+
+                    <h3 class="reveal">Adding a Build Command for a New Language</h3>
+                    <p class="reveal">
+                        In <code>user/compile.rs</code>, add an entry to the
+                        <code>default_build_command()</code> function:
+                    </p>
+<pre class="reveal"><code>pub fn default_build_command(language: &amp;str) -&gt; Option&lt;&amp;'static str&gt; {
+    let commands: &amp;[(&amp;str, &amp;str)] = &amp;[
+        ("rust", "cargo build"),
+        ("typescript", "npm run build"),
+        // Add your language here:
+        ("zig", "zig build"),
+        ("haskell", "cabal build"),
+    ];
+    commands
+        .iter()
+        .find_map(|(lang, cmd)| (*lang == language).then_some(*cmd))
+}</code></pre>
+
+                    <h3 class="reveal">Modifying Oil Directory Browser Defaults</h3>
+                    <p class="reveal">
+                        In <code>user/oil.rs</code>, edit the <code>defaults()</code> function to
+                        change the initial state of the directory browser:
+                    </p>
+<pre class="reveal"><code>pub fn defaults() -&gt; OilDefaults {
+    OilDefaults {
+        show_hidden: true,       // show dotfiles by default
+        sort_mode: OilSortMode::TypeThenName,
+        trash_enabled: true,     // use trash instead of permanent delete
+    }
+}</code></pre>
+                    <p class="reveal">
+                        You can also change keybindings in the <code>keybindings()</code> function in the
+                        same file.
+                    </p>
+
+                    <h3 class="reveal">Editing the Statusline</h3>
+                    <p class="reveal">
+                        The statusline is rendered by <code>user/statusline.rs</code>.  You receive a
+                        <code>StatuslineContext</code> with fields like <code>vim_mode</code>,
+                        <code>buffer_name</code>, <code>line</code>, <code>column</code>,
+                        <code>git_branch</code>, and <code>lsp_diagnostics</code>.  Edit the rendering
+                        functions to customize what appears in the statusline.
+                    </p>
+                </section>
+
+                <hr>
+
+                <!-- Adding Language Support -->
+                <section id="adding-language-support">
+                    <h2 class="reveal">Adding Language Support</h2>
+                    <p class="reveal">
+                        Adding a new language requires creating a module in <code>user/lang/</code>
+                        and registering it.
+                    </p>
+
+                    <div class="step-card reveal">
+                        <h3>Step 1 &#8212; Create the Language Module</h3>
+                        <p>Create <code>user/lang/python.rs</code>:</p>
+<pre><code>use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginHookBinding,
+    PluginHookDeclaration, PluginPackage,
+};
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+
+pub fn package() -&gt; PluginPackage {
+    PluginPackage::new(
+        "lang-python",
+        true,
+        "Python language defaults and tree-sitter mapping.",
+    )
+    .with_commands(vec![
+        PluginCommand::new(
+            "lang-python.attach",
+            "Attaches Python language defaults to the active workspace.",
+            vec![
+                PluginAction::log_message("Python language package attached."),
+            ],
+        ),
+    ])
+    .with_hook_declarations(vec![
+        PluginHookDeclaration::new(
+            "lang.python.attached",
+            "Runs after the Python language package attaches.",
+        ),
+    ])
+    .with_hook_bindings(vec![
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lang-python.auto-attach",
+            "lang-python.attach",
+            Some(".py"),
+        ),
+    ])
+}
+
+pub fn syntax_language() -&gt; LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "python",
+        ["py"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter/tree-sitter-python.git",
+            ".",
+            "src",
+            "tree-sitter-python",
+            "tree_sitter_python",
+        ),
+        [
+            CaptureThemeMapping::new("comment",  "syntax.comment"),
+            CaptureThemeMapping::new("keyword",  "syntax.keyword"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("string",   "syntax.string"),
+            CaptureThemeMapping::new("type",     "syntax.type"),
+            CaptureThemeMapping::new("variable", "syntax.variable"),
+            CaptureThemeMapping::new("number",   "syntax.constant"),
+            CaptureThemeMapping::new("operator", "syntax.operator"),
+        ],
+    )
+}</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 2 &#8212; Register in <code>user/lang/mod.rs</code></h3>
+<pre><code>/// Python language support and theme mappings.
+pub mod python;
+
+pub fn packages() -&gt; Vec&lt;editor_plugin_api::PluginPackage&gt; {
+    vec![
+        // ... existing languages ...
+        python::package(),
+    ]
+}
+
+pub fn syntax_languages() -&gt; Vec&lt;LanguageConfiguration&gt; {
+    vec![
+        // ... existing languages ...
+        python::syntax_language(),
+    ]
+}</code></pre>
+                    </div>
+
+                    <div class="step-card reveal">
+                        <h3>Step 3 &#8212; Add an LSP Server (Optional)</h3>
+                        <p>
+                            In <code>user/lsp.rs</code>, add a new <code>LanguageServerSpec</code> to
+                            the <code>language_servers()</code> function for your language&#8217;s LSP server.
+                        </p>
+                    </div>
+                </section>
+
+                <hr>
+
+                <!-- Building and Testing -->
+                <section id="building-and-testing">
+                    <h2 class="reveal">Building and Testing</h2>
+
+                    <h3 class="reveal">Developer Commands</h3>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Command</th><th>Purpose</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>cargo build -p volt-user</code></td><td>Build the user library (debug)</td></tr>
+                            <tr><td><code>cargo build -p volt</code></td><td>Build the editor binary (debug)</td></tr>
+                            <tr><td><code>cargo build -p volt -p volt-user --release</code></td><td>Release build of both</td></tr>
+                            <tr><td><code>cargo xtask fmt</code></td><td>Format the workspace</td></tr>
+                            <tr><td><code>cargo xtask check</code></td><td>Run cargo check</td></tr>
+                            <tr><td><code>cargo xtask clippy</code></td><td>Run clippy (warnings &#8594; errors)</td></tr>
+                            <tr><td><code>cargo xtask test</code></td><td>Run all workspace tests</td></tr>
+                            <tr><td><code>cargo xtask ci</code></td><td>Full CI validation</td></tr>
+                        </tbody>
+                    </table>
+
+                    <h3 class="reveal">Running and Verifying</h3>
+<pre class="reveal"><code># Launch the SDL shell (interactive)
+cargo run -p volt
+
+# One-frame headless smoke test
+cargo run -p volt -- --shell-hidden
+
+# Bootstrap demo &#8212; prints registered packages and subsystem summary
+cargo run -p volt -- --bootstrap-demo</code></pre>
+
+                    <h3 class="reveal">Running a Single Test</h3>
+<pre class="reveal"><code># Run tests in the user crate matching a name pattern
+cargo test -p volt-user &lt;test_name&gt;
+
+# Exact match with module path
+cargo test -p volt-user tests::user_library_exports_themes -- --exact</code></pre>
+
+                    <h3 class="reveal">Output Artifacts</h3>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Platform</th><th>User library</th><th>Editor binary</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Linux</td><td><code>target/&lt;profile&gt;/libuser.so</code></td><td><code>target/&lt;profile&gt;/volt</code></td></tr>
+                            <tr><td>macOS</td><td><code>target/&lt;profile&gt;/libuser.dylib</code></td><td><code>target/&lt;profile&gt;/volt</code></td></tr>
+                            <tr><td>Windows</td><td><code>target/&lt;profile&gt;/user.dll</code></td><td><code>target/&lt;profile&gt;/volt.exe</code></td></tr>
+                        </tbody>
+                    </table>
+
+                    <h3 class="reveal">Lint Policy</h3>
+                    <p class="reveal">
+                        The workspace enforces these lints (defined in the root <code>Cargo.toml</code>):
+                    </p>
+                    <ul class="reveal">
+                        <li><code>unsafe_code</code> is <strong>forbidden</strong></li>
+                        <li><code>dbg!</code>, <code>todo!</code>, and <code>unwrap()</code> are <strong>denied</strong></li>
+                        <li><code>cargo xtask clippy</code> promotes warnings to errors</li>
+                    </ul>
+                    <p class="reveal">
+                        Always run <code>cargo xtask clippy</code> before submitting changes.
+                    </p>
+                </section>
+
+            </div>
+        </main>
+
+        <footer class="site-footer">
+            <p>
+                <strong>Volt</strong> pairs Vim-style editing with a layered Rust runtime, compiled
+                customization, and modern tooling integration.
+            </p>
+            <a href="#top">Back to top</a>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
