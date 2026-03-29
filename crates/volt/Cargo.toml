@@ -10,6 +10,7 @@ build = "build.rs"
 workspace = true
 
 [dependencies]
+abi_stable = "0.11"
 editor-buffer = { path = "../editor-buffer" }
 editor-core = { path = "../editor-core" }
 editor-dap = { path = "../editor-dap" }
@@ -18,11 +19,13 @@ editor-git = { path = "../editor-git" }
 editor-jobs = { path = "../editor-jobs" }
 editor-lsp = { path = "../editor-lsp" }
 editor-picker = { path = "../editor-picker" }
+editor-plugin-api = { path = "../../user/sdk" }
 editor-plugin-host = { path = "../editor-plugin-host" }
 editor-sdl = { path = "../editor-sdl" }
 editor-syntax = { path = "../editor-syntax" }
 editor-terminal = { path = "../editor-terminal" }
 editor-theme = { path = "../editor-theme" }
+editor-icons = { path = "../editor-icons" }
 user = { package = "volt-user", path = "../../user" }
 
 [target.'cfg(windows)'.build-dependencies]

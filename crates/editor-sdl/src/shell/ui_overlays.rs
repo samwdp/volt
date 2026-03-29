@@ -17,8 +17,9 @@ pub(super) struct AutocompleteRegistry {
 }
 
 impl AutocompleteRegistry {
-    pub(super) fn from_user_config() -> Self {
-        let providers = user::autocomplete::providers()
+    pub(super) fn from_user_config(user_library: &dyn UserLibrary) -> Self {
+        let providers = user_library
+            .autocomplete_providers()
             .into_iter()
             .filter_map(|provider| match provider.id.as_str() {
                 AUTOCOMPLETE_BUFFER_PROVIDER => Some(AutocompleteProviderSpec {
@@ -41,7 +42,7 @@ impl AutocompleteRegistry {
             })
             .collect();
         Self {
-            result_limit: user::autocomplete::RESULT_LIMIT.max(1),
+            result_limit: user_library.autocomplete_result_limit().max(1),
             providers,
         }
     }
@@ -168,8 +169,9 @@ pub(super) struct HoverRegistry {
 }
 
 impl HoverRegistry {
-    pub(super) fn from_user_config() -> Self {
-        let providers = user::hover::providers()
+    pub(super) fn from_user_config(user_library: &dyn UserLibrary) -> Self {
+        let providers = user_library
+            .hover_providers()
             .into_iter()
             .filter_map(|provider| {
                 let kind = match provider.id.as_str() {
@@ -187,7 +189,7 @@ impl HoverRegistry {
             })
             .collect();
         Self {
-            line_limit: user::hover::LINE_LIMIT.max(1),
+            line_limit: user_library.hover_line_limit().max(1),
             providers,
         }
     }

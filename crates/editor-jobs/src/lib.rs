@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     fmt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -330,6 +330,7 @@ impl CompilationRunner {
 
 fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
     let started = Instant::now();
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut output_result = build_job_command(&spec, spec.program(), None).output();
     #[cfg(windows)]
     {
@@ -410,7 +411,7 @@ fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
 
 #[cfg(windows)]
 fn windows_launch_program_candidates(program: &str) -> Vec<String> {
-    if Path::new(program).extension().is_some() {
+    if std::path::Path::new(program).extension().is_some() {
         return Vec::new();
     }
 
@@ -452,7 +453,7 @@ fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
 
 #[cfg(windows)]
 fn windows_fnm_environment(
-    cwd: Option<&Path>,
+    cwd: Option<&std::path::Path>,
     env: &[(String, String)],
 ) -> Option<Vec<(String, String)>> {
     let mut command = Command::new("fnm");
@@ -476,7 +477,7 @@ fn windows_fnm_launch_program_candidates(
     program: &str,
     fnm_env: &[(String, String)],
 ) -> Vec<String> {
-    if Path::new(program).components().count() != 1 {
+    if std::path::Path::new(program).components().count() != 1 {
         return Vec::new();
     }
 
@@ -495,7 +496,7 @@ fn windows_fnm_launch_program_candidates(
         .filter(|entry| !entry.is_empty())
     {
         for name in &names {
-            let candidate = Path::new(directory).join(name);
+            let candidate = std::path::Path::new(directory).join(name);
             if candidate.is_file() {
                 let candidate = candidate.to_string_lossy().into_owned();
                 if !candidates.iter().any(|existing| existing == &candidate) {
@@ -557,8 +558,6 @@ fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::{CompilationRunner, JobKind, JobManager, JobSpec};
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -570,6 +569,7 @@ mod tests {
 
     #[cfg(windows)]
     fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")

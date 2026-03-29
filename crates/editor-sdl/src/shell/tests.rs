@@ -69,15 +69,15 @@ fn terminal_key_for_event_maps_special_keys() {
 
 #[test]
 fn terminal_buffers_are_read_only_without_prompt_input() {
-    let (read_only, input) = buffer_interaction(&BufferKind::Terminal);
+    let (read_only, input) = buffer_interaction(&BufferKind::Terminal, &NullUserLibrary);
     assert!(read_only);
     assert!(input.is_none());
 }
 
 #[test]
 fn directory_view_state_uses_user_oil_defaults() {
-    let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new());
-    let defaults = user::oil::defaults();
+    let defaults = editor_plugin_host::NullUserLibrary.oil_defaults();
+    let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new(), defaults);
 
     assert_eq!(state.show_hidden, defaults.show_hidden);
     assert_eq!(state.sort_mode, defaults.sort_mode);
@@ -111,7 +111,7 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
 
 #[test]
 fn terminal_placeholder_lines_describe_shell_launch_not_vertical_slice() {
-    let lines = placeholder_lines("*terminal*", &BufferKind::Terminal);
+    let lines = placeholder_lines("*terminal*", &BufferKind::Terminal, &NullUserLibrary);
     let body = lines.join("\n");
 
     assert!(body.contains("*terminal* is launching the configured shell."));
@@ -324,7 +324,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
     let line = SectionRenderLine {
         text: format!(
             "{} Head: master f9d8c15 Added some more keybinds",
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+            editor_icons::symbols::dev::DEV_GIT_BRANCH
         ),
         depth: 1,
         section_id: GIT_SECTION_HEADERS.to_owned(),
@@ -366,7 +366,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
         text_segments,
         vec![
             "  ".to_owned(),
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+            editor_icons::symbols::dev::DEV_GIT_BRANCH.to_owned(),
             " ".to_owned(),
             "Head:".to_owned(),
             " ".to_owned(),
@@ -384,7 +384,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
     let line = AcpRenderedTextLine {
         prefix: vec![
-            acp_icon_segment(user::icon_font::symbols::cod::COD_COMMENT, AcpColorRole::Accent),
+            acp_icon_segment(editor_icons::symbols::cod::COD_COMMENT, AcpColorRole::Accent),
             acp_text_segment(" ", AcpColorRole::Default),
         ],
         text: "Excellent! Now let me gather more context about the project to inform the documentation content:".to_owned(),
@@ -443,7 +443,7 @@ fn statusline_lsp_diagnostics_counts_errors_and_warnings() {
 
     assert_eq!(
         statusline_lsp_diagnostics(&diagnostics),
-        Some(user::statusline::LspDiagnosticsInfo {
+        Some(editor_plugin_api::LspDiagnosticsInfo {
             errors: 1,
             warnings: 1,
         })
@@ -640,11 +640,62 @@ fn install_acp_test_buffer(
         (1..=output_lines)
             .map(|index| format!("line {index}"))
             .collect(),
+        &NullUserLibrary,
     );
     if let Some(input) = shell_buffer.input_field_mut() {
         input.set_text(input_text);
         input.set_hint(hint.map(str::to_owned));
     }
+    shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_plugin_sections_test_buffer(
+    state: &mut ShellState,
+    input_lines: &[&str],
+    output_lines: &[&str],
+) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            "*calculator test*",
+            BufferKind::Plugin(buffer_kinds::CALCULATOR.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let buffer = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| "plugin test buffer is missing".to_owned())?;
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(
+        buffer,
+        input_lines.iter().map(|line| (*line).to_owned()).collect(),
+        &NullUserLibrary,
+    );
+    let output = if output_lines.is_empty() {
+        vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()]
+    } else {
+        output_lines.iter().map(|line| (*line).to_owned()).collect()
+    };
+    shell_buffer.plugin_section_state = Some(PluginSectionBufferState::new(
+        PluginBufferSections::new("Input", "Output", 1, output),
+    ));
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -666,7 +717,7 @@ fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<Buf
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, name, BufferKind::Scratch, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     sync_active_buffer(&mut state.runtime)?;
     Ok(buffer_id)
@@ -698,7 +749,7 @@ fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, Strin
         .model_mut()
         .create_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )
@@ -710,8 +761,9 @@ fn install_browser_test_buffer(state: &mut ShellState) -> Result<BufferId, Strin
         .map_err(|error| error.to_string())?;
     shell_ui_mut(&mut state.runtime)?.ensure_buffer(
         buffer_id,
-        user::browser::BUFFER_NAME,
+        BROWSER_BUFFER_NAME,
         BufferKind::Plugin(BROWSER_KIND.to_owned()),
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -733,7 +785,7 @@ fn install_terminal_test_buffer(state: &mut ShellState) -> Result<BufferId, Stri
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal);
+    shell_ui_mut(&mut state.runtime)?.ensure_buffer(buffer_id, "*terminal*", BufferKind::Terminal, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
 }
@@ -758,6 +810,7 @@ fn install_terminal_popup_test_buffer(state: &mut ShellState) -> Result<BufferId
         buffer_id,
         "*terminal-popup*",
         BufferKind::Terminal,
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.set_popup_focus(true);
     Ok(buffer_id)
@@ -788,6 +841,7 @@ fn install_git_status_test_buffer(state: &mut ShellState) -> Result<BufferId, St
         buffer_id,
         "*git-status*",
         BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+        &NullUserLibrary,
     );
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -869,7 +923,7 @@ fn install_text_test_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| "text test buffer is missing".to_owned())?;
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &NullUserLibrary);
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok(buffer_id)
@@ -1229,7 +1283,7 @@ fn git_status_header_spans_skip_leading_icons() {
     let line = SectionRenderLine {
         text: format!(
             "{} Head: master f9d8c15 Added some more keybinds",
-            user::icon_font::symbols::dev::DEV_GIT_BRANCH
+            editor_icons::symbols::dev::DEV_GIT_BRANCH
         ),
         depth: 1,
         section_id: GIT_SECTION_HEADERS.to_owned(),
@@ -1244,7 +1298,7 @@ fn git_status_header_spans_skip_leading_icons() {
         vec![
             (
                 TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
-                user::icon_font::symbols::dev::DEV_GIT_BRANCH.to_owned(),
+                editor_icons::symbols::dev::DEV_GIT_BRANCH.to_owned(),
             ),
             (TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(), "Head:".to_owned()),
             (
@@ -1268,7 +1322,7 @@ fn git_status_entry_spans_skip_leading_icons() {
     let line = SectionRenderLine {
         text: format!(
             "{} crates/editor-sdl/src/shell.rs",
-            user::icon_font::symbols::cod::COD_DIFF_MODIFIED
+            editor_icons::symbols::cod::COD_DIFF_MODIFIED
         ),
         depth: 1,
         section_id: GIT_SECTION_UNSTAGED.to_owned(),
@@ -1283,7 +1337,7 @@ fn git_status_entry_spans_skip_leading_icons() {
         vec![
             (
                 TOKEN_GIT_STATUS_ENTRY_MODIFIED.to_owned(),
-                user::icon_font::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
+                editor_icons::symbols::cod::COD_DIFF_MODIFIED.to_owned(),
             ),
             (
                 TOKEN_GIT_STATUS_ENTRY_PATH.to_owned(),
@@ -1298,7 +1352,7 @@ fn git_status_stash_spans_handle_compact_stash_names() {
     let line = SectionRenderLine {
         text: format!(
             "{} stash[0] WIP on master: overnight todo",
-            user::icon_font::symbols::cod::COD_HISTORY
+            editor_icons::symbols::cod::COD_HISTORY
         ),
         depth: 1,
         section_id: GIT_SECTION_STASHES.to_owned(),
@@ -1313,7 +1367,7 @@ fn git_status_stash_spans_handle_compact_stash_names() {
         vec![
             (
                 TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
-                user::icon_font::symbols::cod::COD_HISTORY.to_owned(),
+                editor_icons::symbols::cod::COD_HISTORY.to_owned(),
             ),
             (
                 TOKEN_GIT_STATUS_STASH_NAME.to_owned(),
@@ -1360,35 +1414,35 @@ fn git_status_sequence_commands_are_registered() -> Result<(), String> {
 #[test]
 fn git_status_command_name_maps_sequences_to_picker_commands() {
     assert_eq!(
-        git_status_command_name(None, "S"),
+        git_status_command_name(&NullUserLibrary, None, "S"),
         Some("git.status.stage-all")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Pull), "u"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Pull), "u"),
         Some("git.status.pull-upstream")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Branch), "b"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Branch), "b"),
         Some("git.status.branches")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Diff), "w"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Diff), "w"),
         Some("git.diff")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Log), "l"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Log), "l"),
         Some("git.log")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Stash), "l"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Stash), "l"),
         Some("git.stash-list")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Rebase), "f"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Rebase), "f"),
         Some("git.status.rebase-autosquash")
     );
     assert_eq!(
-        git_status_command_name(Some(GitPrefix::Reset), "f"),
+        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Reset), "f"),
         Some("git.status.checkout-file")
     );
 }
@@ -1701,7 +1755,7 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
     let line = SectionRenderLine {
         text: format!(
             "{} Press c to commit staged changes.",
-            user::icon_font::symbols::cod::COD_GIT_COMMIT
+            editor_icons::symbols::cod::COD_GIT_COMMIT
         ),
         depth: 1,
         section_id: GIT_SECTION_COMMIT.to_owned(),
@@ -1717,7 +1771,7 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
             TOKEN_GIT_STATUS_COMMAND.to_owned(),
             format!(
                 "{} Press c to commit staged changes.",
-                user::icon_font::symbols::cod::COD_GIT_COMMIT
+                editor_icons::symbols::cod::COD_GIT_COMMIT
             ),
         )]
     );
@@ -1725,14 +1779,15 @@ fn git_status_commit_message_spans_use_command_token_with_icon_prefix() {
 
 #[test]
 fn hover_registry_includes_signature_help_provider() {
-    let registry = HoverRegistry::from_user_config();
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let registry = HoverRegistry::from_user_config(&user_library);
     assert!(matches!(registry.providers[0].kind, HoverProviderKind::Lsp));
     assert!(matches!(
         registry.providers[1].kind,
         HoverProviderKind::SignatureHelp
     ));
     assert_eq!(registry.providers[1].label, "Signature");
-    assert_eq!(registry.providers[1].icon, user::hover::SIGNATURE_ICON);
+    assert_eq!(registry.providers[1].icon, user_library.hover_signature_icon());
     assert!(matches!(
         registry.providers[2].kind,
         HoverProviderKind::Diagnostics
@@ -1741,8 +1796,9 @@ fn hover_registry_includes_signature_help_provider() {
 
 #[test]
 fn statusline_icon_segments_split_acp_and_lsp_icons() {
-    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
     let statusline = format!("NORMAL | {acp_icon} | Ln 3, Col 9 | {lsp_icon} rust-analyzer");
     assert_eq!(
         statusline_icon_segments(&statusline, &[acp_icon, lsp_icon]),
@@ -1758,9 +1814,10 @@ fn statusline_icon_segments_split_acp_and_lsp_icons() {
 
 #[test]
 fn statusline_icon_segments_split_diagnostic_icons() {
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
-    let error_icon = user::statusline::LSP_ERROR_ICON;
-    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let user_library = editor_plugin_host::NullUserLibrary;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
+    let error_icon = user_library.statusline_lsp_error_icon();
+    let warning_icon = user_library.statusline_lsp_warning_icon();
     let prefix = format!("NORMAL | {lsp_icon} rust-analyzer ");
     let statusline = format!("NORMAL | {lsp_icon} rust-analyzer {error_icon} 2 {warning_icon} 4");
     assert_eq!(
@@ -1956,6 +2013,60 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
     assert!(output_bottom <= layout.input_y);
     assert!(layout.input_y < hint_y);
     assert!(hint_y < layout.statusline_y);
+    Ok(())
+}
+
+#[test]
+fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_plugin_sections_test_buffer(
+        &mut state,
+        &["a = 1", "b = 2", "sqrt(a + b)"],
+        &["(press Ctrl+c Ctrl+c to evaluate)"],
+    )?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
+    let panes = plugin_section_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "plugin section layout missing".to_owned())?;
+
+    assert_eq!(panes.output.visible_rows, 1);
+    assert!(panes.input.rect.y() >= layout.body_y);
+    assert!(panes.input.rect.y() + panes.input.rect.height() as i32 <= panes.output.rect.y());
+    assert!(panes.output.rect.y() + panes.output.rect.height() as i32 <= layout.pane_bottom);
+    Ok(())
+}
+
+#[test]
+fn plugin_sections_switching_output_pane_changes_focus_and_read_only_state() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id =
+        install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["1"])?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Input)
+    );
+    assert!(!buffer.is_read_only());
+
+    assert!(buffer.plugin_switch_pane());
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Output)
+    );
+    assert!(buffer.is_read_only());
+
+    assert!(buffer.plugin_switch_pane());
+    assert_eq!(
+        buffer.plugin_section_active_pane(),
+        Some(PluginSectionPane::Input)
+    );
+    assert!(!buffer.is_read_only());
     Ok(())
 }
 
@@ -2377,7 +2488,7 @@ fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
     let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
     let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
         .map_err(|error| error.to_string())?;
-    let material_icon = user::icon_font_symbols::md::MD_FORMAT_BOLD
+    let material_icon = editor_icons::symbols::md::MD_FORMAT_BOLD
         .chars()
         .next()
         .ok_or_else(|| "material icon glyph missing".to_owned())?;
@@ -2405,7 +2516,7 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
     let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
     let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
         .map_err(|error| error.to_string())?;
-    let codicon = user::icon_font_symbols::cod::COD_DIFF_ADDED
+    let codicon = editor_icons::symbols::cod::COD_DIFF_ADDED
         .chars()
         .next()
         .ok_or_else(|| "codicon glyph missing".to_owned())?;
@@ -2426,7 +2537,7 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
 
 #[test]
 fn font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint() -> Result<(), String> {
-    let branch = user::icon_font_symbols::ple::PL_BRANCH
+    let branch = editor_icons::symbols::ple::PL_BRANCH
         .chars()
         .next()
         .ok_or_else(|| "powerline branch glyph missing".to_owned())?;
@@ -3250,7 +3361,7 @@ fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
         .model_mut()
         .create_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )

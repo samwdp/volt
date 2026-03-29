@@ -510,13 +510,13 @@ fn hover_toggle_previews_and_focus_enters_panel() -> Result<(), Box<dyn std::err
 
     state
         .runtime
-        .emit_hook(user::hover::HOOK_HOVER_FOCUS, HookEvent::new())
+        .emit_hook(editor_plugin_api::hover_hooks::FOCUS, HookEvent::new())
         .map_err(|error| error.to_string())?;
     assert!(state.hover_focused()?);
 
     state
         .runtime
-        .emit_hook(user::hover::HOOK_HOVER_FOCUS, HookEvent::new())
+        .emit_hook(editor_plugin_api::hover_hooks::FOCUS, HookEvent::new())
         .map_err(|error| error.to_string())?;
     assert!(state.hover_visible()?);
     assert!(state.hover_focused()?);

@@ -3,8 +3,14 @@
     windows_subsystem = "windows"
 )]
 
-use std::{error::Error, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
+use abi_stable::library::RootModule;
 use editor_buffer::TextBuffer;
 use editor_core::{BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, builtins};
 use editor_dap::{DebugAdapterRegistry, DebugConfiguration, DebugRequestKind, DebugSessionPlan};
@@ -13,7 +19,8 @@ use editor_git::parse_status;
 use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_host::{bootstrap, load_auto_loaded_packages};
+use editor_plugin_api::abi::{AbiDirectoryEntry, AbiGitStatusPrefix, AbiStatuslineContext, UserLibraryModuleRef};
+use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
 use editor_terminal::TerminalSession;
@@ -70,12 +77,365 @@ struct LaunchOptions {
     profile_input_latency: bool,
 }
 
+struct DynamicUserLibrary {
+    module: UserLibraryModuleRef,
+    icon_symbols: &'static [editor_icons::IconFontSymbol],
+}
+
+impl DynamicUserLibrary {
+    fn new(module: UserLibraryModuleRef) -> Self {
+        let icon_symbols = module
+            .icon_symbols()()
+            .into_iter()
+            .map(editor_icons::IconFontSymbol::from)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            module,
+            icon_symbols: Box::leak(icon_symbols),
+        }
+    }
+}
+
+impl UserLibrary for DynamicUserLibrary {
+    fn packages(&self) -> Vec<editor_plugin_api::PluginPackage> {
+        self.module.packages()().into_iter().collect()
+    }
+
+    fn themes(&self) -> Vec<editor_theme::Theme> {
+        self.module.themes()().into_iter().map(Into::into).collect()
+    }
+
+    fn syntax_languages(&self) -> Vec<editor_syntax::LanguageConfiguration> {
+        self.module
+            .syntax_languages()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn language_servers(&self) -> Vec<editor_lsp::LanguageServerSpec> {
+        self.module
+            .language_servers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn debug_adapters(&self) -> Vec<editor_dap::DebugAdapterSpec> {
+        self.module
+            .debug_adapters()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn autocomplete_providers(&self) -> Vec<editor_plugin_api::AutocompleteProvider> {
+        self.module
+            .autocomplete_providers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn autocomplete_result_limit(&self) -> usize {
+        self.module.autocomplete_result_limit()()
+    }
+
+    fn autocomplete_token_icon(&self) -> &'static str {
+        self.module.autocomplete_token_icon()().as_str()
+    }
+
+    fn hover_providers(&self) -> Vec<editor_plugin_api::HoverProvider> {
+        self.module
+            .hover_providers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn hover_line_limit(&self) -> usize {
+        self.module.hover_line_limit()()
+    }
+
+    fn hover_token_icon(&self) -> &'static str {
+        self.module.hover_token_icon()().as_str()
+    }
+
+    fn hover_signature_icon(&self) -> &'static str {
+        self.module.hover_signature_icon()().as_str()
+    }
+
+    fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
+        self.module.acp_clients()().into_iter().map(Into::into).collect()
+    }
+
+    fn acp_client_by_id(&self, id: &str) -> Option<editor_plugin_api::AcpClient> {
+        self.module
+            .acp_client_by_id()(id.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn workspace_roots(&self) -> Vec<editor_plugin_api::WorkspaceRoot> {
+        self.module
+            .workspace_roots()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn terminal_config(&self) -> editor_plugin_api::TerminalConfig {
+        self.module.terminal_config()().into()
+    }
+
+    fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
+        self.module.oil_defaults()().into()
+    }
+
+    fn oil_keybindings(&self) -> editor_plugin_api::OilKeybindings {
+        self.module.oil_keybindings()().into()
+    }
+
+    fn oil_keydown_action(&self, chord: &str) -> Option<editor_plugin_api::OilKeyAction> {
+        self.module
+            .oil_keydown_action()(chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn oil_chord_action(
+        &self,
+        had_prefix: bool,
+        chord: &str,
+    ) -> Option<editor_plugin_api::OilKeyAction> {
+        self.module
+            .oil_chord_action()(had_prefix, chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn oil_help_lines(&self) -> Vec<String> {
+        self.module
+            .oil_help_lines()()
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn oil_directory_sections(
+        &self,
+        root: &Path,
+        entries: &[editor_fs::DirectoryEntry],
+        show_hidden: bool,
+        sort_mode: editor_plugin_api::OilSortMode,
+        trash_enabled: bool,
+    ) -> editor_core::SectionTree {
+        let entries = entries
+            .iter()
+            .cloned()
+            .map(AbiDirectoryEntry::from)
+            .collect::<Vec<_>>();
+        self.module
+            .oil_directory_sections()(
+                root.to_string_lossy().into_owned().into(),
+                entries.into(),
+                show_hidden,
+                sort_mode.into(),
+                trash_enabled,
+            )
+            .into()
+    }
+
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
+        let stripped = self
+            .module
+            .oil_strip_entry_icon_prefix()(label.to_owned().into());
+        if stripped.as_str() == label {
+            label
+        } else {
+            label
+                .find(stripped.as_str())
+                .map(|start| &label[start..start + stripped.len()])
+                .unwrap_or(label)
+        }
+    }
+
+    fn git_status_sections(&self, snapshot: &editor_git::GitStatusSnapshot) -> editor_core::SectionTree {
+        self.module.git_status_sections()(snapshot.clone().into()).into()
+    }
+
+    fn git_commit_template(&self) -> Vec<String> {
+        self.module
+            .git_commit_template()()
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn git_prefix_for_chord(&self, chord: &str) -> Option<editor_plugin_api::GitStatusPrefix> {
+        self.module
+            .git_prefix_for_chord()(chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn git_command_for_chord(
+        &self,
+        prefix: Option<editor_plugin_api::GitStatusPrefix>,
+        chord: &str,
+    ) -> Option<&'static str> {
+        let command = self
+            .module
+            .git_command_for_chord()(
+                prefix.map(AbiGitStatusPrefix::from).into(),
+                chord.to_owned().into(),
+            )
+            .into_option();
+        command.map(|command| command.as_str())
+    }
+
+    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String> {
+        let url = url.map(|value| value.to_owned().into());
+        self.module
+            .browser_buffer_lines()(url.into())
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn browser_input_hint(&self, url: Option<&str>) -> String {
+        let url = url.map(|value| value.to_owned().into());
+        self.module
+            .browser_input_hint()(url.into())
+            .into()
+    }
+
+    fn browser_url_prompt(&self) -> String {
+        self.module.browser_url_prompt()().into()
+    }
+
+    fn browser_url_placeholder(&self) -> String {
+        self.module.browser_url_placeholder()().into()
+    }
+
+    fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
+        self.module
+            .statusline_render()(AbiStatuslineContext::from(*context))
+            .into()
+    }
+
+    fn statusline_lsp_connected_icon(&self) -> &'static str {
+        self.module.statusline_lsp_connected_icon()().as_str()
+    }
+
+    fn statusline_lsp_error_icon(&self) -> &'static str {
+        self.module.statusline_lsp_error_icon()().as_str()
+    }
+
+    fn statusline_lsp_warning_icon(&self) -> &'static str {
+        self.module.statusline_lsp_warning_icon()().as_str()
+    }
+
+    fn lsp_diagnostic_icon(&self) -> &'static str {
+        self.module.lsp_diagnostic_icon()().as_str()
+    }
+
+    fn lsp_diagnostic_line_limit(&self) -> usize {
+        self.module.lsp_diagnostic_line_limit()()
+    }
+
+    fn lsp_show_buffer_diagnostics(&self) -> bool {
+        self.module.lsp_show_buffer_diagnostics()()
+    }
+
+    fn gitfringe_token_added(&self) -> &'static str {
+        self.module.gitfringe_token_added()().as_str()
+    }
+
+    fn gitfringe_token_modified(&self) -> &'static str {
+        self.module.gitfringe_token_modified()().as_str()
+    }
+
+    fn gitfringe_token_removed(&self) -> &'static str {
+        self.module.gitfringe_token_removed()().as_str()
+    }
+
+    fn gitfringe_symbol(&self) -> &'static str {
+        self.module.gitfringe_symbol()().as_str()
+    }
+
+    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
+        self.icon_symbols
+    }
+
+    fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
+        self.module
+            .run_plugin_buffer_evaluator()(handler.to_owned().into(), input.to_owned().into())
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn default_build_command(&self, language: &str) -> Option<String> {
+        self.module
+            .default_build_command()(language.to_owned().into())
+            .into_option()
+            .map(|command| command.into_string())
+    }
+}
+
+fn user_library_candidates(exe_path: Option<&Path>, env_path: Option<&str>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(env_path) = env_path {
+        let path = PathBuf::from(env_path);
+        if seen.insert(path.clone()) {
+            candidates.push(path);
+        }
+    }
+    if let Some(exe_path) = exe_path.and_then(Path::parent) {
+        let path = UserLibraryModuleRef::get_library_path(exe_path);
+        if seen.insert(path.clone()) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn load_user_library() -> Arc<dyn UserLibrary> {
+    let current_exe = std::env::current_exe().ok();
+    for path in user_library_candidates(
+        current_exe.as_deref(),
+        std::env::var("VOLT_USER_LIBRARY").ok().as_deref(),
+    ) {
+        if !path.is_file() {
+            continue;
+        }
+        match UserLibraryModuleRef::load_from_file(&path) {
+            Ok(module) => {
+                eprintln!("loaded user library from `{}`", path.display());
+                return Arc::new(DynamicUserLibrary::new(module));
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to load runtime user library `{}`: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Arc::new(user::UserLibraryImpl)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_launch_options(std::env::args().skip(1))?;
+    let user_library = load_user_library();
     match options.mode {
         LaunchMode::ShellDemo => {
             let summary = run_demo_shell(ShellConfig {
                 profile_input_latency: options.profile_input_latency,
+                user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
             })?;
             print_shell_summary("Volt", &summary);
@@ -86,6 +446,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 hidden: true,
                 frame_limit: Some(1),
                 profile_input_latency: options.profile_input_latency,
+                user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
             })?;
             print_shell_summary("volt hidden shell smoke test", &summary);
@@ -371,23 +732,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         CommandSource::Core,
     )?;
 
-    let loaded_packages = load_auto_loaded_packages(&mut runtime, &user::packages())?;
+    let loaded_packages = load_auto_loaded_packages(&mut runtime, &user_library.packages())?;
     let mut command_palette_preview =
         PickerSession::new("Command Palette", command_palette_items(&runtime))
             .with_result_limit(16);
     command_palette_preview.set_query("term");
     let mut lsp_registry = LanguageServerRegistry::new();
-    lsp_registry.register_all(user::language_servers())?;
+    lsp_registry.register_all(user_library.language_servers())?;
     runtime.services_mut().insert(lsp_registry);
     runtime.services_mut().insert(LspState::default());
     let mut dap_registry = DebugAdapterRegistry::new();
-    dap_registry.register_all(user::debug_adapters())?;
+    dap_registry.register_all(user_library.debug_adapters())?;
     runtime.services_mut().insert(dap_registry);
     runtime.services_mut().insert(DapState::default());
     let mut syntax_registry = SyntaxRegistry::new();
-    syntax_registry.register_all(user::syntax_languages())?;
+    syntax_registry.register_all(user_library.syntax_languages())?;
     let mut theme_registry = ThemeRegistry::new();
-    theme_registry.register_all(user::themes())?;
+    theme_registry.register_all(user_library.themes())?;
     let rust_syntax = syntax_registry.highlight_buffer_for_extension(
         "rs",
         &TextBuffer::from_text(
@@ -779,5 +1140,28 @@ mod tests {
             parse_launch_options(["--shell-demo".to_owned(), "--bootstrap-demo".to_owned()])
                 .expect_err("multiple launch modes should be rejected");
         assert!(error.contains("more than once"));
+    }
+
+    #[test]
+    fn user_library_candidates_prefer_env_then_executable_directory() {
+        let candidates = user_library_candidates(
+            Some(Path::new("/tmp/volt/bin/volt")),
+            Some("/tmp/custom/user/libuser.so"),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/tmp/custom/user/libuser.so"),
+                UserLibraryModuleRef::get_library_path(Path::new("/tmp/volt/bin")),
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_user_library_can_wrap_exported_module() {
+        let library = DynamicUserLibrary::new(user::user_library_module());
+        assert!(!library.packages().is_empty());
+        assert!(!library.themes().is_empty());
+        assert!(!library.icon_symbols().is_empty());
     }
 }

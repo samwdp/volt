@@ -1,0 +1,20 @@
+[package]
+name = "editor-plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+abi_stable = "0.11"
+editor-core = { path = "../../crates/editor-core" }
+editor-dap = { path = "../../crates/editor-dap" }
+editor-fs = { path = "../../crates/editor-fs" }
+editor-git = { path = "../../crates/editor-git" }
+editor-icons = { path = "../../crates/editor-icons" }
+editor-lsp = { path = "../../crates/editor-lsp" }
+editor-syntax = { path = "../../crates/editor-syntax" }
+editor-theme = { path = "../../crates/editor-theme" }
