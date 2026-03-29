@@ -80,11 +80,19 @@ pub fn auto_loaded_packages(packages: &[PluginPackage]) -> Vec<PluginPackage> {
         .collect()
 }
 
-/// Activates all auto-loaded user packages against the runtime.
+/// Activates all auto-loaded user packages against the runtime and pre-registers
+/// commands from self-contained manual packages so they remain globally discoverable.
 pub fn load_auto_loaded_packages(
     runtime: &mut EditorRuntime,
     packages: &[PluginPackage],
 ) -> Result<usize, HostError> {
+    for package in packages
+        .iter()
+        .filter(|package| !package.auto_load() && is_self_contained(package))
+    {
+        register_package_commands(runtime, package)?;
+    }
+
     let auto_loaded = auto_loaded_packages(packages);
 
     for package in &auto_loaded {
@@ -95,21 +103,10 @@ pub fn load_auto_loaded_packages(
 }
 
 fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Result<(), HostError> {
+    register_package_commands(runtime, package)?;
+
     for declaration in package.hook_declarations() {
         runtime.register_hook(declaration.name(), declaration.description())?;
-    }
-
-    for command in package.commands() {
-        let package_name = package.name().to_owned();
-        let command_name = command.name().to_owned();
-        let actions = command.actions().to_vec();
-
-        runtime.register_command(
-            command.name(),
-            command.description(),
-            CommandSource::UserPackage(package_name.clone()),
-            move |runtime| run_actions(runtime, &package_name, &command_name, &actions),
-        )?;
     }
 
     for binding in package.key_bindings() {
@@ -148,6 +145,30 @@ fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Res
     }
 
     Ok(())
+}
+
+fn register_package_commands(
+    runtime: &mut EditorRuntime,
+    package: &PluginPackage,
+) -> Result<(), HostError> {
+    for command in package.commands() {
+        let package_name = package.name().to_owned();
+        let command_name = command.name().to_owned();
+        let actions = command.actions().to_vec();
+
+        runtime.register_command(
+            command.name(),
+            command.description(),
+            CommandSource::UserPackage(package_name.clone()),
+            move |runtime| run_actions(runtime, &package_name, &command_name, &actions),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn is_self_contained(package: &PluginPackage) -> bool {
+    package.hook_declarations().is_empty() && package.hook_bindings().is_empty()
 }
 
 fn run_actions(
@@ -352,6 +373,59 @@ mod tests {
 
         let workspace = runtime.model().workspace(workspace_id)?;
         assert_eq!(workspace.buffer_count(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_registers_self_contained_manual_package_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "scratch", None)?;
+        let baseline_buffers = runtime.model().workspace(workspace_id)?.buffer_count();
+
+        let packages = vec![
+            PluginPackage::new("calculator", false, "Self-contained calculator commands.")
+                .with_commands(vec![PluginCommand::new(
+                    "calculator.open",
+                    "Opens the calculator buffer.",
+                    vec![PluginAction::open_buffer(
+                        "*calculator*",
+                        "scratch",
+                        None::<&str>,
+                    )],
+                )])
+                .with_key_bindings(vec![PluginKeyBinding::new(
+                    "Ctrl+=",
+                    "calculator.open",
+                    PluginKeymapScope::Global,
+                )]),
+            PluginPackage::new("lang-rust", false, "Rust language defaults.")
+                .with_hook_declarations(vec![PluginHookDeclaration::new(
+                    "lang.rust.attached",
+                    "Runs after Rust language support attaches.",
+                )])
+                .with_commands(vec![PluginCommand::new(
+                    "lang-rust.attach",
+                    "Attaches Rust language services.",
+                    vec![PluginAction::emit_hook("lang.rust.attached", Some("rust"))],
+                )]),
+        ];
+
+        let loaded = load_auto_loaded_packages(&mut runtime, &packages)?;
+        assert_eq!(loaded, 0);
+        assert!(runtime.commands().contains("calculator.open"));
+        assert!(!runtime.commands().contains("lang-rust.attach"));
+        assert!(!runtime.keymaps().contains(&KeymapScope::Global, "Ctrl+="));
+
+        runtime.execute_command("calculator.open")?;
+        assert_eq!(
+            runtime.model().workspace(workspace_id)?.buffer_count(),
+            baseline_buffers + 1
+        );
 
         Ok(())
     }
