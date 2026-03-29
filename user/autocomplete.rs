@@ -1,7 +1,7 @@
 use crate::icon_font::symbols::{cod, md};
-use editor_lsp::LspCompletionKind;
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    LspCompletionKind, PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope,
+    PluginPackage, PluginVimMode,
 };
 
 pub const HOOK_AUTOCOMPLETE_TRIGGER: &str = "ui.autocomplete.trigger";

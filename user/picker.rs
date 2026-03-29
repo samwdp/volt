@@ -86,7 +86,7 @@ pub fn package() -> PluginPackage {
     .with_key_bindings(vec![
         PluginKeyBinding::new("F3", "picker.open-commands", PluginKeymapScope::Global),
         PluginKeyBinding::new("F4", "picker.open-buffers", PluginKeymapScope::Global),
-        PluginKeyBinding::new("F5", "picker.open-keybindings", PluginKeymapScope::Global),
+        PluginKeyBinding::new("F7", "picker.open-keybindings", PluginKeymapScope::Global),
         PluginKeyBinding::new("F6", "picker.open-themes", PluginKeymapScope::Global),
         PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Normal),

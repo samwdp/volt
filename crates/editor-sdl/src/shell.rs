@@ -59,7 +59,14 @@ use editor_lsp::{
     LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
 };
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_host::load_auto_loaded_packages;
+use editor_plugin_api::{
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction, PluginBufferSections,
+    autocomplete_hooks, browser_hooks, buffer_kinds, plugin_hooks, git_actions, git_hooks,
+    git_sections, hover_hooks, lsp_hooks, oil_hooks, oil_protocol,
+};
+use editor_plugin_host::{
+    NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary, load_auto_loaded_packages,
+};
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
     find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
@@ -129,15 +136,15 @@ const HOOK_PICKER_NEXT: &str = "ui.picker.next";
 const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
-const HOOK_AUTOCOMPLETE_TRIGGER: &str = user::autocomplete::HOOK_AUTOCOMPLETE_TRIGGER;
-const HOOK_AUTOCOMPLETE_NEXT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_NEXT;
-const HOOK_AUTOCOMPLETE_PREVIOUS: &str = user::autocomplete::HOOK_AUTOCOMPLETE_PREVIOUS;
-const HOOK_AUTOCOMPLETE_ACCEPT: &str = user::autocomplete::HOOK_AUTOCOMPLETE_ACCEPT;
-const HOOK_AUTOCOMPLETE_CANCEL: &str = user::autocomplete::HOOK_AUTOCOMPLETE_CANCEL;
-const HOOK_HOVER_TOGGLE: &str = user::hover::HOOK_HOVER_TOGGLE;
-const HOOK_HOVER_FOCUS: &str = user::hover::HOOK_HOVER_FOCUS;
-const HOOK_HOVER_NEXT: &str = user::hover::HOOK_HOVER_NEXT;
-const HOOK_HOVER_PREVIOUS: &str = user::hover::HOOK_HOVER_PREVIOUS;
+const HOOK_AUTOCOMPLETE_TRIGGER: &str = autocomplete_hooks::TRIGGER;
+const HOOK_AUTOCOMPLETE_NEXT: &str = autocomplete_hooks::NEXT;
+const HOOK_AUTOCOMPLETE_PREVIOUS: &str = autocomplete_hooks::PREVIOUS;
+const HOOK_AUTOCOMPLETE_ACCEPT: &str = autocomplete_hooks::ACCEPT;
+const HOOK_AUTOCOMPLETE_CANCEL: &str = autocomplete_hooks::CANCEL;
+const HOOK_HOVER_TOGGLE: &str = hover_hooks::TOGGLE;
+const HOOK_HOVER_FOCUS: &str = hover_hooks::FOCUS;
+const HOOK_HOVER_NEXT: &str = hover_hooks::NEXT;
+const HOOK_HOVER_PREVIOUS: &str = hover_hooks::PREVIOUS;
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
@@ -161,48 +168,53 @@ const HOOK_WORKSPACE_WINDOW_UP: &str = "ui.workspace.window-up";
 const HOOK_WORKSPACE_WINDOW_RIGHT: &str = "ui.workspace.window-right";
 const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
-const ACP_BUFFER_KIND: &str = user::acp::ACP_BUFFER_KIND;
-const BROWSER_KIND: &str = user::browser::BROWSER_KIND;
-const HOOK_BROWSER_URL: &str = user::browser::HOOK_BROWSER_URL;
-const AUTOCOMPLETE_BUFFER_PROVIDER: &str = user::autocomplete::PROVIDER_BUFFER;
-const AUTOCOMPLETE_LSP_PROVIDER: &str = user::autocomplete::PROVIDER_LSP;
-const HOVER_PROVIDER_TEST: &str = user::hover::PROVIDER_TEST_HOVER;
-const HOVER_PROVIDER_LSP: &str = user::hover::PROVIDER_LSP;
-const HOVER_PROVIDER_SIGNATURE_HELP: &str = user::hover::PROVIDER_SIGNATURE_HELP;
-const HOVER_PROVIDER_DIAGNOSTICS: &str = user::hover::PROVIDER_DIAGNOSTICS;
-const HOOK_LSP_START: &str = user::lsp::HOOK_LSP_START;
-const HOOK_LSP_STOP: &str = user::lsp::HOOK_LSP_STOP;
-const HOOK_LSP_RESTART: &str = user::lsp::HOOK_LSP_RESTART;
-const HOOK_LSP_LOG: &str = user::lsp::HOOK_LSP_LOG;
-const HOOK_LSP_DEFINITION: &str = user::lsp::HOOK_LSP_DEFINITION;
-const HOOK_LSP_REFERENCES: &str = user::lsp::HOOK_LSP_REFERENCES;
-const HOOK_LSP_IMPLEMENTATION: &str = user::lsp::HOOK_LSP_IMPLEMENTATION;
+const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
+const BROWSER_KIND: &str = buffer_kinds::BROWSER;
+const HOOK_BROWSER_URL: &str = browser_hooks::URL;
+const AUTOCOMPLETE_BUFFER_PROVIDER: &str = "buffer";
+const AUTOCOMPLETE_LSP_PROVIDER: &str = "lsp";
+const HOVER_PROVIDER_TEST: &str = "test-hover";
+const HOVER_PROVIDER_LSP: &str = "lsp";
+const HOVER_PROVIDER_SIGNATURE_HELP: &str = "signature-help";
+const HOVER_PROVIDER_DIAGNOSTICS: &str = "diagnostics";
+const HOOK_LSP_START: &str = lsp_hooks::START;
+const HOOK_LSP_STOP: &str = lsp_hooks::STOP;
+const HOOK_LSP_RESTART: &str = lsp_hooks::RESTART;
+const HOOK_LSP_LOG: &str = lsp_hooks::LOG;
+const HOOK_LSP_DEFINITION: &str = lsp_hooks::DEFINITION;
+const HOOK_LSP_REFERENCES: &str = lsp_hooks::REFERENCES;
+const HOOK_LSP_IMPLEMENTATION: &str = lsp_hooks::IMPLEMENTATION;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
-const GIT_STATUS_KIND: &str = user::git::GIT_STATUS_KIND;
-const GIT_COMMIT_KIND: &str = user::git::GIT_COMMIT_KIND;
-const GIT_DIFF_KIND: &str = user::git::GIT_DIFF_KIND;
-const GIT_LOG_KIND: &str = user::git::GIT_LOG_KIND;
-const GIT_STASH_KIND: &str = user::git::GIT_STASH_KIND;
-const HOOK_GIT_STATUS_OPEN_POPUP: &str = user::git::HOOK_GIT_STATUS_OPEN_POPUP;
-const HOOK_GIT_DIFF_OPEN: &str = user::git::HOOK_GIT_DIFF_OPEN;
-const HOOK_GIT_LOG_OPEN: &str = user::git::HOOK_GIT_LOG_OPEN;
-const HOOK_GIT_STASH_LIST_OPEN: &str = user::git::HOOK_GIT_STASH_LIST_OPEN;
-const HOOK_OIL_OPEN: &str = user::oil::HOOK_OIL_OPEN;
-const HOOK_OIL_OPEN_PARENT: &str = user::oil::HOOK_OIL_OPEN_PARENT;
-const GIT_ACTION_STAGE_FILE: &str = user::git::ACTION_STAGE_FILE;
-const GIT_ACTION_UNSTAGE_FILE: &str = user::git::ACTION_UNSTAGE_FILE;
-const GIT_ACTION_SHOW_COMMIT: &str = user::git::ACTION_SHOW_COMMIT;
-const GIT_ACTION_SHOW_STASH: &str = user::git::ACTION_SHOW_STASH;
-const GIT_SECTION_HEADERS: &str = user::git::SECTION_HEADERS;
-const GIT_SECTION_IN_PROGRESS: &str = user::git::SECTION_IN_PROGRESS;
-const GIT_SECTION_STAGED: &str = user::git::SECTION_STAGED;
-const GIT_SECTION_UNSTAGED: &str = user::git::SECTION_UNSTAGED;
-const GIT_SECTION_UNTRACKED: &str = user::git::SECTION_UNTRACKED;
-const GIT_SECTION_STASHES: &str = user::git::SECTION_STASHES;
-const GIT_SECTION_UNPULLED: &str = user::git::SECTION_UNPULLED;
-const GIT_SECTION_UNPUSHED: &str = user::git::SECTION_UNPUSHED;
-const GIT_SECTION_COMMIT: &str = user::git::SECTION_COMMIT;
+const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
+const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
+const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
+const GIT_LOG_KIND: &str = buffer_kinds::GIT_LOG;
+const GIT_STASH_KIND: &str = buffer_kinds::GIT_STASH;
+const HOOK_PLUGIN_EVALUATE: &str = plugin_hooks::EVALUATE;
+const PLUGIN_EVALUATE_SEPARATOR_PREFIX: &str = plugin_hooks::EVALUATE_SEPARATOR_PREFIX;
+const HOOK_PLUGIN_RUN_COMMAND: &str = plugin_hooks::RUN_COMMAND;
+const HOOK_PLUGIN_RERUN_COMMAND: &str = plugin_hooks::RERUN_COMMAND;
+const HOOK_PLUGIN_SWITCH_PANE: &str = plugin_hooks::SWITCH_PANE;
+const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
+const HOOK_GIT_DIFF_OPEN: &str = git_hooks::DIFF_OPEN;
+const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
+const HOOK_GIT_STASH_LIST_OPEN: &str = git_hooks::STASH_LIST_OPEN;
+const HOOK_OIL_OPEN: &str = oil_hooks::OPEN;
+const HOOK_OIL_OPEN_PARENT: &str = oil_hooks::OPEN_PARENT;
+const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
+const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
+const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
+const GIT_ACTION_SHOW_STASH: &str = git_actions::SHOW_STASH;
+const GIT_SECTION_HEADERS: &str = git_sections::HEADERS;
+const GIT_SECTION_IN_PROGRESS: &str = git_sections::IN_PROGRESS;
+const GIT_SECTION_STAGED: &str = git_sections::STAGED;
+const GIT_SECTION_UNSTAGED: &str = git_sections::UNSTAGED;
+const GIT_SECTION_UNTRACKED: &str = git_sections::UNTRACKED;
+const GIT_SECTION_STASHES: &str = git_sections::STASHES;
+const GIT_SECTION_UNPULLED: &str = git_sections::UNPULLED;
+const GIT_SECTION_UNPUSHED: &str = git_sections::UNPUSHED;
+const GIT_SECTION_COMMIT: &str = git_sections::COMMIT;
 const TOKEN_GIT_STATUS_SECTION_HEADER: &str = "git.status.section.header";
 const TOKEN_GIT_STATUS_SECTION_COUNT: &str = "git.status.section.count";
 const TOKEN_GIT_STATUS_HEADER_LABEL: &str = "git.status.header.label";
@@ -296,6 +308,27 @@ const NOTIFICATION_MAX_STORED: usize = 12;
 const NOTIFICATION_STACK_GAP: i32 = 10;
 const NOTIFICATION_MAX_BODY_LINES: usize = 4;
 
+// ─── Local constants (formerly from user modules) ────────────────────────────
+const BROWSER_BUFFER_NAME: &str = "*browser*";
+const AUTOCOMPLETE_NEXT_CHORD: &str = "Ctrl+n";
+const AUTOCOMPLETE_PREVIOUS_CHORD: &str = "Ctrl+p";
+const HOVER_NEXT_CHORD: &str = "Ctrl+n";
+const HOVER_PREVIOUS_CHORD: &str = "Ctrl+p";
+
+/// Newtype wrapper so `Arc<dyn UserLibrary>` can be stored in the runtime's
+/// type-erased service map.
+struct UserLibraryService(Arc<dyn UserLibrary>);
+
+/// Returns a clone of the user library stored in the runtime service map.
+fn shell_user_library(runtime: &EditorRuntime) -> Arc<dyn UserLibrary> {
+    runtime
+        .services()
+        .get::<UserLibraryService>()
+        .expect("UserLibraryService not registered in runtime")
+        .0
+        .clone()
+}
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -339,8 +372,10 @@ impl<'ttf> FontSet<'ttf> {
         icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
         icon_pixel_size: f32,
         cell_width: i32,
+        user_library: &dyn UserLibrary,
     ) -> Self {
-        let icon_chars = user::icon_font::symbols()
+        let icon_chars = user_library
+            .icon_symbols()
             .iter()
             .flat_map(|symbol| symbol.glyph.chars())
             .collect();
@@ -1417,6 +1452,8 @@ struct ActiveBufferEventContext {
     is_directory: bool,
     is_browser: bool,
     is_terminal: bool,
+    is_plugin_evaluatable: bool,
+    is_compilation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1453,7 +1490,7 @@ impl GitViewState {
     }
 }
 
-type DirectorySortMode = user::oil::OilSortMode;
+type DirectorySortMode = editor_plugin_api::OilSortMode;
 
 #[derive(Debug, Clone)]
 struct DirectoryViewState {
@@ -1466,8 +1503,7 @@ struct DirectoryViewState {
 }
 
 impl DirectoryViewState {
-    fn new(root: PathBuf, entries: Vec<DirectoryEntry>) -> Self {
-        let defaults = user::oil::defaults();
+    fn new(root: PathBuf, entries: Vec<DirectoryEntry>, defaults: OilDefaults) -> Self {
         Self {
             root,
             entries,
@@ -1756,13 +1792,13 @@ fn git_status_entry_token(label: &str) -> &'static str {
 
 fn git_status_entry_token_from_icon(icon: &str) -> &'static str {
     match icon {
-        user::icon_font::symbols::cod::COD_DIFF_ADDED => TOKEN_GIT_STATUS_ENTRY_ADDED,
-        user::icon_font::symbols::cod::COD_DIFF_MODIFIED => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
-        user::icon_font::symbols::cod::COD_DIFF_REMOVED => TOKEN_GIT_STATUS_ENTRY_DELETED,
-        user::icon_font::symbols::cod::COD_DIFF_RENAMED => TOKEN_GIT_STATUS_ENTRY_RENAMED,
-        user::icon_font::symbols::cod::COD_ARROW_SWAP => TOKEN_GIT_STATUS_ENTRY_COPIED,
-        user::icon_font::symbols::cod::COD_SYNC => TOKEN_GIT_STATUS_ENTRY_UPDATED,
-        user::icon_font::symbols::cod::COD_SYMBOL_FILE => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
+        editor_icons::symbols::cod::COD_DIFF_ADDED => TOKEN_GIT_STATUS_ENTRY_ADDED,
+        editor_icons::symbols::cod::COD_DIFF_MODIFIED => TOKEN_GIT_STATUS_ENTRY_MODIFIED,
+        editor_icons::symbols::cod::COD_DIFF_REMOVED => TOKEN_GIT_STATUS_ENTRY_DELETED,
+        editor_icons::symbols::cod::COD_DIFF_RENAMED => TOKEN_GIT_STATUS_ENTRY_RENAMED,
+        editor_icons::symbols::cod::COD_ARROW_SWAP => TOKEN_GIT_STATUS_ENTRY_COPIED,
+        editor_icons::symbols::cod::COD_SYNC => TOKEN_GIT_STATUS_ENTRY_UPDATED,
+        editor_icons::symbols::cod::COD_SYMBOL_FILE => TOKEN_GIT_STATUS_ENTRY_UNTRACKED,
         _ => TOKEN_GIT_STATUS_ENTRY_CHANGED,
     }
 }
@@ -1995,6 +2031,7 @@ pub(crate) struct ShellBuffer {
     read_only: bool,
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
+    plugin_section_state: Option<PluginSectionBufferState>,
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
@@ -2028,6 +2065,29 @@ pub(crate) struct ShellBuffer {
 enum AcpPane {
     Plan,
     Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginSectionPane {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone)]
+struct PluginSectionBufferState {
+    input_title: String,
+    output_title: String,
+    output_min_rows: usize,
+    active_pane: PluginSectionPane,
+    output_pane: PlainTextPaneState,
+}
+
+#[derive(Debug, Clone)]
+struct PlainTextPaneState {
+    text: TextBuffer,
+    scroll_row: usize,
+    viewport_rows: usize,
+    wrap_cols: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2108,6 +2168,38 @@ enum AcpColorRole {
 }
 
 const ACP_IMAGE_ROWS: usize = 12;
+
+impl Default for PlainTextPaneState {
+    fn default() -> Self {
+        Self {
+            text: TextBuffer::new(),
+            scroll_row: 0,
+            viewport_rows: 1,
+            wrap_cols: 1,
+        }
+    }
+}
+
+impl PluginSectionBufferState {
+    fn new(config: PluginBufferSections) -> Self {
+        let mut output_pane = PlainTextPaneState::default();
+        output_pane.replace_lines(
+            config
+                .output_initial_lines()
+                .iter()
+                .map(|line| line.to_string())
+                .collect(),
+            true,
+        );
+        Self {
+            input_title: config.input_title().to_owned(),
+            output_title: config.output_title().to_owned(),
+            output_min_rows: config.output_min_rows(),
+            active_pane: PluginSectionPane::Input,
+            output_pane,
+        }
+    }
+}
 
 impl Default for AcpPaneState {
     fn default() -> Self {
@@ -2312,6 +2404,166 @@ impl AcpPaneState {
     }
 }
 
+impl PlainTextPaneState {
+    fn line_count(&self) -> usize {
+        self.text.line_count()
+    }
+
+    fn line_len_chars(&self, line_index: usize) -> usize {
+        self.text.line_len_chars(line_index).unwrap_or(0)
+    }
+
+    fn cursor(&self) -> TextPoint {
+        self.text.cursor()
+    }
+
+    fn set_cursor(&mut self, point: TextPoint) {
+        self.text.set_cursor(point);
+    }
+
+    fn visible_rows(&self) -> usize {
+        self.viewport_rows.max(1)
+    }
+
+    fn wrap_cols(&self) -> usize {
+        self.wrap_cols.max(1)
+    }
+
+    fn set_view_metrics(&mut self, visible_rows: usize, wrap_cols: usize) {
+        self.viewport_rows = visible_rows.max(1);
+        self.wrap_cols = wrap_cols.max(1);
+        self.scroll_row = self.scroll_row.min(self.max_scroll_row());
+    }
+
+    fn row_count_for_line(&self, line_index: usize) -> usize {
+        let line = self.text.line(line_index).unwrap_or_default();
+        wrap_line_segments(
+            &LineCharMap::new(&line),
+            self.wrap_cols(),
+            self.wrap_cols(),
+        )
+        .len()
+        .max(1)
+    }
+
+    fn max_scroll_row_for(&self, visible_rows: usize) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let visible_rows = visible_rows.max(1);
+        let mut rows = 0usize;
+        for line_index in (0..line_count).rev() {
+            let row_count = self.row_count_for_line(line_index);
+            if rows.saturating_add(row_count) > visible_rows {
+                return if rows == 0 {
+                    line_index
+                } else {
+                    line_index.saturating_add(1)
+                };
+            }
+            rows = rows.saturating_add(row_count);
+        }
+        0
+    }
+
+    fn max_scroll_row(&self) -> usize {
+        self.max_scroll_row_for(self.visible_rows())
+    }
+
+    fn should_follow_output(&self) -> bool {
+        self.scroll_row >= self.max_scroll_row()
+    }
+
+    fn replace_lines(&mut self, lines: Vec<String>, follow_output: bool) {
+        let cursor = self.cursor();
+        let scroll_row = self.scroll_row;
+        self.text = if lines.is_empty() {
+            TextBuffer::new()
+        } else {
+            TextBuffer::from_text(lines.join("\n"))
+        };
+        self.text.mark_clean();
+        if self.line_count() == 0 {
+            self.text.set_cursor(TextPoint::default());
+            self.scroll_row = 0;
+            return;
+        }
+        let line = cursor.line.min(self.line_count().saturating_sub(1));
+        let column = cursor.column.min(self.line_len_chars(line));
+        self.text.set_cursor(TextPoint::new(line, column));
+        if follow_output {
+            self.scroll_row = self.max_scroll_row();
+        } else {
+            self.scroll_row = scroll_row.min(self.max_scroll_row());
+        }
+    }
+
+    fn line_at_viewport_offset(&self, offset: usize) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let mut line_index = self.scroll_row.min(line_count.saturating_sub(1));
+        let mut remaining = offset;
+        while line_index + 1 < line_count {
+            let row_count = self.row_count_for_line(line_index);
+            if remaining < row_count {
+                return line_index;
+            }
+            remaining = remaining.saturating_sub(row_count);
+            line_index = line_index.saturating_add(1);
+        }
+        line_index
+    }
+
+    fn cursor_viewport_offset(&self) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            return 0;
+        }
+        let mut offset = 0usize;
+        for line_index in self.scroll_row..cursor.line {
+            offset = offset.saturating_add(self.row_count_for_line(line_index));
+        }
+        let line = self.text.line(cursor.line).unwrap_or_default();
+        let segments = wrap_line_segments(
+            &LineCharMap::new(&line),
+            self.wrap_cols(),
+            self.wrap_cols(),
+        );
+        offset.saturating_add(segment_index_for_column(&segments, cursor.column))
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            self.scroll_row = 0;
+            return;
+        }
+        let cursor = self.cursor();
+        if cursor.line < self.scroll_row {
+            self.scroll_row = cursor.line;
+            return;
+        }
+        let visible_rows = self.visible_rows();
+        let mut offset = self.cursor_viewport_offset();
+        if offset < visible_rows {
+            return;
+        }
+        let mut new_scroll = self.scroll_row;
+        while offset >= visible_rows && new_scroll < cursor.line {
+            offset = offset.saturating_sub(self.row_count_for_line(new_scroll));
+            new_scroll = new_scroll.saturating_add(1);
+        }
+        self.scroll_row = new_scroll.min(self.max_scroll_row());
+    }
+}
+
 impl AcpRenderedLine {
     fn plain_text(&self) -> String {
         match self {
@@ -2365,7 +2617,7 @@ fn acp_text_segment(text: impl Into<String>, role: AcpColorRole) -> AcpRenderedS
 
 fn acp_spinner_segment(role: AcpColorRole) -> AcpRenderedSegment {
     AcpRenderedSegment {
-        text: user::icon_font::symbols::fa::FA_SPINNER.to_owned(),
+        text: editor_icons::symbols::fa::FA_SPINNER.to_owned(),
         role,
         animate: true,
     }
@@ -2415,14 +2667,19 @@ impl WrapRowCache {
 }
 
 impl ShellBuffer {
-    fn from_runtime_buffer(buffer: &Buffer, lines: Vec<String>) -> Self {
+    fn from_runtime_buffer(
+        buffer: &Buffer,
+        lines: Vec<String>,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
         let text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
+        let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
 
         Self {
             id: buffer.id(),
@@ -2431,6 +2688,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2461,9 +2719,14 @@ impl ShellBuffer {
         }
     }
 
-    fn from_text_buffer(buffer: &Buffer, text: TextBuffer) -> Self {
+    fn from_text_buffer(
+        buffer: &Buffer,
+        text: TextBuffer,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(buffer.kind());
+        let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
+        let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
         let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
             Some(GitFringeState::new())
         } else {
@@ -2478,6 +2741,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2508,16 +2772,22 @@ impl ShellBuffer {
         }
     }
 
-    fn placeholder(buffer_id: BufferId, name: &str, kind: BufferKind) -> Self {
-        let lines = placeholder_lines(name, &kind);
+    fn placeholder(
+        buffer_id: BufferId,
+        name: &str,
+        kind: BufferKind,
+        user_library: &dyn UserLibrary,
+    ) -> Self {
+        let lines = placeholder_lines(name, &kind, user_library);
         let text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
         let undo_tree = UndoTree::new(&text);
-        let (read_only, input) = buffer_interaction(&kind);
+        let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind);
+        let plugin_section_state = plugin_section_state_for_kind(&kind, user_library);
 
         Self {
             id: buffer_id,
@@ -2526,6 +2796,7 @@ impl ShellBuffer {
             read_only,
             input,
             section_state: None,
+            plugin_section_state,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2565,11 +2836,53 @@ impl ShellBuffer {
     }
 
     fn is_read_only(&self) -> bool {
-        self.read_only
+        self.read_only || self.plugin_section_active_pane() == Some(PluginSectionPane::Output)
     }
 
     fn has_input_field(&self) -> bool {
         self.input.is_some()
+    }
+
+    fn has_plugin_sections(&self) -> bool {
+        self.plugin_section_state.is_some()
+    }
+
+    fn plugin_section_active_pane(&self) -> Option<PluginSectionPane> {
+        self.plugin_section_state.as_ref().map(|state| state.active_pane)
+    }
+
+    fn plugin_output_pane_state(&self) -> Option<&PlainTextPaneState> {
+        self.plugin_section_state.as_ref().map(|state| &state.output_pane)
+    }
+
+    fn plugin_output_pane_state_mut(&mut self) -> Option<&mut PlainTextPaneState> {
+        self.plugin_section_state
+            .as_mut()
+            .filter(|state| state.active_pane == PluginSectionPane::Output)
+            .map(|state| &mut state.output_pane)
+    }
+
+    fn plugin_switch_pane(&mut self) -> bool {
+        let Some(state) = self.plugin_section_state.as_mut() else {
+            return false;
+        };
+        state.active_pane = match state.active_pane {
+            PluginSectionPane::Input => PluginSectionPane::Output,
+            PluginSectionPane::Output => PluginSectionPane::Input,
+        };
+        true
+    }
+
+    fn plugin_sections(&self) -> Option<&PluginSectionBufferState> {
+        self.plugin_section_state.as_ref()
+    }
+
+    fn set_plugin_output_lines(&mut self, lines: Vec<String>) {
+        let Some(state) = self.plugin_section_state.as_mut() else {
+            return;
+        };
+        let follow_output = state.output_pane.should_follow_output();
+        state.output_pane.replace_lines(lines, follow_output);
     }
 
     fn is_acp_buffer(&self) -> bool {
@@ -2584,7 +2897,7 @@ impl ShellBuffer {
         self.acp_state = Some(AcpBufferState::new(client_label.to_owned()));
         self.acp_push_system_message(format!(
             "{} Connected to {client_label}.",
-            user::icon_font::symbols::cod::COD_ROCKET
+            editor_icons::symbols::cod::COD_ROCKET
         ));
     }
 
@@ -2626,6 +2939,9 @@ impl ShellBuffer {
     }
 
     fn current_scroll_row(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.scroll_row;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.scroll_row)
             .unwrap_or(self.scroll_row)
@@ -2971,30 +3287,45 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_row(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor().line;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.cursor().line)
             .unwrap_or_else(|| self.text.cursor().line)
     }
 
     pub(crate) fn cursor_col(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor().column;
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.cursor().column)
             .unwrap_or_else(|| self.text.cursor().column)
     }
 
     pub(crate) fn cursor_point(&self) -> TextPoint {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::cursor)
             .unwrap_or_else(|| self.text.cursor())
     }
 
     fn line_count(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_count();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::line_count)
             .unwrap_or_else(|| self.text.line_count())
     }
 
     fn line_len_chars(&self, line_index: usize) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_len_chars(line_index);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.line_len_chars(line_index))
             .unwrap_or_else(|| self.text.line_len_chars(line_index).unwrap_or(0))
@@ -3022,6 +3353,9 @@ impl ShellBuffer {
     }
 
     fn path(&self) -> Option<&Path> {
+        if self.plugin_output_pane_state().is_some() {
+            return None;
+        }
         self.text.path()
     }
 
@@ -3335,6 +3669,9 @@ impl ShellBuffer {
     }
 
     fn move_left(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_left();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_left();
         }
@@ -3342,6 +3679,9 @@ impl ShellBuffer {
     }
 
     fn move_right(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_right();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_right();
         }
@@ -3349,6 +3689,9 @@ impl ShellBuffer {
     }
 
     fn move_up(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_up();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_up();
         }
@@ -3356,6 +3699,9 @@ impl ShellBuffer {
     }
 
     fn move_down(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_down();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_down();
         }
@@ -3363,6 +3709,9 @@ impl ShellBuffer {
     }
 
     fn move_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_forward();
         }
@@ -3370,6 +3719,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_forward();
         }
@@ -3377,6 +3729,9 @@ impl ShellBuffer {
     }
 
     fn move_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_backward();
         }
@@ -3384,6 +3739,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_backward();
         }
@@ -3391,6 +3749,9 @@ impl ShellBuffer {
     }
 
     fn move_word_end(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_end_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_end_forward();
         }
@@ -3398,6 +3759,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_end_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_end_forward();
         }
@@ -3405,6 +3769,9 @@ impl ShellBuffer {
     }
 
     fn move_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_word_end_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_word_end_backward();
         }
@@ -3412,6 +3779,9 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_big_word_end_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_big_word_end_backward();
         }
@@ -3419,6 +3789,9 @@ impl ShellBuffer {
     }
 
     fn move_matching_delimiter(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_matching_delimiter();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_matching_delimiter();
         }
@@ -3426,6 +3799,9 @@ impl ShellBuffer {
     }
 
     fn move_sentence_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_sentence_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_sentence_forward();
         }
@@ -3433,6 +3809,9 @@ impl ShellBuffer {
     }
 
     fn move_sentence_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_sentence_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_sentence_backward();
         }
@@ -3440,6 +3819,9 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_forward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_paragraph_forward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_paragraph_forward();
         }
@@ -3447,6 +3829,9 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_backward(&mut self) -> bool {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            return pane.text.move_paragraph_backward();
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             return pane.text.move_paragraph_backward();
         }
@@ -3454,6 +3839,10 @@ impl ShellBuffer {
     }
 
     pub(crate) fn set_cursor(&mut self, point: TextPoint) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            pane.set_cursor(point);
+            return;
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             pane.set_cursor(point);
             return;
@@ -3462,6 +3851,9 @@ impl ShellBuffer {
     }
 
     fn point_after(&self, point: TextPoint) -> Option<TextPoint> {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.point_after(point);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.text.point_after(point))
             .unwrap_or_else(|| self.text.point_after(point))
@@ -3476,7 +3868,11 @@ impl ShellBuffer {
     fn move_line_first_non_blank(&mut self) -> bool {
         let before = self.cursor_point();
         let row = self.cursor_row();
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(row) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(row) {
                 pane.text.set_cursor(point);
             }
@@ -3496,7 +3892,11 @@ impl ShellBuffer {
 
     fn goto_first_line(&mut self) -> bool {
         let before = self.cursor_point();
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(0) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(0) {
                 pane.text.set_cursor(point);
             }
@@ -3509,7 +3909,11 @@ impl ShellBuffer {
     fn goto_last_line(&mut self) -> bool {
         let before = self.cursor_point();
         let line = self.line_count().saturating_sub(1);
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            if let Some(point) = pane.text.first_non_blank_in_line(line) {
+                pane.text.set_cursor(point);
+            }
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(line) {
                 pane.text.set_cursor(point);
             }
@@ -3522,7 +3926,13 @@ impl ShellBuffer {
     fn goto_line(&mut self, line_index: usize) -> bool {
         let before = self.cursor_point();
         let line = line_index.min(self.line_count().saturating_sub(1));
-        if let Some(pane) = self.acp_active_pane_state_mut() {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            let point = pane
+                .text
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            pane.text.set_cursor(point);
+        } else if let Some(pane) = self.acp_active_pane_state_mut() {
             let point = pane
                 .text
                 .first_non_blank_in_line(line)
@@ -3655,12 +4065,18 @@ impl ShellBuffer {
     }
 
     fn slice(&self, range: TextRange) -> String {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.slice(range);
+        }
         self.acp_active_pane_state()
             .map(|pane| pane.text.slice(range))
             .unwrap_or_else(|| self.text.slice(range))
     }
 
     pub(crate) fn line_range(&self, line_index: usize) -> Option<TextRange> {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.text.line_range(line_index);
+        }
         self.acp_active_pane_state()
             .and_then(|pane| pane.text.line_range(line_index))
             .or_else(|| self.text.line_range(line_index))
@@ -3763,6 +4179,12 @@ impl ShellBuffer {
     }
 
     fn scroll_by(&mut self, delta: i32) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            let max_scroll = pane.max_scroll_row() as i32;
+            let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
+            pane.scroll_row = next as usize;
+            return;
+        }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             let max_scroll = pane.max_scroll_row() as i32;
             let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
@@ -3776,6 +4198,11 @@ impl ShellBuffer {
 
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
+        if let Some(state) = self.plugin_section_state.as_mut() {
+            let rows = state.output_pane.visible_rows();
+            let wrap_cols = state.output_pane.wrap_cols();
+            state.output_pane.set_view_metrics(rows, wrap_cols);
+        }
         if let Some(state) = self.acp_state.as_mut() {
             let plan_rows = state.plan_pane.visible_rows();
             let plan_wrap_cols = state.plan_pane.wrap_cols();
@@ -3812,7 +4239,36 @@ impl ShellBuffer {
         }
     }
 
+    fn sync_plugin_section_viewport_metrics(
+        &mut self,
+        width: u32,
+        height: u32,
+        cell_width: i32,
+        line_height: i32,
+    ) {
+        let rect = PixelRectToRect::rect(0, 0, width.max(1), height.max(1));
+        let layout = buffer_footer_layout(self, rect, line_height, cell_width);
+        let Some(section_layout) =
+            plugin_section_buffer_layout(self, rect, layout, cell_width, line_height)
+        else {
+            return;
+        };
+        self.viewport_lines = section_layout.input.visible_rows.max(1);
+        if let Some(state) = self.plugin_section_state.as_mut() {
+            state
+                .output_pane
+                .set_view_metrics(section_layout.output.visible_rows, section_layout.output.wrap_cols);
+        }
+    }
+
     fn viewport_lines(&self) -> usize {
+        if let Some(PluginSectionPane::Output) = self.plugin_section_active_pane() {
+            return self
+                .plugin_section_state
+                .as_ref()
+                .map(|state| state.output_pane.visible_rows())
+                .unwrap_or(1);
+        }
         match self.acp_active_pane() {
             Some(AcpPane::Plan) => self.acp_plan_viewport_lines(),
             Some(AcpPane::Output) => self.acp_output_viewport_lines(),
@@ -3822,6 +4278,9 @@ impl ShellBuffer {
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
         let max_line = self.line_count().saturating_sub(1);
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.line_at_viewport_offset(offset).min(max_line);
+        }
         if let Some(pane) = self.acp_active_pane_state() {
             return pane.line_at_viewport_offset(offset).min(max_line);
         }
@@ -3829,6 +4288,9 @@ impl ShellBuffer {
     }
 
     fn cursor_viewport_offset(&self) -> usize {
+        if let Some(pane) = self.plugin_output_pane_state() {
+            return pane.cursor_viewport_offset();
+        }
         self.acp_active_pane_state()
             .map(AcpPaneState::cursor_viewport_offset)
             .unwrap_or_else(|| self.cursor_row().saturating_sub(self.scroll_row))
@@ -3848,6 +4310,10 @@ impl ShellBuffer {
     }
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
+        if let Some(pane) = self.plugin_output_pane_state_mut() {
+            pane.ensure_cursor_visible();
+            return;
+        }
         if self.is_acp_buffer() {
             if let Some(pane) = self.acp_active_pane_state_mut() {
                 pane.ensure_cursor_visible();
@@ -3972,7 +4438,7 @@ fn acp_build_plan_lines(entries: &[PlanEntry]) -> Vec<AcpRenderedLine> {
     if entries.is_empty() {
         return vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![acp_icon_segment(
-                user::icon_font::symbols::cod::COD_NOTEBOOK,
+                editor_icons::symbols::cod::COD_NOTEBOOK,
                 AcpColorRole::Muted,
             )],
             text: " Waiting for plan updates...".to_owned(),
@@ -4003,7 +4469,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
             AcpOutputItem::UserPrompt(prompt) => {
                 let prefix = vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_PERSON,
+                        editor_icons::symbols::cod::COD_PERSON,
                         AcpColorRole::Accent,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4016,7 +4482,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
             }
             AcpOutputItem::SystemMessage(message) => {
                 let prefix = vec![
-                    acp_icon_segment(user::icon_font::symbols::cod::COD_INFO, AcpColorRole::Muted),
+                    acp_icon_segment(editor_icons::symbols::cod::COD_INFO, AcpColorRole::Muted),
                     acp_text_segment(" ", AcpColorRole::Default),
                 ];
                 lines.extend(acp_multiline_text_lines(
@@ -4031,7 +4497,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                         block,
                         vec![
                             acp_icon_segment(
-                                user::icon_font::symbols::cod::COD_COMMENT,
+                                editor_icons::symbols::cod::COD_COMMENT,
                                 AcpColorRole::Accent,
                             ),
                             acp_text_segment(" ", AcpColorRole::Default),
@@ -4064,7 +4530,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                     lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
                         prefix: vec![
                             acp_icon_segment(
-                                user::icon_font::symbols::cod::COD_SEARCH,
+                                editor_icons::symbols::cod::COD_SEARCH,
                                 AcpColorRole::Muted,
                             ),
                             acp_text_segment(" ", AcpColorRole::Default),
@@ -4079,7 +4545,7 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
     if lines.is_empty() {
         lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![acp_icon_segment(
-                user::icon_font::symbols::cod::COD_HISTORY,
+                editor_icons::symbols::cod::COD_HISTORY,
                 AcpColorRole::Muted,
             )],
             text: " Waiting for session output...".to_owned(),
@@ -4095,7 +4561,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
             &content.content,
             vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_CHEVRON_RIGHT,
+                    editor_icons::symbols::cod::COD_CHEVRON_RIGHT,
                     AcpColorRole::Muted,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4105,7 +4571,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_DIFF_MODIFIED,
+                    editor_icons::symbols::cod::COD_DIFF_MODIFIED,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4116,7 +4582,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_TERMINAL,
+                    editor_icons::symbols::cod::COD_TERMINAL,
                     AcpColorRole::Accent,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4127,7 +4593,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
         _ => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_WARNING,
+                    editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4150,7 +4616,7 @@ fn acp_render_content_block(
                 let mut lines = vec![AcpRenderedLine::Image(AcpRenderedImageLine {
                     label: format!(
                         "{} {}",
-                        user::icon_font::symbols::fa::FA_IMAGE,
+                        editor_icons::symbols::fa::FA_IMAGE,
                         image.mime_type
                     ),
                     image: Some(decoded),
@@ -4165,7 +4631,7 @@ fn acp_render_content_block(
             Err(error) => acp_multiline_text_lines(
                 vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_WARNING,
+                        editor_icons::symbols::cod::COD_WARNING,
                         AcpColorRole::Warning,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4178,7 +4644,7 @@ fn acp_render_content_block(
             acp_multiline_text_lines(
                 vec![
                     acp_icon_segment(
-                        user::icon_font::symbols::cod::COD_WARNING,
+                        editor_icons::symbols::cod::COD_WARNING,
                         AcpColorRole::Warning,
                     ),
                     acp_text_segment(" ", AcpColorRole::Default),
@@ -4190,7 +4656,7 @@ fn acp_render_content_block(
         _ => acp_multiline_text_lines(
             vec![
                 acp_icon_segment(
-                    user::icon_font::symbols::cod::COD_WARNING,
+                    editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
@@ -4246,20 +4712,20 @@ fn acp_icon_segment(icon: &str, role: AcpColorRole) -> AcpRenderedSegment {
 fn acp_status_segments(status: ToolCallStatus) -> Vec<AcpRenderedSegment> {
     match status {
         ToolCallStatus::Pending => vec![acp_icon_segment(
-            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            editor_icons::symbols::dev::DEV_CIRCLECI,
             AcpColorRole::Muted,
         )],
         ToolCallStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
         ToolCallStatus::Completed => vec![acp_icon_segment(
-            user::icon_font::symbols::fa::FA_CHECK,
+            editor_icons::symbols::fa::FA_CHECK,
             AcpColorRole::Success,
         )],
         ToolCallStatus::Failed => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_ERROR,
+            editor_icons::symbols::cod::COD_ERROR,
             AcpColorRole::Error,
         )],
         _ => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_WARNING,
+            editor_icons::symbols::cod::COD_WARNING,
             AcpColorRole::Warning,
         )],
     }
@@ -4271,16 +4737,16 @@ fn acp_plan_status_segments(
 ) -> Vec<AcpRenderedSegment> {
     match status {
         PlanEntryStatus::Pending => vec![acp_icon_segment(
-            user::icon_font::symbols::dev::DEV_CIRCLECI,
+            editor_icons::symbols::dev::DEV_CIRCLECI,
             acp_priority_color_role(priority),
         )],
         PlanEntryStatus::InProgress => vec![acp_spinner_segment(AcpColorRole::Accent)],
         PlanEntryStatus::Completed => vec![acp_icon_segment(
-            user::icon_font::symbols::fa::FA_CHECK,
+            editor_icons::symbols::fa::FA_CHECK,
             AcpColorRole::Success,
         )],
         _ => vec![acp_icon_segment(
-            user::icon_font::symbols::cod::COD_WARNING,
+            editor_icons::symbols::cod::COD_WARNING,
             AcpColorRole::Warning,
         )],
     }
@@ -4297,17 +4763,17 @@ fn acp_priority_color_role(priority: PlanEntryPriority) -> AcpColorRole {
 
 fn acp_tool_kind_icon(kind: ToolKind) -> &'static str {
     match kind {
-        ToolKind::Read => user::icon_font::symbols::cod::COD_NOTEBOOK,
-        ToolKind::Edit => user::icon_font::symbols::cod::COD_EDIT,
-        ToolKind::Delete => user::icon_font::symbols::cod::COD_DIFF_REMOVED,
-        ToolKind::Move => user::icon_font::symbols::cod::COD_ARROW_SWAP,
-        ToolKind::Search => user::icon_font::symbols::cod::COD_SEARCH,
-        ToolKind::Execute => user::icon_font::symbols::cod::COD_TERMINAL,
-        ToolKind::Think => user::icon_font::symbols::cod::COD_LIGHTBULB,
-        ToolKind::Fetch => user::icon_font::symbols::cod::COD_CLOUD_DOWNLOAD,
-        ToolKind::SwitchMode => user::icon_font::symbols::cod::COD_SYNC,
-        ToolKind::Other => user::icon_font::symbols::cod::COD_TOOLS,
-        _ => user::icon_font::symbols::cod::COD_TOOLS,
+        ToolKind::Read => editor_icons::symbols::cod::COD_NOTEBOOK,
+        ToolKind::Edit => editor_icons::symbols::cod::COD_EDIT,
+        ToolKind::Delete => editor_icons::symbols::cod::COD_DIFF_REMOVED,
+        ToolKind::Move => editor_icons::symbols::cod::COD_ARROW_SWAP,
+        ToolKind::Search => editor_icons::symbols::cod::COD_SEARCH,
+        ToolKind::Execute => editor_icons::symbols::cod::COD_TERMINAL,
+        ToolKind::Think => editor_icons::symbols::cod::COD_LIGHTBULB,
+        ToolKind::Fetch => editor_icons::symbols::cod::COD_CLOUD_DOWNLOAD,
+        ToolKind::SwitchMode => editor_icons::symbols::cod::COD_SYNC,
+        ToolKind::Other => editor_icons::symbols::cod::COD_TOOLS,
+        _ => editor_icons::symbols::cod::COD_TOOLS,
     }
 }
 
@@ -4637,7 +5103,7 @@ impl ShellWorkspaceView {
     }
 }
 
-type GitPrefix = user::git::GitStatusPrefix;
+type GitPrefix = editor_plugin_api::GitStatusPrefix;
 
 #[derive(Debug, Clone)]
 struct GitPrefixState {
@@ -4681,6 +5147,9 @@ pub(crate) struct ShellUiState {
     vim_search_worker: VimSearchWorkerState,
     workspace_search_worker: WorkspaceSearchWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
+    /// Per-workspace last-used build command.  Set when the user runs
+    /// `workspace.compile`; reused by `workspace.recompile`.
+    compile_commands: BTreeMap<WorkspaceId, String>,
 }
 
 impl ShellUiState {
@@ -4728,6 +5197,7 @@ impl ShellUiState {
             vim_search_worker: VimSearchWorkerState::new(),
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
+            compile_commands: BTreeMap::new(),
         }
     }
 
@@ -5218,6 +5688,7 @@ impl ShellUiState {
         buffer_id: BufferId,
         name: &str,
         kind: BufferKind,
+        user_library: &dyn UserLibrary,
     ) -> &mut ShellBuffer {
         if let Some(view) = self.workspace_view_mut()
             && !view.buffer_ids.contains(&buffer_id)
@@ -5234,7 +5705,7 @@ impl ShellUiState {
         }
 
         self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind));
+            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -5244,6 +5715,7 @@ impl ShellUiState {
         buffer_id: BufferId,
         name: &str,
         kind: BufferKind,
+        user_library: &dyn UserLibrary,
     ) -> &mut ShellBuffer {
         if let Some(index) = self
             .buffers
@@ -5254,7 +5726,7 @@ impl ShellUiState {
         }
 
         self.buffers
-            .push(ShellBuffer::placeholder(buffer_id, name, kind));
+            .push(ShellBuffer::placeholder(buffer_id, name, kind, user_library));
         let index = self.buffers.len() - 1;
         &mut self.buffers[index]
     }
@@ -5928,6 +6400,7 @@ struct ShellVisualRefreshKey {
 
 pub(crate) struct ShellState {
     pub(crate) runtime: EditorRuntime,
+    pub(crate) user_library: Arc<dyn UserLibrary>,
     typing_profiler: Option<TypingProfiler>,
     last_text_input_profile: Option<Duration>,
     last_text_input_at: Option<Instant>,
@@ -5953,12 +6426,14 @@ struct MouseDragState {
 impl ShellState {
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, ShellError> {
-        Self::new_with_log(default_error_log_path(), false)
+        let user_library: Arc<dyn UserLibrary> = Arc::new(NullUserLibrary);
+        Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
-    pub(crate) fn new_with_log(
+    pub(crate) fn new_with_user_library(
         log_file_path: PathBuf,
         profile_input_latency: bool,
+        user_library: Arc<dyn UserLibrary>,
     ) -> Result<Self, ShellError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
@@ -5997,8 +6472,12 @@ impl ShellState {
                 ShellError::Runtime("notes buffer missing after bootstrap".to_owned())
             })?;
             (
-                ShellBuffer::from_runtime_buffer(scratch, initial_scratch_lines()),
-                ShellBuffer::from_runtime_buffer(notes, initial_notes_lines()),
+                ShellBuffer::from_runtime_buffer(
+                    scratch,
+                    initial_scratch_lines(),
+                    &*user_library,
+                ),
+                ShellBuffer::from_runtime_buffer(notes, initial_notes_lines(), &*user_library),
                 pane_id,
             )
         };
@@ -6006,7 +6485,7 @@ impl ShellState {
         let mut ui_state =
             ShellUiState::new(workspace_id, primary_pane_id, scratch, notes, notes_id);
         ui_state
-            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics)
+            .ensure_buffer(errors_id, "*errors*", BufferKind::Diagnostics, &*user_library)
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
 
@@ -6028,26 +6507,26 @@ impl ShellState {
         acp::init_acp_manager(&mut runtime)?;
         runtime
             .services_mut()
-            .insert(AutocompleteRegistry::from_user_config());
+            .insert(AutocompleteRegistry::from_user_config(&*user_library));
         runtime
             .services_mut()
-            .insert(HoverRegistry::from_user_config());
+            .insert(HoverRegistry::from_user_config(&*user_library));
         let mut lsp_registry = LanguageServerRegistry::new();
         lsp_registry
-            .register_all(user::language_servers())
+            .register_all(user_library.language_servers())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime
             .services_mut()
             .insert(Arc::new(LspClientManager::new(lsp_registry)));
         let mut syntax_registry = SyntaxRegistry::new();
         syntax_registry
-            .register_all(user::syntax_languages())
+            .register_all(user_library.syntax_languages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         runtime.services_mut().insert(syntax_registry);
         configure_syntax_refresh_worker(&mut runtime).map_err(ShellError::Runtime)?;
         let mut theme_registry = ThemeRegistry::new();
         theme_registry
-            .register_all(user::themes())
+            .register_all(user_library.themes())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         if let Err(error) =
             restore_saved_theme_selection(&mut theme_registry, &active_theme_state_path())
@@ -6055,13 +6534,17 @@ impl ShellState {
             record_runtime_error(&mut runtime, "theme.restore", error);
         }
         runtime.services_mut().insert(theme_registry);
-        load_auto_loaded_packages(&mut runtime, &user::packages())
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::clone(&user_library)));
+        load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
         register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
 
         Ok(Self {
             runtime,
+            user_library,
             typing_profiler: profile_input_latency
                 .then(|| TypingProfiler::new(default_typing_profile_log_path())),
             last_text_input_profile: None,
@@ -6373,6 +6856,35 @@ impl ShellState {
                             cancel_git_commit_buffer(&mut self.runtime, active_buffer.buffer_id)
                                 .map_err(ShellError::Runtime)?;
                         }
+                        return Ok(false);
+                    }
+                    if consume {
+                        return Ok(false);
+                    }
+                }
+                if active_buffer.is_plugin_evaluatable {
+                    let mut should_evaluate = false;
+                    let mut consume = false;
+                    {
+                        let ui = self.ui_mut()?;
+                        if ui.pending_ctrl_c.is_some() {
+                            if is_ctrl_c {
+                                ui.pending_ctrl_c = None;
+                                should_evaluate = true;
+                                consume = true;
+                            } else if is_ctrl_key {
+                                consume = true;
+                            } else {
+                                ui.pending_ctrl_c = None;
+                            }
+                        } else if is_ctrl_c {
+                            ui.pending_ctrl_c = Some(Instant::now());
+                            consume = true;
+                        }
+                    }
+                    if should_evaluate {
+                        evaluate_active_plugin_buffer(&mut self.runtime, active_buffer.buffer_id)
+                            .map_err(ShellError::Runtime)?;
                         return Ok(false);
                     }
                     if consume {
@@ -6885,6 +7397,7 @@ impl ShellState {
             fonts,
             ui,
             runtime_popup.as_ref(),
+            &*self.user_library,
             &workspace_name,
             ui.attached_lsp_server(),
             lsp_workspace_loaded,
@@ -7648,6 +8161,15 @@ impl ShellState {
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && active_buffer.is_compilation
+                && chord == "<CR>"
+            {
+                jump_to_compilation_error(&mut self.runtime)
+                    .map_err(ShellError::Runtime)?;
+                self.ui_mut()?.vim_mut().clear_transient();
+                return Ok(());
+            }
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -8176,10 +8698,10 @@ impl ShellState {
             if !autocomplete.is_visible() {
                 return Ok(false);
             }
-            if chord == user::autocomplete::NEXT_CHORD {
+            if chord == AUTOCOMPLETE_NEXT_CHORD {
                 autocomplete.select_next();
                 true
-            } else if chord == user::autocomplete::PREVIOUS_CHORD {
+            } else if chord == AUTOCOMPLETE_PREVIOUS_CHORD {
                 autocomplete.select_previous();
                 true
             } else {
@@ -8292,7 +8814,7 @@ impl ShellState {
             && hover_visible
             && matches!(
                 chord.as_str(),
-                user::hover::NEXT_CHORD | user::hover::PREVIOUS_CHORD
+                HOVER_NEXT_CHORD | HOVER_PREVIOUS_CHORD
             )
             && self
                 .runtime
@@ -8542,7 +9064,7 @@ impl ShellState {
             visible_buffers.push((popup.active_buffer, render_width, popup_height.max(1)));
         }
         for (buffer_id, width, height) in visible_buffers {
-            let (language_id, visible_rows, is_acp) = {
+            let (language_id, visible_rows, is_acp, has_plugin_sections) = {
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
@@ -8550,6 +9072,7 @@ impl ShellState {
                     buffer.language_id().map(str::to_owned),
                     buffer_visible_rows_for_height(buffer, height, line_height),
                     buffer.is_acp_buffer(),
+                    buffer.has_plugin_sections(),
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -8563,6 +9086,8 @@ impl ShellState {
                 .ok_or_else(|| ShellError::Runtime(format!("buffer `{buffer_id}` is missing")))?;
             if is_acp {
                 buffer.sync_acp_viewport_metrics(width, height, cell_width, line_height);
+            } else if has_plugin_sections {
+                buffer.sync_plugin_section_viewport_metrics(width, height, cell_width, line_height);
             } else {
                 buffer.set_viewport_lines(visible_rows);
             }
@@ -8771,10 +9296,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
-    let mut state = ShellState::new_with_log(log_file_path, config.profile_input_latency)?;
+    let user_library: Arc<dyn UserLibrary> = config
+        .user_library
+        .clone()
+        .unwrap_or_else(|| Arc::new(NullUserLibrary));
+    let mut state = ShellState::new_with_user_library(
+        log_file_path,
+        config.profile_input_latency,
+        Arc::clone(&user_library),
+    )?;
     let mut theme_settings =
         theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
-    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings)?;
+    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
@@ -9120,7 +9653,7 @@ fn update_theme_runtime<'ttf>(
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
     {
-        let (next_fonts, next_font_path) = load_font_set(ttf, &updated)?;
+        let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
         *font_path = next_font_path;
         *fonts = next_fonts;
         *line_height = fonts.primary().height().max(1) as usize;
@@ -9266,10 +9799,13 @@ fn resolve_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
     Ok(paths)
 }
 
-fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
+fn validate_bundled_icon_fonts(
+    fonts: &FontSet<'_>,
+    user_library: &dyn UserLibrary,
+) -> Result<(), ShellError> {
     let mut missing_count = 0usize;
     let mut examples = Vec::new();
-    for symbol in user::icon_font::symbols() {
+    for symbol in user_library.icon_symbols() {
         let supported = symbol
             .glyph
             .chars()
@@ -9300,6 +9836,7 @@ fn validate_bundled_icon_fonts(fonts: &FontSet<'_>) -> Result<(), ShellError> {
 fn load_font_set<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     settings: &ThemeRuntimeSettings,
+    user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
     let primary = ttf
@@ -9337,8 +9874,14 @@ fn load_font_set<'ttf>(
             Ok((name, font, raster_font))
         })
         .collect::<Result<Vec<_>, ShellError>>()?;
-    let fonts = FontSet::new(primary, icon_fonts, settings.font_size as f32, cell_width);
-    validate_bundled_icon_fonts(&fonts)?;
+    let fonts = FontSet::new(
+        primary,
+        icon_fonts,
+        settings.font_size as f32,
+        cell_width,
+        user_library,
+    );
+    validate_bundled_icon_fonts(&fonts, user_library)?;
     Ok((fonts, primary_path))
 }
 
@@ -9696,7 +10239,62 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_INPUT_CLEAR,
         "Clears the active input buffer prompt.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_EVALUATE,
+        "Evaluates the active plugin buffer's input section and writes the output section.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_RUN_COMMAND,
+        "Opens the compilation buffer and runs (or prompts for) the workspace build command.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_RERUN_COMMAND,
+        "Re-runs the last build command for the active workspace.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SWITCH_PANE,
+        "Switches focus between the active plugin buffer's split panes.",
+    )?;
 
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_EVALUATE,
+            "shell.plugin-evaluate",
+            |_, runtime| {
+                let buffer_id = active_shell_buffer_id(runtime)?;
+                evaluate_active_plugin_buffer(runtime, buffer_id)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SWITCH_PANE,
+            "shell.plugin-switch-pane",
+            |_, runtime| switch_active_plugin_pane(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_RUN_COMMAND,
+            "shell.plugin-run-command",
+            |event, runtime| {
+                open_compile_buffer(runtime, event.detail.as_deref())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_RERUN_COMMAND,
+            "shell.plugin-rerun-command",
+            |_, runtime| {
+                rerun_compile_command(runtime)
+            },
+        )
+        .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_MOVE_LEFT, "shell.move-left", |_, runtime| {
             apply_motion_command(runtime, ShellMotion::Left)?;
@@ -11245,8 +11843,9 @@ fn ensure_lsp_log_buffer(
         .create_popup_buffer(workspace_id, &buffer_name, BufferKind::Diagnostics, None)
         .map_err(|error| error.to_string())?;
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics)
+        ui.ensure_buffer(buffer_id, &buffer_name, BufferKind::Diagnostics, &*user_library)
             .replace_with_lines_follow_output(lsp_log_buffer_lines(server_id, &entries));
     }
     runtime
@@ -11435,6 +12034,7 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
             &registry,
             lsp_client.as_ref(),
             lsp_context.as_ref(),
+            &*shell_user_library(runtime),
         )
     };
     let ui = shell_ui_mut(runtime)?;
@@ -11600,6 +12200,8 @@ fn active_buffer_event_context(
         is_directory: buffer_is_directory(&buffer.kind),
         is_browser: buffer_is_browser(&buffer.kind),
         is_terminal: buffer_is_terminal(&buffer.kind),
+        is_plugin_evaluatable: plugin_evaluatable_kind(&buffer.kind, runtime),
+        is_compilation: buffer_is_compilation(&buffer.kind),
     })
 }
 
@@ -11649,6 +12251,20 @@ fn buffer_is_acp(kind: &BufferKind) -> bool {
 
 fn buffer_is_browser(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND)
+}
+
+fn buffer_is_compilation(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Compilation)
+}
+
+/// Returns `true` when the user library has an evaluator for the given buffer
+/// kind.  Used to decide whether Ctrl+c Ctrl+c should trigger evaluation.
+fn plugin_evaluatable_kind(kind: &BufferKind, runtime: &EditorRuntime) -> bool {
+    if let BufferKind::Plugin(plugin_kind) = kind {
+        shell_user_library(runtime).supports_plugin_evaluate(plugin_kind)
+    } else {
+        false
+    }
 }
 
 fn buffer_is_terminal(kind: &BufferKind) -> bool {
@@ -12310,6 +12926,39 @@ fn buffer_autocomplete_entries(
         .collect()
 }
 
+fn lsp_kind_icon(kind: Option<editor_lsp::LspCompletionKind>) -> &'static str {
+    use editor_icons::symbols::cod::*;
+    use editor_lsp::LspCompletionKind;
+    match kind {
+        Some(LspCompletionKind::Text) => COD_TEXT_SIZE,
+        Some(LspCompletionKind::Method)
+        | Some(LspCompletionKind::Function)
+        | Some(LspCompletionKind::Constructor) => COD_SYMBOL_METHOD,
+        Some(LspCompletionKind::Field) => COD_SYMBOL_FIELD,
+        Some(LspCompletionKind::Variable) => COD_SYMBOL_VARIABLE,
+        Some(LspCompletionKind::Class) => COD_SYMBOL_CLASS,
+        Some(LspCompletionKind::Interface) => COD_SYMBOL_INTERFACE,
+        Some(LspCompletionKind::Module) => COD_SYMBOL_NAMESPACE,
+        Some(LspCompletionKind::Property) => COD_SYMBOL_PROPERTY,
+        Some(LspCompletionKind::Unit) => COD_SYMBOL_RULER,
+        Some(LspCompletionKind::Value) => COD_SYMBOL_NUMERIC,
+        Some(LspCompletionKind::Enum) => COD_SYMBOL_ENUM,
+        Some(LspCompletionKind::Keyword) => COD_SYMBOL_KEYWORD,
+        Some(LspCompletionKind::Snippet) => COD_SYMBOL_SNIPPET,
+        Some(LspCompletionKind::Color) => COD_SYMBOL_COLOR,
+        Some(LspCompletionKind::File) => COD_FILE,
+        Some(LspCompletionKind::Reference) => COD_REFERENCES,
+        Some(LspCompletionKind::Folder) => COD_FOLDER,
+        Some(LspCompletionKind::EnumMember) => COD_SYMBOL_ENUM_MEMBER,
+        Some(LspCompletionKind::Constant) => COD_SYMBOL_CONSTANT,
+        Some(LspCompletionKind::Struct) => COD_SYMBOL_STRUCTURE,
+        Some(LspCompletionKind::Event) => COD_SYMBOL_EVENT,
+        Some(LspCompletionKind::Operator) => COD_SYMBOL_OPERATOR,
+        Some(LspCompletionKind::TypeParameter) => COD_SYMBOL_PARAMETER,
+        None => COD_SYMBOL_MISC,
+    }
+}
+
 fn lsp_autocomplete_entries(
     request: &AutocompleteWorkerRequest,
     query: &AutocompleteQuery,
@@ -12355,7 +13004,7 @@ fn lsp_autocomplete_entries(
                     provider_id: provider.id.clone(),
                     provider_label: provider.label.clone(),
                     provider_icon: provider.icon.clone(),
-                    item_icon: user::autocomplete::lsp_kind_icon(item.kind()).to_owned(),
+                    item_icon: lsp_kind_icon(item.kind()).to_owned(),
                     label: candidate.clone(),
                     replacement,
                     detail: item.detail().map(str::to_owned),
@@ -12493,6 +13142,7 @@ fn hover_overlay_for_buffer(
     registry: &HoverRegistry,
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
+    user_library: &dyn UserLibrary,
 ) -> Option<HoverOverlay> {
     if registry.providers.is_empty() {
         return None;
@@ -12516,7 +13166,9 @@ fn hover_overlay_for_buffer(
                 HoverProviderKind::SignatureHelp => {
                     hover_signature_provider_lines(buffer, lsp_client, lsp_context)
                 }
-                HoverProviderKind::Diagnostics => hover_diagnostic_provider_lines(buffer),
+                HoverProviderKind::Diagnostics => {
+                    hover_diagnostic_provider_lines(buffer, user_library)
+                }
             };
             (!lines.is_empty()).then(|| HoverProviderContent {
                 provider_label: provider.label.clone(),
@@ -12528,7 +13180,7 @@ fn hover_overlay_for_buffer(
     let providers = if providers.is_empty() {
         vec![HoverProviderContent {
             provider_label: "Hover".to_owned(),
-            provider_icon: user::hover::TOKEN_ICON.to_owned(),
+            provider_icon: editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE.to_owned(),
             lines: hover_empty_provider_lines(buffer, token_info.as_ref()),
         }]
     } else {
@@ -12643,7 +13295,7 @@ fn hover_lsp_provider_lines(
         if show_server_labels {
             lines.push(format!(
                 "{} {}",
-                user::autocomplete::DOCUMENTATION_ICON,
+                editor_icons::symbols::cod::COD_INFO,
                 hover.server_id()
             ));
         }
@@ -12669,7 +13321,7 @@ fn hover_signature_provider_lines(
         if show_server_labels {
             lines.push(format!(
                 "{} {}",
-                user::hover::SIGNATURE_ICON,
+                editor_icons::symbols::md::MD_SIGNATURE,
                 signature.server_id()
             ));
         }
@@ -12702,21 +13354,25 @@ fn synced_hover_lsp_request<T>(
         .unwrap_or_default()
 }
 
-fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
+fn hover_diagnostic_provider_lines(
+    buffer: &ShellBuffer,
+    user_library: &dyn UserLibrary,
+) -> Vec<String> {
     let cursor = buffer.cursor_point();
+    let diagnostic_icon = user_library.lsp_diagnostic_icon();
+    let diagnostic_line_limit = user_library.lsp_diagnostic_line_limit();
     let matching = buffer
         .lsp_diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic_matches_cursor_line(diagnostic, cursor))
-        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
+        .take(diagnostic_line_limit)
         .map(|diagnostic| {
             let source = diagnostic.source();
             if source.is_empty() {
-                format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message())
+                format!("{diagnostic_icon} {}", diagnostic.message())
             } else {
                 format!(
-                    "{} {} ({source})",
-                    user::lsp::DIAGNOSTIC_ICON,
+                    "{diagnostic_icon} {} ({source})",
                     diagnostic.message()
                 )
             }
@@ -12729,8 +13385,8 @@ fn hover_diagnostic_provider_lines(buffer: &ShellBuffer) -> Vec<String> {
         .lsp_diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.range().start().line == cursor.line)
-        .take(user::lsp::DIAGNOSTIC_LINE_LIMIT)
-        .map(|diagnostic| format!("{} {}", user::lsp::DIAGNOSTIC_ICON, diagnostic.message()))
+        .take(diagnostic_line_limit)
+        .map(|diagnostic| format!("{diagnostic_icon} {}", diagnostic.message()))
         .collect()
 }
 
@@ -12784,7 +13440,7 @@ const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
 
 fn statusline_lsp_diagnostics(
     diagnostics: &[LspDiagnostic],
-) -> Option<user::statusline::LspDiagnosticsInfo> {
+) -> Option<PluginLspDiagnosticsInfo> {
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for diagnostic in diagnostics {
@@ -12795,7 +13451,7 @@ fn statusline_lsp_diagnostics(
         }
     }
     (errors > 0 || warnings > 0)
-        .then_some(user::statusline::LspDiagnosticsInfo { errors, warnings })
+        .then_some(PluginLspDiagnosticsInfo { errors, warnings })
 }
 
 fn diagnostic_line_spans_for_diagnostics(
@@ -14189,6 +14845,9 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     if buffer_is_browser(&kind) {
         return navigate_browser_buffer(runtime, buffer_id, &text);
     }
+    if buffer_is_compilation(&kind) {
+        return run_compile_command_in_buffer(runtime, buffer_id, &text);
+    }
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&[format!("{prompt}{text}")]);
@@ -14217,8 +14876,9 @@ fn navigate_browser_buffer(
     raw_url: &str,
 ) -> Result<(), String> {
     let url = normalize_browser_url(raw_url);
+    let user_library = shell_user_library(runtime);
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    set_browser_buffer_location(buffer, &url, true);
+    set_browser_buffer_location(buffer, &url, true, &*user_library);
     Ok(())
 }
 
@@ -14259,7 +14919,7 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .model_mut()
         .create_popup_buffer(
             workspace_id,
-            user::browser::BUFFER_NAME,
+            BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )
@@ -14268,11 +14928,15 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .model_mut()
         .open_popup_buffer(workspace_id, "Browser", buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(
-        buffer_id,
-        user::browser::BUFFER_NAME,
-        BufferKind::Plugin(BROWSER_KIND.to_owned()),
-    );
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(
+            buffer_id,
+            BROWSER_BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            &*user_library,
+        );
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
     navigate_browser_buffer(runtime, buffer_id, raw_url)
@@ -14280,12 +14944,17 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
 
 fn browser_buffer_display_name(current_url: Option<&str>) -> String {
     match current_url {
-        Some(url) => format!("{} {url}", user::browser::BUFFER_NAME),
-        None => user::browser::BUFFER_NAME.to_owned(),
+        Some(url) => format!("{} {url}", BROWSER_BUFFER_NAME),
+        None => BROWSER_BUFFER_NAME.to_owned(),
     }
 }
 
-fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input: bool) {
+fn set_browser_buffer_location(
+    buffer: &mut ShellBuffer,
+    url: &str,
+    clear_input: bool,
+    user_library: &dyn UserLibrary,
+) {
     let state = buffer
         .browser_state
         .get_or_insert_with(BrowserBufferState::default);
@@ -14293,13 +14962,13 @@ fn set_browser_buffer_location(buffer: &mut ShellBuffer, url: &str, clear_input:
     if changed {
         state.current_url = Some(url.to_owned());
         buffer.name = browser_buffer_display_name(Some(url));
-        buffer.replace_with_lines(user::browser::buffer_lines(Some(url)));
+        buffer.replace_with_lines(user_library.browser_buffer_lines(Some(url)));
     }
     if let Some(input) = buffer.input_field_mut() {
         if clear_input {
             input.clear();
         }
-        input.set_hint(Some(user::browser::input_hint(Some(url))));
+        input.set_hint(Some(user_library.browser_input_hint(Some(url))));
     }
 }
 
@@ -14307,10 +14976,11 @@ fn apply_browser_location_updates(
     runtime: &mut EditorRuntime,
     updates: &[BrowserLocationUpdate],
 ) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
     let ui = shell_ui_mut(runtime)?;
     for update in updates {
         if let Some(buffer) = ui.buffer_mut(update.buffer_id) {
-            set_browser_buffer_location(buffer, &update.current_url, false);
+            set_browser_buffer_location(buffer, &update.current_url, false, &*user_library);
         }
     }
     Ok(())
@@ -15984,6 +16654,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         (ui.active_pane_id(), ui.active_buffer_id())
     };
     let should_enter_insert = {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
         if previous_pane != Some(pane_id) {
             ui.focus_pane(pane_id);
@@ -15992,7 +16663,7 @@ fn sync_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             ui.close_hover();
         }
         let has_input = ui
-            .ensure_buffer(buffer_id, &buffer_name, buffer_kind)
+            .ensure_buffer(buffer_id, &buffer_name, buffer_kind, &*user_library)
             .has_input_field();
         ui.focus_buffer_in_active_pane(buffer_id);
         if !is_git_commit {
@@ -16053,7 +16724,8 @@ fn ensure_shell_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Resu
             .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
         (buffer.name().to_owned(), buffer.kind().clone())
     };
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind);
+    let user_library = shell_user_library(runtime);
+    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, &buffer_name, buffer_kind, &*user_library);
     Ok(())
 }
 
@@ -16120,7 +16792,8 @@ fn apply_git_status_snapshot(
     buffer_id: BufferId,
     snapshot: GitStatusSnapshot,
 ) -> Result<(), String> {
-    let sections = user::git::status_sections(&snapshot);
+    let user_library = shell_user_library(runtime);
+    let sections = user_library.git_status_sections(&snapshot);
     let collapsed = shell_buffer(runtime, buffer_id)?
         .section_state()
         .map(|state| state.collapsed.clone())
@@ -16154,11 +16827,15 @@ fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup(workspace_id, "Git Status", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(
-        buffer_id,
-        "*git-status*",
-        BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
-    );
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(
+            buffer_id,
+            "*git-status*",
+            BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
+            &*user_library,
+        );
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     refresh_git_status_buffer(runtime, buffer_id)
 }
@@ -16243,8 +16920,9 @@ fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), 
             .map_err(|error| error.to_string())?
     };
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory);
+        ui.ensure_buffer(buffer_id, OIL_BUFFER_NAME, BufferKind::Directory, &*user_library);
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
     }
@@ -16287,7 +16965,8 @@ fn refresh_directory_buffer(
             return Err(message);
         }
     };
-    let mut state = DirectoryViewState::new(root, entries);
+    let defaults = shell_user_library(runtime).oil_defaults();
+    let mut state = DirectoryViewState::new(root, entries, defaults);
     state.show_hidden = show_hidden;
     state.sort_mode = sort_mode;
     state.trash_enabled = trash_enabled;
@@ -16299,7 +16978,7 @@ fn set_directory_root(
     buffer_id: BufferId,
     root: PathBuf,
 ) -> Result<(), String> {
-    let defaults = user::oil::defaults();
+    let defaults = shell_user_library(runtime).oil_defaults();
     let (show_hidden, sort_mode, trash_enabled, previous_root) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let state = buffer.directory_state();
@@ -16325,7 +17004,7 @@ fn set_directory_root(
             return Err(message);
         }
     };
-    let mut state = DirectoryViewState::new(root, entries);
+    let mut state = DirectoryViewState::new(root, entries, defaults);
     state.show_hidden = show_hidden;
     state.sort_mode = sort_mode;
     state.trash_enabled = trash_enabled;
@@ -16376,7 +17055,8 @@ fn apply_directory_state(
         .section_state()
         .map(|state| state.collapsed.clone())
         .unwrap_or_default();
-    let lines = user::oil::directory_sections(
+    let user_library = shell_user_library(runtime);
+    let lines = user_library.oil_directory_sections(
         &state.root,
         &entries,
         state.show_hidden,
@@ -16446,7 +17126,7 @@ fn directory_entry_at_cursor(
         .section_line_meta(line)
         .and_then(|meta| meta.action.as_ref())
         .ok_or_else(|| "no directory entry selected".to_owned())?;
-    if meta.id() != user::oil::ACTION_OIL_ENTRY {
+    if meta.id() != oil_protocol::ACTION_OIL_ENTRY {
         return Err("no directory entry selected".to_owned());
     }
     let detail = meta
@@ -16476,7 +17156,7 @@ enum DirectoryEditAction {
     Rename { from: PathBuf, to: PathBuf },
 }
 
-fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
+fn directory_edit_lines(buffer: &ShellBuffer, user_library: &dyn UserLibrary) -> Vec<String> {
     let mut lines = Vec::new();
     for line_index in 0..buffer.line_count() {
         let raw = buffer.text.line(line_index).unwrap_or_default();
@@ -16487,13 +17167,16 @@ fn directory_edit_lines(buffer: &ShellBuffer) -> Vec<String> {
         if line_index == 0 && trimmed.starts_with("Directory ") {
             continue;
         }
-        lines.push(user::oil::strip_entry_icon_prefix(trimmed).to_owned());
+        lines.push(user_library.oil_strip_entry_icon_prefix(trimmed).to_owned());
     }
     lines
 }
 
-fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
-    let trimmed = user::oil::strip_entry_icon_prefix(line.trim());
+fn parse_directory_line(
+    line: &str,
+    user_library: &dyn UserLibrary,
+) -> Result<DirectoryLine, String> {
+    let trimmed = user_library.oil_strip_entry_icon_prefix(line.trim());
     let is_dir = trimmed.ends_with('/');
     let raw = trimmed.trim_end_matches('/');
     if raw.is_empty() {
@@ -16518,13 +17201,16 @@ fn parse_directory_line(line: &str) -> Result<DirectoryLine, String> {
 
 #[cfg(test)]
 mod directory_line_tests {
+    use editor_plugin_host::NullUserLibrary;
     use super::parse_directory_line;
     use std::path::PathBuf;
 
     #[test]
     fn parse_directory_line_strips_file_icons() {
-        let line = format!("{} Cargo.toml", user::icon_font::symbols::seti::CUSTOM_TOML);
-        let parsed = parse_directory_line(&line).expect("icon-prefixed file line should parse");
+        let line = format!("{} Cargo.toml", editor_icons::symbols::seti::CUSTOM_TOML);
+        let user_library = NullUserLibrary;
+        let parsed =
+            parse_directory_line(&line, &user_library).expect("icon-prefixed file line should parse");
         assert_eq!(parsed.label, "Cargo.toml");
         assert_eq!(parsed.rel_path, PathBuf::from("Cargo.toml"));
         assert!(!parsed.is_dir);
@@ -16532,20 +17218,24 @@ mod directory_line_tests {
 
     #[test]
     fn parse_directory_line_strips_directory_icons() {
-        let line = format!("{} src/", user::icon_font::symbols::seti::CUSTOM_FOLDER);
-        let parsed =
-            parse_directory_line(&line).expect("icon-prefixed directory line should parse");
+        let line = format!("{} src/", editor_icons::symbols::seti::CUSTOM_FOLDER);
+        let user_library = NullUserLibrary;
+        let parsed = parse_directory_line(&line, &user_library)
+            .expect("icon-prefixed directory line should parse");
         assert_eq!(parsed.label, "src/");
         assert_eq!(parsed.rel_path, PathBuf::from("src"));
         assert!(parsed.is_dir);
     }
 }
 
-fn parse_directory_lines(lines: &[String]) -> Result<Vec<DirectoryLine>, String> {
+fn parse_directory_lines(
+    lines: &[String],
+    user_library: &dyn UserLibrary,
+) -> Result<Vec<DirectoryLine>, String> {
     let mut seen = BTreeSet::new();
     let mut parsed = Vec::with_capacity(lines.len());
     for line in lines {
-        let entry = parse_directory_line(line)?;
+        let entry = parse_directory_line(line, user_library)?;
         if !seen.insert(entry.rel_path.clone()) {
             return Err(format!("duplicate entry `{}`", entry.label));
         }
@@ -16576,12 +17266,13 @@ fn directory_edit_actions(
     root: &Path,
     before: &[String],
     after: &[String],
+    user_library: &dyn UserLibrary,
 ) -> Result<Vec<DirectoryEditAction>, String> {
     if before == after {
         return Ok(Vec::new());
     }
-    let before_parsed = parse_directory_lines(before)?;
-    let after_parsed = parse_directory_lines(after)?;
+    let before_parsed = parse_directory_lines(before, user_library)?;
+    let after_parsed = parse_directory_lines(after, user_library)?;
     let (removed_indices, added_indices) = diff_directory_lines(before, after);
     let removed = removed_indices
         .iter()
@@ -16693,9 +17384,11 @@ fn apply_directory_edit_queue(
     };
     let after = {
         let buffer = shell_buffer(runtime, buffer_id)?;
-        directory_edit_lines(buffer)
+        let user_library = shell_user_library(runtime);
+        directory_edit_lines(buffer, &*user_library)
     };
-    let actions = directory_edit_actions(&root, &before, &after)?;
+    let user_library = shell_user_library(runtime);
+    let actions = directory_edit_actions(&root, &before, &after, &*user_library)?;
     if actions.is_empty() {
         return Ok(());
     }
@@ -16854,7 +17547,8 @@ fn open_oil_preview_popup(runtime: &mut EditorRuntime, path: &Path) -> Result<()
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let text = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
-    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     queue_buffer_syntax_refresh(runtime, buffer_id)?;
     Ok(())
@@ -16892,7 +17586,9 @@ fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, user::oil::help_lines());
+    let user_library = shell_user_library(runtime);
+    let shell_buffer =
+        ShellBuffer::from_runtime_buffer(buffer, user_library.oil_help_lines(), &*user_library);
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     Ok(())
 }
@@ -16968,8 +17664,9 @@ fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let template = user::git::commit_buffer_template();
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template);
+    let template = shell_user_library(runtime).git_commit_template();
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template, &*user_library);
     shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
         let ui = shell_ui_mut(runtime)?;
@@ -17035,6 +17732,370 @@ fn cancel_git_commit_buffer(
 ) -> Result<(), String> {
     close_buffer_discard(runtime, buffer_id)?;
     refresh_git_status_if_active(runtime)?;
+    Ok(())
+}
+
+/// Evaluate the input section of any evaluatable plugin buffer and replace the
+/// output section with the result.  Called both by the generic Ctrl+c Ctrl+c
+/// handler and by the `plugin.evaluate` hook subscriber.
+fn evaluate_active_plugin_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    // Read the buffer kind (needed to route the evaluate call).
+    let (input_lines, sep_line, kind_str, has_plugin_sections) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let kind_str = if let BufferKind::Plugin(k) = &buffer.kind {
+            k.clone()
+        } else {
+            return Ok(()); // not a plugin buffer; nothing to do
+        };
+        if buffer.has_plugin_sections() {
+            let line_count = buffer.text.line_count();
+            let all_lines: Vec<String> = (0..line_count)
+                .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
+                .collect();
+            (
+                all_lines,
+                String::new(),
+                kind_str,
+                true,
+            )
+        } else {
+            let line_count = buffer.text.line_count();
+            let all_lines: Vec<String> = (0..line_count)
+                .map(|i| buffer.text.line(i).unwrap_or_default().to_owned())
+                .collect();
+            if let Some(idx) = all_lines
+                .iter()
+                .position(|l| l.starts_with(PLUGIN_EVALUATE_SEPARATOR_PREFIX))
+            {
+                let input = all_lines[..idx].to_vec();
+                let sep = all_lines[idx].clone();
+                (input, sep, kind_str, false)
+            } else {
+                // No separator — treat everything as input; add a fresh separator.
+                let sep = format!(
+                    "{} {}",
+                    PLUGIN_EVALUATE_SEPARATOR_PREFIX,
+                    "─".repeat(48)
+                );
+                (all_lines, sep, kind_str, false)
+            }
+        }
+    };
+
+    let input_text = input_lines.join("\n");
+
+    // Call user library evaluator (no mutable borrow of runtime required).
+    let output = shell_user_library(runtime).handle_plugin_evaluate(&kind_str, &input_text);
+
+    if has_plugin_sections {
+        shell_buffer_mut(runtime, buffer_id)?.set_plugin_output_lines(output);
+        return Ok(());
+    }
+
+    // Rebuild: input + separator + output.
+    let mut new_lines = input_lines;
+    new_lines.push(sep_line);
+    new_lines.extend(output);
+
+    shell_buffer_mut(runtime, buffer_id)?.replace_with_lines(new_lines);
+    Ok(())
+}
+
+fn switch_active_plugin_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let switched_to_output = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if buffer.plugin_switch_pane() {
+            matches!(buffer.plugin_section_active_pane(), Some(PluginSectionPane::Output))
+        } else {
+            return acp::acp_switch_pane(runtime);
+        }
+    };
+    if switched_to_output {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+    }
+    Ok(())
+}
+
+// ─── Generic compile / build infrastructure ───────────────────────────────────
+
+/// Buffer name pattern for the compilation popup.
+fn compile_buffer_name(workspace_name: &str) -> String {
+    format!("*compile {workspace_name}*")
+}
+
+/// Open (or focus) the `*compile <workspace>*` compilation buffer and
+/// pre-fill its input field with the default build command for `language`
+/// (obtained from the user library).  The user can edit the command and press
+/// Ctrl+Enter to run it.
+///
+/// Called by the `plugin.run-command` hook subscriber.
+fn open_compile_buffer(
+    runtime: &mut EditorRuntime,
+    language_hint: Option<&str>,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let workspace_name = runtime
+        .model()
+        .active_workspace()
+        .map_err(|error| error.to_string())?
+        .name()
+        .to_owned();
+    let buf_name = compile_buffer_name(&workspace_name);
+
+    // Reuse an existing buffer if present.
+    let existing = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| {
+            ui.buffers
+                .iter()
+                .find(|b| b.display_name() == buf_name)
+                .map(|b| b.id())
+        });
+
+    let buffer_id = if let Some(existing) = existing {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        ui.focus_buffer_in_active_pane(existing);
+        ui.enter_normal_mode();
+        existing
+    } else {
+        let id = runtime
+            .model_mut()
+            .create_buffer(workspace_id, &buf_name, BufferKind::Compilation, None)
+            .map_err(|error| error.to_string())?;
+        let buffer = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|e| e.to_string())?
+            .buffer(id)
+            .ok_or_else(|| format!("buffer `{id}` is missing"))?;
+        let user_library = shell_user_library(runtime);
+        let initial = vec![format!("# {workspace_name} — compilation output")];
+        let mut shell_buf = ShellBuffer::from_runtime_buffer(buffer, initial, &*user_library);
+        // Pre-fill the input field with the default build command.
+        let default_cmd = language_hint
+            .and_then(|lang| user_library.default_build_command(lang))
+            .unwrap_or_default();
+        if let Some(input) = shell_buf.input_field_mut() {
+            input.set_text(&default_cmd);
+        }
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buf);
+        ui.focus_buffer_in_active_pane(id);
+        ui.enter_normal_mode();
+        id
+    };
+
+    // If the buffer already has a stored command for this workspace, pre-fill it.
+    let stored = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
+    if let Some(cmd) = stored {
+        if let Some(buf) = shell_ui_mut(runtime).ok().and_then(|ui| ui.buffer_mut(buffer_id)) {
+            if let Some(input) = buf.input_field_mut() {
+                input.set_text(&cmd);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Re-run the last stored build command for the active workspace.
+/// If no command has been stored yet, falls back to opening the compile buffer.
+fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let stored = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
+    if let Some(cmd) = stored {
+        let workspace_name = runtime
+            .model()
+            .active_workspace()
+            .map_err(|error| error.to_string())?
+            .name()
+            .to_owned();
+        let buf_name = compile_buffer_name(&workspace_name);
+        let buf_id = shell_ui(runtime)
+            .ok()
+            .and_then(|ui| {
+                ui.buffers
+                    .iter()
+                    .find(|b| b.display_name() == buf_name)
+                    .map(|b| b.id())
+            });
+        if let Some(buffer_id) = buf_id {
+            run_compile_command_in_buffer(runtime, buffer_id, &cmd)
+        } else {
+            open_compile_buffer(runtime, None)
+        }
+    } else {
+        open_compile_buffer(runtime, None)
+    }
+}
+
+/// Run `command` in the compilation buffer `buffer_id`, capturing stdout +
+/// stderr into it.  Stores the command as the active workspace's last command.
+fn run_compile_command_in_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    command: &str,
+) -> Result<(), String> {
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Ok(());
+    }
+
+    // Parse into program + args.
+    let mut parts = command.split_whitespace();
+    let program = parts.next().unwrap_or("").to_owned();
+    let args: Vec<String> = parts.map(str::to_owned).collect();
+
+    // Determine working directory (workspace root or cwd).
+    let cwd = active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Store command for this workspace.
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    if let Ok(ui) = shell_ui_mut(runtime) {
+        ui.compile_commands.insert(workspace_id, command.clone());
+    }
+
+    // Write header to buffer.
+    {
+        let buf = shell_buffer_mut(runtime, buffer_id)?;
+        buf.append_output_lines(&[
+            format!("$ {command}"),
+            String::new(),
+        ]);
+        buf.clear_input();
+    }
+
+    // Spawn the job and wait (synchronously — same pattern as git commands).
+    let spec = JobSpec::command("compile", &program, args).with_cwd(cwd);
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager.lock().map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager.spawn(spec).map_err(|e| e.to_string())?;
+    drop(manager);
+    let result = handle.wait().map_err(|e| e.to_string())?;
+
+    // Write output to the buffer.
+    let transcript = result.transcript();
+    let output_lines: Vec<String> = transcript.lines().map(str::to_owned).collect();
+    let status_line = if result.succeeded() {
+        "── ✓ Build succeeded ──────────────────────────────────────────────────".to_owned()
+    } else {
+        format!(
+            "── ✗ Build failed (exit {}) ─────────────────────────────────────────",
+            result.exit_code().unwrap_or(-1)
+        )
+    };
+    let buf = shell_buffer_mut(runtime, buffer_id)?;
+    buf.append_output_lines(&output_lines);
+    buf.append_output_lines(&[status_line]);
+    Ok(())
+}
+
+/// In a compilation buffer, jump to the file location on the current line
+/// by parsing `path:line` or `path:line:col`.
+fn jump_to_compilation_error(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let line_text = {
+        let buf = shell_buffer(runtime, buffer_id)?;
+        let cursor_line = buf.cursor_point().line;
+        buf.text.line(cursor_line).unwrap_or_default().to_owned()
+    };
+
+    // Parse the error line via the user library's compile module pattern.
+    // We use the same logic as user::compile::parse_error_location but replicated
+    // here generically so the shell does not depend on user code at parse time.
+    let parsed = parse_compilation_error_line(&line_text);
+    let (path, line_num, _col) = match parsed {
+        Some(loc) => loc,
+        None => return Ok(()), // not an error line, silently ignore
+    };
+
+    // Determine the absolute path (relative to workspace root if needed).
+    let root = active_workspace_root(runtime).ok().flatten();
+    let abs_path = if std::path::Path::new(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else if let Some(ref root) = root {
+        root.join(&path)
+    } else {
+        PathBuf::from(&path)
+    };
+
+    // Find or open the file buffer and navigate to the line.
+    open_file_at_line(runtime, &abs_path, line_num)
+}
+
+/// Generic compilation error line parser.  Handles:
+/// - `path:line:col`
+/// - `path:line`
+/// - `  --> path:line:col` (Rust rustc style)
+fn parse_compilation_error_line(line: &str) -> Option<(String, u32, u32)> {
+    let line = line.trim();
+    let line = line.strip_prefix("-->").map(str::trim).unwrap_or(line);
+    let parts: Vec<&str> = line.splitn(4, ':').collect();
+    match parts.as_slice() {
+        [path, line_str, col_str, ..] => {
+            let line_num = line_str.trim().parse::<u32>().ok()?;
+            let col_num = col_str
+                .trim()
+                .split_once(|c: char| !c.is_ascii_digit())
+                .and_then(|(n, _)| n.parse().ok())
+                .or_else(|| col_str.trim().parse().ok())
+                .unwrap_or(1);
+            if !path.is_empty() && line_num > 0 {
+                return Some(((*path).to_owned(), line_num, col_num));
+            }
+            None
+        }
+        [path, line_str] => {
+            let line_num = line_str.trim().parse::<u32>().ok()?;
+            if !path.is_empty() && line_num > 0 {
+                return Some(((*path).to_owned(), line_num, 1));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Open `path` in the most-recently-active non-compilation buffer and move
+/// the cursor to `line_num`.
+fn open_file_at_line(
+    runtime: &mut EditorRuntime,
+    path: &Path,
+    line_num: u32,
+) -> Result<(), String> {
+    open_workspace_file_at(
+        runtime,
+        path,
+        TextPoint::new(line_num.saturating_sub(1) as usize, 0),
+    )?;
+    shell_ui_mut(runtime)?.enter_normal_mode();
     Ok(())
 }
 
@@ -17291,7 +18352,8 @@ fn open_git_view_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines);
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &*user_library);
     shell_buffer.set_git_view(view);
     let ui = shell_ui_mut(runtime)?;
     ui.insert_buffer(shell_buffer);
@@ -17400,10 +18462,10 @@ fn diff_git_dwim(
     if let Some(meta) = meta
         && let SectionRenderLineKind::Header { id, .. } = &meta.kind
     {
-        if id == user::git::SECTION_STAGED {
+        if id == GIT_SECTION_STAGED {
             return open_git_diff_staged(runtime);
         }
-        if id == user::git::SECTION_UNSTAGED || id == user::git::SECTION_UNTRACKED {
+        if id == GIT_SECTION_UNSTAGED || id == GIT_SECTION_UNTRACKED {
             return open_git_diff_unstaged(runtime);
         }
     }
@@ -19082,8 +20144,12 @@ fn git_status_discard_or_reset_command(runtime: &mut EditorRuntime) -> Result<()
     reset_commit_at_point_or_picker(runtime, context.meta.as_ref(), GitResetMode::Mixed)
 }
 
-fn git_status_command_name(prefix: Option<GitPrefix>, chord: &str) -> Option<&'static str> {
-    user::git::status_command_name(prefix, chord)
+fn git_status_command_name(
+    user_library: &dyn UserLibrary,
+    prefix: Option<GitPrefix>,
+    chord: &str,
+) -> Option<&'static str> {
+    user_library.git_command_for_chord(prefix, chord)
 }
 
 fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<bool, String> {
@@ -19209,8 +20275,9 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
     }
 
     let prefix = take_git_prefix(runtime)?;
-    if let Some(command_name) =
-        git_status_command_name(prefix, chord).or_else(|| git_status_command_name(None, chord))
+    let user_library = shell_user_library(runtime);
+    if let Some(command_name) = git_status_command_name(&*user_library, prefix, chord)
+        .or_else(|| git_status_command_name(&*user_library, None, chord))
     {
         runtime
             .execute_command(command_name)
@@ -19218,7 +20285,7 @@ fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<b
         return Ok(true);
     }
 
-    if let Some(prefix) = user::git::status_prefix_for_chord(chord) {
+    if let Some(prefix) = user_library.git_prefix_for_chord(chord) {
         set_git_prefix(runtime, prefix)?;
         return Ok(true);
     }
@@ -19261,18 +20328,19 @@ fn handle_directory_keydown_chord(
         return Ok(false);
     }
     shell_ui_mut(runtime)?.pending_directory_prefix = None;
-    match user::oil::keydown_action(chord) {
-        Some(user::oil::OilKeyAction::OpenEntry) => {
+    let user_library = shell_user_library(runtime);
+    match user_library.oil_keydown_action(chord) {
+        Some(OilKeyAction::OpenEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenVerticalSplit) => {
+        Some(OilKeyAction::OpenVerticalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenHorizontalSplit) => {
+        Some(OilKeyAction::OpenHorizontalSplit) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(
                 runtime,
@@ -19282,21 +20350,21 @@ fn handle_directory_keydown_chord(
             )?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenNewPane) => {
+        Some(OilKeyAction::OpenNewPane) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::PreviewEntry) => {
+        Some(OilKeyAction::PreviewEntry) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::Refresh) => {
+        Some(OilKeyAction::Refresh) => {
             refresh_directory_buffer(runtime, buffer_id)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::Close) => {
+        Some(OilKeyAction::Close) => {
             close_buffer_discard(runtime, buffer_id)?;
             Ok(true)
         }
@@ -19311,54 +20379,55 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
         return Ok(false);
     }
     let had_prefix = take_directory_prefix(runtime)?;
-    match user::oil::chord_action(had_prefix, chord) {
-        Some(user::oil::OilKeyAction::ShowHelp) => {
+    let user_library = shell_user_library(runtime);
+    match user_library.oil_chord_action(had_prefix, chord) {
+        Some(OilKeyAction::ShowHelp) => {
             open_oil_help_popup(runtime)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::ToggleHidden) => {
+        Some(OilKeyAction::ToggleHidden) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.show_hidden = !state.show_hidden;
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::ToggleTrash) => {
+        Some(OilKeyAction::ToggleTrash) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.trash_enabled = !state.trash_enabled;
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::CycleSort) => {
+        Some(OilKeyAction::CycleSort) => {
             update_directory_state(runtime, buffer_id, |state| {
                 state.sort_mode = state.sort_mode.cycle();
             })?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenExternal) => {
+        Some(OilKeyAction::OpenExternal) => {
             let entry = directory_entry_at_cursor(runtime, buffer_id)?;
             open_external_path(entry.path())?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::SetTabLocalRoot) | Some(user::oil::OilKeyAction::SetRoot) => {
+        Some(OilKeyAction::SetTabLocalRoot) | Some(OilKeyAction::SetRoot) => {
             directory_cd_from_cursor(runtime, buffer_id)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::StartPrefix) => {
+        Some(OilKeyAction::StartPrefix) => {
             set_directory_prefix(runtime)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenParent) => {
+        Some(OilKeyAction::OpenParent) => {
             let root = oil_parent_root(runtime)?;
             set_directory_root(runtime, buffer_id, root)?;
             Ok(true)
         }
-        Some(user::oil::OilKeyAction::OpenWorkspaceRoot) => {
+        Some(OilKeyAction::OpenWorkspaceRoot) => {
             let root = oil_workspace_root(runtime)?;
             set_directory_root(runtime, buffer_id, root)?;
             Ok(true)
         }
         None if had_prefix => {
-            let prefix = user::oil::keybindings().prefix;
+            let prefix = user_library.oil_keybindings().prefix;
             record_runtime_error(
                 runtime,
                 "oil.directory",
@@ -19648,12 +20717,10 @@ fn terminal_spawn_config(
     cols: u16,
 ) -> Result<LiveTerminalConfig, String> {
     let title = shell_buffer(runtime, buffer_id)?.display_name().to_owned();
-    let mut config = LiveTerminalConfig::new(
-        title,
-        user::terminal::default_shell_program(),
-        user::terminal::default_shell_args(),
-    )
-    .with_size(rows, cols);
+    let terminal_config = shell_user_library(runtime).terminal_config();
+    let mut config =
+        LiveTerminalConfig::new(title, terminal_config.program, terminal_config.args)
+            .with_size(rows, cols);
     if let Some(cwd) = terminal_working_dir(runtime)? {
         config = config.with_cwd(cwd);
     }
@@ -20372,10 +21439,12 @@ pub(crate) fn open_workspace_from_project(
             ShellBuffer::from_runtime_buffer(
                 scratch,
                 workspace_scratch_lines(workspace.name(), workspace.root()),
+                &*shell_user_library(runtime),
             ),
             ShellBuffer::from_runtime_buffer(
                 notes,
                 workspace_notes_lines(workspace.name(), workspace.root()),
+                &*shell_user_library(runtime),
             ),
             pane_id,
         )
@@ -20492,7 +21561,10 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup(workspace_id, "Popup", vec![buffer_id], buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics);
+    {
+        let user_library = shell_user_library(runtime);
+        shell_ui_mut(runtime)?.ensure_popup_buffer(buffer_id, "*popup*", BufferKind::Diagnostics, &*user_library);
+    }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
 }
@@ -20544,8 +21616,9 @@ fn split_runtime_pane(
         (buffer.name().to_owned(), buffer.kind().clone())
     };
     {
+        let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
-        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind);
+        ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind, &*user_library);
         ui.split_pane(pane_id, split_buffer_id, direction);
     }
     let window_id = active_window_id(runtime)?;
@@ -20965,7 +22038,8 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("new file buffer `{buffer_id}` is missing"))?;
-    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text);
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
 
     {
         let ui = shell_ui_mut(runtime)?;
@@ -21964,8 +23038,9 @@ fn update_error_buffer(
     buffer_id: BufferId,
     lines: Vec<String>,
 ) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
     let ui = shell_ui_mut(runtime)?;
-    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics);
+    let buffer = ui.ensure_buffer(buffer_id, "*errors*", BufferKind::Diagnostics, &*user_library);
     buffer.replace_with_lines(lines);
     Ok(())
 }
@@ -22141,14 +23216,17 @@ fn workspace_notes_lines(name: &str, root: Option<&std::path::Path>) -> Vec<Stri
     lines
 }
 
-fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
+fn buffer_interaction(
+    kind: &BufferKind,
+    user_library: &dyn UserLibrary,
+) -> (bool, Option<InputField>) {
     match kind {
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
-            (true, Some(browser_input_field()))
+            (true, Some(browser_input_field(user_library)))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => {
             let mut input = InputField::new("> ");
@@ -22164,14 +23242,22 @@ fn buffer_interaction(kind: &BufferKind) -> (bool, Option<InputField>) {
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),
         BufferKind::Terminal => (true, None),
         BufferKind::Directory => (false, None),
+        BufferKind::Compilation => {
+            let mut input = InputField::new("$ ");
+            input.set_placeholder(Some(
+                "Enter build command (e.g. cargo build) then press Ctrl+Enter".to_owned(),
+            ));
+            (true, Some(input))
+        }
         _ => (false, None),
     }
 }
 
-fn browser_input_field() -> InputField {
-    let mut input = InputField::new(user::browser::URL_PROMPT);
-    input.set_placeholder(Some(user::browser::URL_PLACEHOLDER.to_owned()));
-    input.set_hint(Some(user::browser::input_hint(None)));
+fn browser_input_field(user_library: &dyn UserLibrary) -> InputField {
+    let prompt = user_library.browser_url_prompt();
+    let mut input = InputField::new(prompt);
+    input.set_placeholder(Some(user_library.browser_url_placeholder()));
+    input.set_hint(Some(user_library.browser_input_hint(None)));
     input
 }
 
@@ -22179,7 +23265,19 @@ fn browser_state_for_kind(kind: &BufferKind) -> Option<BrowserBufferState> {
     buffer_is_browser(kind).then(BrowserBufferState::default)
 }
 
-fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
+fn plugin_section_state_for_kind(
+    kind: &BufferKind,
+    user_library: &dyn UserLibrary,
+) -> Option<PluginSectionBufferState> {
+    let BufferKind::Plugin(plugin_kind) = kind else {
+        return None;
+    };
+    user_library
+        .plugin_buffer_sections(plugin_kind)
+        .map(PluginSectionBufferState::new)
+}
+
+fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibrary) -> Vec<String> {
     match name {
         "*scratch*" => initial_scratch_lines(),
         "*notes*" => initial_notes_lines(),
@@ -22225,7 +23323,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
                 "Use Ctrl+Enter to submit or Ctrl+l to clear.".to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
-                user::browser::buffer_lines(None)
+                user_library.browser_buffer_lines(None)
             }
             BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => vec![
                 format!("{name} is an ACP session buffer."),
@@ -22239,16 +23337,25 @@ fn placeholder_lines(name: &str, kind: &BufferKind) -> Vec<String> {
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
-                user::git::commit_buffer_template()
+                user_library.git_commit_template()
             }
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),
                 "File loading is not yet wired into the SDL shell event loop.".to_owned(),
             ],
-            BufferKind::Plugin(plugin_kind) => vec![
-                format!("{name} was opened for plugin kind `{plugin_kind}`."),
-                "Users can change this behavior by editing the matching user package and recompiling.".to_owned(),
-            ],
+            BufferKind::Plugin(plugin_kind) => {
+                // Ask the user library for initial content.  If none is provided,
+                // fall back to the generic plugin placeholder message.
+                let initial = user_library.plugin_buffer_initial_lines(plugin_kind);
+                if initial.is_empty() {
+                    vec![
+                        format!("{name} was opened for plugin kind `{plugin_kind}`."),
+                        "Users can change this behavior by editing the matching user package and recompiling.".to_owned(),
+                    ]
+                } else {
+                    initial
+                }
+            }
         },
     }
 }
@@ -22291,6 +23398,7 @@ fn render_shell_state(
     fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -22351,21 +23459,22 @@ fn render_shell_state(
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
-            render_buffer(
-                target,
-                fonts,
-                buffer,
-                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
-                active,
-                visual_range,
-                yank_flash,
-                input_mode,
-                state.vim().recording_macro,
-                workspace_name,
-                lsp_server,
-                lsp_workspace_loaded,
-                acp_connected,
-                git_summary.as_ref(),
+        render_buffer(
+            target,
+            fonts,
+            buffer,
+            PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+            active,
+            visual_range,
+            yank_flash,
+            input_mode,
+            state.vim().recording_macro,
+            user_library,
+            workspace_name,
+            lsp_server,
+            lsp_workspace_loaded,
+            acp_connected,
+            git_summary.as_ref(),
                 theme_registry,
                 cell_width,
                 line_height,
@@ -22381,6 +23490,7 @@ fn render_shell_state(
             state,
             popup,
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
+            user_library,
             workspace_name,
             lsp_server,
             lsp_workspace_loaded,
@@ -22408,6 +23518,7 @@ fn render_shell_state(
                 active_rect.width,
                 active_rect.height,
             ),
+            user_library,
             theme_registry,
             cell_width,
             line_height,
@@ -22427,6 +23538,7 @@ fn render_shell_state(
                 active_rect.width,
                 active_rect.height,
             ),
+            user_library,
             theme_registry,
             cell_width,
             line_height,
@@ -22473,6 +23585,7 @@ fn render_runtime_popup_overlay(
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
     popup_rect: Rect,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -22509,6 +23622,7 @@ fn render_runtime_popup_overlay(
             yank_flash,
             input_mode,
             state.vim().recording_macro,
+            user_library,
             workspace_name,
             lsp_server,
             lsp_workspace_loaded,
@@ -22645,11 +23759,13 @@ fn rects_intersect(left: Rect, right: Rect) -> bool {
         && left_bottom > right.y()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_autocomplete_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
     autocomplete: &AutocompleteOverlay,
     pane_rect: Rect,
+    user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -22712,14 +23828,16 @@ fn render_autocomplete_overlay(
         .min(width.saturating_sub((cell_width.max(1) as u32) * 18));
     let docs_width = width.saturating_sub(list_width).saturating_sub(1);
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
+    let result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
-        .clamp(4, user::autocomplete::RESULT_LIMIT.max(6) as u32 + 2)
+        .clamp(4, result_limit.max(6) as u32 + 2)
         as usize;
     let preview_lines = autocomplete_preview_lines(
         autocomplete.selected(),
         &autocomplete.query.token,
         docs_columns,
         max_body_rows,
+        user_library.autocomplete_token_icon(),
     );
     let body_rows = autocomplete
         .entries()
@@ -22796,11 +23914,13 @@ fn render_autocomplete_overlay(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_hover_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
     hover: &HoverOverlay,
     pane_rect: Rect,
+    _user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -23359,14 +24479,12 @@ fn autocomplete_preview_lines(
     token: &str,
     max_columns: usize,
     max_lines: usize,
+    token_icon: &str,
 ) -> Vec<String> {
     let max_lines = max_lines.max(1);
     let Some(entry) = entry else {
         return wrap_overlay_text(
-            &format!(
-                "{} {token}\n\nSelect a completion to preview details.",
-                user::autocomplete::TOKEN_ICON
-            ),
+            &format!("{token_icon} {token}\n\nSelect a completion to preview details."),
             max_columns,
             max_lines,
         );
@@ -23511,15 +24629,16 @@ fn statusline_icon_segments<'a>(text: &'a str, icons: &[&'a str]) -> Vec<(&'a st
 
 fn statusline_icon_colors(
     statusline: &str,
+    user_library: &dyn UserLibrary,
     acp_connected: bool,
     lsp_server_visible: bool,
     lsp_workspace_loaded: bool,
     connected_color: Color,
 ) -> Vec<(&'static str, Color)> {
-    let acp_icon = user::icon_font::symbols::fa::FA_CONNECTDEVELOP;
-    let lsp_icon = user::statusline::LSP_CONNECTED_ICON;
-    let error_icon = user::statusline::LSP_ERROR_ICON;
-    let warning_icon = user::statusline::LSP_WARNING_ICON;
+    let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
+    let lsp_icon = user_library.statusline_lsp_connected_icon();
+    let error_icon = user_library.statusline_lsp_error_icon();
+    let warning_icon = user_library.statusline_lsp_warning_icon();
     let mut icon_colors = Vec::new();
     if acp_connected && statusline.contains(acp_icon) {
         icon_colors.push((acp_icon, connected_color));
@@ -23729,6 +24848,7 @@ fn render_buffer(
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     recording_macro: Option<char>,
+    user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
     lsp_workspace_loaded: bool,
@@ -23790,30 +24910,29 @@ fn render_buffer(
     );
     let git_fringe_added = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_ADDED,
+        user_library.gitfringe_token_added(),
         git_added_fallback,
     );
     let git_fringe_modified = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_MODIFIED,
+        user_library.gitfringe_token_modified(),
         git_modified_fallback,
     );
     let git_fringe_removed = theme_color(
         theme_registry,
-        user::gitfringe::TOKEN_REMOVED,
+        user_library.gitfringe_token_removed(),
         git_removed_fallback,
     );
     let cell_width = cell_width.max(1);
-    let git_info = git_summary.and_then(|summary| {
-        summary
-            .branch
-            .as_deref()
-            .map(|branch| user::statusline::GitStatuslineInfo {
-                branch,
-                added: summary.added,
-                removed: summary.removed,
-            })
-    });
+    let (git_branch, git_added, git_removed) = git_summary
+        .map(|summary| {
+            (
+                summary.branch.as_deref(),
+                summary.added,
+                summary.removed,
+            )
+        })
+        .unwrap_or((None, 0, 0));
     let lsp_diagnostics = statusline_lsp_diagnostics(buffer.lsp_diagnostics());
     let terminal_cursor = buffer
         .terminal_render()
@@ -23824,21 +24943,24 @@ fn render_buffer(
     let statusline_column = terminal_cursor
         .map(|cursor| cursor.col() as usize + 1)
         .unwrap_or(buffer.cursor_col() + 1);
+    let statusline_context = HostStatuslineContext {
+        vim_mode: input_mode.label(),
+        recording_macro,
+        workspace_name,
+        buffer_name: buffer.display_name(),
+        buffer_modified: buffer.is_dirty(),
+        language_id: buffer.language_id(),
+        line: statusline_line,
+        column: statusline_column,
+        lsp_server,
+        lsp_diagnostics,
+        acp_connected,
+        git_branch,
+        git_added,
+        git_removed,
+    };
     let statusline = truncate_text_to_width(
-        &user::statusline::compose(&user::statusline::StatuslineContext {
-            vim_mode: input_mode.label(),
-            recording_macro,
-            workspace_name,
-            buffer_name: buffer.display_name(),
-            buffer_modified: buffer.is_dirty(),
-            language_id: buffer.language_id(),
-            line: statusline_line,
-            column: statusline_column,
-            lsp_server,
-            lsp_diagnostics,
-            acp_connected,
-            git: git_info,
-        }),
+        &user_library.statusline_render(&statusline_context),
         rect.width().saturating_sub(24),
         cell_width,
     );
@@ -23886,6 +25008,24 @@ fn render_buffer(
             border_color,
             selection,
             yank_flash_color,
+            cursor,
+            cursor_roundness,
+            cell_width,
+            line_height,
+        )?;
+    } else if buffer.has_plugin_sections() {
+        render_plugin_section_buffer_body(
+            target,
+            buffer,
+            rect,
+            layout,
+            active,
+            input_mode,
+            theme_registry,
+            base_background,
+            foreground,
+            muted,
+            border_color,
             cursor,
             cursor_roundness,
             cell_width,
@@ -24017,19 +25157,25 @@ fn render_buffer(
                     }
                 }
                 if segment_index == 0 {
-                    let diagnostic_severity = user::lsp::SHOW_BUFFER_DIAGNOSTICS
+                    let diagnostic_severity = user_library.lsp_show_buffer_diagnostics()
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
                     if let Some(severity) = diagnostic_severity {
                         let color = diagnostic_color(severity);
-                        draw_text(target, fringe_x, y, user::lsp::DIAGNOSTIC_ICON, color)?;
+                        draw_text(
+                            target,
+                            fringe_x,
+                            y,
+                            user_library.lsp_diagnostic_icon(),
+                            color,
+                        )?;
                     } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
                         let color = match kind {
                             GitFringeKind::Added => git_fringe_added,
                             GitFringeKind::Modified => git_fringe_modified,
                             GitFringeKind::Removed => git_fringe_removed,
                         };
-                        draw_text(target, fringe_x, y, user::gitfringe::SYMBOL, color)?;
+                        draw_text(target, fringe_x, y, user_library.gitfringe_symbol(), color)?;
                     }
                     let line_number = if relative_line_numbers {
                         if line_index == cursor_row {
@@ -24071,7 +25217,7 @@ fn render_buffer(
                             .then_some(base_background),
                     ),
                 )?;
-                if user::lsp::SHOW_BUFFER_DIAGNOSTICS && buffer.lsp_enabled() {
+                if user_library.lsp_show_buffer_diagnostics() && buffer.lsp_enabled() {
                     draw_diagnostic_underlines_for_segment(
                         target,
                         buffer.lsp_diagnostic_line_spans(line_index),
@@ -24219,6 +25365,7 @@ fn render_buffer(
     let statusline_x = rect.x() + 12;
     let statusline_icon_colors = statusline_icon_colors(
         &statusline,
+        user_library,
         acp_connected,
         lsp_server.is_some(),
         lsp_workspace_loaded,
@@ -24256,6 +25403,304 @@ fn render_buffer(
         border_color,
     )?;
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextPaneLayout {
+    rect: Rect,
+    visible_rows: usize,
+    wrap_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PluginSectionLayout {
+    input: TextPaneLayout,
+    output: TextPaneLayout,
+}
+
+fn plain_text_pane_content_rows(pane: &PlainTextPaneState, wrap_cols: usize) -> usize {
+    let wrap_cols = wrap_cols.max(1);
+    (0..pane.line_count())
+        .map(|line_index| {
+            let line = pane.text.line(line_index).unwrap_or_default();
+            wrap_line_segments(&LineCharMap::new(&line), wrap_cols, wrap_cols)
+                .len()
+                .max(1)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+fn plugin_section_buffer_layout(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    cell_width: i32,
+    line_height: i32,
+) -> Option<PluginSectionLayout> {
+    let state = buffer.plugin_sections()?;
+    let line_height = line_height.max(1);
+    let panel_x = rect.x() + 8;
+    let panel_width = rect.width().saturating_sub(16);
+    let gap = 8i32;
+    let header_height = (line_height + 10).max(line_height);
+    let pane_chrome = header_height + 12;
+    let total_height = layout
+        .pane_bottom
+        .saturating_sub(layout.body_y)
+        .max(pane_chrome * 2 + gap + line_height * 2);
+    let body_width = panel_width.saturating_sub(20);
+    let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
+    let total_row_budget =
+        ((total_height - pane_chrome * 2 - gap).max(line_height * 2) / line_height).max(2) as usize;
+    let output_target_rows =
+        plain_text_pane_content_rows(&state.output_pane, wrap_cols).max(state.output_min_rows);
+    let output_rows = output_target_rows.min(total_row_budget.saturating_sub(1).max(1));
+    let input_rows = total_row_budget.saturating_sub(output_rows).max(1);
+    let used_height =
+        pane_chrome * 2 + gap + ((input_rows.saturating_add(output_rows)) as i32 * line_height);
+    let input_extra = total_height.saturating_sub(used_height);
+    let input_height = pane_chrome + input_rows as i32 * line_height + input_extra;
+    let output_height = pane_chrome + output_rows as i32 * line_height;
+    Some(PluginSectionLayout {
+        input: TextPaneLayout {
+            rect: Rect::new(panel_x, layout.body_y, panel_width, input_height as u32),
+            visible_rows: input_rows,
+            wrap_cols,
+        },
+        output: TextPaneLayout {
+            rect: Rect::new(
+                panel_x,
+                layout.body_y + input_height + gap,
+                panel_width,
+                output_height as u32,
+            ),
+            visible_rows: output_rows,
+            wrap_cols,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_plugin_section_buffer_body(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    input_mode: InputMode,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(state) = buffer.plugin_sections() else {
+        return Ok(());
+    };
+    let Some(section_layout) =
+        plugin_section_buffer_layout(buffer, rect, layout, cell_width, line_height)
+    else {
+        return Ok(());
+    };
+    let panel_background = theme_color(
+        theme_registry,
+        "ui.panel.background",
+        adjust_color(
+            base_background,
+            if is_dark_color(base_background) { 8 } else { -8 },
+        ),
+    );
+    let header_background = theme_color(
+        theme_registry,
+        "ui.panel.header.background",
+        adjust_color(
+            panel_background,
+            if is_dark_color(panel_background) { 12 } else { -12 },
+        ),
+    );
+    let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
+    let active_pane = state.active_pane;
+    render_text_panel(
+        target,
+        &buffer.text,
+        buffer.scroll_row,
+        if active_pane == PluginSectionPane::Input {
+            Some(buffer.text.cursor())
+        } else {
+            None
+        },
+        active && active_pane == PluginSectionPane::Input,
+        section_layout.input,
+        &state.input_title,
+        input_mode,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    render_text_panel(
+        target,
+        &state.output_pane.text,
+        state.output_pane.scroll_row,
+        (active_pane == PluginSectionPane::Output).then_some(state.output_pane.cursor()),
+        active && active_pane == PluginSectionPane::Output,
+        section_layout.output,
+        &state.output_title,
+        InputMode::Normal,
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_text_panel(
+    target: &mut DrawTarget<'_>,
+    text: &TextBuffer,
+    scroll_row: usize,
+    cursor_point: Option<TextPoint>,
+    pane_active: bool,
+    pane_layout: TextPaneLayout,
+    title: &str,
+    input_mode: InputMode,
+    _theme_registry: Option<&ThemeRegistry>,
+    panel_background: Color,
+    header_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    active_border: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let rect = pane_layout.rect;
+    let border = if pane_active {
+        active_border
+    } else {
+        border_color
+    };
+    fill_rounded_rect(target, rect, 10, border)?;
+    let inner_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        rect.height().saturating_sub(2),
+    );
+    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
+    let header_height = (line_height.max(1) + 10).max(line_height.max(1));
+    let header_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        header_height as u32,
+    );
+    let header_color = if pane_active {
+        blend_color(cursor, header_background, 0.25)
+    } else {
+        header_background
+    };
+    let header_radius = 9.min(header_rect.height() / 2);
+    fill_rounded_rect(target, header_rect, header_radius, header_color)?;
+    if header_rect.height() > header_radius {
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                header_rect.x(),
+                header_rect.y() + header_radius as i32,
+                header_rect.width(),
+                header_rect.height().saturating_sub(header_radius),
+            ),
+            header_color,
+        )?;
+    }
+    draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
+    let body_x = rect.x() + 10;
+    let body_y = rect.y() + header_height + 6;
+    let mut visual_row = 0usize;
+    let line_count = text.line_count();
+    let mut cursor_screen: Option<(usize, usize)> = None;
+    for line_index in scroll_row.min(line_count.saturating_sub(1))..line_count {
+        let line = text.line(line_index).unwrap_or_default();
+        let segments = wrap_line_segments(
+            &LineCharMap::new(&line),
+            pane_layout.wrap_cols,
+            pane_layout.wrap_cols,
+        );
+        for segment in &segments {
+            if visual_row >= pane_layout.visible_rows {
+                break;
+            }
+            if cursor_screen.is_none()
+                && let Some(cursor_point) = cursor_point
+                && cursor_point.line == line_index
+                && cursor_point.column >= segment.start_col
+                && cursor_point.column <= segment.end_col
+            {
+                cursor_screen = Some((
+                    visual_row,
+                    cursor_point.column.saturating_sub(segment.start_col),
+                ));
+            }
+            let rendered = acp_slice_chars(&line, segment.start_col, segment.end_col);
+            draw_text(
+                target,
+                body_x,
+                body_y + visual_row as i32 * line_height,
+                &rendered,
+                foreground,
+            )?;
+            visual_row = visual_row.saturating_add(1);
+        }
+        if visual_row >= pane_layout.visible_rows {
+            break;
+        }
+    }
+    if let Some((cursor_row, cursor_col)) = cursor_screen
+        && pane_active
+        && cursor_row < pane_layout.visible_rows
+    {
+        let cursor_width = match input_mode {
+            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+            InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
+        };
+        fill_rounded_rect(
+            target,
+            PixelRectToRect::rect(
+                body_x + (cursor_col as i32 * cell_width),
+                body_y + cursor_row as i32 * line_height,
+                cursor_width,
+                line_height.max(2) as u32,
+            ),
+            cursor_roundness,
+            cursor,
+        )?;
+    } else if line_count == 0 {
+        draw_text(target, body_x, body_y, "", muted)?;
+    }
     Ok(())
 }
 

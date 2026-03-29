@@ -212,9 +212,19 @@ impl LanguageServerSpec {
         &self.root_markers
     }
 
+    /// Returns the extension-to-language-id overrides.
+    pub fn document_language_ids(&self) -> &BTreeMap<String, String> {
+        &self.document_language_ids
+    }
+
     /// Returns the workspace-root strategy for this server.
     pub const fn root_strategy(&self) -> LanguageServerRootStrategy {
         self.root_strategy
+    }
+
+    /// Returns the environment overrides used when launching the server.
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
     }
 
     /// Returns the launch spec used to start the server.

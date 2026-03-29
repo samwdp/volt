@@ -639,6 +639,10 @@ name = "editor-git"
 version = "0.1.0"
 
 [[package]]
+name = "editor-icons"
+version = "0.1.0"
+
+[[package]]
 name = "editor-jobs"
 version = "0.1.0"
 
@@ -662,6 +666,14 @@ name = "editor-plugin-api"
 version = "0.1.0"
 dependencies = [
  "abi_stable",
+ "editor-core",
+ "editor-dap",
+ "editor-fs",
+ "editor-git",
+ "editor-icons",
+ "editor-lsp",
+ "editor-syntax",
+ "editor-theme",
 ]
 
 [[package]]
@@ -669,7 +681,14 @@ name = "editor-plugin-host"
 version = "0.1.0"
 dependencies = [
  "editor-core",
+ "editor-dap",
+ "editor-fs",
+ "editor-git",
+ "editor-icons",
+ "editor-lsp",
  "editor-plugin-api",
+ "editor-syntax",
+ "editor-theme",
 ]
 
 [[package]]
@@ -687,9 +706,11 @@ dependencies = [
  "editor-core",
  "editor-fs",
  "editor-git",
+ "editor-icons",
  "editor-jobs",
  "editor-lsp",
  "editor-picker",
+ "editor-plugin-api",
  "editor-plugin-host",
  "editor-render",
  "editor-syntax",
@@ -702,7 +723,6 @@ dependencies = [
  "sdl3-ttf-sys",
  "tokio",
  "tokio-util",
- "volt-user",
  "wry",
 ]
 
@@ -3230,14 +3250,17 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "volt"
 version = "0.1.0"
 dependencies = [
+ "abi_stable",
  "editor-buffer",
  "editor-core",
  "editor-dap",
  "editor-fs",
  "editor-git",
+ "editor-icons",
  "editor-jobs",
  "editor-lsp",
  "editor-picker",
+ "editor-plugin-api",
  "editor-plugin-host",
  "editor-sdl",
  "editor-syntax",
@@ -3251,12 +3274,12 @@ dependencies = [
 name = "volt-user"
 version = "0.1.0"
 dependencies = [
+ "abi_stable",
  "editor-buffer",
  "editor-core",
- "editor-dap",
  "editor-fs",
  "editor-git",
- "editor-lsp",
+ "editor-icons",
  "editor-plugin-api",
  "editor-syntax",
  "editor-theme",

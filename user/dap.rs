@@ -1,5 +1,6 @@
-use editor_dap::DebugAdapterSpec;
-use editor_plugin_api::{PluginAction, PluginCommand, PluginHookDeclaration, PluginPackage};
+use editor_plugin_api::{
+    DebugAdapterSpec, PluginAction, PluginCommand, PluginHookDeclaration, PluginPackage,
+};
 
 /// Returns the metadata for the DAP integration package.
 pub fn package() -> PluginPackage {

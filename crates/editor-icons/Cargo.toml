@@ -1,12 +1,12 @@
 [package]
-name = "editor-plugin-api"
+name = "editor-icons"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lints]
 workspace = true
 
-[dependencies]
-abi_stable = "0.11"
+[build-dependencies]

@@ -1,7 +1,7 @@
 use crate::icon_font::symbols::md;
-use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec};
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
+    LanguageServerRootStrategy, LanguageServerSpec, PluginAction, PluginCommand, PluginHookBinding,
+    PluginHookDeclaration, PluginPackage,
 };
 
 pub const HOOK_LSP_START: &str = "lsp.server-start";

@@ -37,6 +37,15 @@ pub struct StatusEntry {
 }
 
 impl StatusEntry {
+    /// Creates a new status entry.
+    pub fn new(path: impl Into<String>, index_status: char, worktree_status: char) -> Self {
+        Self {
+            path: path.into(),
+            index_status,
+            worktree_status,
+        }
+    }
+
     /// Returns the file path.
     pub fn path(&self) -> &str {
         &self.path
@@ -65,6 +74,25 @@ pub struct RepositoryStatus {
 }
 
 impl RepositoryStatus {
+    /// Creates a new repository status snapshot.
+    pub fn new(
+        branch: Option<String>,
+        ahead: usize,
+        behind: usize,
+        staged: Vec<StatusEntry>,
+        unstaged: Vec<StatusEntry>,
+        untracked: Vec<String>,
+    ) -> Self {
+        Self {
+            branch,
+            ahead,
+            behind,
+            staged,
+            unstaged,
+            untracked,
+        }
+    }
+
     /// Returns the current branch head description.
     pub fn branch(&self) -> Option<&str> {
         self.branch.as_deref()
@@ -104,6 +132,14 @@ pub struct GitLogEntry {
 }
 
 impl GitLogEntry {
+    /// Creates a new git log entry.
+    pub fn new(hash: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            hash: hash.into(),
+            summary: summary.into(),
+        }
+    }
+
     /// Returns the commit hash.
     pub fn hash(&self) -> &str {
         &self.hash
@@ -123,6 +159,14 @@ pub struct GitStashEntry {
 }
 
 impl GitStashEntry {
+    /// Creates a new git stash entry.
+    pub fn new(name: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            summary: summary.into(),
+        }
+    }
+
     /// Returns the stash identifier.
     pub fn name(&self) -> &str {
         &self.name

@@ -2984,6 +2984,7 @@ mod tests {
         assert_eq!(diagnostics[0].message(), "unused binding");
     }
 
+    #[cfg(windows)]
     #[test]
     fn file_uri_roundtrip_handles_windows_paths() {
         let path = PathBuf::from(r"P:\volt\src\main.rs");
