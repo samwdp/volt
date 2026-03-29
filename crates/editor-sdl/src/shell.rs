@@ -2192,11 +2192,13 @@ impl PluginSectionBufferState {
         let base = sections.next()?;
         let attached_sections = sections
             .map(|section| {
-                let mut pane = PluginTextPaneState::default();
-                pane.title = section.name().to_owned();
-                pane.writable = section.writable();
-                pane.min_rows = section.min_lines();
-                pane.update = section.update();
+                let mut pane = PluginTextPaneState {
+                    title: section.name().to_owned(),
+                    writable: section.writable(),
+                    min_rows: section.min_lines(),
+                    update: section.update(),
+                    ..PluginTextPaneState::default()
+                };
                 pane.replace_lines(
                     section
                         .initial_lines()
@@ -2926,6 +2928,7 @@ impl ShellBuffer {
         self.plugin_section_state.is_some()
     }
 
+    #[cfg(test)]
     fn plugin_active_section_index(&self) -> Option<usize> {
         self.plugin_section_state
             .as_ref()
