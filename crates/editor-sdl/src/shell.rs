@@ -2188,7 +2188,7 @@ impl Default for PluginTextPaneState {
 
 impl PluginSectionBufferState {
     fn new(config: PluginBufferSections, evaluate_target_section: Option<&str>) -> Option<Self> {
-        let mut sections = config.sections().iter();
+        let mut sections = config.items().iter();
         let base = sections.next()?;
         let attached_sections = sections
             .map(|section| {
@@ -2211,19 +2211,19 @@ impl PluginSectionBufferState {
         let evaluate_target_section = evaluate_target_section
             .and_then(|name| {
                 config
-                    .sections()
+                    .items()
                     .iter()
                     .position(|section| section.name() == name)
             })
             .or_else(|| {
                 config
-                    .sections()
+                    .items()
                     .iter()
                     .enumerate()
                     .rev()
                     .find_map(|(index, section)| (!section.writable()).then_some(index))
             })
-            .unwrap_or(0);
+            .unwrap_or_else(|| config.items().len().saturating_sub(1));
         Self {
             base_title: base.name().to_owned(),
             base_writable: base.writable(),
@@ -25668,7 +25668,7 @@ fn plugin_section_buffer_layout(
     let mut pane_y = layout.body_y;
     let mut panes = Vec::with_capacity(section_count);
     for (index, rows) in row_budget.into_iter().enumerate() {
-        let extra = usize::from(index == 0) as i32 * extra_height;
+        let extra = if index == 0 { extra_height } else { 0 };
         let pane_height = pane_chrome + rows as i32 * line_height + extra;
         panes.push(TextPaneLayout {
             rect: Rect::new(panel_x, pane_y, panel_width, pane_height as u32),

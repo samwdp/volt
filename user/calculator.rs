@@ -778,15 +778,15 @@ mod tests {
     fn calculator_buffer_sections_start_with_single_output_row() {
         let sections = buffer_sections();
         let names = sections
-            .sections()
+            .items()
             .iter()
             .map(|section| section.name())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["Input", "Output"]);
-        assert!(sections.sections()[0].writable());
-        assert_eq!(sections.sections()[1].min_lines(), Some(1));
+        assert!(sections.items()[0].writable());
+        assert_eq!(sections.items()[1].min_lines(), Some(1));
         assert_eq!(
-            sections.sections()[1]
+            sections.items()[1]
                 .initial_lines()
                 .iter()
                 .map(|line| line.as_str())
@@ -831,7 +831,7 @@ mod tests {
         assert_eq!(
             buffer.sections().map(|sections| {
                 sections
-                    .sections()
+                    .items()
                     .iter()
                     .map(|section| section.name())
                     .collect::<Vec<_>>()

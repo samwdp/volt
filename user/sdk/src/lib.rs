@@ -135,6 +135,7 @@ impl PluginBufferSection {
     }
 
     /// Declares the minimum number of wrapped rows reserved for the section.
+    /// Values below 1 are clamped to 1.
     pub fn with_min_lines(mut self, min_lines: usize) -> Self {
         self.min_lines = ROption::RSome(min_lines.max(1));
         self
@@ -197,8 +198,13 @@ impl PluginBufferSections {
     }
 
     /// Returns the configured sections in display order.
-    pub fn sections(&self) -> &[PluginBufferSection] {
+    pub fn items(&self) -> &[PluginBufferSection] {
         self.sections.as_slice()
+    }
+
+    /// Returns the configured sections in display order.
+    pub fn sections(&self) -> &[PluginBufferSection] {
+        self.items()
     }
 }
 
@@ -308,7 +314,7 @@ pub trait UserLibrary: Send + Sync {
             .map(|buffer| {
                 buffer
                     .sections()
-                    .and_then(|sections| sections.sections().first())
+                    .and_then(|sections| sections.items().first())
                     .map(|section| {
                         section
                             .initial_lines()
@@ -1179,7 +1185,7 @@ mod tests {
             package.buffers()[0]
                 .sections()
                 .expect("sections should be present")
-                .sections()[0]
+                .items()[0]
                 .initial_lines()
                 .iter()
                 .map(|line| line.as_str())
@@ -1190,7 +1196,7 @@ mod tests {
             package.buffers()[0]
                 .sections()
                 .expect("sections should be present")
-                .sections()
+                .items()
                 .iter()
                 .map(|section| section.name())
                 .collect::<Vec<_>>(),
