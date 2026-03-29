@@ -1,7 +1,7 @@
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(any(not(test), unix))]
+use std::{fs, io};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserLibraryPaths {
@@ -34,6 +34,7 @@ pub fn user_library_filename(target_os: &str) -> &'static str {
     }
 }
 
+#[cfg(any(not(test), unix))]
 pub fn install_root_library_link(paths: &UserLibraryPaths) -> io::Result<()> {
     if let Ok(current_target) = fs::read_link(&paths.root_library_path)
         && current_target == paths.built_library_path
@@ -64,7 +65,7 @@ fn create_symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn create_symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
