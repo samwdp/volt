@@ -17895,15 +17895,13 @@ fn open_compile_buffer(
     let stored = shell_ui(runtime)
         .ok()
         .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
-    if let Some(cmd) = stored {
-        if let Some(buf) = shell_ui_mut(runtime)
+    if let Some(cmd) = stored
+        && let Some(buf) = shell_ui_mut(runtime)
             .ok()
             .and_then(|ui| ui.buffer_mut(buffer_id))
-        {
-            if let Some(input) = buf.input_field_mut() {
-                input.set_text(&cmd);
-            }
-        }
+        && let Some(input) = buf.input_field_mut()
+    {
+        input.set_text(&cmd);
     }
 
     Ok(())
