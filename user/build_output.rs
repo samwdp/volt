@@ -71,10 +71,14 @@ fn create_symlink(target: &Path, link: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{distributed_user_library_paths, install_root_library_link, user_library_filename};
+    use super::{distributed_user_library_paths, user_library_filename};
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use super::install_root_library_link;
+    #[cfg(unix)]
     use std::{
         env, fs,
-        path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
 
