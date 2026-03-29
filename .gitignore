@@ -1,4 +1,7 @@
 /target/
+/libuser.so
+/libuser.dylib
+/user.dll
 /.idea/
 /.vscode/
 target-validation/*

@@ -13,6 +13,10 @@
 //! struct implements the [`editor_plugin_host::UserLibrary`] trait so the host
 //! can call into the user library without direct source-level coupling.
 
+#[cfg(test)]
+#[path = "build_output.rs"]
+mod build_output;
+
 /// Agent Client Protocol integrations.
 pub mod acp;
 /// Provider-backed autocomplete commands and configuration.
