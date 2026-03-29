@@ -972,7 +972,13 @@ mod tests {
         assert_eq!(
             library
                 .plugin_buffer_sections(calculator::CALCULATOR_KIND)
-                .map(|sections| sections.output_title().to_owned()),
+                .map(|sections| {
+                    sections
+                        .sections()
+                        .last()
+                        .map(|section| section.name().to_owned())
+                })
+                .flatten(),
             Some("Output".to_owned())
         );
         assert_eq!(

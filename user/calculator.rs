@@ -52,8 +52,9 @@
 //! - Constants: `pi`, `e`, `tau`, `inf`, `nan`
 
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginBufferSections, PluginCommand, PluginKeyBinding,
-    PluginKeymapScope, PluginPackage, buffer_kinds, plugin_hooks,
+    PluginAction, PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate,
+    PluginBufferSections, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    buffer_kinds, plugin_hooks,
 };
 
 // ─── Public constants ─────────────────────────────────────────────────────────
@@ -103,20 +104,20 @@ pub fn package() -> PluginPackage {
         .with_buffers(vec![
             PluginBuffer::new(CALCULATOR_KIND, initial_buffer_lines())
                 .with_sections(buffer_sections())
-                .with_evaluate_handler(EVALUATE_HANDLER),
-        ])
-        // No hook declarations: plugin.evaluate is a host-owned hook.
-        .with_key_bindings(vec![
-            PluginKeyBinding::new(
-                EVALUATE_CHORD,
-                "calculator.evaluate",
-                PluginKeymapScope::Workspace,
-            ),
-            PluginKeyBinding::new(
-                SWITCH_PANE_CHORD,
-                "calculator.switch-pane",
-                PluginKeymapScope::Workspace,
-            ),
+                .with_evaluate_handler(EVALUATE_HANDLER)
+                .with_evaluate_target_section("Output")
+                .with_key_bindings(vec![
+                    PluginKeyBinding::new(
+                        EVALUATE_CHORD,
+                        "calculator.evaluate",
+                        PluginKeymapScope::Workspace,
+                    ),
+                    PluginKeyBinding::new(
+                        SWITCH_PANE_CHORD,
+                        "calculator.switch-pane",
+                        PluginKeymapScope::Workspace,
+                    ),
+                ]),
         ])
 }
 
@@ -137,12 +138,15 @@ pub fn initial_buffer_lines() -> Vec<String> {
 
 /// Returns the split-pane layout used by the calculator buffer.
 pub fn buffer_sections() -> PluginBufferSections {
-    PluginBufferSections::new(
-        "Input",
-        "Output",
-        1,
-        vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()],
-    )
+    PluginBufferSections::new(vec![
+        PluginBufferSection::new("Input")
+            .with_writable(true)
+            .with_initial_lines(initial_buffer_lines()),
+        PluginBufferSection::new("Output")
+            .with_min_lines(1)
+            .with_initial_lines(vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()])
+            .with_update(PluginBufferSectionUpdate::Replace),
+    ])
 }
 
 // ─── Evaluator ───────────────────────────────────────────────────────────────
@@ -655,8 +659,12 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_c_ctrl_c() {
         let pkg = package();
+        let buffer = pkg
+            .buffer(CALCULATOR_KIND)
+            .expect("calculator package should declare its plugin buffer");
         assert!(
-            pkg.key_bindings()
+            buffer
+                .key_bindings()
                 .iter()
                 .any(|kb| kb.chord() == EVALUATE_CHORD)
         );
@@ -665,8 +673,12 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_tab_to_switch_panes() {
         let pkg = package();
+        let buffer = pkg
+            .buffer(CALCULATOR_KIND)
+            .expect("calculator package should declare its plugin buffer");
         assert!(
-            pkg.key_bindings()
+            buffer
+                .key_bindings()
                 .iter()
                 .any(|kb| kb.chord() == SWITCH_PANE_CHORD
                     && kb.command_name() == "calculator.switch-pane")
@@ -765,12 +777,17 @@ mod tests {
     #[test]
     fn calculator_buffer_sections_start_with_single_output_row() {
         let sections = buffer_sections();
-        assert_eq!(sections.input_title(), "Input");
-        assert_eq!(sections.output_title(), "Output");
-        assert_eq!(sections.output_min_rows(), 1);
+        let names = sections
+            .sections()
+            .iter()
+            .map(|section| section.name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Input", "Output"]);
+        assert!(sections.sections()[0].writable());
+        assert_eq!(sections.sections()[1].min_lines(), Some(1));
         assert_eq!(
-            sections
-                .output_initial_lines()
+            sections.sections()[1]
+                .initial_lines()
                 .iter()
                 .map(|line| line.as_str())
                 .collect::<Vec<_>>(),
@@ -802,20 +819,24 @@ mod tests {
             .expect("calculator package should declare its plugin buffer");
         assert_eq!(buffer.kind(), CALCULATOR_KIND);
         assert_eq!(buffer.evaluate_handler(), Some(EVALUATE_HANDLER));
+        assert_eq!(buffer.evaluate_target_section(), Some("Output"));
         assert_eq!(
             buffer
-                .initial_lines()
+                .key_bindings()
                 .iter()
-                .map(|line| line.as_str())
+                .map(|binding| binding.chord())
                 .collect::<Vec<_>>(),
-            initial_buffer_lines()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
+            vec![EVALUATE_CHORD, SWITCH_PANE_CHORD]
         );
         assert_eq!(
-            buffer.sections().map(|sections| sections.output_title()),
-            Some("Output")
+            buffer.sections().map(|sections| {
+                sections
+                    .sections()
+                    .iter()
+                    .map(|section| section.name())
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["Input", "Output"])
         );
     }
 }
