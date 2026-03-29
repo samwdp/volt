@@ -167,6 +167,10 @@ fn register_package_commands(
     Ok(())
 }
 
+/// Returns whether a package can safely expose its commands without full activation.
+///
+/// Packages with no package-owned hook declarations or hook bindings are treated as
+/// self-contained because their commands only rely on the host's built-in action support.
 fn is_self_contained(package: &PluginPackage) -> bool {
     package.hook_declarations().is_empty() && package.hook_bindings().is_empty()
 }
