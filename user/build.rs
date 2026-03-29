@@ -1,4 +1,8 @@
+mod build_output;
+
 use std::{env, error::Error, fs, path::PathBuf};
+
+use build_output::{distributed_user_library_paths, install_root_library_link};
 
 const MODULES: &[(&str, &str)] = &[
     ("cod", "Cod"),
@@ -44,6 +48,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     fs::write(out_dir.join("icon_font_data.rs"), output)?;
+    link_root_user_library(&manifest_dir, &out_dir)?;
+    Ok(())
+}
+
+fn link_root_user_library(manifest_dir: &PathBuf, out_dir: &PathBuf) -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
+    let Some(paths) = distributed_user_library_paths(manifest_dir, out_dir, &target_os) else {
+        return Ok(());
+    };
+
+    if let Err(error) = install_root_library_link(&paths) {
+        println!(
+            "cargo:warning=failed to expose `{}` at repository root `{}`: {error}",
+            paths.built_library_path.display(),
+            paths.root_library_path.display()
+        );
+    }
+
     Ok(())
 }
 

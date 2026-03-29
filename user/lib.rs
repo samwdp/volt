@@ -4,6 +4,10 @@
 //! under the `user/` directory so the future extension model matches the planned
 //! 4coder-style workflow.
 
+#[cfg(test)]
+#[path = "build_output.rs"]
+mod build_output;
+
 /// Agent Client Protocol integrations.
 pub mod acp;
 /// Provider-backed autocomplete commands and configuration.
