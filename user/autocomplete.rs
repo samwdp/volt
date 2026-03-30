@@ -81,6 +81,7 @@ pub fn backends() -> Vec<AutocompleteProviderConfig> {
             LSP_ITEM_ICON,
         )
         .with_or_group(PROVIDER_SOURCE_GROUP),
+        calculator::autocomplete_provider().with_or_group(PROVIDER_SOURCE_GROUP),
         AutocompleteProviderConfig::new(
             PROVIDER_BUFFER,
             "Buffer",
@@ -88,7 +89,6 @@ pub fn backends() -> Vec<AutocompleteProviderConfig> {
             BUFFER_ITEM_ICON,
         )
         .with_or_group(PROVIDER_SOURCE_GROUP),
-        calculator::autocomplete_provider(),
     ]
 }
 
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_prioritize_lsp_before_buffer() {
+    fn providers_prioritize_lsp_over_calculator_over_buffer() {
         let providers = backends();
         assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].id, PROVIDER_LSP);
@@ -245,18 +245,22 @@ mod tests {
             providers[0].or_group.as_deref(),
             Some(PROVIDER_SOURCE_GROUP)
         );
-        assert_eq!(providers[1].id, PROVIDER_BUFFER);
-        assert_eq!(providers[1].label, "Buffer");
+        assert_eq!(providers[1].id, calculator::PROVIDER_CALCULATOR);
         assert_eq!(
             providers[1].or_group.as_deref(),
             Some(PROVIDER_SOURCE_GROUP)
         );
-        assert_eq!(providers[2].id, calculator::PROVIDER_CALCULATOR);
         assert_eq!(
-            providers[2].buffer_kind.as_deref(),
+            providers[1].buffer_kind.as_deref(),
             Some(calculator::CALCULATOR_KIND)
         );
-        assert!(!providers[2].items.is_empty());
+        assert!(!providers[1].items.is_empty());
+        assert_eq!(providers[2].id, PROVIDER_BUFFER);
+        assert_eq!(providers[2].label, "Buffer");
+        assert_eq!(
+            providers[2].or_group.as_deref(),
+            Some(PROVIDER_SOURCE_GROUP)
+        );
     }
 
     #[test]
