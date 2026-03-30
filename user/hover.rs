@@ -132,30 +132,42 @@ mod tests {
     #[test]
     fn package_exports_hover_commands_and_keybindings() {
         let package = package();
-        assert!(package
-            .commands()
-            .iter()
-            .any(|command| command.name() == "hover.toggle"));
-        assert!(package
-            .commands()
-            .iter()
-            .any(|command| command.name() == "hover.focus"));
-        assert!(package
-            .commands()
-            .iter()
-            .any(|command| command.name() == "hover.next"));
-        assert!(package
-            .commands()
-            .iter()
-            .any(|command| command.name() == "hover.previous"));
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == NEXT_CHORD));
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == PREVIOUS_CHORD));
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "hover.toggle")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "hover.focus")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "hover.next")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "hover.previous")
+        );
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == NEXT_CHORD)
+        );
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == PREVIOUS_CHORD)
+        );
         assert_eq!(TOGGLE_CHORD, "K");
     }
 
@@ -165,12 +177,12 @@ mod tests {
         assert_eq!(providers[0].id, PROVIDER_LSP);
         assert_eq!(providers[1].id, PROVIDER_SIGNATURE_HELP);
         assert_eq!(providers[2].id, PROVIDER_DIAGNOSTICS);
-        assert_eq!(providers[3].id, PROVIDER_TEST_HOVER);
-        assert_eq!(providers[4].id, calculator::PROVIDER_CALCULATOR);
+        assert_eq!(providers[3].id, calculator::PROVIDER_CALCULATOR);
+        assert_eq!(providers[4].id, PROVIDER_TEST_HOVER);
         assert_eq!(
-            providers[4].buffer_kind.as_deref(),
+            providers[3].buffer_kind.as_deref(),
             Some(calculator::CALCULATOR_KIND)
         );
-        assert!(!providers[4].topics.is_empty());
+        assert!(!providers[3].topics.is_empty());
     }
 }
