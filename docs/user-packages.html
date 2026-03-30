@@ -232,6 +232,11 @@
             border-color: rgba(0, 232, 255, 0.5);
             background: rgba(0, 232, 255, 0.12);
         }
+        @media (min-width: 861px) {
+            .toc-card {
+                display: none;
+            }
+        }
     </style>
 </head>
 <body>
@@ -239,7 +244,7 @@
         <div class="ambient ambient-one"></div>
         <div class="ambient ambient-two"></div>
 
-        <header class="topbar">
+        <header class="topbar topbar--slim">
             <a class="brand" href="index.html" aria-label="Volt Docs home">
                 <span class="brand-mark">
                     <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
@@ -254,19 +259,10 @@
                 class="nav-toggle"
                 type="button"
                 aria-expanded="false"
-                aria-controls="primary-nav"
+                aria-controls="page-sidebar"
             >
                 Menu
             </button>
-
-            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
-                <a href="#architecture-overview">Architecture</a>
-                <a href="#core-concepts">Concepts</a>
-                <a href="#creating-a-new-plugin">Create a Plugin</a>
-                <a href="#editing-builtin-plugins">Edit Builtins</a>
-                <a href="#adding-language-support">Languages</a>
-                <a href="#building-and-testing">Build &amp; Test</a>
-            </nav>
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
@@ -275,6 +271,7 @@
             </div>
         </header>
 
+        <div class="page-layout">
         <main id="top">
             <!-- Hero -->
             <section class="hero section" style="display:block;">
@@ -304,6 +301,7 @@
                         <li><a href="#creating-a-new-plugin">Creating a New Plugin</a></li>
                         <li><a href="#complete-plugin-examples">Complete Plugin Examples</a></li>
                         <li><a href="#editing-builtin-plugins">Editing Builtin Plugins</a></li>
+                        <li><a href="#autocomplete-providers">Autocomplete Providers</a></li>
                         <li><a href="#adding-language-support">Adding Language Support</a></li>
                         <li><a href="#building-and-testing">Building and Testing</a></li>
                     </ul>
@@ -925,6 +923,100 @@ const LEADER_KEY: &amp;str = "Comma";</code></pre>
 
                 <hr>
 
+                <!-- Autocomplete Providers -->
+                <section id="autocomplete-providers">
+                    <h2 class="reveal">Autocomplete Providers</h2>
+                    <p class="reveal">
+                        Volt&#8217;s autocomplete system is backed by a list of <strong>providers</strong>,
+                        each registered in <code>user/autocomplete.rs</code> via the <code>backends()</code>
+                        function.  Providers can be grouped into an <strong>or-group</strong>: once the
+                        highest-priority provider in a group returns results, all lower-priority providers
+                        in that same group are skipped.
+                    </p>
+
+                    <h3 class="reveal">Provider Priority Order</h3>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Priority</th><th>Provider</th><th>Or-Group</th><th>Notes</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>1</td>
+                                <td><code>lsp</code></td>
+                                <td><code>source</code></td>
+                                <td>Live completions from an attached language server</td>
+                            </tr>
+                            <tr>
+                                <td>2</td>
+                                <td><code>calculator</code></td>
+                                <td><code>source</code></td>
+                                <td>Built-in function and constant names; only active in calculator buffers</td>
+                            </tr>
+                            <tr>
+                                <td>3</td>
+                                <td><code>buffer</code></td>
+                                <td><code>source</code></td>
+                                <td>Words already present in the open buffer</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="reveal">
+                        Because all three providers share the <code>source</code> or-group, only the
+                        highest-priority provider with results is shown.  Inside a calculator buffer, if
+                        the <code>calculator</code> provider returns matches, the <code>buffer</code>
+                        provider is silently skipped.
+                    </p>
+
+                    <h3 class="reveal">How the Source Group Works</h3>
+<pre class="reveal"><code>// user/autocomplete.rs &#8212; backends() function
+
+pub fn backends() -&gt; Vec&lt;AutocompleteProviderConfig&gt; {
+    vec![
+        // 1. LSP wins if an LSP server is attached and returns completions
+        AutocompleteProviderConfig::new(PROVIDER_LSP, "LSP", /* icon */)
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+
+        // 2. Calculator provider is checked next;
+        //    only active inside calculator buffers (buffer_kind filter).
+        //    If it returns results, buffer completions are suppressed.
+        calculator::autocomplete_provider()
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+
+        // 3. Buffer word completions — fallback when LSP and calculator
+        //    both return nothing.
+        AutocompleteProviderConfig::new(PROVIDER_BUFFER, "Buffer", /* icon */)
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+    ]
+}</code></pre>
+
+                    <h3 class="reveal">Adding Your Own Provider</h3>
+                    <p class="reveal">
+                        To add a manual autocomplete provider to a plugin buffer, define an
+                        <code>autocomplete_provider()</code> function in your plugin module and add it
+                        to the <code>backends()</code> vector in <code>user/autocomplete.rs</code>.
+                        Call <code>.with_buffer_kind(YOUR_KIND)</code> to limit the provider to your
+                        buffer type and <code>.with_or_group(PROVIDER_SOURCE_GROUP)</code> to slot it
+                        into the shared fallback chain.
+                    </p>
+<pre class="reveal"><code>// user/myplugin.rs
+pub fn autocomplete_provider() -&gt; AutocompleteProviderConfig {
+    AutocompleteProviderConfig::new(
+        "myplugin",
+        "My Plugin",
+        MY_PROVIDER_ICON,
+        MY_ITEM_ICON,
+    )
+    .with_buffer_kind(MY_BUFFER_KIND)
+    .with_or_group(autocomplete::PROVIDER_SOURCE_GROUP)
+    .with_items(my_autocomplete_items())
+}
+
+// user/autocomplete.rs &#8212; add to backends():
+myplugin::autocomplete_provider()</code></pre>
+                </section>
+
+                <hr>
+
                 <!-- Adding Language Support -->
                 <section id="adding-language-support">
                     <h2 class="reveal">Adding Language Support</h2>
@@ -1098,6 +1190,26 @@ cargo test -p volt-user tests::user_library_exports_themes -- --exact</code></pr
 
             </div>
         </main>
+
+        <aside
+            class="page-sidebar"
+            id="page-sidebar"
+            aria-label="Page navigation">
+            <nav class="sidebar-nav" aria-label="On this page">
+                <p class="sidebar-nav-label">On this page</p>
+                <ul>
+                    <li><a href="#architecture-overview">Architecture</a></li>
+                    <li><a href="#core-concepts">Concepts</a></li>
+                    <li><a href="#creating-a-new-plugin">Create a Plugin</a></li>
+                    <li><a href="#complete-plugin-examples">Examples</a></li>
+                    <li><a href="#editing-builtin-plugins">Edit Builtins</a></li>
+                    <li><a href="#autocomplete-providers">Autocomplete</a></li>
+                    <li><a href="#adding-language-support">Languages</a></li>
+                    <li><a href="#building-and-testing">Build &amp; Test</a></li>
+                </ul>
+            </nav>
+        </aside>
+        </div>
 
         <footer class="site-footer">
             <p>
