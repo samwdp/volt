@@ -668,7 +668,7 @@ results, all lower-priority providers in the same group are skipped.
 | Priority | Provider     | Or-Group | Notes                                                       |
 |----------|--------------|----------|-------------------------------------------------------------|
 | 1        | `lsp`        | `source` | Live completions from an attached language server           |
-| 2        | `calculator` | `source` | Built-in function/constant names; only active in calculator buffers |
+| 2        | `calculator` | `source` | Built-in function and constant names; only active in calculator buffers |
 | 3        | `buffer`     | `source` | Words already present in the open buffer                    |
 
 Because all three share the `source` or-group, only the highest-priority
