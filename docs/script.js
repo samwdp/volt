@@ -1,21 +1,35 @@
 const topbar = document.querySelector(".topbar");
 const navToggle = document.querySelector(".nav-toggle");
-const navLinks = Array.from(document.querySelectorAll(".primary-nav a"));
+const pageSidebar = document.querySelector(".page-sidebar");
+const navLinks = Array.from(document.querySelectorAll(".sidebar-nav a, .primary-nav a"));
 const revealItems = document.querySelectorAll(".reveal");
 const copyButtons = document.querySelectorAll(".copy-button");
 const sections = navLinks
-    .map((link) => document.querySelector(link.getAttribute("href")))
+    .map((link) => {
+        const href = link.getAttribute("href");
+        return href && href.startsWith("#") ? document.querySelector(href) : null;
+    })
     .filter(Boolean);
 
-if (navToggle && topbar) {
+if (navToggle && (topbar || pageSidebar)) {
     navToggle.addEventListener("click", () => {
-        const isOpen = topbar.classList.toggle("is-open");
-        navToggle.setAttribute("aria-expanded", String(isOpen));
+        if (pageSidebar) {
+            const isOpen = pageSidebar.classList.toggle("is-open");
+            navToggle.setAttribute("aria-expanded", String(isOpen));
+        } else if (topbar) {
+            const isOpen = topbar.classList.toggle("is-open");
+            navToggle.setAttribute("aria-expanded", String(isOpen));
+        }
     });
 
     navLinks.forEach((link) => {
         link.addEventListener("click", () => {
-            topbar.classList.remove("is-open");
+            if (pageSidebar) {
+                pageSidebar.classList.remove("is-open");
+            }
+            if (topbar) {
+                topbar.classList.remove("is-open");
+            }
             navToggle.setAttribute("aria-expanded", "false");
         });
     });

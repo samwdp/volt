@@ -51,8 +51,14 @@
 //!   `ln`, `log`, `log2`, `log10`, `exp`, `pow`, `min`, `max`
 //! - Constants: `pi`, `e`, `tau`, `inf`, `nan`
 
+use crate::{
+    autocomplete::AutocompleteProviderConfig,
+    hover::HoverProviderConfig,
+    icon_font::symbols::{cod, md},
+};
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginBufferSections, PluginCommand, PluginKeyBinding,
+    AutocompleteProviderItem, HoverProviderTopic, PluginAction, PluginBuffer, PluginBufferSection,
+    PluginBufferSectionUpdate, PluginBufferSections, PluginCommand, PluginKeyBinding,
     PluginKeymapScope, PluginPackage, buffer_kinds, plugin_hooks,
 };
 
@@ -64,6 +70,12 @@ pub const BUFFER_NAME: &str = "*calculator*";
 pub const EVALUATE_HANDLER: &str = "calculator.evaluate-buffer";
 pub const EVALUATE_CHORD: &str = "C-c C-c";
 pub const SWITCH_PANE_CHORD: &str = "Ctrl+Tab";
+pub const PROVIDER_CALCULATOR: &str = "calculator";
+pub const PROVIDER_LABEL: &str = "Calculator";
+
+const PROVIDER_ICON: &str = md::MD_CALCULATOR;
+const AUTOCOMPLETE_ITEM_ICON: &str = md::MD_FUNCTION;
+const HOVER_TOPIC_ICON: &str = cod::COD_INFO;
 
 // ─── Package ─────────────────────────────────────────────────────────────────
 
@@ -103,20 +115,20 @@ pub fn package() -> PluginPackage {
         .with_buffers(vec![
             PluginBuffer::new(CALCULATOR_KIND, initial_buffer_lines())
                 .with_sections(buffer_sections())
-                .with_evaluate_handler(EVALUATE_HANDLER),
-        ])
-        // No hook declarations: plugin.evaluate is a host-owned hook.
-        .with_key_bindings(vec![
-            PluginKeyBinding::new(
-                EVALUATE_CHORD,
-                "calculator.evaluate",
-                PluginKeymapScope::Workspace,
-            ),
-            PluginKeyBinding::new(
-                SWITCH_PANE_CHORD,
-                "calculator.switch-pane",
-                PluginKeymapScope::Workspace,
-            ),
+                .with_evaluate_handler(EVALUATE_HANDLER)
+                .with_evaluate_target_section("Output")
+                .with_key_bindings(vec![
+                    PluginKeyBinding::new(
+                        EVALUATE_CHORD,
+                        "calculator.evaluate",
+                        PluginKeymapScope::Workspace,
+                    ),
+                    PluginKeyBinding::new(
+                        SWITCH_PANE_CHORD,
+                        "calculator.switch-pane",
+                        PluginKeymapScope::Workspace,
+                    ),
+                ]),
         ])
 }
 
@@ -137,12 +149,54 @@ pub fn initial_buffer_lines() -> Vec<String> {
 
 /// Returns the split-pane layout used by the calculator buffer.
 pub fn buffer_sections() -> PluginBufferSections {
-    PluginBufferSections::new(
-        "Input",
-        "Output",
-        1,
-        vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()],
+    PluginBufferSections::new(vec![
+        PluginBufferSection::new("Input")
+            .with_writable(true)
+            .with_initial_lines(initial_buffer_lines()),
+        PluginBufferSection::new("Output")
+            .with_min_lines(1)
+            .with_initial_lines(vec!["(press Ctrl+c Ctrl+c to evaluate)".to_owned()])
+            .with_update(PluginBufferSectionUpdate::Replace),
+    ])
+}
+
+pub fn autocomplete_provider() -> AutocompleteProviderConfig {
+    AutocompleteProviderConfig::new(
+        PROVIDER_CALCULATOR,
+        PROVIDER_LABEL,
+        PROVIDER_ICON,
+        AUTOCOMPLETE_ITEM_ICON,
     )
+    .with_buffer_kind(CALCULATOR_KIND)
+    .with_items(autocomplete_items())
+}
+
+pub fn hover_provider() -> HoverProviderConfig {
+    HoverProviderConfig::new(PROVIDER_CALCULATOR, PROVIDER_LABEL, PROVIDER_ICON)
+        .with_buffer_kind(CALCULATOR_KIND)
+        .with_topics(hover_topics())
+}
+
+pub fn autocomplete_items() -> Vec<AutocompleteProviderItem> {
+    calculator_symbols()
+        .iter()
+        .map(|symbol| AutocompleteProviderItem {
+            label: symbol.label.to_owned(),
+            replacement: symbol.replacement.to_owned(),
+            detail: Some(symbol.detail.to_owned()),
+            documentation: Some(symbol.documentation.to_owned()),
+        })
+        .collect()
+}
+
+pub fn hover_topics() -> Vec<HoverProviderTopic> {
+    calculator_symbols()
+        .iter()
+        .map(|symbol| HoverProviderTopic {
+            token: symbol.replacement.to_owned(),
+            lines: hover_lines(symbol),
+        })
+        .collect()
 }
 
 // ─── Evaluator ───────────────────────────────────────────────────────────────
@@ -183,6 +237,185 @@ pub fn evaluate(input: &str) -> Vec<String> {
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+struct CalculatorSymbol {
+    label: &'static str,
+    replacement: &'static str,
+    detail: &'static str,
+    documentation: &'static str,
+}
+
+const CALCULATOR_SYMBOLS: &[CalculatorSymbol] = &[
+    CalculatorSymbol {
+        label: "sqrt(x)",
+        replacement: "sqrt",
+        detail: "Square root",
+        documentation: "Returns the square root of x.",
+    },
+    CalculatorSymbol {
+        label: "cbrt(x)",
+        replacement: "cbrt",
+        detail: "Cube root",
+        documentation: "Returns the cube root of x.",
+    },
+    CalculatorSymbol {
+        label: "abs(x)",
+        replacement: "abs",
+        detail: "Absolute value",
+        documentation: "Returns the absolute value of x.",
+    },
+    CalculatorSymbol {
+        label: "floor(x)",
+        replacement: "floor",
+        detail: "Round down",
+        documentation: "Rounds x down to the nearest integer.",
+    },
+    CalculatorSymbol {
+        label: "ceil(x)",
+        replacement: "ceil",
+        detail: "Round up",
+        documentation: "Rounds x up to the nearest integer.",
+    },
+    CalculatorSymbol {
+        label: "round(x)",
+        replacement: "round",
+        detail: "Round to nearest integer",
+        documentation: "Rounds x to the nearest integer.",
+    },
+    CalculatorSymbol {
+        label: "sin(x)",
+        replacement: "sin",
+        detail: "Sine",
+        documentation: "Returns the sine of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "cos(x)",
+        replacement: "cos",
+        detail: "Cosine",
+        documentation: "Returns the cosine of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "tan(x)",
+        replacement: "tan",
+        detail: "Tangent",
+        documentation: "Returns the tangent of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "asin(x)",
+        replacement: "asin",
+        detail: "Arcsine",
+        documentation: "Returns the arcsine of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "acos(x)",
+        replacement: "acos",
+        detail: "Arccosine",
+        documentation: "Returns the arccosine of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "atan(x)",
+        replacement: "atan",
+        detail: "Arctangent",
+        documentation: "Returns the arctangent of x in radians.",
+    },
+    CalculatorSymbol {
+        label: "atan2(y, x)",
+        replacement: "atan2",
+        detail: "Two-argument arctangent",
+        documentation: "Returns the angle for the point (x, y) in radians.",
+    },
+    CalculatorSymbol {
+        label: "ln(x)",
+        replacement: "ln",
+        detail: "Natural logarithm",
+        documentation: "Returns the natural logarithm of x.",
+    },
+    CalculatorSymbol {
+        label: "log(x)",
+        replacement: "log",
+        detail: "Base-10 logarithm",
+        documentation: "Returns the base-10 logarithm of x.",
+    },
+    CalculatorSymbol {
+        label: "log2(x)",
+        replacement: "log2",
+        detail: "Base-2 logarithm",
+        documentation: "Returns the base-2 logarithm of x.",
+    },
+    CalculatorSymbol {
+        label: "log10(x)",
+        replacement: "log10",
+        detail: "Base-10 logarithm",
+        documentation: "Returns the base-10 logarithm of x.",
+    },
+    CalculatorSymbol {
+        label: "exp(x)",
+        replacement: "exp",
+        detail: "Exponential",
+        documentation: "Returns e raised to the power of x.",
+    },
+    CalculatorSymbol {
+        label: "pow(base, exponent)",
+        replacement: "pow",
+        detail: "Power",
+        documentation: "Returns base raised to exponent.",
+    },
+    CalculatorSymbol {
+        label: "min(a, b)",
+        replacement: "min",
+        detail: "Minimum",
+        documentation: "Returns the smaller of a and b.",
+    },
+    CalculatorSymbol {
+        label: "max(a, b)",
+        replacement: "max",
+        detail: "Maximum",
+        documentation: "Returns the larger of a and b.",
+    },
+    CalculatorSymbol {
+        label: "pi",
+        replacement: "pi",
+        detail: "Circle constant π",
+        documentation: "Built-in constant for π.",
+    },
+    CalculatorSymbol {
+        label: "e",
+        replacement: "e",
+        detail: "Euler's number",
+        documentation: "Built-in constant for Euler's number.",
+    },
+    CalculatorSymbol {
+        label: "tau",
+        replacement: "tau",
+        detail: "Circle constant τ",
+        documentation: "Built-in constant for τ (2π).",
+    },
+    CalculatorSymbol {
+        label: "inf",
+        replacement: "inf",
+        detail: "Infinity",
+        documentation: "Built-in constant for positive infinity.",
+    },
+    CalculatorSymbol {
+        label: "nan",
+        replacement: "nan",
+        detail: "Not a number",
+        documentation: "Built-in constant for NaN.",
+    },
+];
+
+fn calculator_symbols() -> &'static [CalculatorSymbol] {
+    CALCULATOR_SYMBOLS
+}
+
+fn hover_lines(symbol: &CalculatorSymbol) -> Vec<String> {
+    vec![
+        format!("{HOVER_TOPIC_ICON} {}", symbol.label),
+        symbol.detail.to_owned(),
+        String::new(),
+        symbol.documentation.to_owned(),
+    ]
+}
 
 fn format_value(v: f64) -> String {
     if v.is_nan() {
@@ -655,8 +888,12 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_c_ctrl_c() {
         let pkg = package();
+        let buffer = pkg
+            .buffer(CALCULATOR_KIND)
+            .expect("calculator package should declare its plugin buffer");
         assert!(
-            pkg.key_bindings()
+            buffer
+                .key_bindings()
                 .iter()
                 .any(|kb| kb.chord() == EVALUATE_CHORD)
         );
@@ -665,8 +902,12 @@ mod tests {
     #[test]
     fn calculator_package_binds_ctrl_tab_to_switch_panes() {
         let pkg = package();
+        let buffer = pkg
+            .buffer(CALCULATOR_KIND)
+            .expect("calculator package should declare its plugin buffer");
         assert!(
-            pkg.key_bindings()
+            buffer
+                .key_bindings()
                 .iter()
                 .any(|kb| kb.chord() == SWITCH_PANE_CHORD
                     && kb.command_name() == "calculator.switch-pane")
@@ -765,17 +1006,59 @@ mod tests {
     #[test]
     fn calculator_buffer_sections_start_with_single_output_row() {
         let sections = buffer_sections();
-        assert_eq!(sections.input_title(), "Input");
-        assert_eq!(sections.output_title(), "Output");
-        assert_eq!(sections.output_min_rows(), 1);
+        let names = sections
+            .items()
+            .iter()
+            .map(|section| section.name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Input", "Output"]);
+        assert!(sections.items()[0].writable());
+        assert_eq!(sections.items()[1].min_lines(), Some(1));
         assert_eq!(
-            sections
-                .output_initial_lines()
+            sections.items()[1]
+                .initial_lines()
                 .iter()
                 .map(|line| line.as_str())
                 .collect::<Vec<_>>(),
             vec!["(press Ctrl+c Ctrl+c to evaluate)"]
         );
+    }
+
+    #[test]
+    fn calculator_autocomplete_provider_scopes_manual_items_to_calculator_buffers() {
+        let provider = autocomplete_provider();
+        assert_eq!(provider.id, PROVIDER_CALCULATOR);
+        assert_eq!(provider.buffer_kind.as_deref(), Some(CALCULATOR_KIND));
+        assert!(provider.items.iter().any(|item| item.replacement == "sqrt"
+            && item.label == "sqrt(x)"
+            && item.detail.as_deref() == Some("Square root")));
+        assert!(
+            provider
+                .items
+                .iter()
+                .any(|item| item.replacement == "pi" && item.documentation.is_some())
+        );
+    }
+
+    #[test]
+    fn calculator_hover_provider_exports_function_and_constant_topics() {
+        let provider = hover_provider();
+        assert_eq!(provider.id, PROVIDER_CALCULATOR);
+        assert_eq!(provider.buffer_kind.as_deref(), Some(CALCULATOR_KIND));
+        assert!(provider.topics.iter().any(|topic| {
+            topic.token == "atan2"
+                && topic
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Two-argument arctangent"))
+        }));
+        assert!(provider.topics.iter().any(|topic| {
+            topic.token == "tau"
+                && topic
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Built-in constant for τ"))
+        }));
     }
 
     #[test]
@@ -802,20 +1085,24 @@ mod tests {
             .expect("calculator package should declare its plugin buffer");
         assert_eq!(buffer.kind(), CALCULATOR_KIND);
         assert_eq!(buffer.evaluate_handler(), Some(EVALUATE_HANDLER));
+        assert_eq!(buffer.evaluate_target_section(), Some("Output"));
         assert_eq!(
             buffer
-                .initial_lines()
+                .key_bindings()
                 .iter()
-                .map(|line| line.as_str())
+                .map(|binding| binding.chord())
                 .collect::<Vec<_>>(),
-            initial_buffer_lines()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
+            vec![EVALUATE_CHORD, SWITCH_PANE_CHORD]
         );
         assert_eq!(
-            buffer.sections().map(|sections| sections.output_title()),
-            Some("Output")
+            buffer.sections().map(|sections| {
+                sections
+                    .items()
+                    .iter()
+                    .map(|section| section.name())
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["Input", "Output"])
         );
     }
 }

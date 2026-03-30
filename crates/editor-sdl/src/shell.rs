@@ -61,8 +61,9 @@ use editor_lsp::{
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
     LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction,
-    PluginBufferSections, autocomplete_hooks, browser_hooks, buffer_kinds, git_actions, git_hooks,
-    git_sections, hover_hooks, lsp_hooks, oil_hooks, oil_protocol, plugin_hooks,
+    PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks, browser_hooks,
+    buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, lsp_hooks, oil_hooks,
+    oil_protocol, plugin_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -2068,23 +2069,23 @@ enum AcpPane {
     Output,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PluginSectionPane {
-    Input,
-    Output,
-}
-
 #[derive(Debug, Clone)]
 struct PluginSectionBufferState {
-    input_title: String,
-    output_title: String,
-    output_min_rows: usize,
-    active_pane: PluginSectionPane,
-    output_pane: PlainTextPaneState,
+    base_title: String,
+    base_writable: bool,
+    base_min_rows: Option<usize>,
+    base_update: PluginBufferSectionUpdate,
+    active_section: usize,
+    evaluate_target_section: usize,
+    attached_sections: Vec<PluginTextPaneState>,
 }
 
 #[derive(Debug, Clone)]
-struct PlainTextPaneState {
+struct PluginTextPaneState {
+    title: String,
+    writable: bool,
+    min_rows: Option<usize>,
+    update: PluginBufferSectionUpdate,
     text: TextBuffer,
     scroll_row: usize,
     viewport_rows: usize,
@@ -2170,9 +2171,13 @@ enum AcpColorRole {
 
 const ACP_IMAGE_ROWS: usize = 12;
 
-impl Default for PlainTextPaneState {
+impl Default for PluginTextPaneState {
     fn default() -> Self {
         Self {
+            title: String::new(),
+            writable: false,
+            min_rows: None,
+            update: PluginBufferSectionUpdate::Replace,
             text: TextBuffer::new(),
             scroll_row: 0,
             viewport_rows: 1,
@@ -2182,23 +2187,93 @@ impl Default for PlainTextPaneState {
 }
 
 impl PluginSectionBufferState {
-    fn new(config: PluginBufferSections) -> Self {
-        let mut output_pane = PlainTextPaneState::default();
-        output_pane.replace_lines(
-            config
-                .output_initial_lines()
-                .iter()
-                .map(|line| line.to_string())
-                .collect(),
-            true,
-        );
-        Self {
-            input_title: config.input_title().to_owned(),
-            output_title: config.output_title().to_owned(),
-            output_min_rows: config.output_min_rows(),
-            active_pane: PluginSectionPane::Input,
-            output_pane,
+    fn new(config: PluginBufferSections, evaluate_target_section: Option<&str>) -> Option<Self> {
+        let mut sections = config.items().iter();
+        let base = sections.next()?;
+        let attached_sections = sections
+            .map(|section| {
+                let mut pane = PluginTextPaneState {
+                    title: section.name().to_owned(),
+                    writable: section.writable(),
+                    min_rows: section.min_lines(),
+                    update: section.update(),
+                    ..PluginTextPaneState::default()
+                };
+                pane.replace_lines(
+                    section
+                        .initial_lines()
+                        .iter()
+                        .map(|line| line.to_string())
+                        .collect(),
+                    true,
+                );
+                pane
+            })
+            .collect::<Vec<_>>();
+        let evaluate_target_section = evaluate_target_section
+            .and_then(|name| {
+                config
+                    .items()
+                    .iter()
+                    .position(|section| section.name() == name)
+            })
+            .or_else(|| {
+                config
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, section)| (!section.writable()).then_some(index))
+            })
+            .unwrap_or_else(|| config.items().len().saturating_sub(1));
+        Some(Self {
+            base_title: base.name().to_owned(),
+            base_writable: base.writable(),
+            base_min_rows: base.min_lines(),
+            base_update: base.update(),
+            active_section: 0,
+            evaluate_target_section,
+            attached_sections,
+        })
+    }
+
+    fn section_count(&self) -> usize {
+        self.attached_sections.len().saturating_add(1)
+    }
+
+    fn active_section_writable(&self) -> bool {
+        if self.active_section == 0 {
+            self.base_writable
+        } else {
+            self.attached_sections
+                .get(self.active_section.saturating_sub(1))
+                .map(|pane| pane.writable)
+                .unwrap_or(false)
         }
+    }
+
+    fn active_attached_section(&self) -> Option<&PluginTextPaneState> {
+        self.active_section
+            .checked_sub(1)
+            .and_then(|index| self.attached_sections.get(index))
+    }
+
+    fn active_attached_section_mut(&mut self) -> Option<&mut PluginTextPaneState> {
+        self.active_section
+            .checked_sub(1)
+            .and_then(|index| self.attached_sections.get_mut(index))
+    }
+
+    fn attached_section(&self, section_index: usize) -> Option<&PluginTextPaneState> {
+        section_index
+            .checked_sub(1)
+            .and_then(|index| self.attached_sections.get(index))
+    }
+
+    fn attached_section_mut(&mut self, section_index: usize) -> Option<&mut PluginTextPaneState> {
+        section_index
+            .checked_sub(1)
+            .and_then(|index| self.attached_sections.get_mut(index))
     }
 }
 
@@ -2405,7 +2480,7 @@ impl AcpPaneState {
     }
 }
 
-impl PlainTextPaneState {
+impl PluginTextPaneState {
     fn line_count(&self) -> usize {
         self.text.line_count()
     }
@@ -2494,6 +2569,17 @@ impl PlainTextPaneState {
         } else {
             self.scroll_row = scroll_row.min(self.max_scroll_row());
         }
+    }
+
+    fn append_lines(&mut self, mut lines: Vec<String>, follow_output: bool) {
+        if lines.is_empty() {
+            return;
+        }
+        let mut existing = (0..self.line_count())
+            .map(|line_index| self.text.line(line_index).unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        existing.append(&mut lines);
+        self.replace_lines(existing, follow_output);
     }
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
@@ -2826,7 +2912,11 @@ impl ShellBuffer {
     }
 
     fn is_read_only(&self) -> bool {
-        self.read_only || self.plugin_section_active_pane() == Some(PluginSectionPane::Output)
+        self.read_only
+            || self
+                .plugin_section_state
+                .as_ref()
+                .is_some_and(|state| !state.active_section_writable())
     }
 
     fn has_input_field(&self) -> bool {
@@ -2837,33 +2927,33 @@ impl ShellBuffer {
         self.plugin_section_state.is_some()
     }
 
-    fn plugin_section_active_pane(&self) -> Option<PluginSectionPane> {
+    #[cfg(test)]
+    fn plugin_active_section_index(&self) -> Option<usize> {
         self.plugin_section_state
             .as_ref()
-            .map(|state| state.active_pane)
+            .map(|state| state.active_section)
     }
 
-    fn plugin_output_pane_state(&self) -> Option<&PlainTextPaneState> {
+    fn plugin_attached_pane_state(&self) -> Option<&PluginTextPaneState> {
         self.plugin_section_state
             .as_ref()
-            .map(|state| &state.output_pane)
+            .and_then(PluginSectionBufferState::active_attached_section)
     }
 
-    fn plugin_output_pane_state_mut(&mut self) -> Option<&mut PlainTextPaneState> {
+    fn plugin_attached_pane_state_mut(&mut self) -> Option<&mut PluginTextPaneState> {
         self.plugin_section_state
             .as_mut()
-            .filter(|state| state.active_pane == PluginSectionPane::Output)
-            .map(|state| &mut state.output_pane)
+            .and_then(PluginSectionBufferState::active_attached_section_mut)
     }
 
     fn plugin_switch_pane(&mut self) -> bool {
         let Some(state) = self.plugin_section_state.as_mut() else {
             return false;
         };
-        state.active_pane = match state.active_pane {
-            PluginSectionPane::Input => PluginSectionPane::Output,
-            PluginSectionPane::Output => PluginSectionPane::Input,
-        };
+        if state.section_count() <= 1 {
+            return false;
+        }
+        state.active_section = (state.active_section + 1) % state.section_count();
         true
     }
 
@@ -2872,11 +2962,35 @@ impl ShellBuffer {
     }
 
     fn set_plugin_output_lines(&mut self, lines: Vec<String>) {
+        let Some((target_section, base_update)) = self
+            .plugin_section_state
+            .as_ref()
+            .map(|state| (state.evaluate_target_section, state.base_update))
+        else {
+            return;
+        };
+        if target_section == 0 {
+            let follow_output = self.should_follow_output();
+            match base_update {
+                PluginBufferSectionUpdate::Replace => self.replace_with_lines(lines),
+                PluginBufferSectionUpdate::Append => self.append_output_lines(&lines),
+            }
+            if follow_output {
+                self.scroll_output_to_end();
+            }
+            return;
+        }
         let Some(state) = self.plugin_section_state.as_mut() else {
             return;
         };
-        let follow_output = state.output_pane.should_follow_output();
-        state.output_pane.replace_lines(lines, follow_output);
+        let Some(pane) = state.attached_section_mut(target_section) else {
+            return;
+        };
+        let follow_output = pane.should_follow_output();
+        match pane.update {
+            PluginBufferSectionUpdate::Replace => pane.replace_lines(lines, follow_output),
+            PluginBufferSectionUpdate::Append => pane.append_lines(lines, follow_output),
+        }
     }
 
     fn is_acp_buffer(&self) -> bool {
@@ -2933,7 +3047,7 @@ impl ShellBuffer {
     }
 
     fn current_scroll_row(&self) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.scroll_row;
         }
         self.acp_active_pane_state()
@@ -3281,7 +3395,7 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_row(&self) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.cursor().line;
         }
         self.acp_active_pane_state()
@@ -3290,7 +3404,7 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_col(&self) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.cursor().column;
         }
         self.acp_active_pane_state()
@@ -3299,7 +3413,7 @@ impl ShellBuffer {
     }
 
     pub(crate) fn cursor_point(&self) -> TextPoint {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.cursor();
         }
         self.acp_active_pane_state()
@@ -3308,7 +3422,7 @@ impl ShellBuffer {
     }
 
     fn line_count(&self) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.line_count();
         }
         self.acp_active_pane_state()
@@ -3317,7 +3431,7 @@ impl ShellBuffer {
     }
 
     fn line_len_chars(&self, line_index: usize) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.line_len_chars(line_index);
         }
         self.acp_active_pane_state()
@@ -3347,7 +3461,7 @@ impl ShellBuffer {
     }
 
     fn path(&self) -> Option<&Path> {
-        if self.plugin_output_pane_state().is_some() {
+        if self.plugin_attached_pane_state().is_some() {
             return None;
         }
         self.text.path()
@@ -3663,7 +3777,7 @@ impl ShellBuffer {
     }
 
     fn move_left(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_left();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3673,7 +3787,7 @@ impl ShellBuffer {
     }
 
     fn move_right(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_right();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3683,7 +3797,7 @@ impl ShellBuffer {
     }
 
     fn move_up(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_up();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3693,7 +3807,7 @@ impl ShellBuffer {
     }
 
     fn move_down(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_down();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3703,7 +3817,7 @@ impl ShellBuffer {
     }
 
     fn move_word_forward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_word_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3713,7 +3827,7 @@ impl ShellBuffer {
     }
 
     fn move_big_word_forward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_big_word_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3723,7 +3837,7 @@ impl ShellBuffer {
     }
 
     fn move_word_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_word_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3733,7 +3847,7 @@ impl ShellBuffer {
     }
 
     fn move_big_word_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_big_word_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3743,7 +3857,7 @@ impl ShellBuffer {
     }
 
     fn move_word_end(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_word_end_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3753,7 +3867,7 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_big_word_end_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3763,7 +3877,7 @@ impl ShellBuffer {
     }
 
     fn move_word_end_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_word_end_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3773,7 +3887,7 @@ impl ShellBuffer {
     }
 
     fn move_big_word_end_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_big_word_end_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3783,7 +3897,7 @@ impl ShellBuffer {
     }
 
     fn move_matching_delimiter(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_matching_delimiter();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3793,7 +3907,7 @@ impl ShellBuffer {
     }
 
     fn move_sentence_forward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_sentence_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3803,7 +3917,7 @@ impl ShellBuffer {
     }
 
     fn move_sentence_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_sentence_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3813,7 +3927,7 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_forward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_paragraph_forward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3823,7 +3937,7 @@ impl ShellBuffer {
     }
 
     fn move_paragraph_backward(&mut self) -> bool {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             return pane.text.move_paragraph_backward();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
@@ -3833,7 +3947,7 @@ impl ShellBuffer {
     }
 
     pub(crate) fn set_cursor(&mut self, point: TextPoint) {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             pane.set_cursor(point);
             return;
         }
@@ -3845,7 +3959,7 @@ impl ShellBuffer {
     }
 
     fn point_after(&self, point: TextPoint) -> Option<TextPoint> {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.text.point_after(point);
         }
         self.acp_active_pane_state()
@@ -3862,7 +3976,7 @@ impl ShellBuffer {
     fn move_line_first_non_blank(&mut self) -> bool {
         let before = self.cursor_point();
         let row = self.cursor_row();
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(row) {
                 pane.text.set_cursor(point);
             }
@@ -3886,7 +4000,7 @@ impl ShellBuffer {
 
     fn goto_first_line(&mut self) -> bool {
         let before = self.cursor_point();
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(0) {
                 pane.text.set_cursor(point);
             }
@@ -3903,7 +4017,7 @@ impl ShellBuffer {
     fn goto_last_line(&mut self) -> bool {
         let before = self.cursor_point();
         let line = self.line_count().saturating_sub(1);
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             if let Some(point) = pane.text.first_non_blank_in_line(line) {
                 pane.text.set_cursor(point);
             }
@@ -3920,7 +4034,7 @@ impl ShellBuffer {
     fn goto_line(&mut self, line_index: usize) -> bool {
         let before = self.cursor_point();
         let line = line_index.min(self.line_count().saturating_sub(1));
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             let point = pane
                 .text
                 .first_non_blank_in_line(line)
@@ -4059,7 +4173,7 @@ impl ShellBuffer {
     }
 
     fn slice(&self, range: TextRange) -> String {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.text.slice(range);
         }
         self.acp_active_pane_state()
@@ -4068,7 +4182,7 @@ impl ShellBuffer {
     }
 
     pub(crate) fn line_range(&self, line_index: usize) -> Option<TextRange> {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.text.line_range(line_index);
         }
         self.acp_active_pane_state()
@@ -4173,7 +4287,7 @@ impl ShellBuffer {
     }
 
     fn scroll_by(&mut self, delta: i32) {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             let max_scroll = pane.max_scroll_row() as i32;
             let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
             pane.scroll_row = next as usize;
@@ -4193,9 +4307,11 @@ impl ShellBuffer {
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
         if let Some(state) = self.plugin_section_state.as_mut() {
-            let rows = state.output_pane.visible_rows();
-            let wrap_cols = state.output_pane.wrap_cols();
-            state.output_pane.set_view_metrics(rows, wrap_cols);
+            for pane in &mut state.attached_sections {
+                let rows = pane.visible_rows();
+                let wrap_cols = pane.wrap_cols();
+                pane.set_view_metrics(rows, wrap_cols);
+            }
         }
         if let Some(state) = self.acp_state.as_mut() {
             let plan_rows = state.plan_pane.visible_rows();
@@ -4247,21 +4363,29 @@ impl ShellBuffer {
         else {
             return;
         };
-        self.viewport_lines = section_layout.input.visible_rows.max(1);
+        self.viewport_lines = section_layout
+            .panes
+            .first()
+            .map(|pane| pane.visible_rows)
+            .unwrap_or(1)
+            .max(1);
         if let Some(state) = self.plugin_section_state.as_mut() {
-            state.output_pane.set_view_metrics(
-                section_layout.output.visible_rows,
-                section_layout.output.wrap_cols,
-            );
+            for (index, pane_layout) in section_layout.panes.iter().enumerate().skip(1) {
+                if let Some(pane) = state.attached_section_mut(index) {
+                    pane.set_view_metrics(pane_layout.visible_rows, pane_layout.wrap_cols);
+                }
+            }
         }
     }
 
     fn viewport_lines(&self) -> usize {
-        if let Some(PluginSectionPane::Output) = self.plugin_section_active_pane() {
-            return self
-                .plugin_section_state
-                .as_ref()
-                .map(|state| state.output_pane.visible_rows())
+        if let Some(state) = self.plugin_section_state.as_ref() {
+            if state.active_section == 0 {
+                return self.viewport_lines.max(1);
+            }
+            return state
+                .active_attached_section()
+                .map(PluginTextPaneState::visible_rows)
                 .unwrap_or(1);
         }
         match self.acp_active_pane() {
@@ -4273,7 +4397,7 @@ impl ShellBuffer {
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
         let max_line = self.line_count().saturating_sub(1);
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.line_at_viewport_offset(offset).min(max_line);
         }
         if let Some(pane) = self.acp_active_pane_state() {
@@ -4283,7 +4407,7 @@ impl ShellBuffer {
     }
 
     fn cursor_viewport_offset(&self) -> usize {
-        if let Some(pane) = self.plugin_output_pane_state() {
+        if let Some(pane) = self.plugin_attached_pane_state() {
             return pane.cursor_viewport_offset();
         }
         self.acp_active_pane_state()
@@ -4305,7 +4429,7 @@ impl ShellBuffer {
     }
 
     fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
-        if let Some(pane) = self.plugin_output_pane_state_mut() {
+        if let Some(pane) = self.plugin_attached_pane_state_mut() {
             pane.ensure_cursor_visible();
             return;
         }
@@ -4926,6 +5050,7 @@ struct PickerEntry {
 enum AutocompleteProviderKind {
     Buffer,
     Lsp,
+    Manual,
 }
 
 #[derive(Debug, Clone)]
@@ -8856,6 +8981,13 @@ impl ShellState {
             return Ok(true);
         }
 
+        if self.try_plugin_buffer_keybinding(&chord, vim_mode)? {
+            self.queue_suppressed_text_input_for_chord(&chord);
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
         if !picker_visible
             && !in_text_insert_mode
             && self
@@ -8873,6 +9005,44 @@ impl ShellState {
         }
 
         Ok(false)
+    }
+
+    fn try_plugin_buffer_keybinding(
+        &mut self,
+        chord: &str,
+        vim_mode: KeymapVimMode,
+    ) -> Result<bool, ShellError> {
+        let buffer_id = match self.ui()?.active_buffer_id() {
+            Some(buffer_id) => buffer_id,
+            None => return Ok(false),
+        };
+        let plugin_kind = {
+            let Some(buffer) = self.ui()?.buffer(buffer_id) else {
+                return Ok(false);
+            };
+            match &buffer.kind {
+                BufferKind::Plugin(kind) => kind.clone(),
+                _ => return Ok(false),
+            }
+        };
+        let binding = shell_user_library(&self.runtime)
+            .plugin_buffer_key_bindings(&plugin_kind)
+            .into_iter()
+            .find(|binding| {
+                matches!(
+                    binding.scope(),
+                    editor_plugin_api::PluginKeymapScope::Workspace
+                        | editor_plugin_api::PluginKeymapScope::Global
+                ) && plugin_vim_mode_matches(binding.vim_mode(), vim_mode)
+                    && binding.chord() == chord
+            });
+        let Some(binding) = binding else {
+            return Ok(false);
+        };
+        self.runtime
+            .execute_command(binding.command_name())
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -12704,6 +12874,7 @@ struct AutocompleteBufferRequest {
     buffer_id: BufferId,
     buffer_revision: u64,
     text: TextSnapshot,
+    plugin_kind: Option<String>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -12723,6 +12894,7 @@ struct AutocompleteWorkerRequest {
     buffer_id: BufferId,
     buffer_revision: u64,
     text: TextSnapshot,
+    plugin_kind: Option<String>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -12798,6 +12970,7 @@ impl AutocompleteWorkerState {
                 buffer_id: request.buffer_id,
                 buffer_revision: request.buffer_revision,
                 text: request.text,
+                plugin_kind: request.plugin_kind,
                 path: request.path,
                 root: request.root,
                 cursor: request.cursor,
@@ -12852,6 +13025,9 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
             }
             AutocompleteProviderKind::Lsp => {
                 lsp_autocomplete_entries(request, &request.query, provider)
+            }
+            AutocompleteProviderKind::Manual => {
+                manual_autocomplete_entries(&request.plugin_kind, &request.query, provider)
             }
         };
         if !entries.is_empty()
@@ -13014,6 +13190,47 @@ fn lsp_autocomplete_entries(
         .collect()
 }
 
+fn manual_autocomplete_entries(
+    plugin_kind: &Option<String>,
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    if provider.buffer_kind.as_ref() != plugin_kind.as_ref() {
+        return Vec::new();
+    }
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    provider
+        .items
+        .iter()
+        .filter_map(|item| {
+            let label_lower = item.label.to_ascii_lowercase();
+            let replacement_lower = item.replacement.to_ascii_lowercase();
+            if !prefix_lower.is_empty()
+                && !label_lower.starts_with(&prefix_lower)
+                && !replacement_lower.starts_with(&prefix_lower)
+            {
+                return None;
+            }
+            if !query.token.is_empty() && item.replacement == query.token {
+                return None;
+            }
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: provider.item_icon.clone(),
+                    label: item.label.clone(),
+                    replacement: item.replacement.clone(),
+                    detail: item.detail.clone(),
+                    documentation: item.documentation.clone(),
+                },
+                autocomplete_score(&item.replacement, 1, query) + 80,
+            ))
+        })
+        .collect()
+}
+
 fn collect_autocomplete_token_counts(text: &str) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     let mut token = String::new();
@@ -13124,6 +13341,10 @@ fn autocomplete_request_for_buffer(
         buffer_id,
         buffer_revision: buffer.text.revision(),
         text,
+        plugin_kind: match &buffer.kind {
+            BufferKind::Plugin(kind) => Some(kind.clone()),
+            _ => None,
+        },
         path: buffer.path().map(Path::to_path_buf),
         root,
         cursor: buffer.cursor_point(),
@@ -13167,6 +13388,7 @@ fn hover_overlay_for_buffer(
                 HoverProviderKind::Diagnostics => {
                     hover_diagnostic_provider_lines(buffer, user_library)
                 }
+                HoverProviderKind::Manual => hover_manual_provider_lines(buffer, provider),
             };
             (!lines.is_empty()).then(|| HoverProviderContent {
                 provider_label: provider.label.clone(),
@@ -13279,6 +13501,25 @@ fn hover_empty_provider_lines(
         "Try moving onto an identifier or waiting for LSP/diagnostics to refresh.".to_owned(),
     );
     lines
+}
+
+fn hover_manual_provider_lines(buffer: &ShellBuffer, provider: &HoverProviderSpec) -> Vec<String> {
+    let plugin_kind = match &buffer.kind {
+        BufferKind::Plugin(kind) => Some(kind.as_str()),
+        _ => None,
+    };
+    if provider.buffer_kind.as_deref() != plugin_kind {
+        return Vec::new();
+    }
+    completion_token_at_cursor(buffer)
+        .and_then(|(_, token)| {
+            provider
+                .topics
+                .iter()
+                .find(|topic| topic.token == token)
+                .map(|topic| topic.lines.clone())
+        })
+        .unwrap_or_default()
 }
 
 fn hover_lsp_provider_lines(
@@ -17800,18 +18041,15 @@ fn evaluate_active_plugin_buffer(
 
 fn switch_active_plugin_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let switched_to_output = {
+    let switched_to_read_only = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         if buffer.plugin_switch_pane() {
-            matches!(
-                buffer.plugin_section_active_pane(),
-                Some(PluginSectionPane::Output)
-            )
+            buffer.is_read_only()
         } else {
             return acp::acp_switch_pane(runtime);
         }
     };
-    if switched_to_output {
+    if switched_to_read_only {
         shell_ui_mut(runtime)?.enter_normal_mode();
     }
     Ok(())
@@ -22744,6 +22982,18 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     }
 }
 
+fn plugin_vim_mode_matches(
+    binding_mode: editor_plugin_api::PluginVimMode,
+    active_mode: KeymapVimMode,
+) -> bool {
+    match binding_mode {
+        editor_plugin_api::PluginVimMode::Any => true,
+        editor_plugin_api::PluginVimMode::Normal => active_mode == KeymapVimMode::Normal,
+        editor_plugin_api::PluginVimMode::Insert => active_mode == KeymapVimMode::Insert,
+        editor_plugin_api::PluginVimMode::Visual => active_mode == KeymapVimMode::Visual,
+    }
+}
+
 fn default_volt_state_dir() -> PathBuf {
     if cfg!(target_os = "windows") {
         let base = env::var_os("LOCALAPPDATA")
@@ -23274,9 +23524,9 @@ fn plugin_section_state_for_kind(
     let BufferKind::Plugin(plugin_kind) = kind else {
         return None;
     };
-    user_library
-        .plugin_buffer_sections(plugin_kind)
-        .map(PluginSectionBufferState::new)
+    let buffer = user_library.plugin_buffer(plugin_kind)?;
+    let sections = buffer.sections()?.clone();
+    PluginSectionBufferState::new(sections, buffer.evaluate_target_section())
 }
 
 fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibrary) -> Vec<String> {
@@ -25409,23 +25659,50 @@ struct TextPaneLayout {
     wrap_cols: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PluginSectionLayout {
-    input: TextPaneLayout,
-    output: TextPaneLayout,
+    panes: Vec<TextPaneLayout>,
 }
 
-fn plain_text_pane_content_rows(pane: &PlainTextPaneState, wrap_cols: usize) -> usize {
-    let wrap_cols = wrap_cols.max(1);
-    (0..pane.line_count())
-        .map(|line_index| {
-            let line = pane.text.line(line_index).unwrap_or_default();
-            wrap_line_segments(&LineCharMap::new(&line), wrap_cols, wrap_cols)
-                .len()
-                .max(1)
-        })
-        .sum::<usize>()
-        .max(1)
+fn plugin_section_row_budget(min_rows: &[Option<usize>], total_row_budget: usize) -> Vec<usize> {
+    let section_count = min_rows.len().max(1);
+    let mut rows = min_rows
+        .iter()
+        .map(|min_rows| min_rows.unwrap_or(1).max(1))
+        .collect::<Vec<_>>();
+    let mut used = rows.iter().sum::<usize>();
+    while used > total_row_budget {
+        let Some((index, _)) = rows.iter().enumerate().max_by_key(|(_, value)| **value) else {
+            break;
+        };
+        if rows[index] <= 1 {
+            break;
+        }
+        rows[index] = rows[index].saturating_sub(1);
+        used = used.saturating_sub(1);
+    }
+    if used >= total_row_budget {
+        return rows;
+    }
+    let flexible = min_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    let recipients = if flexible.is_empty() {
+        vec![section_count.saturating_sub(1)]
+    } else {
+        flexible
+    };
+    let mut remaining = total_row_budget.saturating_sub(used);
+    let mut recipient_index = 0usize;
+    while remaining > 0 {
+        let index = recipients[recipient_index % recipients.len()];
+        rows[index] = rows[index].saturating_add(1);
+        recipient_index = recipient_index.saturating_add(1);
+        remaining = remaining.saturating_sub(1);
+    }
+    rows
 }
 
 fn plugin_section_buffer_layout(
@@ -25436,46 +25713,45 @@ fn plugin_section_buffer_layout(
     line_height: i32,
 ) -> Option<PluginSectionLayout> {
     let state = buffer.plugin_sections()?;
+    let section_count = state.section_count();
     let line_height = line_height.max(1);
     let panel_x = rect.x() + 8;
     let panel_width = rect.width().saturating_sub(16);
     let gap = 8i32;
     let header_height = (line_height + 10).max(line_height);
     let pane_chrome = header_height + 12;
+    let total_gap = gap.saturating_mul(section_count.saturating_sub(1) as i32);
     let total_height = layout
         .pane_bottom
         .saturating_sub(layout.body_y)
-        .max(pane_chrome * 2 + gap + line_height * 2);
+        .max(pane_chrome * section_count as i32 + total_gap + line_height * section_count as i32);
     let body_width = panel_width.saturating_sub(20);
     let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
-    let total_row_budget =
-        ((total_height - pane_chrome * 2 - gap).max(line_height * 2) / line_height).max(2) as usize;
-    let output_target_rows =
-        plain_text_pane_content_rows(&state.output_pane, wrap_cols).max(state.output_min_rows);
-    let output_rows = output_target_rows.min(total_row_budget.saturating_sub(1).max(1));
-    let input_rows = total_row_budget.saturating_sub(output_rows).max(1);
-    let used_height =
-        pane_chrome * 2 + gap + ((input_rows.saturating_add(output_rows)) as i32 * line_height);
-    let input_extra = total_height.saturating_sub(used_height);
-    let input_height = pane_chrome + input_rows as i32 * line_height + input_extra;
-    let output_height = pane_chrome + output_rows as i32 * line_height;
-    Some(PluginSectionLayout {
-        input: TextPaneLayout {
-            rect: Rect::new(panel_x, layout.body_y, panel_width, input_height as u32),
-            visible_rows: input_rows,
+    let total_row_budget = ((total_height - pane_chrome * section_count as i32 - total_gap)
+        .max(line_height * section_count as i32)
+        / line_height)
+        .max(section_count as i32) as usize;
+    let min_rows = std::iter::once(state.base_min_rows)
+        .chain(state.attached_sections.iter().map(|pane| pane.min_rows))
+        .collect::<Vec<_>>();
+    let row_budget = plugin_section_row_budget(&min_rows, total_row_budget);
+    let used_height = pane_chrome * section_count as i32
+        + total_gap
+        + row_budget.iter().sum::<usize>() as i32 * line_height;
+    let extra_height = total_height.saturating_sub(used_height);
+    let mut pane_y = layout.body_y;
+    let mut panes = Vec::with_capacity(section_count);
+    for (index, rows) in row_budget.into_iter().enumerate() {
+        let extra = if index == 0 { extra_height } else { 0 };
+        let pane_height = pane_chrome + rows as i32 * line_height + extra;
+        panes.push(TextPaneLayout {
+            rect: Rect::new(panel_x, pane_y, panel_width, pane_height as u32),
+            visible_rows: rows,
             wrap_cols,
-        },
-        output: TextPaneLayout {
-            rect: Rect::new(
-                panel_x,
-                layout.body_y + input_height + gap,
-                panel_width,
-                output_height as u32,
-            ),
-            visible_rows: output_rows,
-            wrap_cols,
-        },
-    })
+        });
+        pane_y += pane_height + gap;
+    }
+    Some(PluginSectionLayout { panes })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -25529,53 +25805,59 @@ fn render_plugin_section_buffer_body(
         ),
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
-    let active_pane = state.active_pane;
-    render_text_panel(
-        target,
-        &buffer.text,
-        buffer.scroll_row,
-        if active_pane == PluginSectionPane::Input {
-            Some(buffer.text.cursor())
+    for (index, pane_layout) in section_layout.panes.iter().copied().enumerate() {
+        let (text, scroll_row, cursor_point, pane_active, title, pane_mode) = if index == 0 {
+            (
+                &buffer.text,
+                buffer.scroll_row,
+                (state.active_section == 0).then_some(buffer.text.cursor()),
+                active && state.active_section == 0,
+                state.base_title.as_str(),
+                if state.base_writable {
+                    input_mode
+                } else {
+                    InputMode::Normal
+                },
+            )
         } else {
-            None
-        },
-        active && active_pane == PluginSectionPane::Input,
-        section_layout.input,
-        &state.input_title,
-        input_mode,
-        theme_registry,
-        panel_background,
-        header_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
-    )?;
-    render_text_panel(
-        target,
-        &state.output_pane.text,
-        state.output_pane.scroll_row,
-        (active_pane == PluginSectionPane::Output).then_some(state.output_pane.cursor()),
-        active && active_pane == PluginSectionPane::Output,
-        section_layout.output,
-        &state.output_title,
-        InputMode::Normal,
-        theme_registry,
-        panel_background,
-        header_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
-    )?;
+            let Some(pane) = state.attached_section(index) else {
+                continue;
+            };
+            (
+                &pane.text,
+                pane.scroll_row,
+                (state.active_section == index).then_some(pane.cursor()),
+                active && state.active_section == index,
+                pane.title.as_str(),
+                if pane.writable {
+                    input_mode
+                } else {
+                    InputMode::Normal
+                },
+            )
+        };
+        render_text_panel(
+            target,
+            text,
+            scroll_row,
+            cursor_point,
+            pane_active,
+            pane_layout,
+            title,
+            pane_mode,
+            theme_registry,
+            panel_background,
+            header_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            cursor,
+            cursor_roundness,
+            cell_width,
+            line_height,
+        )?;
+    }
     Ok(())
 }
 

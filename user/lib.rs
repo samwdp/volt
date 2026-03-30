@@ -188,6 +188,8 @@ impl UserLibrary for UserLibraryImpl {
                 icon: p.icon,
                 item_icon: p.item_icon,
                 or_group: p.or_group,
+                buffer_kind: p.buffer_kind,
+                items: p.items,
             })
             .collect()
     }
@@ -208,6 +210,8 @@ impl UserLibrary for UserLibraryImpl {
                 label: p.label,
                 icon: p.icon,
                 line_limit: hover::LINE_LIMIT,
+                buffer_kind: p.buffer_kind,
+                topics: p.topics,
             })
             .collect()
     }
@@ -972,7 +976,12 @@ mod tests {
         assert_eq!(
             library
                 .plugin_buffer_sections(calculator::CALCULATOR_KIND)
-                .map(|sections| sections.output_title().to_owned()),
+                .and_then(|sections| {
+                    sections
+                        .items()
+                        .last()
+                        .map(|section| section.name().to_owned())
+                }),
             Some("Output".to_owned())
         );
         assert_eq!(
@@ -987,6 +996,42 @@ mod tests {
         assert_eq!(module.packages()().len(), packages().len());
         assert_eq!(module.themes()().len(), themes().len());
         assert_eq!(module.language_servers()().len(), language_servers().len());
+    }
+
+    #[test]
+    fn user_library_exports_calculator_manual_providers() {
+        let library = UserLibraryImpl;
+        let autocomplete = library.autocomplete_providers();
+        let calculator_autocomplete = autocomplete
+            .iter()
+            .find(|provider| provider.id == calculator::PROVIDER_CALCULATOR)
+            .expect("calculator autocomplete provider should be exported");
+        assert_eq!(
+            calculator_autocomplete.buffer_kind.as_deref(),
+            Some(calculator::CALCULATOR_KIND)
+        );
+        assert!(
+            calculator_autocomplete
+                .items
+                .iter()
+                .any(|item| item.replacement == "sqrt")
+        );
+
+        let hover = library.hover_providers();
+        let calculator_hover = hover
+            .iter()
+            .find(|provider| provider.id == calculator::PROVIDER_CALCULATOR)
+            .expect("calculator hover provider should be exported");
+        assert_eq!(
+            calculator_hover.buffer_kind.as_deref(),
+            Some(calculator::CALCULATOR_KIND)
+        );
+        assert!(
+            calculator_hover
+                .topics
+                .iter()
+                .any(|topic| topic.token == "pi")
+        );
     }
 
     #[test]

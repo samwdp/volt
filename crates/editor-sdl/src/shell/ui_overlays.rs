@@ -7,6 +7,8 @@ pub(super) struct AutocompleteProviderSpec {
     pub(super) icon: String,
     pub(super) item_icon: String,
     pub(super) or_group: Option<String>,
+    pub(super) buffer_kind: Option<String>,
+    pub(super) items: Vec<editor_plugin_api::AutocompleteProviderItem>,
     pub(super) kind: AutocompleteProviderKind,
 }
 
@@ -21,24 +23,26 @@ impl AutocompleteRegistry {
         let providers = user_library
             .autocomplete_providers()
             .into_iter()
-            .filter_map(|provider| match provider.id.as_str() {
-                AUTOCOMPLETE_BUFFER_PROVIDER => Some(AutocompleteProviderSpec {
+            .filter_map(|provider| {
+                let kind = if !provider.items.is_empty() {
+                    AutocompleteProviderKind::Manual
+                } else {
+                    match provider.id.as_str() {
+                        AUTOCOMPLETE_BUFFER_PROVIDER => AutocompleteProviderKind::Buffer,
+                        AUTOCOMPLETE_LSP_PROVIDER => AutocompleteProviderKind::Lsp,
+                        _ => return None,
+                    }
+                };
+                Some(AutocompleteProviderSpec {
                     id: provider.id,
                     label: provider.label,
                     icon: provider.icon,
                     item_icon: provider.item_icon,
                     or_group: provider.or_group,
-                    kind: AutocompleteProviderKind::Buffer,
-                }),
-                AUTOCOMPLETE_LSP_PROVIDER => Some(AutocompleteProviderSpec {
-                    id: provider.id,
-                    label: provider.label,
-                    icon: provider.icon,
-                    item_icon: provider.item_icon,
-                    or_group: provider.or_group,
-                    kind: AutocompleteProviderKind::Lsp,
-                }),
-                _ => None,
+                    buffer_kind: provider.buffer_kind,
+                    items: provider.items,
+                    kind,
+                })
             })
             .collect();
         Self {
@@ -153,12 +157,15 @@ pub(super) enum HoverProviderKind {
     Lsp,
     SignatureHelp,
     Diagnostics,
+    Manual,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct HoverProviderSpec {
     pub(super) label: String,
     pub(super) icon: String,
+    pub(super) buffer_kind: Option<String>,
+    pub(super) topics: Vec<editor_plugin_api::HoverProviderTopic>,
     pub(super) kind: HoverProviderKind,
 }
 
@@ -174,16 +181,22 @@ impl HoverRegistry {
             .hover_providers()
             .into_iter()
             .filter_map(|provider| {
-                let kind = match provider.id.as_str() {
-                    HOVER_PROVIDER_TEST => HoverProviderKind::TestHover,
-                    HOVER_PROVIDER_LSP => HoverProviderKind::Lsp,
-                    HOVER_PROVIDER_SIGNATURE_HELP => HoverProviderKind::SignatureHelp,
-                    HOVER_PROVIDER_DIAGNOSTICS => HoverProviderKind::Diagnostics,
-                    _ => return None,
+                let kind = if !provider.topics.is_empty() {
+                    HoverProviderKind::Manual
+                } else {
+                    match provider.id.as_str() {
+                        HOVER_PROVIDER_TEST => HoverProviderKind::TestHover,
+                        HOVER_PROVIDER_LSP => HoverProviderKind::Lsp,
+                        HOVER_PROVIDER_SIGNATURE_HELP => HoverProviderKind::SignatureHelp,
+                        HOVER_PROVIDER_DIAGNOSTICS => HoverProviderKind::Diagnostics,
+                        _ => return None,
+                    }
                 };
                 Some(HoverProviderSpec {
                     label: provider.label,
                     icon: provider.icon,
+                    buffer_kind: provider.buffer_kind,
+                    topics: provider.topics,
                     kind,
                 })
             })

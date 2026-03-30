@@ -232,6 +232,11 @@
             border-color: rgba(0, 232, 255, 0.5);
             background: rgba(0, 232, 255, 0.12);
         }
+        @media (min-width: 861px) {
+            .toc-card {
+                display: none;
+            }
+        }
     </style>
 </head>
 <body>
@@ -239,7 +244,7 @@
         <div class="ambient ambient-one"></div>
         <div class="ambient ambient-two"></div>
 
-        <header class="topbar">
+        <header class="topbar topbar--slim">
             <a class="brand" href="index.html" aria-label="Volt Docs home">
                 <span class="brand-mark">
                     <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
@@ -254,21 +259,10 @@
                 class="nav-toggle"
                 type="button"
                 aria-expanded="false"
-                aria-controls="primary-nav"
+                aria-controls="page-sidebar"
             >
                 Menu
             </button>
-
-            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
-                <a href="#overview">Overview</a>
-                <a href="#module-layout">Module Layout</a>
-                <a href="#common-helper">Common Helper</a>
-                <a href="#full-implementation">Full Implementation</a>
-                <a href="#registration">Registration</a>
-                <a href="#lsp">LSP</a>
-                <a href="#theme-tokens">Theme Tokens</a>
-                <a href="#testing">Testing</a>
-            </nav>
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
@@ -277,6 +271,7 @@
             </div>
         </header>
 
+        <div class="page-layout">
         <main id="top">
             <!-- Hero -->
             <section class="hero section" style="display:block;">
@@ -890,6 +885,26 @@ cargo xtask ci</code></pre>
 
             </div>
         </main>
+
+        <aside
+            class="page-sidebar"
+            id="page-sidebar"
+            aria-label="Page navigation">
+            <nav class="sidebar-nav" aria-label="On this page">
+                <p class="sidebar-nav-label">On this page</p>
+                <ul>
+                    <li><a href="#overview">Overview</a></li>
+                    <li><a href="#module-layout">Module Layout</a></li>
+                    <li><a href="#common-helper">Common Helper</a></li>
+                    <li><a href="#full-implementation">Full Implementation</a></li>
+                    <li><a href="#registration">Registration</a></li>
+                    <li><a href="#lsp">LSP</a></li>
+                    <li><a href="#theme-tokens">Theme Tokens</a></li>
+                    <li><a href="#testing">Testing</a></li>
+                </ul>
+            </nav>
+        </aside>
+        </div>
 
         <footer class="site-footer">
             <p>

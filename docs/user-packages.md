@@ -34,6 +34,7 @@ and shows how to edit the builtin plugins that ship with Volt.
   - [Adding a Build Command for a New Language](#adding-a-build-command-for-a-new-language)
   - [Modifying Oil Directory Browser Defaults](#modifying-oil-directory-browser-defaults)
   - [Editing the Statusline](#editing-the-statusline)
+- [Autocomplete Providers](#autocomplete-providers)
 - [Adding Language Support](#adding-language-support)
 - [Building and Testing](#building-and-testing)
 
@@ -650,6 +651,82 @@ The statusline is rendered by `user/statusline.rs`.  You receive a
 `StatuslineContext` with fields like `vim_mode`, `buffer_name`, `line`, `column`,
 `git_branch`, and `lsp_diagnostics`.  Edit the rendering functions to customize
 what appears in the statusline.
+
+---
+
+---
+
+## Autocomplete Providers
+
+Volt's autocomplete system is backed by a list of **providers** registered in
+`user/autocomplete.rs` via the `backends()` function.  Providers can be grouped
+into an **or-group**: once the highest-priority provider in a group returns
+results, all lower-priority providers in the same group are skipped.
+
+### Provider Priority Order
+
+| Priority | Provider     | Or-Group | Notes                                                       |
+|----------|--------------|----------|-------------------------------------------------------------|
+| 1        | `lsp`        | `source` | Live completions from an attached language server           |
+| 2        | `calculator` | `source` | Built-in function and constant names; only active in calculator buffers |
+| 3        | `buffer`     | `source` | Words already present in the open buffer                    |
+
+Because all three share the `source` or-group, only the highest-priority
+provider with results is shown.  Inside a calculator buffer, if the
+`calculator` provider returns matches, the `buffer` provider is silently
+skipped.
+
+### How the Source Group Works
+
+```rust
+// user/autocomplete.rs — backends()
+
+pub fn backends() -> Vec<AutocompleteProviderConfig> {
+    vec![
+        // 1. LSP wins if an LSP server is attached and returns completions.
+        AutocompleteProviderConfig::new(PROVIDER_LSP, "LSP", /* icon */)
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+
+        // 2. Calculator provider is checked next; only active inside
+        //    calculator buffers (buffer_kind filter).  If it returns
+        //    results, buffer completions are suppressed.
+        calculator::autocomplete_provider()
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+
+        // 3. Buffer word completions — fallback when LSP and calculator
+        //    both return nothing.
+        AutocompleteProviderConfig::new(PROVIDER_BUFFER, "Buffer", /* icon */)
+            .with_or_group(PROVIDER_SOURCE_GROUP),
+    ]
+}
+```
+
+### Adding Your Own Provider
+
+To add a manual autocomplete provider to a plugin buffer, define an
+`autocomplete_provider()` function in your plugin module and add it to the
+`backends()` vector in `user/autocomplete.rs`.  Call
+`.with_buffer_kind(YOUR_KIND)` to limit it to your buffer type and
+`.with_or_group(PROVIDER_SOURCE_GROUP)` to slot it into the shared fallback
+chain.
+
+```rust
+// user/myplugin.rs
+pub fn autocomplete_provider() -> AutocompleteProviderConfig {
+    AutocompleteProviderConfig::new(
+        "myplugin",
+        "My Plugin",
+        MY_PROVIDER_ICON,
+        MY_ITEM_ICON,
+    )
+    .with_buffer_kind(MY_BUFFER_KIND)
+    .with_or_group(autocomplete::PROVIDER_SOURCE_GROUP)
+    .with_items(my_autocomplete_items())
+}
+
+// user/autocomplete.rs — add to backends():
+myplugin::autocomplete_provider()
+```
 
 ---
 

@@ -22,7 +22,7 @@
         <div class="ambient ambient-one"></div>
         <div class="ambient ambient-two"></div>
 
-        <header class="topbar">
+        <header class="topbar topbar--slim">
             <a class="brand" href="#top" aria-label="Volt Docs home">
                 <span class="brand-mark">
                     <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
@@ -37,20 +37,10 @@
                 class="nav-toggle"
                 type="button"
                 aria-expanded="false"
-                aria-controls="primary-nav"
+                aria-controls="page-sidebar"
             >
                 Menu
             </button>
-
-            <nav class="primary-nav" id="primary-nav" aria-label="Primary">
-                <a href="#overview">Overview</a>
-                <a href="#architecture">Architecture</a>
-                <a href="#crates">Crates</a>
-                <a href="#workflows">Workflows</a>
-                <a href="#commands">Commands</a>
-                <a href="user-packages.html">Packages</a>
-                <a href="language.html">Languages</a>
-            </nav>
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="architecture-diagram.html">Open Diagram</a>
@@ -60,6 +50,7 @@
             </div>
         </header>
 
+        <div class="page-layout">
         <main id="top">
             <section class="hero section">
                 <div class="hero-copy">
@@ -179,19 +170,6 @@
                 </div>
 
                 <div class="architecture-layout">
-                    <article class="diagram-frame reveal">
-                        <div class="frame-topline">
-                            <span>Live reference</span>
-                            <span>architecture-diagram.html</span>
-                        </div>
-                        <iframe
-                            class="diagram-embed"
-                            src="architecture-diagram.html"
-                            title="Volt architecture diagram preview"
-                            loading="lazy"
-                        ></iframe>
-                    </article>
-
                     <div class="architecture-notes">
                         <article class="insight-card reveal">
                             <span class="insight-index">01</span>
@@ -424,6 +402,25 @@
                 </div>
             </section>
         </main>
+
+        <aside
+            class="page-sidebar"
+            id="page-sidebar"
+            aria-label="Page navigation">
+            <nav class="sidebar-nav" aria-label="On this page">
+                <p class="sidebar-nav-label">On this page</p>
+                <ul>
+                    <li><a href="#overview">Overview</a></li>
+                    <li><a href="#architecture">Architecture</a></li>
+                    <li><a href="#crates">Crates</a></li>
+                    <li><a href="#workflows">Workflows</a></li>
+                    <li><a href="#commands">Commands</a></li>
+                    <li><a href="user-packages.html">Packages ↗</a></li>
+                    <li><a href="language.html">Languages ↗</a></li>
+                </ul>
+            </nav>
+        </aside>
+        </div>
 
         <footer class="site-footer">
             <p>

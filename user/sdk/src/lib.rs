@@ -95,55 +95,116 @@ pub mod buffer_kinds {
     pub const CALCULATOR: &str = "calculator";
 }
 
-/// Generic split-pane metadata for plugin buffers that want an editable input
-/// area plus a dedicated read-only output pane rendered by the host.
+/// Controls how a plugin section is updated when plugin evaluation writes to it.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
-pub struct PluginBufferSections {
-    input_title: RString,
-    output_title: RString,
-    output_min_rows: usize,
-    output_initial_lines: RVec<RString>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum PluginBufferSectionUpdate {
+    /// Replace the existing section contents with the newly produced lines.
+    Replace,
+    /// Append the newly produced lines after the existing section contents.
+    Append,
 }
 
-impl PluginBufferSections {
-    /// Creates a two-pane plugin buffer configuration.
-    pub fn new(
-        input_title: impl Into<RString>,
-        output_title: impl Into<RString>,
-        output_min_rows: usize,
-        output_initial_lines: Vec<impl Into<RString>>,
-    ) -> Self {
+/// Metadata for one rendered section within a plugin-owned buffer.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PluginBufferSection {
+    name: RString,
+    writable: bool,
+    min_lines: ROption<usize>,
+    initial_lines: RVec<RString>,
+    update: PluginBufferSectionUpdate,
+}
+
+impl PluginBufferSection {
+    /// Creates a new section with the given display name.
+    pub fn new(name: impl Into<RString>) -> Self {
         Self {
-            input_title: input_title.into(),
-            output_title: output_title.into(),
-            output_min_rows: output_min_rows.max(1),
-            output_initial_lines: output_initial_lines
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>()
-                .into(),
+            name: name.into(),
+            writable: false,
+            min_lines: ROption::RNone,
+            initial_lines: RVec::new(),
+            update: PluginBufferSectionUpdate::Replace,
         }
     }
 
-    /// Returns the title shown in the editable input pane.
-    pub fn input_title(&self) -> &str {
-        self.input_title.as_str()
+    /// Marks the section as writable or read-only.
+    pub fn with_writable(mut self, writable: bool) -> Self {
+        self.writable = writable;
+        self
     }
 
-    /// Returns the title shown in the read-only output pane.
-    pub fn output_title(&self) -> &str {
-        self.output_title.as_str()
+    /// Declares the minimum number of wrapped rows reserved for the section.
+    /// Values below 1 are clamped to 1.
+    pub fn with_min_lines(mut self, min_lines: usize) -> Self {
+        self.min_lines = ROption::RSome(min_lines.max(1));
+        self
     }
 
-    /// Returns the minimum number of wrapped rows reserved for the output pane.
-    pub fn output_min_rows(&self) -> usize {
-        self.output_min_rows
+    /// Seeds the section with the provided initial lines.
+    pub fn with_initial_lines(mut self, lines: Vec<impl Into<RString>>) -> Self {
+        self.initial_lines = lines.into_iter().map(Into::into).collect::<Vec<_>>().into();
+        self
     }
 
-    /// Returns the initial output lines shown before the first evaluation.
-    pub fn output_initial_lines(&self) -> &[RString] {
-        self.output_initial_lines.as_slice()
+    /// Controls whether evaluation replaces or appends to this section.
+    pub fn with_update(mut self, update: PluginBufferSectionUpdate) -> Self {
+        self.update = update;
+        self
+    }
+
+    /// Returns the display name rendered for the section.
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// Returns whether the section is writable.
+    pub const fn writable(&self) -> bool {
+        self.writable
+    }
+
+    /// Returns the minimum number of wrapped rows reserved for the section.
+    pub const fn min_lines(&self) -> Option<usize> {
+        match self.min_lines {
+            ROption::RSome(value) => Some(value),
+            ROption::RNone => None,
+        }
+    }
+
+    /// Returns the initial lines shown in the section.
+    pub fn initial_lines(&self) -> &[RString] {
+        self.initial_lines.as_slice()
+    }
+
+    /// Returns how evaluation updates this section.
+    pub const fn update(&self) -> PluginBufferSectionUpdate {
+        self.update
+    }
+}
+
+/// Generic section metadata for plugin buffers that want host-rendered panes.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PluginBufferSections {
+    sections: RVec<PluginBufferSection>,
+}
+
+impl PluginBufferSections {
+    /// Creates a sectioned plugin buffer configuration.
+    pub fn new(sections: Vec<PluginBufferSection>) -> Self {
+        Self {
+            sections: sections.into(),
+        }
+    }
+
+    /// Returns the configured sections in display order.
+    pub fn items(&self) -> &[PluginBufferSection] {
+        self.sections.as_slice()
+    }
+
+    /// Returns the configured sections in display order.
+    pub fn sections(&self) -> &[PluginBufferSection] {
+        self.items()
     }
 }
 
@@ -155,6 +216,8 @@ pub struct PluginBuffer {
     initial_lines: RVec<RString>,
     sections: ROption<PluginBufferSections>,
     evaluate_handler: ROption<RString>,
+    evaluate_target_section: ROption<RString>,
+    key_bindings: RVec<PluginKeyBinding>,
 }
 
 /// Context passed to the user library when rendering the statusline.
@@ -250,16 +313,33 @@ pub trait UserLibrary: Send + Sync {
         self.plugin_buffer(kind)
             .map(|buffer| {
                 buffer
-                    .initial_lines()
-                    .iter()
-                    .map(|line| line.to_string())
-                    .collect()
+                    .sections()
+                    .and_then(|sections| sections.items().first())
+                    .map(|section| {
+                        section
+                            .initial_lines()
+                            .iter()
+                            .map(|line| line.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        buffer
+                            .initial_lines()
+                            .iter()
+                            .map(|line| line.to_string())
+                            .collect()
+                    })
             })
             .unwrap_or_default()
     }
     fn plugin_buffer_sections(&self, kind: &str) -> Option<PluginBufferSections> {
         self.plugin_buffer(kind)
             .and_then(|buffer| buffer.sections().cloned())
+    }
+    fn plugin_buffer_key_bindings(&self, kind: &str) -> Vec<PluginKeyBinding> {
+        self.plugin_buffer(kind)
+            .map(|buffer| buffer.key_bindings().to_vec())
+            .unwrap_or_default()
     }
     fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String>;
     fn plugin_buffer(&self, kind: &str) -> Option<PluginBuffer> {
@@ -282,6 +362,8 @@ impl PluginBuffer {
                 .into(),
             sections: ROption::RNone,
             evaluate_handler: ROption::RNone,
+            evaluate_target_section: ROption::RNone,
+            key_bindings: RVec::new(),
         }
     }
 
@@ -294,6 +376,18 @@ impl PluginBuffer {
     /// Declares the evaluator handler id used when `plugin.evaluate` fires.
     pub fn with_evaluate_handler(mut self, handler: impl Into<RString>) -> Self {
         self.evaluate_handler = ROption::RSome(handler.into());
+        self
+    }
+
+    /// Declares which section receives evaluation output.
+    pub fn with_evaluate_target_section(mut self, section_name: impl Into<RString>) -> Self {
+        self.evaluate_target_section = ROption::RSome(section_name.into());
+        self
+    }
+
+    /// Attaches keybindings that are only active while this buffer kind is focused.
+    pub fn with_key_bindings(mut self, key_bindings: Vec<PluginKeyBinding>) -> Self {
+        self.key_bindings = key_bindings.into();
         self
     }
 
@@ -321,6 +415,19 @@ impl PluginBuffer {
             ROption::RSome(handler) => Some(handler.as_str()),
             ROption::RNone => None,
         }
+    }
+
+    /// Returns the optional section that should receive evaluation output.
+    pub fn evaluate_target_section(&self) -> Option<&str> {
+        match &self.evaluate_target_section {
+            ROption::RSome(section_name) => Some(section_name.as_str()),
+            ROption::RNone => None,
+        }
+    }
+
+    /// Returns the keybindings attached to this buffer kind.
+    pub fn key_bindings(&self) -> &[PluginKeyBinding] {
+        self.key_bindings.as_slice()
     }
 }
 
@@ -499,6 +606,17 @@ pub struct AutocompleteProvider {
     pub icon: String,
     pub item_icon: String,
     pub or_group: Option<String>,
+    pub buffer_kind: Option<String>,
+    pub items: Vec<AutocompleteProviderItem>,
+}
+
+/// Static autocomplete item exported by a user library provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutocompleteProviderItem {
+    pub label: String,
+    pub replacement: String,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
 }
 
 /// Hover provider configuration exported by the user library.
@@ -508,6 +626,15 @@ pub struct HoverProvider {
     pub label: String,
     pub icon: String,
     pub line_limit: usize,
+    pub buffer_kind: Option<String>,
+    pub topics: Vec<HoverProviderTopic>,
+}
+
+/// Static hover topic exported by a user library provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverProviderTopic {
+    pub token: String,
+    pub lines: Vec<String>,
 }
 
 /// ACP client configuration exported by the user library.
@@ -1018,8 +1145,9 @@ impl PluginPackage {
 #[cfg(test)]
 mod tests {
     use super::{
-        PluginAction, PluginBuffer, PluginBufferSections, PluginCommand, PluginHookBinding,
-        PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+        PluginAction, PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate,
+        PluginBufferSections, PluginCommand, PluginHookBinding, PluginHookDeclaration,
+        PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
     };
 
     #[test]
@@ -1040,13 +1168,22 @@ mod tests {
             )])
             .with_buffers(vec![
                 PluginBuffer::new("calculator", vec!["1 + 1"])
-                    .with_sections(PluginBufferSections::new(
-                        "Input",
-                        "Output",
-                        1,
-                        vec!["(press enter)".to_owned()],
-                    ))
-                    .with_evaluate_handler("calculator.evaluate"),
+                    .with_sections(PluginBufferSections::new(vec![
+                        PluginBufferSection::new("Input")
+                            .with_writable(true)
+                            .with_initial_lines(vec!["1 + 1"]),
+                        PluginBufferSection::new("Output")
+                            .with_min_lines(1)
+                            .with_initial_lines(vec!["(press enter)".to_owned()])
+                            .with_update(PluginBufferSectionUpdate::Replace),
+                    ]))
+                    .with_evaluate_handler("calculator.evaluate")
+                    .with_evaluate_target_section("Output")
+                    .with_key_bindings(vec![PluginKeyBinding::new(
+                        "Ctrl+Enter",
+                        "lsp.start",
+                        PluginKeymapScope::Workspace,
+                    )]),
             ])
             .with_hook_bindings(vec![PluginHookBinding::new(
                 "buffer.file-open",
@@ -1066,6 +1203,9 @@ mod tests {
         assert_eq!(package.buffers()[0].kind(), "calculator");
         assert_eq!(
             package.buffers()[0]
+                .sections()
+                .expect("sections should be present")
+                .items()[0]
                 .initial_lines()
                 .iter()
                 .map(|line| line.as_str())
@@ -1075,12 +1215,21 @@ mod tests {
         assert_eq!(
             package.buffers()[0]
                 .sections()
-                .map(|sections| sections.output_title()),
-            Some("Output")
+                .expect("sections should be present")
+                .items()
+                .iter()
+                .map(|section| section.name())
+                .collect::<Vec<_>>(),
+            vec!["Input", "Output"]
         );
         assert_eq!(
             package.buffers()[0].evaluate_handler(),
             Some("calculator.evaluate")
         );
+        assert_eq!(
+            package.buffers()[0].evaluate_target_section(),
+            Some("Output")
+        );
+        assert_eq!(package.buffers()[0].key_bindings()[0].chord(), "Ctrl+Enter");
     }
 }
