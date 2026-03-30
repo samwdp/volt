@@ -75,6 +75,7 @@ pub const PROVIDER_LABEL: &str = "Calculator";
 
 const PROVIDER_ICON: &str = md::MD_CALCULATOR;
 const AUTOCOMPLETE_ITEM_ICON: &str = md::MD_FUNCTION;
+const HOVER_TOPIC_ICON: &str = cod::COD_INFO;
 
 // ─── Package ─────────────────────────────────────────────────────────────────
 
@@ -409,7 +410,7 @@ fn calculator_symbols() -> &'static [CalculatorSymbol] {
 
 fn hover_lines(symbol: &CalculatorSymbol) -> Vec<String> {
     vec![
-        format!("{} {}", cod::COD_INFO, symbol.label),
+        format!("{HOVER_TOPIC_ICON} {}", symbol.label),
         symbol.detail.to_owned(),
         String::new(),
         symbol.documentation.to_owned(),
