@@ -37,6 +37,7 @@ agent-client-protocol = { version = "0.10.2", features = ["unstable_session_mode
 tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 async-trait = "0.1.89"
+notify = "8.2.0"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 wry = { version = "0.53", features = ["devtools"] }

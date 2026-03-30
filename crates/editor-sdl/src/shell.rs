@@ -9,7 +9,7 @@ mod tests;
 use std::{
     any::Any,
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env, fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -28,6 +28,10 @@ use agent_client_protocol::{
 };
 use base64::Engine as _;
 use clipboard::*;
+use notify::{
+    Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    recommended_watcher,
+};
 use ui_overlays::*;
 
 use crate::browser_host::{
@@ -55,8 +59,9 @@ use editor_git::{
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    LanguageServerRegistry, LspClientError, LspClientManager, LspFormattingOptions, LspLocation,
-    LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
+    LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction, LspFormattingOptions,
+    LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot,
+    LspTextEdit,
 };
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
@@ -92,10 +97,10 @@ use sdl3::{
     mouse::{MouseButton, MouseWheelDirection},
     pixels::{Color, PixelFormat},
     rect::Rect,
-    render::{Canvas, FPoint, RenderTarget},
+    render::{BlendMode, Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
     surface::Surface,
     ttf::Font,
-    video::Window,
+    video::{Window, WindowContext},
 };
 use sdl3_ttf_sys as _;
 
@@ -189,6 +194,7 @@ const HOOK_LSP_LOG: &str = lsp_hooks::LOG;
 const HOOK_LSP_DEFINITION: &str = lsp_hooks::DEFINITION;
 const HOOK_LSP_REFERENCES: &str = lsp_hooks::REFERENCES;
 const HOOK_LSP_IMPLEMENTATION: &str = lsp_hooks::IMPLEMENTATION;
+const HOOK_LSP_CODE_ACTIONS: &str = lsp_hooks::CODE_ACTIONS;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
 const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
@@ -303,7 +309,6 @@ const FRAME_PACING_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const TYPING_EVENT_BATCH_LIMIT: usize = 24;
 const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
 const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const FILE_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 const SYNTAX_WINDOW_MIN_LINES: usize = 256;
@@ -2075,7 +2080,8 @@ pub(crate) struct ShellBuffer {
     terminal_render: Option<TerminalRenderSnapshot>,
     pub(crate) text: TextBuffer,
     backing_file_fingerprint: Option<BackingFileFingerprint>,
-    last_backing_file_check_at: Option<Instant>,
+    backing_file_reload_pending: bool,
+    backing_file_check_in_flight: bool,
     undo_tree: UndoTree,
     language_id: Option<String>,
     pub(crate) scroll_row: usize,
@@ -2828,7 +2834,8 @@ impl ShellBuffer {
             terminal_render: None,
             text,
             backing_file_fingerprint: None,
-            last_backing_file_check_at: None,
+            backing_file_reload_pending: false,
+            backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -2882,7 +2889,8 @@ impl ShellBuffer {
             terminal_render: None,
             text,
             backing_file_fingerprint,
-            last_backing_file_check_at: None,
+            backing_file_reload_pending: false,
+            backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -2939,7 +2947,8 @@ impl ShellBuffer {
             terminal_render: None,
             text,
             backing_file_fingerprint: None,
-            last_backing_file_check_at: None,
+            backing_file_reload_pending: false,
+            backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -3531,8 +3540,61 @@ impl ShellBuffer {
     fn save_to_path(&mut self, path: &Path) -> Result<(), std::io::Error> {
         self.text.save_to_path(path)?;
         self.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
-        self.last_backing_file_check_at = Some(Instant::now());
+        self.backing_file_reload_pending = false;
+        self.backing_file_check_in_flight = false;
         Ok(())
+    }
+
+    fn mark_backing_file_reload_pending(&mut self) {
+        if self.kind == BufferKind::File && self.text.path().is_some() {
+            self.backing_file_reload_pending = true;
+        }
+    }
+
+    fn file_reload_request(&mut self) -> Option<FileReloadWorkerRequest> {
+        if self.kind != BufferKind::File
+            || self.text.is_dirty()
+            || self.backing_file_check_in_flight
+            || !self.backing_file_reload_pending
+        {
+            return None;
+        }
+        let path = self.text.path().map(Path::to_path_buf)?;
+        self.backing_file_reload_pending = false;
+        self.backing_file_check_in_flight = true;
+        Some(FileReloadWorkerRequest {
+            buffer_id: self.id,
+            buffer_revision: self.text.revision(),
+            path,
+            loaded_fingerprint: self.backing_file_fingerprint,
+        })
+    }
+
+    fn finish_file_reload_request(&mut self) {
+        self.backing_file_check_in_flight = false;
+    }
+
+    fn apply_reloaded_file_buffer(
+        &mut self,
+        fingerprint: BackingFileFingerprint,
+        reloaded: TextBuffer,
+    ) -> bool {
+        self.backing_file_fingerprint = Some(fingerprint);
+        if !self.text.reload_from_buffer(reloaded) {
+            return false;
+        }
+
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.force_syntax_refresh();
+        self.scroll_row = self.scroll_row.min(self.line_count().saturating_sub(1));
+        self.invalidate_wrap_cache();
+        if self.git_fringe.is_some() {
+            self.git_fringe_dirty = true;
+            self.git_fringe_last_edit_at = None;
+        }
+        true
     }
 
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
@@ -3607,21 +3669,18 @@ impl ShellBuffer {
         self.syntax_error = error;
     }
 
-    fn reload_from_disk_if_changed(&mut self, now: Instant, force: bool) -> Result<bool, String> {
+    fn reload_from_disk_if_changed(&mut self, force: bool) -> Result<bool, String> {
         if self.kind != BufferKind::File || self.text.is_dirty() {
             return Ok(false);
         }
         let Some(path) = self.text.path().map(Path::to_path_buf) else {
             return Ok(false);
         };
-        if !force
-            && self
-                .last_backing_file_check_at
-                .is_some_and(|last| now.duration_since(last) < FILE_RELOAD_POLL_INTERVAL)
-        {
+        if !force && !self.backing_file_reload_pending {
             return Ok(false);
         }
-        self.last_backing_file_check_at = Some(now);
+        self.backing_file_reload_pending = false;
+        self.backing_file_check_in_flight = false;
 
         let current_fingerprint = match BackingFileFingerprint::read(&path) {
             Ok(fingerprint) => fingerprint,
@@ -3650,6 +3709,7 @@ impl ShellBuffer {
             return Ok(false);
         }
 
+        self.finish_file_reload_request();
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
         self.syntax_lines.clear();
@@ -5087,6 +5147,12 @@ struct ShellPane {
 enum PickerAction {
     NoOp,
     ExecuteCommand(String),
+    ApplyLspCodeAction {
+        workspace_id: WorkspaceId,
+        buffer_id: BufferId,
+        path: PathBuf,
+        code_action: LspCodeAction,
+    },
     FocusBuffer(BufferId),
     CloseBuffer(BufferId),
     CloseBufferSave(BufferId),
@@ -5379,6 +5445,7 @@ pub(crate) struct ShellUiState {
     autocomplete_worker: AutocompleteWorkerState,
     vim_search_worker: VimSearchWorkerState,
     workspace_search_worker: WorkspaceSearchWorkerState,
+    file_reload_worker: FileReloadWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
     /// Per-workspace last-used build command.  Set when the user runs
     /// `workspace.compile`; reused by `workspace.recompile`.
@@ -5429,6 +5496,7 @@ impl ShellUiState {
             autocomplete_worker: AutocompleteWorkerState::new(),
             vim_search_worker: VimSearchWorkerState::new(),
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
+            file_reload_worker: FileReloadWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
             compile_commands: BTreeMap::new(),
         }
@@ -5745,24 +5813,44 @@ impl ShellUiState {
     }
 
     fn insert_buffer(&mut self, mut buffer: ShellBuffer) {
+        let new_watch_path = shell_buffer_watch_path(&buffer);
         if let Some(existing) = self
             .buffers
             .iter_mut()
             .find(|existing| existing.id() == buffer.id())
         {
+            let old_watch_path = shell_buffer_watch_path(existing);
             buffer.vim_buffer_state = existing.vim_buffer_state.clone();
             *existing = buffer;
+            sync_file_reload_watch(
+                &mut self.file_reload_worker,
+                old_watch_path.as_deref(),
+                new_watch_path.as_deref(),
+            );
         } else {
             self.buffers.push(buffer);
+            sync_file_reload_watch(
+                &mut self.file_reload_worker,
+                None,
+                new_watch_path.as_deref(),
+            );
         }
     }
 
     fn remove_buffer(&mut self, buffer_id: BufferId) {
         let removed_active_buffer = self.active_buffer_id() == Some(buffer_id);
+        let removed_watch_path = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id() == buffer_id)
+            .and_then(shell_buffer_watch_path);
         if !removed_active_buffer {
             self.persist_active_buffer_vim_state();
         }
         self.buffers.retain(|buffer| buffer.id() != buffer_id);
+        if let Some(path) = removed_watch_path.as_deref() {
+            self.file_reload_worker.unwatch_path(path);
+        }
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.retain(|id| *id != buffer_id);
@@ -6083,6 +6171,28 @@ impl ShellUiState {
         }
         self.restore_active_buffer_vim_state();
         self.active_pane_id()
+    }
+}
+
+fn shell_buffer_watch_path(buffer: &ShellBuffer) -> Option<PathBuf> {
+    (buffer.kind == BufferKind::File)
+        .then_some(())
+        .and_then(|_| buffer.path().map(Path::to_path_buf))
+}
+
+fn sync_file_reload_watch(
+    worker: &mut FileReloadWorkerState,
+    previous: Option<&Path>,
+    current: Option<&Path>,
+) {
+    if previous == current {
+        return;
+    }
+    if let Some(previous) = previous {
+        worker.unwatch_path(previous);
+    }
+    if let Some(current) = current {
+        worker.watch_path(current.to_path_buf());
     }
 }
 
@@ -9619,6 +9729,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut cell_width = fonts.cell_width();
 
     let mut canvas = window.into_canvas();
+    let texture_creator = canvas.texture_creator();
+    let mut text_texture_cache = TextTextureCache::new();
     let renderer_name = canvas.renderer_name.clone();
     let mut event_pump = sdl_context
         .event_pump()
@@ -9639,19 +9751,24 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> FrameOutcome {
                 let mut typing_frame =
                     state.begin_typing_frame(frames_rendered, frame_pacing_sleep);
-                if let Err(error) = update_theme_runtime(
+                let fonts_changed = match update_theme_runtime(
                     &ttf,
                     &state,
                     &config,
                     &mut theme_settings,
                     &mut fonts,
                     &mut font_path,
+                    &mut text_texture_cache,
                     &mut line_height,
                     &mut ascent,
                     &mut cell_width,
                 ) {
-                    state.record_shell_error("shell.update-theme", error);
-                }
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.update-theme", error);
+                        false
+                    }
+                };
 
                 let (render_width, render_height) = match canvas.output_size() {
                     Ok(size) => size,
@@ -9728,6 +9845,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
                 let refresh_now = Instant::now();
                 let typing_active = state.secondary_refresh_deferred_for_typing(refresh_now);
+                let text_texture_cache_mode = if typing_active {
+                    TextTextureCacheMode::ReuseOnly
+                } else {
+                    TextTextureCacheMode::ReadWrite
+                };
                 let file_reload_changed = match state.refresh_pending_file_reloads(refresh_now) {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -9839,6 +9961,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 };
                 let should_render = last_scene.is_none()
                     || had_events
+                    || fonts_changed
                     || file_reload_changed
                     || picker_changed
                     || lsp_changed
@@ -9867,9 +9990,16 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     if let Some(frame) = typing_frame.as_mut() {
                         frame.render = render_started.elapsed();
                     }
-                    if last_scene.as_ref() != Some(&scene) {
+                    if fonts_changed || last_scene.as_ref() != Some(&scene) {
                         let present_started = Instant::now();
-                        if let Err(error) = present_scene_to_canvas(&mut canvas, &fonts, &scene) {
+                        if let Err(error) = present_scene_to_canvas(
+                            &mut canvas,
+                            &texture_creator,
+                            &mut text_texture_cache,
+                            text_texture_cache_mode,
+                            &fonts,
+                            &scene,
+                        ) {
                             state.record_shell_error("shell.present", error);
                         } else if let Some(frame) = typing_frame.as_mut() {
                             frame.present = present_started.elapsed();
@@ -9942,28 +10072,32 @@ fn update_theme_runtime<'ttf>(
     theme_settings: &mut ThemeRuntimeSettings,
     fonts: &mut FontSet<'ttf>,
     font_path: &mut PathBuf,
+    text_texture_cache: &mut TextTextureCache<'_>,
     line_height: &mut usize,
     ascent: &mut i32,
     cell_width: &mut i32,
-) -> Result<(), ShellError> {
+) -> Result<bool, ShellError> {
     let updated = theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), config);
     if &updated == theme_settings {
-        return Ok(());
+        return Ok(false);
     }
 
+    let mut fonts_changed = false;
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
     {
         let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
         *font_path = next_font_path;
         *fonts = next_fonts;
+        text_texture_cache.clear();
         *line_height = fonts.primary().height().max(1) as usize;
         *ascent = fonts.primary().ascent();
         *cell_width = fonts.cell_width();
+        fonts_changed = true;
     }
 
     *theme_settings = updated;
-    Ok(())
+    Ok(fonts_changed)
 }
 
 fn theme_runtime_settings(
@@ -11669,6 +11803,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         .map_err(|error| error.to_string())?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::ApplyLspCodeAction {
+                    workspace_id,
+                    buffer_id,
+                    path,
+                    code_action,
+                } => {
+                    apply_lsp_code_action(runtime, workspace_id, buffer_id, &path, &code_action)?;
+                }
                 PickerAction::FocusBuffer(buffer_id) => {
                     let workspace_id = runtime
                         .model()
@@ -11939,6 +12081,16 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
     }
 
+    if runtime.hooks().contains(HOOK_LSP_CODE_ACTIONS) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_CODE_ACTIONS,
+                "shell.lsp-code-actions",
+                |_, runtime| open_lsp_code_actions(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -12095,6 +12247,62 @@ fn goto_lsp_implementation(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Implementations",
         LspClientManager::implementations,
     )
+}
+
+fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let range = active_lsp_code_action_range(runtime, context.buffer_id)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let (labels, code_actions) = {
+        let labels = lsp_client
+            .sync_buffer(
+                &context.path,
+                &context.text,
+                context.revision,
+                context.root.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        let code_actions = lsp_client
+            .code_actions(&context.path, range)
+            .map_err(|error| error.to_string())?;
+        (labels, code_actions)
+    };
+    sync_lsp_buffer_state(runtime, context.workspace_id, context.buffer_id, &labels)?;
+    if code_actions.is_empty() {
+        return Err("no code actions available at the cursor".to_owned());
+    }
+    let picker = lsp_code_actions_picker_overlay(
+        context.workspace_id,
+        context.buffer_id,
+        &context.path,
+        &code_actions,
+    );
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn active_lsp_code_action_range(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<TextRange, String> {
+    let ui = shell_ui(runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "active shell buffer is missing".to_owned())?;
+    match ui.visual_selection_for_buffer(buffer, true) {
+        Some(VisualSelection::Range(range)) => Ok(range),
+        Some(VisualSelection::Block(_)) => {
+            Err("LSP code actions do not support block selections".to_owned())
+        }
+        None => {
+            let cursor = buffer.cursor_point();
+            Ok(TextRange::new(cursor, cursor))
+        }
+    }
 }
 
 fn navigate_to_lsp_locations(
@@ -14198,6 +14406,235 @@ impl WorkspaceSearchWorkerState {
     fn take_latest_result(&self) -> Option<WorkspaceSearchWorkerResult> {
         let mut results = self.results.lock().ok()?;
         results.drain(..).next_back()
+    }
+}
+
+struct FileReloadWorkerRequest {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    path: PathBuf,
+    loaded_fingerprint: Option<BackingFileFingerprint>,
+}
+
+enum FileReloadWorkerOutcome {
+    Missing,
+    Unchanged {
+        fingerprint: BackingFileFingerprint,
+    },
+    Reloaded {
+        fingerprint: BackingFileFingerprint,
+        text: TextBuffer,
+    },
+}
+
+struct FileReloadWorkerResult {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    path: PathBuf,
+    outcome: Result<FileReloadWorkerOutcome, String>,
+}
+
+enum FileReloadWorkerCommand {
+    WatchPath(PathBuf),
+    UnwatchPath(PathBuf),
+    Reload(FileReloadWorkerRequest),
+}
+
+struct FileReloadWorkerState {
+    command_tx: Sender<FileReloadWorkerCommand>,
+    changed_paths: Arc<Mutex<Vec<PathBuf>>>,
+    results: Arc<Mutex<Vec<FileReloadWorkerResult>>>,
+    errors: Arc<Mutex<Vec<String>>>,
+    watched_paths: HashMap<PathBuf, usize>,
+}
+
+impl FileReloadWorkerState {
+    fn new() -> Self {
+        let (command_tx, command_rx) = mpsc::channel::<FileReloadWorkerCommand>();
+        let changed_paths = Arc::new(Mutex::new(Vec::new()));
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let watcher_changed_paths = Arc::clone(&changed_paths);
+        let worker_results = Arc::clone(&results);
+        let worker_errors = Arc::clone(&errors);
+        std::thread::spawn(move || {
+            let mut watcher =
+                match create_file_reload_watcher(watcher_changed_paths, Arc::clone(&worker_errors))
+                {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        push_file_reload_worker_error(
+                            &worker_errors,
+                            format!("failed to start file watcher: {error}"),
+                        );
+                        return;
+                    }
+                };
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    FileReloadWorkerCommand::WatchPath(path) => {
+                        if let Err(error) =
+                            watcher.watch(path.as_path(), RecursiveMode::NonRecursive)
+                        {
+                            push_file_reload_worker_error(
+                                &worker_errors,
+                                format!("failed to watch `{}`: {error}", path.display()),
+                            );
+                        }
+                    }
+                    FileReloadWorkerCommand::UnwatchPath(path) => {
+                        if let Err(error) = watcher.unwatch(path.as_path()) {
+                            push_file_reload_worker_error(
+                                &worker_errors,
+                                format!("failed to stop watching `{}`: {error}", path.display()),
+                            );
+                        }
+                    }
+                    FileReloadWorkerCommand::Reload(request) => {
+                        let result = process_file_reload_request(request);
+                        if let Ok(mut results) = worker_results.lock() {
+                            results.push(result);
+                        } else {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            command_tx,
+            changed_paths,
+            results,
+            errors,
+            watched_paths: HashMap::new(),
+        }
+    }
+
+    fn watch_path(&mut self, path: PathBuf) {
+        let entry = self.watched_paths.entry(path.clone()).or_default();
+        *entry = entry.saturating_add(1);
+        if *entry == 1 {
+            let _ = self
+                .command_tx
+                .send(FileReloadWorkerCommand::WatchPath(path));
+        }
+    }
+
+    fn unwatch_path(&mut self, path: &Path) {
+        let Some(count) = self.watched_paths.get_mut(path) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+            return;
+        }
+        self.watched_paths.remove(path);
+        let _ = self
+            .command_tx
+            .send(FileReloadWorkerCommand::UnwatchPath(path.to_path_buf()));
+    }
+
+    fn send(&self, request: FileReloadWorkerRequest) {
+        let _ = self
+            .command_tx
+            .send(FileReloadWorkerCommand::Reload(request));
+    }
+
+    fn take_changed_paths(&self) -> Vec<PathBuf> {
+        let Ok(mut changed_paths) = self.changed_paths.lock() else {
+            return Vec::new();
+        };
+        changed_paths.drain(..).collect()
+    }
+
+    fn take_results(&self) -> Vec<FileReloadWorkerResult> {
+        let Ok(mut results) = self.results.lock() else {
+            return Vec::new();
+        };
+        results.drain(..).collect()
+    }
+
+    fn take_errors(&self) -> Vec<String> {
+        let Ok(mut errors) = self.errors.lock() else {
+            return Vec::new();
+        };
+        errors.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    fn record_changed_path_for_test(&self, path: PathBuf) {
+        if let Ok(mut changed_paths) = self.changed_paths.lock() {
+            changed_paths.push(path);
+        }
+    }
+}
+
+fn process_file_reload_request(request: FileReloadWorkerRequest) -> FileReloadWorkerResult {
+    let outcome = match BackingFileFingerprint::read(&request.path) {
+        Ok(fingerprint) => match request.loaded_fingerprint {
+            Some(loaded_fingerprint) if fingerprint == loaded_fingerprint => {
+                Ok(FileReloadWorkerOutcome::Unchanged { fingerprint })
+            }
+            None => Ok(FileReloadWorkerOutcome::Unchanged { fingerprint }),
+            Some(_) => match TextBuffer::load_from_path(&request.path) {
+                Ok(text) => Ok(FileReloadWorkerOutcome::Reloaded { fingerprint, text }),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Ok(FileReloadWorkerOutcome::Missing)
+                }
+                Err(error) => Err(format!(
+                    "failed to reload `{}`: {error}",
+                    request.path.display()
+                )),
+            },
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(FileReloadWorkerOutcome::Missing)
+        }
+        Err(error) => Err(format!(
+            "failed to stat `{}`: {error}",
+            request.path.display()
+        )),
+    };
+
+    FileReloadWorkerResult {
+        buffer_id: request.buffer_id,
+        buffer_revision: request.buffer_revision,
+        path: request.path,
+        outcome,
+    }
+}
+
+fn create_file_reload_watcher(
+    changed_paths: Arc<Mutex<Vec<PathBuf>>>,
+    errors: Arc<Mutex<Vec<String>>>,
+) -> notify::Result<RecommendedWatcher> {
+    recommended_watcher(move |event: notify::Result<NotifyEvent>| match event {
+        Ok(event) => enqueue_file_reload_event(event, &changed_paths),
+        Err(error) => {
+            push_file_reload_worker_error(
+                &errors,
+                format!("failed to receive file watcher event: {error}"),
+            );
+        }
+    })
+}
+
+fn enqueue_file_reload_event(event: NotifyEvent, changed_paths: &Arc<Mutex<Vec<PathBuf>>>) {
+    if !matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) {
+        return;
+    }
+    if let Ok(mut queued_paths) = changed_paths.lock() {
+        queued_paths.extend(event.paths);
+    }
+}
+
+fn push_file_reload_worker_error(errors: &Arc<Mutex<Vec<String>>>, message: String) {
+    if let Ok(mut errors) = errors.lock() {
+        errors.push(message);
     }
 }
 
@@ -20950,24 +21387,93 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
 
 fn refresh_pending_file_reloads(
     runtime: &mut EditorRuntime,
-    now: Instant,
+    _now: Instant,
     force: bool,
 ) -> Result<bool, String> {
-    let buffer_ids = {
-        let ui = shell_ui(runtime)?;
-        ui.buffers.iter().map(ShellBuffer::id).collect::<Vec<_>>()
-    };
-
     let mut changed = false;
-    for buffer_id in buffer_ids {
-        let did_reload = {
-            let ui = shell_ui_mut(runtime)?;
-            let Some(buffer) = ui.buffer_mut(buffer_id) else {
+    if force {
+        let buffer_ids = {
+            let ui = shell_ui(runtime)?;
+            ui.buffers.iter().map(ShellBuffer::id).collect::<Vec<_>>()
+        };
+        for buffer_id in buffer_ids {
+            let did_reload = {
+                let ui = shell_ui_mut(runtime)?;
+                let Some(buffer) = ui.buffer_mut(buffer_id) else {
+                    continue;
+                };
+                buffer.reload_from_disk_if_changed(true)?
+            };
+            changed |= did_reload;
+        }
+        return Ok(changed);
+    }
+
+    let mut first_error = None;
+    let watcher_errors = shell_ui(runtime)?.file_reload_worker.take_errors();
+    if first_error.is_none() {
+        first_error = watcher_errors.into_iter().next();
+    }
+    let changed_paths = shell_ui(runtime)?.file_reload_worker.take_changed_paths();
+    if !changed_paths.is_empty() {
+        let changed_paths = changed_paths.into_iter().collect::<HashSet<_>>();
+        let ui = shell_ui_mut(runtime)?;
+        for buffer in &mut ui.buffers {
+            let Some(path) = shell_buffer_watch_path(buffer) else {
                 continue;
             };
-            buffer.reload_from_disk_if_changed(now, force)?
-        };
-        changed |= did_reload;
+            if changed_paths.contains(&path) {
+                buffer.mark_backing_file_reload_pending();
+            }
+        }
+    }
+    let results = shell_ui(runtime)?.file_reload_worker.take_results();
+    if !results.is_empty() {
+        let ui = shell_ui_mut(runtime)?;
+        for result in results {
+            let Some(buffer) = ui.buffer_mut(result.buffer_id) else {
+                continue;
+            };
+            buffer.finish_file_reload_request();
+            let current_path = buffer.path().map(Path::to_path_buf);
+            if buffer.text.revision() != result.buffer_revision
+                || current_path.as_deref() != Some(result.path.as_path())
+            {
+                continue;
+            }
+            match result.outcome {
+                Ok(FileReloadWorkerOutcome::Missing) => {}
+                Ok(FileReloadWorkerOutcome::Unchanged { fingerprint }) => {
+                    buffer.backing_file_fingerprint = Some(fingerprint);
+                }
+                Ok(FileReloadWorkerOutcome::Reloaded { fingerprint, text }) => {
+                    changed |= buffer.apply_reloaded_file_buffer(fingerprint, text);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+
+    let requests = {
+        let ui = shell_ui_mut(runtime)?;
+        ui.buffers
+            .iter_mut()
+            .filter_map(ShellBuffer::file_reload_request)
+            .collect::<Vec<_>>()
+    };
+    if !requests.is_empty() {
+        let ui = shell_ui(runtime)?;
+        for request in requests {
+            ui.file_reload_worker.send(request);
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     Ok(changed)
@@ -22833,6 +23339,135 @@ fn lsp_location_picker_entry(workspace_root: Option<&Path>, location: &LspLocati
         ),
         action: PickerAction::OpenFileLocation { path, target },
     }
+}
+
+fn lsp_code_actions_picker_overlay(
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+    code_actions: &[LspCodeAction],
+) -> PickerOverlay {
+    let entries = code_actions
+        .iter()
+        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .enumerate()
+        .map(|(index, code_action)| {
+            lsp_code_action_picker_entry(workspace_id, buffer_id, path, index, code_action)
+        })
+        .collect();
+    PickerOverlay::from_entries("Code Actions", entries)
+}
+
+fn lsp_code_action_picker_entry(
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+    index: usize,
+    code_action: &LspCodeAction,
+) -> PickerEntry {
+    let status = if code_action.disabled_reason().is_some() {
+        "disabled"
+    } else if lsp_code_action_supported_edits(code_action, path).is_ok() {
+        "edit"
+    } else {
+        "unsupported"
+    };
+    let mut detail_parts = vec![code_action.server_id().to_owned()];
+    if let Some(kind) = code_action.kind() {
+        detail_parts.push(kind.to_owned());
+    }
+    if code_action.is_preferred() {
+        detail_parts.push("preferred".to_owned());
+    }
+    detail_parts.push(status.to_owned());
+    PickerEntry {
+        item: PickerItem::new(
+            format!("lsp-code-action:{index}"),
+            code_action.title(),
+            detail_parts.join(" | "),
+            lsp_code_action_picker_preview(code_action, path),
+        ),
+        action: PickerAction::ApplyLspCodeAction {
+            workspace_id,
+            buffer_id,
+            path: path.to_path_buf(),
+            code_action: code_action.clone(),
+        },
+    }
+}
+
+fn lsp_code_action_picker_preview(code_action: &LspCodeAction, path: &Path) -> Option<String> {
+    match lsp_code_action_supported_edits(code_action, path) {
+        Ok(edits) => {
+            let suffix = if edits.len() == 1 { "" } else { "s" };
+            Some(format!(
+                "Apply {} text edit{suffix} to the active file.",
+                edits.len()
+            ))
+        }
+        Err(message) => Some(message),
+    }
+}
+
+fn lsp_code_action_supported_edits<'a>(
+    code_action: &'a LspCodeAction,
+    path: &Path,
+) -> Result<&'a [LspTextEdit], String> {
+    if let Some(reason) = code_action.disabled_reason() {
+        return Err(format!("Disabled: {reason}"));
+    }
+    if code_action.has_resource_operations() {
+        return Err("Unsupported: resource operations are not supported yet.".to_owned());
+    }
+    if let Some(command_name) = code_action.command_name() {
+        return Err(format!(
+            "Unsupported: command `{command_name}` code actions are not supported yet."
+        ));
+    }
+    if code_action.document_edits().is_empty() {
+        return Err("Unsupported: this code action does not include text edits.".to_owned());
+    }
+    if code_action.document_edits().len() != 1 {
+        return Err("Unsupported: multi-file code actions are not supported yet.".to_owned());
+    }
+    let document_edit = &code_action.document_edits()[0];
+    if document_edit.path() != path {
+        return Err(format!(
+            "Unsupported: this code action edits `{}` instead of the active file.",
+            document_edit.path().display()
+        ));
+    }
+    Ok(document_edit.edits())
+}
+
+fn apply_lsp_code_action(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    path: &Path,
+    code_action: &LspCodeAction,
+) -> Result<(), String> {
+    let edits = lsp_code_action_supported_edits(code_action, path)?;
+    let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if buffer.path() != Some(path) {
+            return Err(format!(
+                "buffer `{}` is no longer available for `{}`",
+                path.display(),
+                code_action.title()
+            ));
+        }
+        apply_lsp_text_edits(buffer, edits);
+        buffer.set_cursor(original_cursor);
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer(buffer_id);
+    sync_active_buffer(runtime)?;
+    Ok(())
 }
 
 fn workspace_search_char_column(line: &str, byte_offset: usize) -> usize {
@@ -27400,8 +28035,331 @@ fn to_pixel_rect(rect: Rect) -> PixelRect {
     PixelRect::new(rect.x(), rect.y(), rect.width(), rect.height())
 }
 
-fn present_scene_to_canvas(
+const TEXT_TEXTURE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const TEXT_TEXTURE_CACHE_MAX_ENTRY_BYTES: usize = 256 * 1024;
+const TEXT_TEXTURE_CACHE_MAX_ENTRIES: usize = 4096;
+const LIGATURE_SHAPE_CACHE_MAX_ENTRIES: usize = 4096;
+
+type WindowTextureCreator = TextureCreator<WindowContext>;
+
+fn render_color_cache_key(color: RenderColor) -> u32 {
+    u32::from_be_bytes([color.r, color.g, color.b, color.a])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextTextureCacheMode {
+    ReadWrite,
+    ReuseOnly,
+}
+
+impl TextTextureCacheMode {
+    const fn allows_inserts(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+}
+
+struct ManagedTexture<'texture> {
+    texture: Texture<'texture>,
+    width: u32,
+    height: u32,
+}
+
+impl<'texture> ManagedTexture<'texture> {
+    fn from_surface(
+        texture_creator: &'texture WindowTextureCreator,
+        surface: &Surface<'_>,
+    ) -> Result<Self, ShellError> {
+        Self::from_surface_with_scale_mode(texture_creator, surface, None)
+    }
+
+    fn from_surface_nearest(
+        texture_creator: &'texture WindowTextureCreator,
+        surface: &Surface<'_>,
+    ) -> Result<Self, ShellError> {
+        Self::from_surface_with_scale_mode(texture_creator, surface, Some(ScaleMode::Nearest))
+    }
+
+    fn from_surface_with_scale_mode(
+        texture_creator: &'texture WindowTextureCreator,
+        surface: &Surface<'_>,
+        scale_mode: Option<ScaleMode>,
+    ) -> Result<Self, ShellError> {
+        let mut texture = texture_creator
+            .create_texture_from_surface(surface)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        if let Some(scale_mode) = scale_mode {
+            texture.set_scale_mode(scale_mode);
+        }
+        let query = texture.query();
+        Ok(Self {
+            texture,
+            width: query.width,
+            height: query.height,
+        })
+    }
+
+    fn byte_len(&self) -> usize {
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(4)
+    }
+
+    fn copy_to_canvas(&self, canvas: &mut Canvas<Window>, rect: Rect) -> Result<(), ShellError> {
+        canvas
+            .copy(&self.texture, None, rect)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        Ok(())
+    }
+
+    const fn width(&self) -> u32 {
+        self.width
+    }
+
+    const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+struct RenderedTextTexture<'texture> {
+    texture: Option<ManagedTexture<'texture>>,
+    offset_x: i32,
+    offset_y: i32,
+    advance: i32,
+}
+
+impl<'texture> RenderedTextTexture<'texture> {
+    fn from_texture(
+        texture: ManagedTexture<'texture>,
+        offset_x: i32,
+        offset_y: i32,
+        advance: i32,
+    ) -> Self {
+        Self {
+            texture: Some(texture),
+            offset_x,
+            offset_y,
+            advance,
+        }
+    }
+
+    fn empty(advance: i32) -> Self {
+        Self {
+            texture: None,
+            offset_x: 0,
+            offset_y: 0,
+            advance,
+        }
+    }
+
+    fn byte_len(&self) -> usize {
+        self.texture.as_ref().map_or(0, ManagedTexture::byte_len)
+    }
+
+    fn blit(&self, canvas: &mut Canvas<Window>, x: i32, y: i32) -> Result<i32, ShellError> {
+        if let Some(texture) = self.texture.as_ref() {
+            texture.copy_to_canvas(
+                canvas,
+                Rect::new(
+                    x.saturating_add(self.offset_x),
+                    y.saturating_add(self.offset_y),
+                    texture.width(),
+                    texture.height(),
+                ),
+            )?;
+        }
+        Ok(self.advance)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TextTextureCacheKey {
+    Primary {
+        text: String,
+        color: u32,
+    },
+    Ligature {
+        text: String,
+        color: u32,
+    },
+    Icon {
+        font_index: usize,
+        character: char,
+        color: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedLigatureGlyphPlacement {
+    glyph_id: u16,
+    draw_x: i32,
+    draw_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedGlyphRasterPlacement {
+    glyph_id: u16,
+    draw_x: i32,
+    draw_y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedLigatureLayout {
+    glyphs: Vec<CachedLigatureGlyphPlacement>,
+    offset_x: i32,
+    offset_y: i32,
+    width: u32,
+    height: u32,
+    advance: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LigatureShapeCacheValue {
+    NotLigature,
+    Layout(CachedLigatureLayout),
+}
+
+struct TextTextureCacheEntry<'texture> {
+    rendered: RenderedTextTexture<'texture>,
+    last_used: u64,
+}
+
+struct LigatureShapeCacheEntry {
+    value: LigatureShapeCacheValue,
+    last_used: u64,
+}
+
+struct TextTextureCache<'texture> {
+    entries: HashMap<TextTextureCacheKey, TextTextureCacheEntry<'texture>>,
+    ligature_shapes: HashMap<String, LigatureShapeCacheEntry>,
+    access_tick: u64,
+    used_bytes: usize,
+}
+
+impl<'texture> TextTextureCache<'texture> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            ligature_shapes: HashMap::new(),
+            access_tick: 0,
+            used_bytes: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.ligature_shapes.clear();
+        self.access_tick = 0;
+        self.used_bytes = 0;
+    }
+
+    fn can_cache(rendered: &RenderedTextTexture<'texture>) -> bool {
+        rendered.byte_len() <= TEXT_TEXTURE_CACHE_MAX_ENTRY_BYTES
+    }
+
+    fn get(&mut self, key: &TextTextureCacheKey) -> Option<&RenderedTextTexture<'texture>> {
+        let last_used = self.next_access_tick();
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = last_used;
+        Some(&entry.rendered)
+    }
+
+    fn insert(
+        &mut self,
+        key: TextTextureCacheKey,
+        rendered: RenderedTextTexture<'texture>,
+    ) -> Result<&RenderedTextTexture<'texture>, ShellError> {
+        let byte_len = rendered.byte_len();
+        let last_used = self.next_access_tick();
+        if let Some(previous) = self.entries.insert(
+            key.clone(),
+            TextTextureCacheEntry {
+                rendered,
+                last_used,
+            },
+        ) {
+            self.used_bytes = self.used_bytes.saturating_sub(previous.rendered.byte_len());
+        }
+        self.used_bytes = self.used_bytes.saturating_add(byte_len);
+        self.evict_to_budget();
+        self.entries
+            .get(&key)
+            .map(|entry| &entry.rendered)
+            .ok_or_else(|| {
+                ShellError::Runtime(
+                    "text texture cache entry disappeared after insertion".to_owned(),
+                )
+            })
+    }
+
+    fn get_ligature_shape(&mut self, text: &str) -> Option<LigatureShapeCacheValue> {
+        let last_used = self.next_access_tick();
+        let entry = self.ligature_shapes.get_mut(text)?;
+        entry.last_used = last_used;
+        Some(entry.value.clone())
+    }
+
+    fn insert_ligature_shape(
+        &mut self,
+        text: String,
+        value: LigatureShapeCacheValue,
+    ) -> LigatureShapeCacheValue {
+        let last_used = self.next_access_tick();
+        self.ligature_shapes.insert(
+            text,
+            LigatureShapeCacheEntry {
+                value: value.clone(),
+                last_used,
+            },
+        );
+        self.evict_ligature_shapes();
+        value
+    }
+
+    fn next_access_tick(&mut self) -> u64 {
+        self.access_tick = self.access_tick.saturating_add(1);
+        self.access_tick
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > TEXT_TEXTURE_CACHE_MAX_ENTRIES
+            || self.used_bytes > TEXT_TEXTURE_CACHE_MAX_BYTES
+        {
+            let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest_key) {
+                self.used_bytes = self.used_bytes.saturating_sub(entry.rendered.byte_len());
+            }
+        }
+    }
+
+    fn evict_ligature_shapes(&mut self) {
+        while self.ligature_shapes.len() > LIGATURE_SHAPE_CACHE_MAX_ENTRIES {
+            let Some(oldest_key) = self
+                .ligature_shapes
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.ligature_shapes.remove(&oldest_key);
+        }
+    }
+}
+
+fn present_scene_to_canvas<'texture>(
     canvas: &mut Canvas<Window>,
+    texture_creator: &'texture WindowTextureCreator,
+    text_texture_cache: &mut TextTextureCache<'texture>,
+    text_texture_cache_mode: TextTextureCacheMode,
     fonts: &FontSet<'_>,
     scene: &[DrawCommand],
 ) -> Result<(), ShellError> {
@@ -27441,9 +28399,17 @@ fn present_scene_to_canvas(
                 *line_height,
                 from_render_color(*color),
             )?,
-            DrawCommand::Text { x, y, text, color } => {
-                render_text_with_fonts(canvas, fonts, *x, *y, text, *color)?;
-            }
+            DrawCommand::Text { x, y, text, color } => render_text_with_fonts(
+                canvas,
+                texture_creator,
+                text_texture_cache,
+                text_texture_cache_mode,
+                fonts,
+                *x,
+                *y,
+                text,
+                *color,
+            )?,
             DrawCommand::Image {
                 rect,
                 image_width,
@@ -27459,43 +28425,15 @@ fn present_scene_to_canvas(
                     PixelFormat::RGBA32,
                 )
                 .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                let texture_creator = canvas.texture_creator();
-                let texture = texture_creator
-                    .create_texture_from_surface(&surface)
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                canvas
-                    .copy(
-                        &texture,
-                        None,
-                        Rect::new(rect.x, rect.y, rect.width, rect.height),
-                    )
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
+                texture
+                    .copy_to_canvas(canvas, Rect::new(rect.x, rect.y, rect.width, rect.height))?;
             }
         }
     }
 
     canvas.present();
     Ok(())
-}
-
-fn blit_surface_to_canvas(
-    canvas: &mut Canvas<Window>,
-    surface: &Surface<'_>,
-    x: i32,
-    y: i32,
-) -> Result<i32, ShellError> {
-    let texture_creator = canvas.texture_creator();
-    let texture = texture_creator
-        .create_texture_from_surface(surface)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    canvas
-        .copy(
-            &texture,
-            None,
-            Rect::new(x, y, surface.width(), surface.height()),
-        )
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    Ok(surface.width() as i32)
 }
 
 #[derive(Clone, Copy)]
@@ -27546,13 +28484,74 @@ fn icon_glyph_cell_layout(metrics: &fontdue::Metrics, cell_width: i32) -> IconGl
     }
 }
 
-fn render_icon_glyph_with_fontdue(
+fn alpha_bitmap_surface(
+    width: usize,
+    height: usize,
+    bitmap: &[u8],
+    color: RenderColor,
+) -> Result<Surface<'static>, ShellError> {
+    let mut surface = Surface::new(width as u32, height as u32, PixelFormat::RGBA32)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let pitch = surface.pitch() as usize;
+    surface.with_lock_mut(|pixels| {
+        for row in 0..height {
+            let src = &bitmap[row * width..(row + 1) * width];
+            let row_start = row * pitch;
+            let dst = &mut pixels[row_start..row_start + width * 4];
+            for (alpha, rgba) in src.iter().zip(dst.chunks_exact_mut(4)) {
+                let alpha = ((*alpha as u16 * color.a as u16) / 255) as u8;
+                rgba[0] = color.r;
+                rgba[1] = color.g;
+                rgba[2] = color.b;
+                rgba[3] = alpha;
+            }
+        }
+    });
+    Ok(surface)
+}
+
+fn render_primary_text_texture<'texture>(
+    texture_creator: &'texture WindowTextureCreator,
+    fonts: &FontSet<'_>,
+    text: &str,
+    color: RenderColor,
+) -> Result<RenderedTextTexture<'texture>, ShellError> {
+    // Keep plain text on the same raster path as ligatures so lines do not
+    // visibly switch renderer when a ligature appears.
+    let layout = nominal_primary_text_layout(fonts, text, fonts.primary().ascent());
+    render_cached_ligature_texture(texture_creator, fonts, &layout, color)
+}
+
+fn draw_text_texture_with_cache<'texture, F>(
     canvas: &mut Canvas<Window>,
-    style: IconGlyphRenderStyle<'_>,
+    text_texture_cache: &mut TextTextureCache<'texture>,
+    text_texture_cache_mode: TextTextureCacheMode,
+    key: TextTextureCacheKey,
+    create: F,
     x: i32,
     y: i32,
+) -> Result<i32, ShellError>
+where
+    F: FnOnce() -> Result<RenderedTextTexture<'texture>, ShellError>,
+{
+    if let Some(rendered) = text_texture_cache.get(&key) {
+        return rendered.blit(canvas, x, y);
+    }
+
+    let rendered = create()?;
+    if !text_texture_cache_mode.allows_inserts() || !TextTextureCache::can_cache(&rendered) {
+        return rendered.blit(canvas, x, y);
+    }
+
+    let rendered = text_texture_cache.insert(key, rendered)?;
+    rendered.blit(canvas, x, y)
+}
+
+fn render_icon_glyph_texture<'texture>(
+    texture_creator: &'texture WindowTextureCreator,
+    style: IconGlyphRenderStyle<'_>,
     character: char,
-) -> Result<i32, ShellError> {
+) -> Result<RenderedTextTexture<'texture>, ShellError> {
     let (metrics, bitmap) = rasterize_icon_glyph_for_cell(
         &style.icon_font.raster_font,
         character,
@@ -27561,30 +28560,18 @@ fn render_icon_glyph_with_fontdue(
     );
     let layout = icon_glyph_cell_layout(&metrics, style.cell_width);
     if metrics.width == 0 || metrics.height == 0 {
-        return Ok(layout.advance);
+        return Ok(RenderedTextTexture::empty(layout.advance));
     }
 
-    let mut pixels = vec![0u8; metrics.width * metrics.height * 4];
-    for (alpha, rgba) in bitmap.iter().zip(pixels.chunks_exact_mut(4)) {
-        let alpha = ((*alpha as u16 * style.color.a as u16) / 255) as u8;
-        rgba[0] = style.color.r;
-        rgba[1] = style.color.g;
-        rgba[2] = style.color.b;
-        rgba[3] = alpha;
-    }
-
-    let surface = Surface::from_data(
-        pixels.as_mut_slice(),
-        metrics.width as u32,
-        metrics.height as u32,
-        (metrics.width * 4) as u32,
-        PixelFormat::RGBA32,
-    )
-    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    let draw_x = x + layout.draw_offset_x;
-    let draw_y = y + style.primary_ascent - metrics.height as i32 - metrics.ymin;
-    blit_surface_to_canvas(canvas, &surface, draw_x, draw_y)?;
-    Ok(layout.advance)
+    let surface = alpha_bitmap_surface(metrics.width, metrics.height, &bitmap, style.color)?;
+    let texture = ManagedTexture::from_surface_nearest(texture_creator, &surface)?;
+    let draw_offset_y = style.primary_ascent - metrics.height as i32 - metrics.ymin;
+    Ok(RenderedTextTexture::from_texture(
+        texture,
+        layout.draw_offset_x,
+        draw_offset_y,
+        layout.advance,
+    ))
 }
 
 fn scale_shaping_units(value: i32, pixel_size: f32, units_per_em: i32) -> f32 {
@@ -27652,57 +28639,118 @@ fn shape_ascii_ligature_run(fonts: &FontSet<'_>, text: &str) -> Option<ShapedRun
     (has_substitution || has_positioning).then_some(shaped)
 }
 
-fn render_primary_ligature_run(
-    canvas: &mut Canvas<Window>,
+fn build_cached_text_layout(
+    glyphs: Vec<CachedGlyphRasterPlacement>,
+    advance: i32,
+) -> CachedLigatureLayout {
+    if glyphs.is_empty() {
+        return CachedLigatureLayout {
+            glyphs: Vec::new(),
+            offset_x: 0,
+            offset_y: 0,
+            width: 0,
+            height: 0,
+            advance,
+        };
+    }
+
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    let glyphs = glyphs
+        .into_iter()
+        .map(|glyph| {
+            min_x = min_x.min(glyph.draw_x);
+            min_y = min_y.min(glyph.draw_y);
+            max_x = max_x.max(glyph.draw_x.saturating_add(glyph.width as i32));
+            max_y = max_y.max(glyph.draw_y.saturating_add(glyph.height as i32));
+            CachedLigatureGlyphPlacement {
+                glyph_id: glyph.glyph_id,
+                draw_x: glyph.draw_x,
+                draw_y: glyph.draw_y,
+            }
+        })
+        .collect();
+
+    CachedLigatureLayout {
+        glyphs,
+        offset_x: min_x,
+        offset_y: min_y,
+        width: (max_x - min_x).max(1) as u32,
+        height: (max_y - min_y).max(1) as u32,
+        advance,
+    }
+}
+
+fn nominal_primary_text_layout(
     fonts: &FontSet<'_>,
-    x: i32,
-    y: i32,
     text: &str,
     primary_ascent: i32,
-    color: RenderColor,
-) -> Result<Option<i32>, ShellError> {
+) -> CachedLigatureLayout {
+    let glyphs = text
+        .chars()
+        .enumerate()
+        .filter_map(|(index, character)| {
+            let glyph_id = fonts.primary_raster_font().lookup_glyph_index(character);
+            let metrics = fonts
+                .primary_raster_font()
+                .metrics_indexed(glyph_id, fonts.primary_pixel_size());
+            if metrics.width == 0 || metrics.height == 0 {
+                return None;
+            }
+            Some(CachedGlyphRasterPlacement {
+                glyph_id,
+                draw_x: index as i32 * fonts.cell_width() + metrics.xmin,
+                draw_y: primary_ascent - metrics.height as i32 - metrics.ymin,
+                width: metrics.width as u32,
+                height: metrics.height as u32,
+            })
+        })
+        .collect();
+    build_cached_text_layout(
+        glyphs,
+        monospace_text_width(text, fonts.cell_width()) as i32,
+    )
+}
+
+fn cached_ligature_layout(
+    fonts: &FontSet<'_>,
+    text: &str,
+    primary_ascent: i32,
+) -> LigatureShapeCacheValue {
     let Some(shaped) = shape_ascii_ligature_run(fonts, text) else {
-        return Ok(None);
+        return LigatureShapeCacheValue::NotLigature;
     };
     let uses_cell_grid = shaped_run_uses_cell_grid(text, &shaped);
     if !shaped_run_preserves_monospace_layout(text, &shaped, fonts.cell_width()) {
-        return Ok(None);
+        return LigatureShapeCacheValue::NotLigature;
     }
 
-    let mut pen_x = x as f32;
+    let mut pen_x = 0.0_f32;
+    let mut glyphs = Vec::new();
     for (index, glyph) in shaped.glyphs.iter().enumerate() {
-        let (metrics, bitmap) = fonts
+        let metrics = fonts
             .primary_raster_font()
-            .rasterize_indexed(glyph.glyph_id, fonts.primary_pixel_size());
+            .metrics_indexed(glyph.glyph_id, fonts.primary_pixel_size());
         if metrics.width != 0 && metrics.height != 0 {
-            let mut pixels = vec![0u8; metrics.width * metrics.height * 4];
-            for (alpha, rgba) in bitmap.iter().zip(pixels.chunks_exact_mut(4)) {
-                let alpha = ((*alpha as u16 * color.a as u16) / 255) as u8;
-                rgba[0] = color.r;
-                rgba[1] = color.g;
-                rgba[2] = color.b;
-                rgba[3] = alpha;
-            }
-
-            let surface = Surface::from_data(
-                pixels.as_mut_slice(),
-                metrics.width as u32,
-                metrics.height as u32,
-                (metrics.width * 4) as u32,
-                PixelFormat::RGBA32,
-            )
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
             let glyph_origin_x = if uses_cell_grid {
-                x as f32 + index as f32 * fonts.cell_width() as f32
+                index as f32 * fonts.cell_width() as f32
             } else {
                 pen_x
             };
             let draw_x = (glyph_origin_x + glyph.x_offset).round() as i32 + metrics.xmin;
-            let draw_y = y + primary_ascent
+            let draw_y = primary_ascent
                 - metrics.height as i32
                 - metrics.ymin
                 - glyph.y_offset.round() as i32;
-            blit_surface_to_canvas(canvas, &surface, draw_x, draw_y)?;
+            glyphs.push(CachedGlyphRasterPlacement {
+                glyph_id: glyph.glyph_id,
+                draw_x,
+                draw_y,
+                width: metrics.width as u32,
+                height: metrics.height as u32,
+            });
         }
         pen_x += glyph.x_advance;
     }
@@ -27712,11 +28760,110 @@ fn render_primary_ligature_run(
     } else {
         shaped.total_advance.round() as i32
     };
-    Ok(Some(advance))
+    LigatureShapeCacheValue::Layout(build_cached_text_layout(glyphs, advance))
 }
 
-fn render_text_with_fonts(
+fn render_cached_ligature_texture<'texture>(
+    texture_creator: &'texture WindowTextureCreator,
+    fonts: &FontSet<'_>,
+    layout: &CachedLigatureLayout,
+    color: RenderColor,
+) -> Result<RenderedTextTexture<'texture>, ShellError> {
+    if layout.glyphs.is_empty() || layout.width == 0 || layout.height == 0 {
+        return Ok(RenderedTextTexture::empty(layout.advance));
+    }
+
+    let mut composed = Surface::new(layout.width, layout.height, PixelFormat::RGBA32)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    composed
+        .fill_rect(None, Color::RGBA(0, 0, 0, 0))
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    for glyph in &layout.glyphs {
+        let (metrics, bitmap) = fonts
+            .primary_raster_font()
+            .rasterize_indexed(glyph.glyph_id, fonts.primary_pixel_size());
+        if metrics.width == 0 || metrics.height == 0 {
+            continue;
+        }
+        let mut glyph_surface =
+            alpha_bitmap_surface(metrics.width, metrics.height, &bitmap, color)?;
+        glyph_surface
+            .set_blend_mode(BlendMode::Blend)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        glyph_surface
+            .blit(
+                None,
+                &mut composed,
+                Some(Rect::new(
+                    glyph.draw_x - layout.offset_x,
+                    glyph.draw_y - layout.offset_y,
+                    glyph_surface.width(),
+                    glyph_surface.height(),
+                )),
+            )
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    }
+    let texture = ManagedTexture::from_surface_nearest(texture_creator, &composed)?;
+    Ok(RenderedTextTexture::from_texture(
+        texture,
+        layout.offset_x,
+        layout.offset_y,
+        layout.advance,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_primary_ligature_texture_if_available<'texture>(
     canvas: &mut Canvas<Window>,
+    texture_creator: &'texture WindowTextureCreator,
+    text_texture_cache: &mut TextTextureCache<'texture>,
+    text_texture_cache_mode: TextTextureCacheMode,
+    fonts: &FontSet<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    primary_ascent: i32,
+    color: RenderColor,
+) -> Result<Option<i32>, ShellError> {
+    let key = TextTextureCacheKey::Ligature {
+        text: text.to_owned(),
+        color: render_color_cache_key(color),
+    };
+    if let Some(rendered) = text_texture_cache.get(&key) {
+        return Ok(Some(rendered.blit(canvas, x, y)?));
+    }
+
+    let shape = if let Some(shape) = text_texture_cache.get_ligature_shape(text) {
+        shape
+    } else {
+        let shape = cached_ligature_layout(fonts, text, primary_ascent);
+        if text_texture_cache_mode.allows_inserts() {
+            text_texture_cache.insert_ligature_shape(text.to_owned(), shape)
+        } else {
+            shape
+        }
+    };
+    let LigatureShapeCacheValue::Layout(layout) = shape else {
+        return Ok(None);
+    };
+    let rendered = render_cached_ligature_texture(texture_creator, fonts, &layout, color)?;
+    if !text_texture_cache_mode.allows_inserts() || !TextTextureCache::can_cache(&rendered) {
+        return Ok(Some(rendered.blit(canvas, x, y)?));
+    }
+
+    let rendered = text_texture_cache.insert(key, rendered)?;
+    Ok(Some(rendered.blit(canvas, x, y)?))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "text rendering needs the live canvas, cache, font set, and draw coordinates together"
+)]
+fn render_text_with_fonts<'texture>(
+    canvas: &mut Canvas<Window>,
+    texture_creator: &'texture WindowTextureCreator,
+    text_texture_cache: &mut TextTextureCache<'texture>,
+    text_texture_cache_mode: TextTextureCacheMode,
     fonts: &FontSet<'_>,
     x: i32,
     y: i32,
@@ -27736,14 +28883,18 @@ fn render_text_with_fonts(
     } else {
         font_runs(text, fonts)
     };
+    let color_key = render_color_cache_key(color);
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
         match run.role {
             FontRole::Primary => {
-                if let Some(advance) = render_primary_ligature_run(
+                if let Some(advance) = draw_primary_ligature_texture_if_available(
                     canvas,
+                    texture_creator,
+                    text_texture_cache,
+                    text_texture_cache_mode,
                     fonts,
                     draw_x,
                     y,
@@ -27754,15 +28905,23 @@ fn render_text_with_fonts(
                     draw_x += advance;
                     continue;
                 }
-                let surface = fonts
-                    .primary()
-                    .render(&run.text)
-                    .blended(from_render_color(color))
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                draw_x += blit_surface_to_canvas(canvas, &surface, draw_x, y)?;
+                draw_x += draw_text_texture_with_cache(
+                    canvas,
+                    text_texture_cache,
+                    text_texture_cache_mode,
+                    TextTextureCacheKey::Primary {
+                        text: run.text.clone(),
+                        color: color_key,
+                    },
+                    || render_primary_text_texture(texture_creator, fonts, &run.text, color),
+                    draw_x,
+                    y,
+                )?;
             }
             FontRole::Icon(index) => {
-                let icon_font = fonts.icon_font(index).expect("icon font missing");
+                let icon_font = fonts.icon_font(index).ok_or_else(|| {
+                    ShellError::Runtime(format!("icon font missing at index {index}"))
+                })?;
                 let style = IconGlyphRenderStyle {
                     icon_font,
                     icon_pixel_size: fonts.icon_pixel_size(),
@@ -27771,7 +28930,19 @@ fn render_text_with_fonts(
                     color,
                 };
                 for character in run.text.chars() {
-                    draw_x += render_icon_glyph_with_fontdue(canvas, style, draw_x, y, character)?;
+                    draw_x += draw_text_texture_with_cache(
+                        canvas,
+                        text_texture_cache,
+                        text_texture_cache_mode,
+                        TextTextureCacheKey::Icon {
+                            font_index: index,
+                            character,
+                            color: color_key,
+                        },
+                        || render_icon_glyph_texture(texture_creator, style, character),
+                        draw_x,
+                        y,
+                    )?;
                 }
             }
         }

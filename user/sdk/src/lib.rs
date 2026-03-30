@@ -60,6 +60,7 @@ pub mod lsp_hooks {
     pub const DEFINITION: &str = "lsp.goto-definition";
     pub const REFERENCES: &str = "lsp.goto-references";
     pub const IMPLEMENTATION: &str = "lsp.goto-implementation";
+    pub const CODE_ACTIONS: &str = "lsp.code-actions";
 }
 
 /// Hook name constants for the git subsystem.

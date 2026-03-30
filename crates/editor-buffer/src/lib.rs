@@ -1253,17 +1253,22 @@ impl TextBuffer {
         };
 
         let reloaded = Self::load_from_path(&path)?;
+        Ok(self.reload_from_buffer(reloaded))
+    }
+
+    /// Applies file-backed contents that were loaded outside the UI thread.
+    pub fn reload_from_buffer(&mut self, reloaded: Self) -> bool {
         let content_changed = self.text() != reloaded.text();
         let line_ending_changed = self.preferred_line_ending != reloaded.preferred_line_ending;
         if !content_changed && !line_ending_changed {
-            return Ok(false);
+            return false;
         }
 
         let cursor = self.cursor;
         let state_id = self.next_state_id;
 
         self.rope = reloaded.rope;
-        self.path = Some(path);
+        self.path = reloaded.path;
         self.preferred_line_ending = reloaded.preferred_line_ending;
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -1272,7 +1277,7 @@ impl TextBuffer {
         self.next_state_id = self.next_state_id.saturating_add(1);
         self.cursor = self.clamp_point(cursor);
 
-        Ok(true)
+        true
     }
 
     fn from_rope(rope: Rope, preferred_line_ending: LineEnding, path: Option<PathBuf>) -> Self {

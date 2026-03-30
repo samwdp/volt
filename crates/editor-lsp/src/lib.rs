@@ -13,10 +13,10 @@ use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
 
 pub use client::{
-    LspClientError, LspClientManager, LspCompletionItem, LspCompletionKind, LspFormattingOptions,
-    LspHoverContents, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot, LspNotification,
-    LspNotificationEntry, LspNotificationLevel, LspNotificationProgress, LspNotificationSnapshot,
-    LspSignatureHelpContents, LspTextEdit,
+    LspClientError, LspClientManager, LspCodeAction, LspCompletionItem, LspCompletionKind,
+    LspDocumentTextEdits, LspFormattingOptions, LspHoverContents, LspLocation, LspLogDirection,
+    LspLogEntry, LspLogSnapshot, LspNotification, LspNotificationEntry, LspNotificationLevel,
+    LspNotificationProgress, LspNotificationSnapshot, LspSignatureHelpContents, LspTextEdit,
 };
 
 /// Human-readable summary of this crate's responsibility.

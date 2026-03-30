@@ -43,6 +43,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
 const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
+const CODE_ACTION_METHOD: &str = "textDocument/codeAction";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -231,6 +232,95 @@ impl LspTextEdit {
 
     pub fn new_text(&self) -> &str {
         &self.new_text
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspDocumentTextEdits {
+    path: PathBuf,
+    edits: Vec<LspTextEdit>,
+}
+
+impl LspDocumentTextEdits {
+    fn new(path: PathBuf, edits: Vec<LspTextEdit>) -> Self {
+        Self { path, edits }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn edits(&self) -> &[LspTextEdit] {
+        &self.edits
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspCodeAction {
+    server_id: String,
+    title: String,
+    kind: Option<String>,
+    disabled_reason: Option<String>,
+    preferred: bool,
+    document_edits: Vec<LspDocumentTextEdits>,
+    command_name: Option<String>,
+    has_resource_operations: bool,
+}
+
+impl LspCodeAction {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        server_id: impl Into<String>,
+        title: impl Into<String>,
+        kind: Option<String>,
+        disabled_reason: Option<String>,
+        preferred: bool,
+        document_edits: Vec<LspDocumentTextEdits>,
+        command_name: Option<String>,
+        has_resource_operations: bool,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            title: title.into(),
+            kind,
+            disabled_reason,
+            preferred,
+            document_edits,
+            command_name,
+            has_resource_operations,
+        }
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    pub fn disabled_reason(&self) -> Option<&str> {
+        self.disabled_reason.as_deref()
+    }
+
+    pub const fn is_preferred(&self) -> bool {
+        self.preferred
+    }
+
+    pub fn document_edits(&self) -> &[LspDocumentTextEdits] {
+        &self.document_edits
+    }
+
+    pub fn command_name(&self) -> Option<&str> {
+        self.command_name.as_deref()
+    }
+
+    pub const fn has_resource_operations(&self) -> bool {
+        self.has_resource_operations
     }
 }
 
@@ -899,6 +989,27 @@ impl LspClientManager {
         Ok(locations)
     }
 
+    pub fn code_actions(
+        &self,
+        path: &Path,
+        range: TextRange,
+    ) -> Result<Vec<LspCodeAction>, LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let mut actions = Vec::new();
+        for session in sessions {
+            actions.extend(session.code_actions(path, range)?);
+        }
+        actions.sort_by(|left, right| {
+            right
+                .preferred
+                .cmp(&left.preferred)
+                .then_with(|| left.title.cmp(&right.title))
+                .then_with(|| left.server_id.cmp(&right.server_id))
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+        Ok(actions)
+    }
+
     pub fn formatting(
         &self,
         path: &Path,
@@ -1401,6 +1512,39 @@ impl LspSessionHandle {
             partial_result_params: PartialResultParams::default(),
         })?;
         parse_definition_response(self.server_id(), &response)
+    }
+
+    fn code_actions(
+        &self,
+        path: &Path,
+        range: TextRange,
+    ) -> Result<Vec<LspCodeAction>, LspClientError> {
+        let range = range.normalized();
+        let diagnostics = self
+            .diagnostics_for_path(path)
+            .into_iter()
+            .filter(|diagnostic| diagnostic_matches_request_range(diagnostic.range(), range))
+            .map(|diagnostic| lsp_code_action_diagnostic(&diagnostic))
+            .collect::<Vec<_>>();
+        let response = match self.request(
+            CODE_ACTION_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": path_to_uri(path)?,
+                },
+                "range": lsp_range_from_text_range(range),
+                "context": {
+                    "diagnostics": diagnostics,
+                },
+                "workDoneProgressParams": self.work_done_progress_params(CODE_ACTION_METHOD),
+                "partialResultParams": {},
+            }),
+        ) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        parse_code_action_response(self.server_id(), &response)
     }
 
     fn formatting(
@@ -2048,6 +2192,9 @@ fn session_notification_key(server_id: &str, root: Option<&Path>) -> String {
 fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
     serde_json::from_value::<ClientCapabilities>(json!({
         "workspace": {
+            "workspaceEdit": {
+                "documentChanges": true
+            },
             "configuration": true,
             "workspaceFolders": true
         },
@@ -2071,6 +2218,26 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
                 "completionItem": {
                     "documentationFormat": ["markdown", "plaintext"],
                     "snippetSupport": false
+                }
+            },
+            "codeAction": {
+                "dynamicRegistration": false,
+                "isPreferredSupport": true,
+                "disabledSupport": true,
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "",
+                            "quickfix",
+                            "refactor",
+                            "refactor.extract",
+                            "refactor.inline",
+                            "refactor.rewrite",
+                            "source",
+                            "source.fixAll",
+                            "source.organizeImports"
+                        ]
+                    }
                 }
             },
             "formatting": {
@@ -2440,6 +2607,169 @@ fn parse_text_edit_response(
             ))
         })?;
     Ok(edits.map(|edits| edits.iter().map(lsp_text_edit_from_lsp).collect::<Vec<_>>()))
+}
+
+fn parse_code_action_response(
+    server_id: &str,
+    value: &Value,
+) -> Result<Vec<LspCodeAction>, LspClientError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(actions) = value.as_array() else {
+        return Err(LspClientError::Protocol(format!(
+            "failed to decode code action response from `{server_id}`: expected an array"
+        )));
+    };
+    Ok(actions
+        .iter()
+        .filter_map(|action| parse_code_action_item(server_id, action))
+        .collect())
+}
+
+fn parse_code_action_item(server_id: &str, value: &Value) -> Option<LspCodeAction> {
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let kind = value.get("kind").and_then(Value::as_str).map(str::to_owned);
+    let disabled_reason = value
+        .get("disabled")
+        .and_then(|disabled| disabled.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let preferred = value
+        .get("isPreferred")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (document_edits, has_resource_operations) =
+        parse_code_action_workspace_edit(value.get("edit"));
+    let command_name = parse_code_action_command_name(value);
+    Some(LspCodeAction::new(
+        server_id,
+        title,
+        kind,
+        disabled_reason,
+        preferred,
+        document_edits,
+        command_name,
+        has_resource_operations,
+    ))
+}
+
+fn parse_code_action_command_name(value: &Value) -> Option<String> {
+    match value.get("command") {
+        Some(Value::String(command)) => Some(command.to_owned()),
+        Some(Value::Object(command)) => command
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn parse_code_action_workspace_edit(value: Option<&Value>) -> (Vec<LspDocumentTextEdits>, bool) {
+    let Some(value) = value else {
+        return (Vec::new(), false);
+    };
+    let mut document_edits = Vec::new();
+    let mut has_resource_operations = false;
+
+    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
+        for (uri, edits_value) in changes {
+            let Some(path) = file_uri_to_path(uri) else {
+                continue;
+            };
+            let edits = parse_inline_text_edits(edits_value);
+            if edits.is_empty() {
+                continue;
+            }
+            document_edits.push(LspDocumentTextEdits::new(path, edits));
+        }
+    }
+
+    if let Some(changes) = value.get("documentChanges").and_then(Value::as_array) {
+        for change in changes {
+            if let Some(document_edit) = parse_code_action_document_change(change) {
+                document_edits.push(document_edit);
+            } else if change.get("kind").is_some() {
+                has_resource_operations = true;
+            }
+        }
+    }
+
+    (document_edits, has_resource_operations)
+}
+
+fn parse_code_action_document_change(value: &Value) -> Option<LspDocumentTextEdits> {
+    let path = value
+        .get("textDocument")
+        .and_then(|text_document| text_document.get("uri"))
+        .and_then(Value::as_str)
+        .and_then(file_uri_to_path)?;
+    let edits = parse_inline_text_edits(value.get("edits")?);
+    (!edits.is_empty()).then(|| LspDocumentTextEdits::new(path, edits))
+}
+
+fn parse_inline_text_edits(value: &Value) -> Vec<LspTextEdit> {
+    value
+        .as_array()
+        .map(|edits| {
+            edits
+                .iter()
+                .filter_map(parse_inline_text_edit)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_inline_text_edit(value: &Value) -> Option<LspTextEdit> {
+    let range = parse_inline_text_range(value.get("range")?)?;
+    let new_text = value.get("newText")?.as_str()?;
+    Some(LspTextEdit::new(range, new_text))
+}
+
+fn parse_inline_text_range(value: &Value) -> Option<TextRange> {
+    Some(TextRange::new(
+        parse_inline_text_point(value.get("start")?)?,
+        parse_inline_text_point(value.get("end")?)?,
+    ))
+}
+
+fn parse_inline_text_point(value: &Value) -> Option<TextPoint> {
+    let line = value.get("line").and_then(Value::as_u64)?;
+    let character = value.get("character").and_then(Value::as_u64)?;
+    Some(TextPoint::new(
+        usize::try_from(line).ok()?,
+        usize::try_from(character).ok()?,
+    ))
+}
+
+fn diagnostic_matches_request_range(diagnostic_range: TextRange, request_range: TextRange) -> bool {
+    let diagnostic_range = diagnostic_range.normalized();
+    let request_range = request_range.normalized();
+    if request_range.start() == request_range.end() {
+        let point = request_range.start();
+        return diagnostic_range.start() <= point && point <= diagnostic_range.end();
+    }
+    diagnostic_range.start() < request_range.end() && request_range.start() < diagnostic_range.end()
+}
+
+fn lsp_code_action_diagnostic(diagnostic: &Diagnostic) -> Value {
+    json!({
+        "range": lsp_range_from_text_range(diagnostic.range()),
+        "severity": lsp_diagnostic_severity(diagnostic.severity()),
+        "source": diagnostic.source(),
+        "message": diagnostic.message(),
+    })
+}
+
+fn lsp_diagnostic_severity(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 1,
+        DiagnosticSeverity::Warning => 2,
+        DiagnosticSeverity::Information => 3,
+    }
 }
 
 fn hover_lines(value: &Value) -> Vec<String> {
@@ -3081,6 +3411,123 @@ mod tests {
                 .path()
                 .ends_with(Path::new("src").join("main.rs"))
         );
+    }
+
+    #[test]
+    fn code_action_parser_collects_active_file_edits() {
+        let response = json!([
+            {
+                "title": "Fix unused import",
+                "kind": "quickfix",
+                "isPreferred": true,
+                "edit": {
+                    "changes": {
+                        "file:///P:/volt/src/main.rs": [
+                            {
+                                "range": {
+                                    "start": { "line": 3, "character": 0 },
+                                    "end": { "line": 4, "character": 0 }
+                                },
+                                "newText": ""
+                            }
+                        ]
+                    }
+                }
+            }
+        ]);
+
+        let actions = parse_code_action_response("rust-analyzer", &response).expect("code actions");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].server_id(), "rust-analyzer");
+        assert_eq!(actions[0].title(), "Fix unused import");
+        assert_eq!(actions[0].kind(), Some("quickfix"));
+        assert!(actions[0].is_preferred());
+        assert_eq!(actions[0].document_edits().len(), 1);
+        assert!(
+            actions[0].document_edits()[0]
+                .path()
+                .ends_with(Path::new("src").join("main.rs"))
+        );
+        assert_eq!(actions[0].document_edits()[0].edits().len(), 1);
+        assert_eq!(
+            actions[0].document_edits()[0].edits()[0].range().start(),
+            TextPoint::new(3, 0)
+        );
+    }
+
+    #[test]
+    fn code_action_parser_tracks_command_and_resource_operations() {
+        let response = json!([
+            {
+                "title": "Apply workspace fix",
+                "kind": "quickfix",
+                "disabled": {
+                    "reason": "build script output is stale"
+                },
+                "command": {
+                    "title": "Apply workspace edit",
+                    "command": "rust-analyzer.applySourceChange"
+                },
+                "edit": {
+                    "documentChanges": [
+                        {
+                            "textDocument": {
+                                "uri": "file:///P:/volt/src/lib.rs",
+                                "version": 3
+                            },
+                            "edits": [
+                                {
+                                    "range": {
+                                        "start": { "line": 0, "character": 0 },
+                                        "end": { "line": 0, "character": 0 }
+                                    },
+                                    "newText": "use std::fmt;\n"
+                                }
+                            ]
+                        },
+                        {
+                            "kind": "rename",
+                            "oldUri": "file:///P:/volt/src/old.rs",
+                            "newUri": "file:///P:/volt/src/new.rs"
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "Trigger organize imports",
+                "command": "rust-analyzer.organizeImports"
+            }
+        ]);
+
+        let actions = parse_code_action_response("rust-analyzer", &response).expect("code actions");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0].disabled_reason(),
+            Some("build script output is stale")
+        );
+        assert_eq!(
+            actions[0].command_name(),
+            Some("rust-analyzer.applySourceChange")
+        );
+        assert!(actions[0].has_resource_operations());
+        assert_eq!(actions[0].document_edits().len(), 1);
+        assert_eq!(
+            actions[1].command_name(),
+            Some("rust-analyzer.organizeImports")
+        );
+        assert!(actions[1].document_edits().is_empty());
+    }
+
+    #[test]
+    fn point_requests_match_covering_diagnostics() {
+        let point = TextPoint::new(4, 12);
+        let range = TextRange::new(point, point);
+        let diagnostic = TextRange::new(TextPoint::new(4, 0), TextPoint::new(4, 20));
+        assert!(diagnostic_matches_request_range(diagnostic, range));
+        assert!(!diagnostic_matches_request_range(
+            TextRange::new(TextPoint::new(5, 0), TextPoint::new(5, 4)),
+            range,
+        ));
     }
 
     #[test]

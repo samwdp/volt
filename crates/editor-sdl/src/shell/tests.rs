@@ -47,10 +47,93 @@ const MATERIAL_ICONS_FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/font/material-design-icons.ttf"
 ));
-const BERKELEY_MONO_FONT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../LigaBerkeleyMono-Regular.ttf"
-));
+
+fn berkeley_mono_font() -> Option<&'static [u8]> {
+    static BERKELEY_MONO_FONT: std::sync::OnceLock<Option<Box<[u8]>>> = std::sync::OnceLock::new();
+    BERKELEY_MONO_FONT
+        .get_or_init(|| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../LigaBerkeleyMono-Regular.ttf");
+            std::fs::read(path).ok().map(Vec::into_boxed_slice)
+        })
+        .as_deref()
+}
+
+fn configure_file_buffer(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    path: &Path,
+) -> Result<(), String> {
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+        buffer.kind = BufferKind::File;
+        buffer.name = path.display().to_string();
+        buffer.text = TextBuffer::load_from_path(path).map_err(|error| error.to_string())?;
+        buffer.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
+        buffer.backing_file_reload_pending = false;
+        buffer.backing_file_check_in_flight = false;
+    }
+    shell_ui_mut(&mut state.runtime)?
+        .file_reload_worker
+        .watch_path(path.to_path_buf());
+    Ok(())
+}
+
+fn active_and_secondary_buffer_ids(
+    runtime: &EditorRuntime,
+) -> Result<(BufferId, BufferId), String> {
+    let ui = shell_ui(runtime)?;
+    let active_buffer_id = ui
+        .active_buffer_id()
+        .ok_or_else(|| "active buffer is missing".to_owned())?;
+    let secondary_buffer_id = ui
+        .active_workspace_buffer_ids()
+        .and_then(|buffer_ids| {
+            buffer_ids
+                .iter()
+                .copied()
+                .find(|buffer_id| *buffer_id != active_buffer_id)
+        })
+        .ok_or_else(|| "secondary buffer is missing".to_owned())?;
+    Ok((active_buffer_id, secondary_buffer_id))
+}
+
+fn wait_for_file_reload_worker(
+    state: &mut ShellState,
+    buffer_ids: &[BufferId],
+) -> Result<(), String> {
+    for _ in 0..200 {
+        let _ = refresh_pending_file_reloads(&mut state.runtime, Instant::now(), false)?;
+        if buffer_ids.iter().copied().all(|buffer_id| {
+            shell_buffer(&state.runtime, buffer_id)
+                .map(|buffer| !buffer.backing_file_check_in_flight)
+                .unwrap_or(true)
+        }) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Err("timed out waiting for the file reload worker".to_owned())
+}
+
+fn wait_for_file_reload_change(state: &mut ShellState) -> Result<bool, String> {
+    for _ in 0..200 {
+        if refresh_pending_file_reloads(&mut state.runtime, Instant::now(), false)? {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(false)
+}
+
+fn record_file_reload_event(state: &ShellState, path: &Path) -> Result<(), String> {
+    shell_ui(&state.runtime)?
+        .file_reload_worker
+        .record_changed_path_for_test(path.to_path_buf());
+    Ok(())
+}
 
 #[test]
 fn ligature_shaping_collapses_material_icon_label_when_enabled() {
@@ -72,12 +155,16 @@ fn ligature_shaping_is_disabled_by_user_toggle() {
 
 #[test]
 fn ligature_shaping_accepts_same_length_contextual_substitutions() {
-    let face = rustybuzz::Face::from_slice(BERKELEY_MONO_FONT, 0)
+    let Some(berkeley_mono_font) = berkeley_mono_font() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+    let face = rustybuzz::Face::from_slice(berkeley_mono_font, 0)
         .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
     let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "=>")
         .unwrap_or_else(|| panic!("expected `=>` to shape"));
     let nominal_font =
-        fontdue::Font::from_bytes(BERKELEY_MONO_FONT, fontdue::FontSettings::default())
+        fontdue::Font::from_bytes(berkeley_mono_font, fontdue::FontSettings::default())
             .unwrap_or_else(|error| panic!("failed to parse Berkeley Mono raster font: {error}"));
 
     assert_eq!(shaped.glyphs.len(), 2);
@@ -93,13 +180,124 @@ fn ligature_shaping_accepts_same_length_contextual_substitutions() {
 
 #[test]
 fn same_length_inline_ligatures_stay_layout_safe_on_cell_grid() {
-    let face = rustybuzz::Face::from_slice(BERKELEY_MONO_FONT, 0)
+    let Some(berkeley_mono_font) = berkeley_mono_font() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+    let face = rustybuzz::Face::from_slice(berkeley_mono_font, 0)
         .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
     let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "a => b")
         .unwrap_or_else(|| panic!("expected inline ligature to shape"));
 
     assert!(shaped_run_uses_cell_grid("a => b", &shaped));
     assert!(shaped_run_preserves_monospace_layout("a => b", &shaped, 11));
+}
+
+#[test]
+fn ligature_shape_cache_stores_negative_results() {
+    let mut cache: TextTextureCache<'static> = TextTextureCache::new();
+
+    assert!(cache.get_ligature_shape("plain").is_none());
+    assert_eq!(
+        cache.insert_ligature_shape("plain".to_owned(), LigatureShapeCacheValue::NotLigature),
+        LigatureShapeCacheValue::NotLigature
+    );
+    assert_eq!(
+        cache.get_ligature_shape("plain"),
+        Some(LigatureShapeCacheValue::NotLigature)
+    );
+}
+
+#[test]
+fn ligature_shape_cache_stores_layout_results() {
+    let mut cache: TextTextureCache<'static> = TextTextureCache::new();
+    let layout = CachedLigatureLayout {
+        glyphs: vec![CachedLigatureGlyphPlacement {
+            glyph_id: 7,
+            draw_x: -1,
+            draw_y: 3,
+        }],
+        offset_x: -1,
+        offset_y: 3,
+        width: 8,
+        height: 10,
+        advance: 11,
+    };
+
+    assert_eq!(
+        cache.insert_ligature_shape(
+            "=>".to_owned(),
+            LigatureShapeCacheValue::Layout(layout.clone()),
+        ),
+        LigatureShapeCacheValue::Layout(layout.clone())
+    );
+    assert_eq!(
+        cache.get_ligature_shape("=>"),
+        Some(LigatureShapeCacheValue::Layout(layout))
+    );
+}
+
+#[test]
+fn build_cached_text_layout_returns_empty_layout_when_no_glyphs() {
+    let layout = build_cached_text_layout(Vec::new(), 17);
+
+    assert_eq!(
+        layout,
+        CachedLigatureLayout {
+            glyphs: Vec::new(),
+            offset_x: 0,
+            offset_y: 0,
+            width: 0,
+            height: 0,
+            advance: 17,
+        }
+    );
+}
+
+#[test]
+fn build_cached_text_layout_tracks_bounds_for_nominal_glyphs() {
+    let layout = build_cached_text_layout(
+        vec![
+            CachedGlyphRasterPlacement {
+                glyph_id: 7,
+                draw_x: -1,
+                draw_y: 3,
+                width: 8,
+                height: 10,
+            },
+            CachedGlyphRasterPlacement {
+                glyph_id: 8,
+                draw_x: 10,
+                draw_y: 5,
+                width: 6,
+                height: 7,
+            },
+        ],
+        22,
+    );
+
+    assert_eq!(
+        layout,
+        CachedLigatureLayout {
+            glyphs: vec![
+                CachedLigatureGlyphPlacement {
+                    glyph_id: 7,
+                    draw_x: -1,
+                    draw_y: 3,
+                },
+                CachedLigatureGlyphPlacement {
+                    glyph_id: 8,
+                    draw_x: 10,
+                    draw_y: 5,
+                },
+            ],
+            offset_x: -1,
+            offset_y: 3,
+            width: 17,
+            height: 10,
+            advance: 22,
+        }
+    );
 }
 
 #[test]
@@ -177,6 +375,146 @@ fn terminal_placeholder_lines_describe_shell_launch_not_vertical_slice() {
     assert!(body.contains("Press i to enter terminal input mode"));
     assert!(!body.contains("vertical slice"));
     assert!(!body.contains("compiled terminal package"));
+}
+
+#[test]
+fn file_reload_notifications_target_only_matching_buffers() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("file-reload-targeted");
+    let active_path = root.join("src").join("main.rs");
+    let hidden_path = root.join("src").join("lib.rs");
+    std::fs::create_dir_all(root.join("src")).map_err(|error| error.to_string())?;
+    std::fs::write(&active_path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    std::fs::write(&hidden_path, "pub fn hidden() {}\n").map_err(|error| error.to_string())?;
+
+    let (active_buffer_id, hidden_buffer_id) = active_and_secondary_buffer_ids(&state.runtime)?;
+    configure_file_buffer(&mut state, active_buffer_id, &active_path)?;
+    configure_file_buffer(&mut state, hidden_buffer_id, &hidden_path)?;
+
+    std::fs::write(
+        &hidden_path,
+        "pub fn hidden() {\n    println!(\"disk\");\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    record_file_reload_event(&state, &hidden_path)?;
+
+    assert!(!refresh_pending_file_reloads(
+        &mut state.runtime,
+        Instant::now(),
+        false
+    )?);
+    wait_for_file_reload_worker(&mut state, &[hidden_buffer_id])?;
+    assert!(wait_for_file_reload_change(&mut state)?);
+    assert_eq!(
+        shell_buffer(&state.runtime, active_buffer_id)?.text.line(1),
+        None
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, hidden_buffer_id)?
+            .text
+            .line(1)
+            .as_deref(),
+        Some("    println!(\"disk\");")
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn file_reload_notifications_reload_hidden_buffers_without_focus_changes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("file-reload-hidden");
+    let active_path = root.join("src").join("main.rs");
+    let hidden_path = root.join("src").join("lib.rs");
+    std::fs::create_dir_all(root.join("src")).map_err(|error| error.to_string())?;
+    std::fs::write(&active_path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    std::fs::write(&hidden_path, "pub fn hidden() {}\n").map_err(|error| error.to_string())?;
+
+    let (active_buffer_id, hidden_buffer_id) = active_and_secondary_buffer_ids(&state.runtime)?;
+    configure_file_buffer(&mut state, active_buffer_id, &active_path)?;
+    configure_file_buffer(&mut state, hidden_buffer_id, &hidden_path)?;
+
+    std::fs::write(
+        &hidden_path,
+        "pub fn hidden() {\n    println!(\"background\");\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    record_file_reload_event(&state, &hidden_path)?;
+
+    assert!(!refresh_pending_file_reloads(
+        &mut state.runtime,
+        Instant::now(),
+        false,
+    )?);
+    wait_for_file_reload_worker(&mut state, &[hidden_buffer_id])?;
+    assert!(wait_for_file_reload_change(&mut state)?);
+    assert_eq!(
+        shell_buffer(&state.runtime, hidden_buffer_id)?
+            .text
+            .line(1)
+            .as_deref(),
+        Some("    println!(\"background\");")
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn file_reload_notifications_wait_for_dirty_buffers_to_become_clean() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("file-reload-dirty");
+    let path = root.join("src").join("main.rs");
+    std::fs::create_dir_all(root.join("src")).map_err(|error| error.to_string())?;
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+
+    let (buffer_id, _) = active_and_secondary_buffer_ids(&state.runtime)?;
+    configure_file_buffer(&mut state, buffer_id, &path)?;
+
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+    }
+    std::fs::write(&path, "fn main() {\n    println!(\"disk\");\n}\n")
+        .map_err(|error| error.to_string())?;
+    record_file_reload_event(&state, &path)?;
+
+    assert!(!refresh_pending_file_reloads(
+        &mut state.runtime,
+        Instant::now(),
+        false,
+    )?);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(0)
+            .as_deref(),
+        Some("// local")
+    );
+
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+        assert!(buffer.text.undo());
+        assert!(!buffer.text.is_dirty());
+    }
+
+    assert!(wait_for_file_reload_change(&mut state)?);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(1)
+            .as_deref(),
+        Some("    println!(\"disk\");")
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[test]

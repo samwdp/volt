@@ -1,7 +1,7 @@
 use crate::icon_font::symbols::md;
 use editor_plugin_api::{
     LanguageServerRootStrategy, LanguageServerSpec, PluginAction, PluginCommand, PluginHookBinding,
-    PluginHookDeclaration, PluginPackage,
+    PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
 };
 
 pub const HOOK_LSP_START: &str = "lsp.server-start";
@@ -11,6 +11,8 @@ pub const HOOK_LSP_LOG: &str = "lsp.open-log";
 pub const HOOK_LSP_DEFINITION: &str = "lsp.goto-definition";
 pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
 pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
+pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
+pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Enter";
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
 pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SERVER_CSHARP_LS: &str = "csharp-ls";
@@ -79,6 +81,12 @@ pub fn package() -> PluginPackage {
             "lsp.implementation",
             "Jumps to LSP implementations for the symbol under the cursor.",
             HOOK_LSP_IMPLEMENTATION,
+            None,
+        ),
+        hook_command(
+            "lsp.code-actions",
+            "Opens LSP code actions available at the cursor.",
+            HOOK_LSP_CODE_ACTIONS,
             None,
         ),
         hook_command(
@@ -204,6 +212,18 @@ pub fn package() -> PluginPackage {
             HOOK_LSP_IMPLEMENTATION,
             "Navigates to LSP implementations for the symbol under the cursor.",
         ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_CODE_ACTIONS,
+            "Opens LSP code actions available at the cursor.",
+        ),
+    ])
+    .with_key_bindings(vec![
+        PluginKeyBinding::new(
+            CODE_ACTIONS_CHORD,
+            "lsp.code-actions",
+            PluginKeymapScope::Workspace,
+        )
+        .with_vim_mode(PluginVimMode::Normal),
     ])
     .with_hook_bindings(vec![
         PluginHookBinding::new(
@@ -606,7 +626,7 @@ mod tests {
 
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 23);
+        assert_eq!(package.commands().len(), 24);
         assert_eq!(package.hook_bindings().len(), 32);
         assert_eq!(servers.len(), 16);
         assert!(ids.contains(&SERVER_RUST_ANALYZER));
@@ -784,6 +804,19 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "lsp.implementation")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "lsp.code-actions")
+        );
+        assert_eq!(package.key_bindings().len(), 1);
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == CODE_ACTIONS_CHORD)
         );
     }
 }
