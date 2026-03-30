@@ -19,7 +19,7 @@ pub const SERVER_VSCODE_JSON_LANGUAGE_SERVER: &str = "vscode-json-language-serve
 pub const SERVER_VSCODE_HTML_LANGUAGE_SERVER: &str = "vscode-html-language-server";
 pub const SERVER_VSCODE_CSS_LANGUAGE_SERVER: &str = "vscode-css-language-server";
 pub const SERVER_CLANGD: &str = "clangd";
-pub const SERVER_PYRIGHT_LANGSERVER: &str = "pyright-langserver";
+pub const SERVER_PYRIGHT_LANGSERVER: &str = "jedi-language-server";
 pub const SERVER_MAKEFILE_LANGUAGE_SERVER: &str = "makefile-language-server";
 pub const SERVER_ZLS: &str = "zls";
 pub const SERVER_GOPLS: &str = "gopls";
@@ -510,8 +510,8 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             SERVER_PYRIGHT_LANGSERVER,
             "python",
             ["py"],
-            "pyright-langserver",
-            ["--stdio"],
+            "jedi-language-server",
+            [""],
         )
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
         .with_root_markers([
@@ -718,11 +718,11 @@ mod tests {
         let python = servers
             .iter()
             .find(|server| server.id() == SERVER_PYRIGHT_LANGSERVER)
-            .expect("pyright-langserver missing");
+            .expect("jedi-language-server missing");
         assert_eq!(python.language_id(), "python");
         assert_eq!(
             python.args().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["--stdio"]
+            vec![""]
         );
 
         let go = servers

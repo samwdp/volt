@@ -226,7 +226,7 @@ transparent = "#00000000"
 
 [options]
 "ui.line-number.relative" = true
-font = "default"
+font = "Liga Berkeley Mono"
 font_size = 18
 cursor_roundness = 2
 picker_roundness = 16

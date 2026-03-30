@@ -31,6 +31,7 @@ sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from
 image = { version = "0.25.1", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22.1"
 fontdue = "0.9.3"
+rustybuzz = "0.20.1"
 sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
 agent-client-protocol = { version = "0.10.2", features = ["unstable_session_model"] }
 tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }

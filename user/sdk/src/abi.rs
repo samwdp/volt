@@ -15,8 +15,8 @@ use editor_theme::{Color, Theme, ThemeOption};
 
 use crate::{
     AcpClient, AutocompleteProvider, AutocompleteProviderItem, GitStatusPrefix, HoverProvider,
-    HoverProviderTopic, LspDiagnosticsInfo, OilDefaults, OilKeyAction, OilKeybindings, OilSortMode,
-    StatuslineContext, TerminalConfig, WorkspaceRoot,
+    HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults, OilKeyAction,
+    OilKeybindings, OilSortMode, StatuslineContext, TerminalConfig, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -873,6 +873,28 @@ impl From<AbiTerminalConfig> for TerminalConfig {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub struct AbiLigatureConfig {
+    pub enabled: bool,
+}
+
+impl From<LigatureConfig> for AbiLigatureConfig {
+    fn from(value: LigatureConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl From<AbiLigatureConfig> for LigatureConfig {
+    fn from(value: AbiLigatureConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub struct AbiLspDiagnosticsInfo {
     pub errors: usize,
     pub warnings: usize,
@@ -1525,6 +1547,7 @@ pub struct UserLibraryModule {
     pub acp_client_by_id: extern "C" fn(RString) -> ROption<AbiAcpClient>,
     pub workspace_roots: extern "C" fn() -> RVec<AbiWorkspaceRoot>,
     pub terminal_config: extern "C" fn() -> AbiTerminalConfig,
+    pub ligature_config: extern "C" fn() -> AbiLigatureConfig,
     pub oil_defaults: extern "C" fn() -> AbiOilDefaults,
     pub oil_keybindings: extern "C" fn() -> AbiOilKeybindings,
     pub oil_keydown_action: extern "C" fn(RString) -> ROption<AbiOilKeyAction>,
@@ -1560,8 +1583,9 @@ pub struct UserLibraryModule {
     pub gitfringe_symbol: extern "C" fn() -> RStr<'static>,
     pub icon_symbols: extern "C" fn() -> RVec<AbiIconFontSymbol>,
     pub run_plugin_buffer_evaluator: extern "C" fn(RString, RString) -> RVec<RString>,
-    #[sabi(last_prefix_field)]
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
+    #[sabi(last_prefix_field)]
+    pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
 }
 
 impl RootModule for UserLibraryModuleRef {

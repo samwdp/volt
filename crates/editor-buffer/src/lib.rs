@@ -1243,6 +1243,38 @@ impl TextBuffer {
         Ok(())
     }
 
+    /// Reloads the buffer from its backing path when the on-disk content changed.
+    pub fn reload_from_path(&mut self) -> io::Result<bool> {
+        let Some(path) = self.path.clone() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "text buffer has no backing path",
+            ));
+        };
+
+        let reloaded = Self::load_from_path(&path)?;
+        let content_changed = self.text() != reloaded.text();
+        let line_ending_changed = self.preferred_line_ending != reloaded.preferred_line_ending;
+        if !content_changed && !line_ending_changed {
+            return Ok(false);
+        }
+
+        let cursor = self.cursor;
+        let state_id = self.next_state_id;
+
+        self.rope = reloaded.rope;
+        self.path = Some(path);
+        self.preferred_line_ending = reloaded.preferred_line_ending;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.state_id = state_id;
+        self.saved_state_id = state_id;
+        self.next_state_id = self.next_state_id.saturating_add(1);
+        self.cursor = self.clamp_point(cursor);
+
+        Ok(true)
+    }
+
     fn from_rope(rope: Rope, preferred_line_ending: LineEnding, path: Option<PathBuf>) -> Self {
         Self {
             rope,
@@ -2014,7 +2046,13 @@ fn advance_point_by_text(mut point: TextPoint, text: &str) -> TextPoint {
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt::Write as _, io::Cursor};
+    use std::{
+        fmt::Write as _,
+        fs,
+        io::Cursor,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{LineEnding, TextBuffer, TextPoint, TextRange, WordKind};
 
@@ -2022,6 +2060,36 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    struct TempFile {
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        fn create(name: &str, contents: &str) -> std::io::Result<Self> {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let path = std::env::temp_dir().join(format!("volt-buffer-{name}-{unique}.txt"));
+            fs::write(&path, contents)?;
+            Ok(Self { path })
+        }
+
+        fn overwrite(&self, contents: &str) -> std::io::Result<()> {
+            fs::write(&self.path, contents)
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
         }
     }
 
@@ -2110,6 +2178,44 @@ mod tests {
             Err(error) => panic!("unexpected utf8 error: {error:?}"),
         };
         assert_eq!(lf, "alpha\nbeta");
+    }
+
+    #[test]
+    fn reload_from_path_updates_content_preserves_cursor_and_marks_clean() {
+        let file = must(TempFile::create("reload", "alpha\nbeta\n"));
+        let mut buffer = must(TextBuffer::load_from_path(file.path()));
+        buffer.set_cursor(TextPoint::new(1, 2));
+
+        must(file.overwrite("alpha\nbravo\ncharlie\r\n"));
+
+        assert!(must(buffer.reload_from_path()));
+        assert_eq!(buffer.text(), "alpha\nbravo\ncharlie\n");
+        assert_eq!(buffer.cursor(), TextPoint::new(1, 2));
+        assert_eq!(buffer.preferred_line_ending(), LineEnding::Crlf);
+        assert_eq!(buffer.revision(), 1);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn reload_from_path_returns_false_when_disk_state_is_unchanged() {
+        let file = must(TempFile::create("reload-same", "alpha\nbeta\n"));
+        let mut buffer = must(TextBuffer::load_from_path(file.path()));
+
+        assert!(!must(buffer.reload_from_path()));
+        assert_eq!(buffer.text(), "alpha\nbeta\n");
+        assert_eq!(buffer.revision(), 0);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn reload_from_path_requires_a_backing_file() {
+        let mut buffer = TextBuffer::from_text("scratch");
+        let error = match buffer.reload_from_path() {
+            Ok(changed) => panic!("expected reload error, got changed={changed}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

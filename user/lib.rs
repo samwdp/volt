@@ -45,6 +45,8 @@ pub use editor_plugin_api::symbols as icon_font_symbols;
 pub mod interactive;
 /// Language-specific registrations.
 pub mod lang;
+/// Text ligature configuration surfaced to the shell renderer.
+pub mod ligatures;
 /// Language server integration hooks and commands.
 pub mod lsp;
 /// Multiple cursor workflows.
@@ -81,9 +83,9 @@ use editor_plugin_api::{
     abi::{
         AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
         AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontSymbol,
-        AbiLanguageConfiguration, AbiLanguageServerSpec, AbiOilDefaults, AbiOilKeyAction,
-        AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig,
-        AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiLanguageConfiguration, AbiLanguageServerSpec, AbiLigatureConfig, AbiOilDefaults,
+        AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext,
+        AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
     },
 };
 
@@ -154,8 +156,8 @@ pub fn themes() -> Vec<Theme> {
 pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilDefaults, OilKeyAction,
-    OilKeybindings, StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilDefaults,
+    OilKeyAction, OilKeybindings, StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -268,6 +270,10 @@ impl UserLibrary for UserLibraryImpl {
             program: terminal::default_shell_program(),
             args: terminal::default_shell_args(),
         }
+    }
+
+    fn ligature_config(&self) -> LigatureConfig {
+        ligatures::config()
     }
 
     fn oil_defaults(&self) -> OilDefaults {
@@ -617,6 +623,10 @@ extern "C" fn exported_terminal_config() -> AbiTerminalConfig {
     UserLibraryImpl.terminal_config().into()
 }
 
+extern "C" fn exported_ligature_config() -> AbiLigatureConfig {
+    UserLibraryImpl.ligature_config().into()
+}
+
 extern "C" fn exported_oil_defaults() -> AbiOilDefaults {
     UserLibraryImpl.oil_defaults().into()
 }
@@ -852,6 +862,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         acp_client_by_id: exported_acp_client_by_id,
         workspace_roots: exported_workspace_roots,
         terminal_config: exported_terminal_config,
+        ligature_config: exported_ligature_config,
         oil_defaults: exported_oil_defaults,
         oil_keybindings: exported_oil_keybindings,
         oil_keydown_action: exported_oil_keydown_action,
@@ -881,6 +892,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         icon_symbols: exported_icon_symbols,
         run_plugin_buffer_evaluator: exported_run_plugin_buffer_evaluator,
         default_build_command: exported_default_build_command,
+        ligature_config_v1: exported_ligature_config,
     }
     .leak_into_prefix()
 }

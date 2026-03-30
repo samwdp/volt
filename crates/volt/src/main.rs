@@ -186,6 +186,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.terminal_config()().into()
     }
 
+    fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
+        self.module.ligature_config_v1()().into()
+    }
+
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
         self.module.oil_defaults()().into()
     }

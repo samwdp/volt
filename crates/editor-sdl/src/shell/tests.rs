@@ -43,6 +43,65 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+const MATERIAL_ICONS_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../volt/assets/font/material-design-icons.ttf"
+));
+const BERKELEY_MONO_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../LigaBerkeleyMono-Regular.ttf"
+));
+
+#[test]
+fn ligature_shaping_collapses_material_icon_label_when_enabled() {
+    let face = rustybuzz::Face::from_slice(MATERIAL_ICONS_FONT, 0)
+        .unwrap_or_else(|| panic!("failed to parse bundled Material Icons font"));
+    let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "face")
+        .unwrap_or_else(|| panic!("expected `face` ligature to shape"));
+
+    assert!(shaped.glyphs.len() < "face".chars().count());
+}
+
+#[test]
+fn ligature_shaping_is_disabled_by_user_toggle() {
+    let face = rustybuzz::Face::from_slice(MATERIAL_ICONS_FONT, 0)
+        .unwrap_or_else(|| panic!("failed to parse bundled Material Icons font"));
+
+    assert!(shape_ascii_ligature_run_with_face(&face, 18.0, false, "face").is_none());
+}
+
+#[test]
+fn ligature_shaping_accepts_same_length_contextual_substitutions() {
+    let face = rustybuzz::Face::from_slice(BERKELEY_MONO_FONT, 0)
+        .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
+    let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "=>")
+        .unwrap_or_else(|| panic!("expected `=>` to shape"));
+    let nominal_font =
+        fontdue::Font::from_bytes(BERKELEY_MONO_FONT, fontdue::FontSettings::default())
+            .unwrap_or_else(|error| panic!("failed to parse Berkeley Mono raster font: {error}"));
+
+    assert_eq!(shaped.glyphs.len(), 2);
+    assert!(
+        shaped
+            .glyphs
+            .iter()
+            .zip("=>".chars())
+            .any(|(glyph, character)| nominal_font.lookup_glyph_index(character) != glyph.glyph_id)
+    );
+    assert!(shaped_run_uses_cell_grid("=>", &shaped));
+}
+
+#[test]
+fn same_length_inline_ligatures_stay_layout_safe_on_cell_grid() {
+    let face = rustybuzz::Face::from_slice(BERKELEY_MONO_FONT, 0)
+        .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
+    let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "a => b")
+        .unwrap_or_else(|| panic!("expected inline ligature to shape"));
+
+    assert!(shaped_run_uses_cell_grid("a => b", &shaped));
+    assert!(shaped_run_preserves_monospace_layout("a => b", &shaped, 11));
+}
+
 #[test]
 fn keydown_chord_maps_alt_x() {
     assert_eq!(

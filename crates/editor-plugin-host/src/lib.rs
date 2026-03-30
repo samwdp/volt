@@ -5,9 +5,9 @@ use editor_core::{
     SectionTree,
 };
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, OilKeyAction, PluginAction,
-    PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode, TerminalConfig,
-    WorkspaceRoot,
+    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilKeyAction,
+    PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
+    TerminalConfig, WorkspaceRoot,
 };
 pub use editor_plugin_api::{StatuslineContext, UserLibrary};
 
@@ -127,6 +127,9 @@ impl UserLibrary for NullUserLibrary {
             program: "bash".to_owned(),
             args: Vec::new(),
         };
+    }
+    fn ligature_config(&self) -> LigatureConfig {
+        LigatureConfig { enabled: false }
     }
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
         editor_plugin_api::OilDefaults {

@@ -1277,3 +1277,75 @@ fn workspace_file_picker_creates_missing_file() -> Result<(), Box<dyn std::error
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn file_buffer_reload_refreshes_clean_open_buffers_after_disk_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    let root = temp_workspace_root("file-reload");
+    let path = root.join("src").join("main.rs");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(&path, "fn main() {}\n")?;
+
+    {
+        let buffer = state.active_buffer_mut()?;
+        buffer.kind = BufferKind::File;
+        buffer.name = path.display().to_string();
+        buffer.text = TextBuffer::load_from_path(&path)?;
+    }
+    assert!(!state.refresh_pending_file_reloads_for_test()?);
+
+    fs::write(&path, "fn main() {\n    println!(\"disk\");\n}\n")?;
+
+    assert!(state.refresh_pending_file_reloads_for_test()?);
+    assert_eq!(
+        state.active_buffer_mut()?.text.line(1).as_deref(),
+        Some("    println!(\"disk\");")
+    );
+    assert!(!state.active_buffer_mut()?.text.is_dirty());
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn file_buffer_reload_waits_for_dirty_buffers_to_become_clean()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    let root = temp_workspace_root("file-reload-dirty");
+    let path = root.join("src").join("main.rs");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(&path, "fn main() {}\n")?;
+
+    {
+        let buffer = state.active_buffer_mut()?;
+        buffer.kind = BufferKind::File;
+        buffer.name = path.display().to_string();
+        buffer.text = TextBuffer::load_from_path(&path)?;
+    }
+    assert!(!state.refresh_pending_file_reloads_for_test()?);
+
+    {
+        let buffer = state.active_buffer_mut()?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+    }
+    fs::write(&path, "fn main() {\n    println!(\"disk\");\n}\n")?;
+
+    assert!(!state.refresh_pending_file_reloads_for_test()?);
+    assert_eq!(
+        state.active_buffer_mut()?.text.line(0).as_deref(),
+        Some("// local")
+    );
+    assert!(state.active_buffer_mut()?.text.undo());
+    assert!(!state.active_buffer_mut()?.text.is_dirty());
+
+    assert!(state.refresh_pending_file_reloads_for_test()?);
+    assert_eq!(
+        state.active_buffer_mut()?.text.line(1).as_deref(),
+        Some("    println!(\"disk\");")
+    );
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

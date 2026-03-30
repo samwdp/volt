@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use ttf_parser::{Face, fonts_in_collection, name_id};
 
 /// Pixel-space rectangle used by the shell renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,7 +302,43 @@ fn font_name_matches(path: &Path, normalized: &str) -> bool {
         return false;
     };
     let stem = normalize_font_name(stem);
-    stem == normalized
+    if stem == normalized {
+        return true;
+    }
+    let Ok(font_data) = fs::read(path) else {
+        return false;
+    };
+    font_data_matches_name(&font_data, normalized)
+}
+
+fn font_data_matches_name(font_data: &[u8], normalized: &str) -> bool {
+    let face_count = fonts_in_collection(font_data).unwrap_or(1);
+    (0..face_count).any(|index| {
+        Face::parse(font_data, index).ok().is_some_and(|face| {
+            face.names()
+                .into_iter()
+                .filter_map(|name| relevant_font_name(&name))
+                .any(|name| normalize_font_name(&name) == normalized)
+        })
+    })
+}
+
+fn relevant_font_name(name: &ttf_parser::name::Name<'_>) -> Option<String> {
+    if !name.is_unicode() {
+        return None;
+    }
+    let is_relevant_name = matches!(
+        name.name_id,
+        name_id::FAMILY
+            | name_id::TYPOGRAPHIC_FAMILY
+            | name_id::FULL_NAME
+            | name_id::POST_SCRIPT_NAME
+            | name_id::WWS_FAMILY
+    );
+    if !is_relevant_name {
+        return None;
+    }
+    name.to_string().filter(|value| !value.trim().is_empty())
 }
 
 fn normalize_font_name(name: &str) -> String {
@@ -365,8 +402,8 @@ pub fn path_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_rect, horizontal_pane_rects, preferred_font_search_roots, rect_tuple,
-        vertical_pane_rects,
+        centered_rect, font_data_matches_name, horizontal_pane_rects, normalize_font_name,
+        preferred_font_search_roots, rect_tuple, vertical_pane_rects,
     };
 
     #[test]
@@ -379,6 +416,21 @@ mod tests {
         let rects = horizontal_pane_rects(120, 60, 2);
         assert_eq!(rect_tuple(rects[0]), (0, 0, 120, 30));
         assert_eq!(rect_tuple(rects[1]), (0, 30, 120, 30));
+    }
+
+    #[test]
+    fn font_metadata_matching_accepts_family_names() {
+        let request = normalize_font_name("Material Icons");
+        assert_ne!(request, normalize_font_name("material-design-icons"));
+        let font_data = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../volt/assets/font/material-design-icons.ttf"
+        ));
+        assert!(font_data_matches_name(font_data, &request));
+        assert!(font_data_matches_name(
+            font_data,
+            &normalize_font_name("MaterialIcons-Regular")
+        ));
     }
 
     #[test]

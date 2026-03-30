@@ -21,8 +21,8 @@ pub use abi::{
     AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix,
     AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory, AbiIconFontSymbol,
     AbiLanguageConfiguration, AbiLanguageServerRootStrategy, AbiLanguageServerSpec,
-    AbiLspDiagnosticsInfo, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
-    AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
+    AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings,
+    AbiOilSortMode, AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
     AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption,
     AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
@@ -257,6 +257,7 @@ pub trait UserLibrary: Send + Sync {
     fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
     fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
     fn terminal_config(&self) -> TerminalConfig;
+    fn ligature_config(&self) -> LigatureConfig;
     fn oil_defaults(&self) -> OilDefaults;
     fn oil_keybindings(&self) -> OilKeybindings;
     fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction>;
@@ -660,6 +661,12 @@ pub struct WorkspaceRoot {
 pub struct TerminalConfig {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// Text ligature configuration exported by the user library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LigatureConfig {
+    pub enabled: bool,
 }
 
 /// LSP diagnostic counts surfaced to the statusline.

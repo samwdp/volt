@@ -11,7 +11,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::Write,
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{
@@ -83,6 +83,9 @@ use editor_terminal::{
 };
 use editor_theme::{Color as ThemeColor, ThemeRegistry};
 use fontdue::Font as RasterFont;
+use rustybuzz::{
+    Face as ShapeFace, Feature as ShapeFeature, UnicodeBuffer, shape, ttf_parser::Tag,
+};
 use sdl3::{
     event::Event,
     keyboard::{Keycode, Mod},
@@ -300,6 +303,7 @@ const FRAME_PACING_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const TYPING_EVENT_BATCH_LIMIT: usize = 24;
 const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
 const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const FILE_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 const SYNTAX_WINDOW_MIN_LINES: usize = 256;
@@ -360,8 +364,24 @@ struct IconFont<'ttf> {
     raster_font: RasterFont,
 }
 
+struct FontSetInit<'ttf> {
+    primary: Font<'ttf>,
+    primary_raster_font: RasterFont,
+    primary_shape_face: ShapeFace<'static>,
+    primary_pixel_size: f32,
+    ligatures_enabled: bool,
+    icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
+    icon_chars: BTreeSet<char>,
+    icon_pixel_size: f32,
+    cell_width: i32,
+}
+
 struct FontSet<'ttf> {
     primary: Font<'ttf>,
+    primary_raster_font: RasterFont,
+    primary_shape_face: ShapeFace<'static>,
+    primary_pixel_size: f32,
+    ligatures_enabled: bool,
     icon_fonts: Vec<IconFont<'ttf>>,
     icon_chars: BTreeSet<char>,
     icon_pixel_size: f32,
@@ -369,19 +389,9 @@ struct FontSet<'ttf> {
 }
 
 impl<'ttf> FontSet<'ttf> {
-    fn new(
-        primary: Font<'ttf>,
-        icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
-        icon_pixel_size: f32,
-        cell_width: i32,
-        user_library: &dyn UserLibrary,
-    ) -> Self {
-        let icon_chars = user_library
-            .icon_symbols()
-            .iter()
-            .flat_map(|symbol| symbol.glyph.chars())
-            .collect();
-        let icon_fonts = icon_fonts
+    fn new(init: FontSetInit<'ttf>) -> Self {
+        let icon_fonts = init
+            .icon_fonts
             .into_iter()
             .map(|(name, font, raster_font)| IconFont {
                 name,
@@ -390,16 +400,36 @@ impl<'ttf> FontSet<'ttf> {
             })
             .collect();
         Self {
-            primary,
+            primary: init.primary,
+            primary_raster_font: init.primary_raster_font,
+            primary_shape_face: init.primary_shape_face,
+            primary_pixel_size: init.primary_pixel_size,
+            ligatures_enabled: init.ligatures_enabled,
             icon_fonts,
-            icon_chars,
-            icon_pixel_size,
-            cell_width: cell_width.max(1),
+            icon_chars: init.icon_chars,
+            icon_pixel_size: init.icon_pixel_size,
+            cell_width: init.cell_width.max(1),
         }
     }
 
     fn primary(&self) -> &Font<'ttf> {
         &self.primary
+    }
+
+    fn primary_raster_font(&self) -> &RasterFont {
+        &self.primary_raster_font
+    }
+
+    fn primary_shape_face(&self) -> &ShapeFace<'static> {
+        &self.primary_shape_face
+    }
+
+    fn primary_pixel_size(&self) -> f32 {
+        self.primary_pixel_size
+    }
+
+    fn ligatures_enabled(&self) -> bool {
+        self.ligatures_enabled
     }
 
     fn icon_font(&self, index: usize) -> Option<&IconFont<'ttf>> {
@@ -2044,6 +2074,8 @@ pub(crate) struct ShellBuffer {
     directory_state: Option<DirectoryViewState>,
     terminal_render: Option<TerminalRenderSnapshot>,
     pub(crate) text: TextBuffer,
+    backing_file_fingerprint: Option<BackingFileFingerprint>,
+    last_backing_file_check_at: Option<Instant>,
     undo_tree: UndoTree,
     language_id: Option<String>,
     pub(crate) scroll_row: usize,
@@ -2067,6 +2099,22 @@ pub(crate) struct ShellBuffer {
 enum AcpPane {
     Plan,
     Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackingFileFingerprint {
+    modified_at: Option<SystemTime>,
+    len: u64,
+}
+
+impl BackingFileFingerprint {
+    fn read(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            modified_at: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2779,6 +2827,8 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            backing_file_fingerprint: None,
+            last_backing_file_check_at: None,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -2810,6 +2860,9 @@ impl ShellBuffer {
         };
         let git_fringe_dirty = git_fringe.is_some();
         let git_fringe_last_edit_at = git_fringe_dirty.then(Instant::now);
+        let backing_file_fingerprint = text
+            .path()
+            .and_then(|path| BackingFileFingerprint::read(path).ok());
         Self {
             id: buffer.id(),
             name: buffer.name().to_owned(),
@@ -2828,6 +2881,8 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            backing_file_fingerprint,
+            last_backing_file_check_at: None,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -2883,6 +2938,8 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            backing_file_fingerprint: None,
+            last_backing_file_check_at: None,
             undo_tree,
             language_id: None,
             scroll_row: 0,
@@ -3472,7 +3529,10 @@ impl ShellBuffer {
     }
 
     fn save_to_path(&mut self, path: &Path) -> Result<(), std::io::Error> {
-        self.text.save_to_path(path)
+        self.text.save_to_path(path)?;
+        self.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
+        self.last_backing_file_check_at = Some(Instant::now());
+        Ok(())
     }
 
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
@@ -3545,6 +3605,62 @@ impl ShellBuffer {
 
     fn set_syntax_error(&mut self, error: Option<String>) {
         self.syntax_error = error;
+    }
+
+    fn reload_from_disk_if_changed(&mut self, now: Instant, force: bool) -> Result<bool, String> {
+        if self.kind != BufferKind::File || self.text.is_dirty() {
+            return Ok(false);
+        }
+        let Some(path) = self.text.path().map(Path::to_path_buf) else {
+            return Ok(false);
+        };
+        if !force
+            && self
+                .last_backing_file_check_at
+                .is_some_and(|last| now.duration_since(last) < FILE_RELOAD_POLL_INTERVAL)
+        {
+            return Ok(false);
+        }
+        self.last_backing_file_check_at = Some(now);
+
+        let current_fingerprint = match BackingFileFingerprint::read(&path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!("failed to stat `{}`: {error}", path.display()));
+            }
+        };
+        let Some(loaded_fingerprint) = self.backing_file_fingerprint else {
+            self.backing_file_fingerprint = Some(current_fingerprint);
+            return Ok(false);
+        };
+        if current_fingerprint == loaded_fingerprint {
+            return Ok(false);
+        }
+
+        let reloaded = match self.text.reload_from_path() {
+            Ok(reloaded) => reloaded,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!("failed to reload `{}`: {error}", path.display()));
+            }
+        };
+        self.backing_file_fingerprint = Some(current_fingerprint);
+        if !reloaded {
+            return Ok(false);
+        }
+
+        self.undo_tree = UndoTree::new(&self.text);
+        self.syntax_error = None;
+        self.syntax_lines.clear();
+        self.force_syntax_refresh();
+        self.scroll_row = self.scroll_row.min(self.line_count().saturating_sub(1));
+        self.invalidate_wrap_cache();
+        if self.git_fringe.is_some() {
+            self.git_fringe_dirty = true;
+            self.git_fringe_last_edit_at = None;
+        }
+        Ok(true)
     }
 
     fn replace_with_lines(&mut self, lines: Vec<String>) {
@@ -9119,6 +9235,12 @@ impl ShellState {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn refresh_pending_file_reloads_for_test(&mut self) -> Result<bool, ShellError> {
+        refresh_pending_file_reloads(&mut self.runtime, Instant::now(), true)
+            .map_err(ShellError::Runtime)
+    }
+
     fn sync_active_buffer(&mut self) -> Result<(), String> {
         sync_active_buffer(&mut self.runtime)
     }
@@ -9280,6 +9402,10 @@ impl ShellState {
     fn mark_active_buffer_syntax_dirty(&mut self) -> Result<(), ShellError> {
         self.active_buffer_mut()?.mark_syntax_dirty();
         Ok(())
+    }
+
+    fn refresh_pending_file_reloads(&mut self, now: Instant) -> Result<bool, ShellError> {
+        refresh_pending_file_reloads(&mut self.runtime, now, false).map_err(ShellError::Runtime)
     }
 
     fn refresh_pending_syntax(&mut self) -> Result<SyntaxRefreshStats, ShellError> {
@@ -9602,6 +9728,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
                 let refresh_now = Instant::now();
                 let typing_active = state.secondary_refresh_deferred_for_typing(refresh_now);
+                let file_reload_changed = match state.refresh_pending_file_reloads(refresh_now) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.file-reload-refresh", error);
+                        false
+                    }
+                };
                 let picker_refresh_started = Instant::now();
                 let picker_changed = match state.refresh_pending_picker_searches() {
                     Ok(changed) => changed,
@@ -9706,6 +9839,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 };
                 let should_render = last_scene.is_none()
                     || had_events
+                    || file_reload_changed
                     || picker_changed
                     || lsp_changed
                     || notification_changed
@@ -10006,6 +10140,31 @@ fn load_font_set<'ttf>(
     user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
+    let primary_font_data: &'static [u8] = Box::leak(
+        fs::read(&primary_path)
+            .map_err(|error| {
+                ShellError::Runtime(format!(
+                    "failed to read primary font `{}`: {error}",
+                    primary_path.display()
+                ))
+            })?
+            .into_boxed_slice(),
+    );
+    let primary_raster_font =
+        RasterFont::from_bytes(primary_font_data, fontdue::FontSettings::default()).map_err(
+            |error| {
+                ShellError::Runtime(format!(
+                    "failed to parse primary font `{}`: {error}",
+                    primary_path.display()
+                ))
+            },
+        )?;
+    let primary_shape_face = ShapeFace::from_slice(primary_font_data, 0).ok_or_else(|| {
+        ShellError::Runtime(format!(
+            "failed to parse shaping data for primary font `{}`",
+            primary_path.display()
+        ))
+    })?;
     let primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -10041,13 +10200,22 @@ fn load_font_set<'ttf>(
             Ok((name, font, raster_font))
         })
         .collect::<Result<Vec<_>, ShellError>>()?;
-    let fonts = FontSet::new(
+    let icon_chars = user_library
+        .icon_symbols()
+        .iter()
+        .flat_map(|symbol| symbol.glyph.chars())
+        .collect();
+    let fonts = FontSet::new(FontSetInit {
         primary,
+        primary_raster_font,
+        primary_shape_face,
+        primary_pixel_size: settings.font_size as f32,
+        ligatures_enabled: user_library.ligature_config().enabled,
         icon_fonts,
-        settings.font_size as f32,
+        icon_chars,
+        icon_pixel_size: settings.font_size as f32,
         cell_width,
-        user_library,
-    );
+    });
     validate_bundled_icon_fonts(&fonts, user_library)?;
     Ok((fonts, primary_path))
 }
@@ -20780,6 +20948,31 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
     Ok(stats)
 }
 
+fn refresh_pending_file_reloads(
+    runtime: &mut EditorRuntime,
+    now: Instant,
+    force: bool,
+) -> Result<bool, String> {
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers.iter().map(ShellBuffer::id).collect::<Vec<_>>()
+    };
+
+    let mut changed = false;
+    for buffer_id in buffer_ids {
+        let did_reload = {
+            let ui = shell_ui_mut(runtime)?;
+            let Some(buffer) = ui.buffer_mut(buffer_id) else {
+                continue;
+            };
+            buffer.reload_from_disk_if_changed(now, force)?
+        };
+        changed |= did_reload;
+    }
+
+    Ok(changed)
+}
+
 fn refresh_pending_git(
     runtime: &mut EditorRuntime,
     now: Instant,
@@ -27081,6 +27274,29 @@ struct FontRun {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShapedGlyph {
+    glyph_id: u16,
+    x_advance: f32,
+    x_offset: f32,
+    y_offset: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ShapedRun {
+    glyphs: Vec<ShapedGlyph>,
+    total_advance: f32,
+}
+
+fn shaped_run_uses_cell_grid(text: &str, shaped: &ShapedRun) -> bool {
+    shaped.glyphs.len() == text.chars().count()
+}
+
+fn shaped_run_preserves_monospace_layout(text: &str, shaped: &ShapedRun, cell_width: i32) -> bool {
+    shaped_run_uses_cell_grid(text, shaped)
+        || (shaped.total_advance - monospace_text_width(text, cell_width) as f32).abs() <= 1.0
+}
+
 fn is_private_use_character(character: char) -> bool {
     matches!(
         character as u32,
@@ -27371,6 +27587,134 @@ fn render_icon_glyph_with_fontdue(
     Ok(layout.advance)
 }
 
+fn scale_shaping_units(value: i32, pixel_size: f32, units_per_em: i32) -> f32 {
+    value as f32 * (pixel_size / units_per_em.max(1) as f32)
+}
+
+fn shape_ascii_ligature_run_with_face(
+    face: &ShapeFace<'_>,
+    pixel_size: f32,
+    ligatures_enabled: bool,
+    text: &str,
+) -> Option<ShapedRun> {
+    if !ligatures_enabled || !text.is_ascii() || text.chars().count() < 2 {
+        return None;
+    }
+
+    let mut face = face.clone();
+    let pixel_size = pixel_size.max(1.0);
+    let ppem = pixel_size.round().clamp(1.0, u16::MAX as f32) as u16;
+    face.set_pixels_per_em(Some((ppem, ppem)));
+
+    let mut buffer = UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    let features = [ShapeFeature::new(Tag::from_bytes(b"calt"), 1, ..)];
+    let glyph_buffer = shape(&face, &features, buffer);
+    let glyph_infos = glyph_buffer.glyph_infos();
+
+    let units_per_em = face.units_per_em();
+    let glyphs = glyph_infos
+        .iter()
+        .zip(glyph_buffer.glyph_positions())
+        .map(|(info, position)| ShapedGlyph {
+            glyph_id: info.glyph_id as u16,
+            x_advance: scale_shaping_units(position.x_advance, pixel_size, units_per_em),
+            x_offset: scale_shaping_units(position.x_offset, pixel_size, units_per_em),
+            y_offset: scale_shaping_units(position.y_offset, pixel_size, units_per_em),
+        })
+        .collect::<Vec<_>>();
+    let total_advance = glyphs.iter().map(|glyph| glyph.x_advance).sum::<f32>();
+    Some(ShapedRun {
+        glyphs,
+        total_advance,
+    })
+}
+
+fn shape_ascii_ligature_run(fonts: &FontSet<'_>, text: &str) -> Option<ShapedRun> {
+    let shaped = shape_ascii_ligature_run_with_face(
+        fonts.primary_shape_face(),
+        fonts.primary_pixel_size(),
+        fonts.ligatures_enabled(),
+        text,
+    )?;
+    let has_substitution = shaped.glyphs.len() != text.chars().count()
+        || text
+            .chars()
+            .zip(shaped.glyphs.iter())
+            .any(|(character, glyph)| {
+                fonts.primary_raster_font().lookup_glyph_index(character) != glyph.glyph_id
+            });
+    let has_positioning = shaped
+        .glyphs
+        .iter()
+        .any(|glyph| glyph.x_offset.abs() > 0.01 || glyph.y_offset.abs() > 0.01);
+    (has_substitution || has_positioning).then_some(shaped)
+}
+
+fn render_primary_ligature_run(
+    canvas: &mut Canvas<Window>,
+    fonts: &FontSet<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    primary_ascent: i32,
+    color: RenderColor,
+) -> Result<Option<i32>, ShellError> {
+    let Some(shaped) = shape_ascii_ligature_run(fonts, text) else {
+        return Ok(None);
+    };
+    let uses_cell_grid = shaped_run_uses_cell_grid(text, &shaped);
+    if !shaped_run_preserves_monospace_layout(text, &shaped, fonts.cell_width()) {
+        return Ok(None);
+    }
+
+    let mut pen_x = x as f32;
+    for (index, glyph) in shaped.glyphs.iter().enumerate() {
+        let (metrics, bitmap) = fonts
+            .primary_raster_font()
+            .rasterize_indexed(glyph.glyph_id, fonts.primary_pixel_size());
+        if metrics.width != 0 && metrics.height != 0 {
+            let mut pixels = vec![0u8; metrics.width * metrics.height * 4];
+            for (alpha, rgba) in bitmap.iter().zip(pixels.chunks_exact_mut(4)) {
+                let alpha = ((*alpha as u16 * color.a as u16) / 255) as u8;
+                rgba[0] = color.r;
+                rgba[1] = color.g;
+                rgba[2] = color.b;
+                rgba[3] = alpha;
+            }
+
+            let surface = Surface::from_data(
+                pixels.as_mut_slice(),
+                metrics.width as u32,
+                metrics.height as u32,
+                (metrics.width * 4) as u32,
+                PixelFormat::RGBA32,
+            )
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            let glyph_origin_x = if uses_cell_grid {
+                x as f32 + index as f32 * fonts.cell_width() as f32
+            } else {
+                pen_x
+            };
+            let draw_x = (glyph_origin_x + glyph.x_offset).round() as i32 + metrics.xmin;
+            let draw_y = y + primary_ascent
+                - metrics.height as i32
+                - metrics.ymin
+                - glyph.y_offset.round() as i32;
+            blit_surface_to_canvas(canvas, &surface, draw_x, draw_y)?;
+        }
+        pen_x += glyph.x_advance;
+    }
+
+    let advance = if uses_cell_grid {
+        monospace_text_width(text, fonts.cell_width()) as i32
+    } else {
+        shaped.total_advance.round() as i32
+    };
+    Ok(Some(advance))
+}
+
 fn render_text_with_fonts(
     canvas: &mut Canvas<Window>,
     fonts: &FontSet<'_>,
@@ -27398,6 +27742,18 @@ fn render_text_with_fonts(
         }
         match run.role {
             FontRole::Primary => {
+                if let Some(advance) = render_primary_ligature_run(
+                    canvas,
+                    fonts,
+                    draw_x,
+                    y,
+                    &run.text,
+                    primary_ascent,
+                    color,
+                )? {
+                    draw_x += advance;
+                    continue;
+                }
                 let surface = fonts
                     .primary()
                     .render(&run.text)
