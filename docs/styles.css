@@ -254,9 +254,9 @@ pre {
 
 .hero {
     display: grid;
-    grid-template-columns: minmax(0, 1.22fr) minmax(280px, 0.78fr);
-    gap: 28px;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+    gap: 22px;
+    align-items: start;
     padding-top: 24px;
 }
 
@@ -277,6 +277,10 @@ pre {
 }
 
 .hero-copy {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 0;
     padding: 28px;
     min-height: 100%;
     min-width: 0;
@@ -307,8 +311,8 @@ pre {
 }
 
 .hero h1 {
-    max-width: 16ch;
-    font-size: clamp(2.7rem, 5.4vw, 5.8rem);
+    max-width: 12ch;
+    font-size: clamp(2.65rem, 4.7vw, 5rem);
     letter-spacing: -0.03em;
     text-wrap: balance;
     word-break: normal;
@@ -336,7 +340,7 @@ pre {
 
 .hero-metrics {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 14px;
     margin-top: 28px;
 }
@@ -507,9 +511,7 @@ pre {
 
 .architecture-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
-    gap: 20px;
-    align-items: start;
+    grid-template-columns: 1fr;
 }
 
 .diagram-frame {
@@ -535,6 +537,7 @@ pre {
 
 .architecture-notes {
     display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 18px;
 }
 
@@ -700,6 +703,10 @@ pre {
         grid-template-columns: 1fr 1fr;
     }
 
+    .architecture-notes {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .overview-grid,
     .command-grid {
         grid-template-columns: 1fr;
@@ -747,9 +754,14 @@ pre {
 
     .hero h1 {
         max-width: none;
+        overflow-wrap: normal;
     }
 
     .hero-metrics {
+        grid-template-columns: 1fr;
+    }
+
+    .architecture-notes {
         grid-template-columns: 1fr;
     }
 
@@ -847,6 +859,7 @@ pre {
 .page-sidebar {
     position: sticky;
     top: 96px;
+    padding-top: 21px;
 }
 
 .sidebar-nav {

@@ -62,8 +62,8 @@ pub fn providers() -> Vec<HoverProviderConfig> {
             "Diagnostics",
             md::MD_ALERT_CIRCLE_OUTLINE,
         ),
-        HoverProviderConfig::new(PROVIDER_TEST_HOVER, "Token", cod::COD_INFO),
         calculator::hover_provider(),
+        HoverProviderConfig::new(PROVIDER_TEST_HOVER, "Token", cod::COD_INFO),
     ]
 }
 
@@ -132,42 +132,30 @@ mod tests {
     #[test]
     fn package_exports_hover_commands_and_keybindings() {
         let package = package();
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "hover.toggle")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "hover.focus")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "hover.next")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "hover.previous")
-        );
-        assert!(
-            package
-                .key_bindings()
-                .iter()
-                .any(|binding| binding.chord() == NEXT_CHORD)
-        );
-        assert!(
-            package
-                .key_bindings()
-                .iter()
-                .any(|binding| binding.chord() == PREVIOUS_CHORD)
-        );
+        assert!(package
+            .commands()
+            .iter()
+            .any(|command| command.name() == "hover.toggle"));
+        assert!(package
+            .commands()
+            .iter()
+            .any(|command| command.name() == "hover.focus"));
+        assert!(package
+            .commands()
+            .iter()
+            .any(|command| command.name() == "hover.next"));
+        assert!(package
+            .commands()
+            .iter()
+            .any(|command| command.name() == "hover.previous"));
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == NEXT_CHORD));
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == PREVIOUS_CHORD));
         assert_eq!(TOGGLE_CHORD, "K");
     }
 
