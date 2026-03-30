@@ -1,7 +1,10 @@
-use crate::icon_font::symbols::{cod, md};
+use crate::{
+    calculator,
+    icon_font::symbols::{cod, md},
+};
 use editor_plugin_api::{
-    LspCompletionKind, PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope,
-    PluginPackage, PluginVimMode,
+    AutocompleteProviderItem, LspCompletionKind, PluginAction, PluginCommand, PluginKeyBinding,
+    PluginKeymapScope, PluginPackage, PluginVimMode,
 };
 
 pub const HOOK_AUTOCOMPLETE_TRIGGER: &str = "ui.autocomplete.trigger";
@@ -30,6 +33,8 @@ pub struct AutocompleteProviderConfig {
     pub icon: String,
     pub item_icon: String,
     pub or_group: Option<String>,
+    pub buffer_kind: Option<String>,
+    pub items: Vec<AutocompleteProviderItem>,
 }
 
 impl AutocompleteProviderConfig {
@@ -45,11 +50,23 @@ impl AutocompleteProviderConfig {
             icon: icon.into(),
             item_icon: item_icon.into(),
             or_group: None,
+            buffer_kind: None,
+            items: Vec::new(),
         }
     }
 
     pub fn with_or_group(mut self, or_group: impl Into<String>) -> Self {
         self.or_group = Some(or_group.into());
+        self
+    }
+
+    pub fn with_buffer_kind(mut self, buffer_kind: impl Into<String>) -> Self {
+        self.buffer_kind = Some(buffer_kind.into());
+        self
+    }
+
+    pub fn with_items(mut self, items: Vec<AutocompleteProviderItem>) -> Self {
+        self.items = items;
         self
     }
 }
@@ -71,6 +88,7 @@ pub fn backends() -> Vec<AutocompleteProviderConfig> {
             BUFFER_ITEM_ICON,
         )
         .with_or_group(PROVIDER_SOURCE_GROUP),
+        calculator::autocomplete_provider(),
     ]
 }
 
@@ -219,7 +237,7 @@ mod tests {
     #[test]
     fn providers_prioritize_lsp_before_buffer() {
         let providers = backends();
-        assert_eq!(providers.len(), 2);
+        assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].id, PROVIDER_LSP);
         assert_eq!(providers[0].label, "LSP");
         assert!(!providers[0].icon.is_empty());
@@ -233,6 +251,12 @@ mod tests {
             providers[1].or_group.as_deref(),
             Some(PROVIDER_SOURCE_GROUP)
         );
+        assert_eq!(providers[2].id, calculator::PROVIDER_CALCULATOR);
+        assert_eq!(
+            providers[2].buffer_kind.as_deref(),
+            Some(calculator::CALCULATOR_KIND)
+        );
+        assert!(!providers[2].items.is_empty());
     }
 
     #[test]

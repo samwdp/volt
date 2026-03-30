@@ -606,6 +606,17 @@ pub struct AutocompleteProvider {
     pub icon: String,
     pub item_icon: String,
     pub or_group: Option<String>,
+    pub buffer_kind: Option<String>,
+    pub items: Vec<AutocompleteProviderItem>,
+}
+
+/// Static autocomplete item exported by a user library provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutocompleteProviderItem {
+    pub label: String,
+    pub replacement: String,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
 }
 
 /// Hover provider configuration exported by the user library.
@@ -615,6 +626,15 @@ pub struct HoverProvider {
     pub label: String,
     pub icon: String,
     pub line_limit: usize,
+    pub buffer_kind: Option<String>,
+    pub topics: Vec<HoverProviderTopic>,
+}
+
+/// Static hover topic exported by a user library provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverProviderTopic {
+    pub token: String,
+    pub lines: Vec<String>,
 }
 
 /// ACP client configuration exported by the user library.

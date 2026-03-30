@@ -5050,6 +5050,7 @@ struct PickerEntry {
 enum AutocompleteProviderKind {
     Buffer,
     Lsp,
+    Manual,
 }
 
 #[derive(Debug, Clone)]
@@ -12873,6 +12874,7 @@ struct AutocompleteBufferRequest {
     buffer_id: BufferId,
     buffer_revision: u64,
     text: TextSnapshot,
+    plugin_kind: Option<String>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -12892,6 +12894,7 @@ struct AutocompleteWorkerRequest {
     buffer_id: BufferId,
     buffer_revision: u64,
     text: TextSnapshot,
+    plugin_kind: Option<String>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -12967,6 +12970,7 @@ impl AutocompleteWorkerState {
                 buffer_id: request.buffer_id,
                 buffer_revision: request.buffer_revision,
                 text: request.text,
+                plugin_kind: request.plugin_kind,
                 path: request.path,
                 root: request.root,
                 cursor: request.cursor,
@@ -13021,6 +13025,9 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
             }
             AutocompleteProviderKind::Lsp => {
                 lsp_autocomplete_entries(request, &request.query, provider)
+            }
+            AutocompleteProviderKind::Manual => {
+                manual_autocomplete_entries(&request.plugin_kind, &request.query, provider)
             }
         };
         if !entries.is_empty()
@@ -13183,6 +13190,47 @@ fn lsp_autocomplete_entries(
         .collect()
 }
 
+fn manual_autocomplete_entries(
+    plugin_kind: &Option<String>,
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    if provider.buffer_kind.as_ref() != plugin_kind.as_ref() {
+        return Vec::new();
+    }
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    provider
+        .items
+        .iter()
+        .filter_map(|item| {
+            let label_lower = item.label.to_ascii_lowercase();
+            let replacement_lower = item.replacement.to_ascii_lowercase();
+            if !prefix_lower.is_empty()
+                && !label_lower.starts_with(&prefix_lower)
+                && !replacement_lower.starts_with(&prefix_lower)
+            {
+                return None;
+            }
+            if !query.token.is_empty() && item.replacement == query.token {
+                return None;
+            }
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: provider.item_icon.clone(),
+                    label: item.label.clone(),
+                    replacement: item.replacement.clone(),
+                    detail: item.detail.clone(),
+                    documentation: item.documentation.clone(),
+                },
+                autocomplete_score(&item.replacement, 1, query) + 80,
+            ))
+        })
+        .collect()
+}
+
 fn collect_autocomplete_token_counts(text: &str) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     let mut token = String::new();
@@ -13293,6 +13341,10 @@ fn autocomplete_request_for_buffer(
         buffer_id,
         buffer_revision: buffer.text.revision(),
         text,
+        plugin_kind: match &buffer.kind {
+            BufferKind::Plugin(kind) => Some(kind.clone()),
+            _ => None,
+        },
         path: buffer.path().map(Path::to_path_buf),
         root,
         cursor: buffer.cursor_point(),
@@ -13336,6 +13388,7 @@ fn hover_overlay_for_buffer(
                 HoverProviderKind::Diagnostics => {
                     hover_diagnostic_provider_lines(buffer, user_library)
                 }
+                HoverProviderKind::Manual => hover_manual_provider_lines(buffer, provider),
             };
             (!lines.is_empty()).then(|| HoverProviderContent {
                 provider_label: provider.label.clone(),
@@ -13448,6 +13501,25 @@ fn hover_empty_provider_lines(
         "Try moving onto an identifier or waiting for LSP/diagnostics to refresh.".to_owned(),
     );
     lines
+}
+
+fn hover_manual_provider_lines(buffer: &ShellBuffer, provider: &HoverProviderSpec) -> Vec<String> {
+    let plugin_kind = match &buffer.kind {
+        BufferKind::Plugin(kind) => Some(kind.as_str()),
+        _ => None,
+    };
+    if provider.buffer_kind.as_deref() != plugin_kind {
+        return Vec::new();
+    }
+    completion_token_at_cursor(buffer)
+        .and_then(|(_, token)| {
+            provider
+                .topics
+                .iter()
+                .find(|topic| topic.token == token)
+                .map(|topic| topic.lines.clone())
+        })
+        .unwrap_or_default()
 }
 
 fn hover_lsp_provider_lines(

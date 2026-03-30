@@ -42,6 +42,8 @@ impl UserLibrary for NullUserLibrary {
                 icon: editor_icons::symbols::md::MD_COMMENT_TEXT_OUTLINE.to_owned(),
                 item_icon: editor_icons::symbols::cod::COD_SYMBOL_MISC.to_owned(),
                 or_group: Some("source".to_owned()),
+                buffer_kind: None,
+                items: Vec::new(),
             },
             AutocompleteProvider {
                 id: "buffer".to_owned(),
@@ -49,6 +51,8 @@ impl UserLibrary for NullUserLibrary {
                 icon: editor_icons::symbols::cod::COD_TEXT_SIZE.to_owned(),
                 item_icon: editor_icons::symbols::cod::COD_TEXT_SIZE.to_owned(),
                 or_group: Some("source".to_owned()),
+                buffer_kind: None,
+                items: Vec::new(),
             },
         ]
     }
@@ -65,24 +69,32 @@ impl UserLibrary for NullUserLibrary {
                 label: "LSP".to_owned(),
                 icon: editor_icons::symbols::md::MD_COMMENT_TEXT_OUTLINE.to_owned(),
                 line_limit: 10,
+                buffer_kind: None,
+                topics: Vec::new(),
             },
             HoverProvider {
                 id: "signature-help".to_owned(),
                 label: "Signature".to_owned(),
                 icon: editor_icons::symbols::md::MD_SIGNATURE.to_owned(),
                 line_limit: 10,
+                buffer_kind: None,
+                topics: Vec::new(),
             },
             HoverProvider {
                 id: "diagnostics".to_owned(),
                 label: "Diagnostics".to_owned(),
                 icon: editor_icons::symbols::md::MD_ALERT_CIRCLE_OUTLINE.to_owned(),
                 line_limit: 10,
+                buffer_kind: None,
+                topics: Vec::new(),
             },
             HoverProvider {
                 id: "test-hover".to_owned(),
                 label: "Token".to_owned(),
                 icon: editor_icons::symbols::cod::COD_INFO.to_owned(),
                 line_limit: 10,
+                buffer_kind: None,
+                topics: Vec::new(),
             },
         ]
     }

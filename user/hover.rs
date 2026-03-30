@@ -1,6 +1,10 @@
-use crate::icon_font::symbols::{cod, md};
+use crate::{
+    calculator,
+    icon_font::symbols::{cod, md},
+};
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    HoverProviderTopic, PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope,
+    PluginPackage, PluginVimMode,
 };
 
 pub const HOOK_HOVER_TOGGLE: &str = "ui.hover.toggle";
@@ -23,6 +27,8 @@ pub struct HoverProviderConfig {
     pub id: String,
     pub label: String,
     pub icon: String,
+    pub buffer_kind: Option<String>,
+    pub topics: Vec<HoverProviderTopic>,
 }
 
 impl HoverProviderConfig {
@@ -31,7 +37,19 @@ impl HoverProviderConfig {
             id: id.into(),
             label: label.into(),
             icon: icon.into(),
+            buffer_kind: None,
+            topics: Vec::new(),
         }
+    }
+
+    pub fn with_buffer_kind(mut self, buffer_kind: impl Into<String>) -> Self {
+        self.buffer_kind = Some(buffer_kind.into());
+        self
+    }
+
+    pub fn with_topics(mut self, topics: Vec<HoverProviderTopic>) -> Self {
+        self.topics = topics;
+        self
     }
 }
 
@@ -45,6 +63,7 @@ pub fn providers() -> Vec<HoverProviderConfig> {
             md::MD_ALERT_CIRCLE_OUTLINE,
         ),
         HoverProviderConfig::new(PROVIDER_TEST_HOVER, "Token", cod::COD_INFO),
+        calculator::hover_provider(),
     ]
 }
 
@@ -159,5 +178,11 @@ mod tests {
         assert_eq!(providers[1].id, PROVIDER_SIGNATURE_HELP);
         assert_eq!(providers[2].id, PROVIDER_DIAGNOSTICS);
         assert_eq!(providers[3].id, PROVIDER_TEST_HOVER);
+        assert_eq!(providers[4].id, calculator::PROVIDER_CALCULATOR);
+        assert_eq!(
+            providers[4].buffer_kind.as_deref(),
+            Some(calculator::CALCULATOR_KIND)
+        );
+        assert!(!providers[4].topics.is_empty());
     }
 }

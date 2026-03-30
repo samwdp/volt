@@ -14,9 +14,9 @@ use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_theme::{Color, Theme, ThemeOption};
 
 use crate::{
-    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, StatuslineContext, TerminalConfig,
-    WorkspaceRoot,
+    AcpClient, AutocompleteProvider, AutocompleteProviderItem, GitStatusPrefix, HoverProvider,
+    HoverProviderTopic, LspDiagnosticsInfo, OilDefaults, OilKeyAction, OilKeybindings, OilSortMode,
+    StatuslineContext, TerminalConfig, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -619,12 +619,45 @@ impl From<AbiGitStatusPrefix> for GitStatusPrefix {
 
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiAutocompleteProviderItem {
+    pub label: RString,
+    pub replacement: RString,
+    pub detail: ROption<RString>,
+    pub documentation: ROption<RString>,
+}
+
+impl From<AutocompleteProviderItem> for AbiAutocompleteProviderItem {
+    fn from(value: AutocompleteProviderItem) -> Self {
+        Self {
+            label: value.label.into(),
+            replacement: value.replacement.into(),
+            detail: value.detail.map(Into::into).into(),
+            documentation: value.documentation.map(Into::into).into(),
+        }
+    }
+}
+
+impl From<AbiAutocompleteProviderItem> for AutocompleteProviderItem {
+    fn from(value: AbiAutocompleteProviderItem) -> Self {
+        Self {
+            label: value.label.into(),
+            replacement: value.replacement.into(),
+            detail: value.detail.into_option().map(RString::into_string),
+            documentation: value.documentation.into_option().map(RString::into_string),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiAutocompleteProvider {
     pub id: RString,
     pub label: RString,
     pub icon: RString,
     pub item_icon: RString,
     pub or_group: ROption<RString>,
+    pub buffer_kind: ROption<RString>,
+    pub items: RVec<AbiAutocompleteProviderItem>,
 }
 
 impl From<AutocompleteProvider> for AbiAutocompleteProvider {
@@ -635,6 +668,13 @@ impl From<AutocompleteProvider> for AbiAutocompleteProvider {
             icon: value.icon.into(),
             item_icon: value.item_icon.into(),
             or_group: value.or_group.map(Into::into).into(),
+            buffer_kind: value.buffer_kind.map(Into::into).into(),
+            items: value
+                .items
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
         }
     }
 }
@@ -647,6 +687,38 @@ impl From<AbiAutocompleteProvider> for AutocompleteProvider {
             icon: value.icon.into(),
             item_icon: value.item_icon.into(),
             or_group: value.or_group.into_option().map(RString::into_string),
+            buffer_kind: value.buffer_kind.into_option().map(RString::into_string),
+            items: value.items.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiHoverProviderTopic {
+    pub token: RString,
+    pub lines: RVec<RString>,
+}
+
+impl From<HoverProviderTopic> for AbiHoverProviderTopic {
+    fn from(value: HoverProviderTopic) -> Self {
+        Self {
+            token: value.token.into(),
+            lines: value
+                .lines
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+}
+
+impl From<AbiHoverProviderTopic> for HoverProviderTopic {
+    fn from(value: AbiHoverProviderTopic) -> Self {
+        Self {
+            token: value.token.into(),
+            lines: value.lines.into_iter().map(RString::into_string).collect(),
         }
     }
 }
@@ -658,6 +730,8 @@ pub struct AbiHoverProvider {
     pub label: RString,
     pub icon: RString,
     pub line_limit: usize,
+    pub buffer_kind: ROption<RString>,
+    pub topics: RVec<AbiHoverProviderTopic>,
 }
 
 impl From<HoverProvider> for AbiHoverProvider {
@@ -667,6 +741,13 @@ impl From<HoverProvider> for AbiHoverProvider {
             label: value.label.into(),
             icon: value.icon.into(),
             line_limit: value.line_limit,
+            buffer_kind: value.buffer_kind.map(Into::into).into(),
+            topics: value
+                .topics
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
         }
     }
 }
@@ -678,6 +759,8 @@ impl From<AbiHoverProvider> for HoverProvider {
             label: value.label.into(),
             icon: value.icon.into(),
             line_limit: value.line_limit,
+            buffer_kind: value.buffer_kind.into_option().map(RString::into_string),
+            topics: value.topics.into_iter().map(Into::into).collect(),
         }
     }
 }

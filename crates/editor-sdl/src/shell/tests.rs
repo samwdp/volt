@@ -2677,6 +2677,7 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
         buffer_id,
         buffer_revision,
         text,
+        plugin_kind: None,
         path: None,
         root: None,
         cursor,
@@ -2688,6 +2689,8 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
                 icon: "P".to_owned(),
                 item_icon: "1".to_owned(),
                 or_group: Some("source".to_owned()),
+                buffer_kind: None,
+                items: Vec::new(),
                 kind: AutocompleteProviderKind::Buffer,
             },
             AutocompleteProviderSpec {
@@ -2696,6 +2699,8 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
                 icon: "F".to_owned(),
                 item_icon: "2".to_owned(),
                 or_group: Some("source".to_owned()),
+                buffer_kind: None,
+                items: Vec::new(),
                 kind: AutocompleteProviderKind::Buffer,
             },
         ],
@@ -2731,6 +2736,70 @@ fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), Strin
     assert_eq!(token, "alpha");
     assert_eq!(range.start(), TextPoint::new(0, 0));
     assert_eq!(range.end(), TextPoint::new(0, 5));
+    Ok(())
+}
+
+#[test]
+fn manual_autocomplete_entries_only_apply_to_matching_plugin_buffers() {
+    let provider = AutocompleteProviderSpec {
+        id: "calculator".to_owned(),
+        label: "Calculator".to_owned(),
+        icon: "C".to_owned(),
+        item_icon: "ƒ".to_owned(),
+        or_group: None,
+        buffer_kind: Some("calculator".to_owned()),
+        items: vec![editor_plugin_api::AutocompleteProviderItem {
+            label: "sqrt(x)".to_owned(),
+            replacement: "sqrt".to_owned(),
+            detail: Some("Square root".to_owned()),
+            documentation: Some("Returns the square root of x.".to_owned()),
+        }],
+        kind: AutocompleteProviderKind::Manual,
+    };
+    let query = AutocompleteQuery {
+        prefix: "sq".to_owned(),
+        token: "sq".to_owned(),
+        replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 2)),
+    };
+
+    let matching = manual_autocomplete_entries(&Some("calculator".to_owned()), &query, &provider);
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].0.replacement, "sqrt");
+
+    let non_matching =
+        manual_autocomplete_entries(&Some("git-status".to_owned()), &query, &provider);
+    assert!(non_matching.is_empty());
+}
+
+#[test]
+fn hover_manual_provider_lines_match_current_plugin_token() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer.kind = BufferKind::Plugin("calculator".to_owned());
+        buffer.text = TextBuffer::from_text("sqrt");
+        buffer.set_cursor(TextPoint::new(0, 2));
+    }
+    let provider = HoverProviderSpec {
+        label: "Calculator".to_owned(),
+        icon: "C".to_owned(),
+        buffer_kind: Some("calculator".to_owned()),
+        topics: vec![editor_plugin_api::HoverProviderTopic {
+            token: "sqrt".to_owned(),
+            lines: vec!["sqrt(x)".to_owned(), "Square root".to_owned()],
+        }],
+        kind: HoverProviderKind::Manual,
+    };
+
+    let lines = hover_manual_provider_lines(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+        &provider,
+    );
+    assert_eq!(lines, vec!["sqrt(x)".to_owned(), "Square root".to_owned()]);
     Ok(())
 }
 
