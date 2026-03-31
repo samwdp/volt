@@ -194,6 +194,30 @@ fn same_length_inline_ligatures_stay_layout_safe_on_cell_grid() {
 }
 
 #[test]
+fn contextual_ligature_raster_size_expands_changed_glyphs() {
+    let Some(berkeley_mono_font) = berkeley_mono_font() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+    let face = rustybuzz::Face::from_slice(berkeley_mono_font, 0)
+        .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
+    let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "=>")
+        .unwrap_or_else(|| panic!("expected `=>` to shape"));
+    let raster_font = fontdue::Font::from_bytes(berkeley_mono_font, fontdue::FontSettings::default())
+        .unwrap_or_else(|error| panic!("failed to parse Berkeley Mono raster font: {error}"));
+
+    assert!(
+        "=>".chars()
+            .zip(shaped.glyphs.iter())
+            .any(|(character, glyph)| {
+                raster_font.lookup_glyph_index(character) != glyph.glyph_id
+                    && adjusted_contextual_ligature_pixel_size(&raster_font, 18.0, character, glyph.glyph_id)
+                        > 18.0
+            })
+    );
+}
+
+#[test]
 fn ligature_shape_cache_stores_negative_results() {
     let mut cache: TextTextureCache<'static> = TextTextureCache::new();
 
@@ -216,6 +240,9 @@ fn ligature_shape_cache_stores_layout_results() {
             glyph_id: 7,
             draw_x: -1,
             draw_y: 3,
+            width: 8,
+            height: 10,
+            raster_px_64: encode_raster_px_64(18.0),
         }],
         offset_x: -1,
         offset_y: 3,
@@ -264,6 +291,7 @@ fn build_cached_text_layout_tracks_bounds_for_nominal_glyphs() {
                 draw_y: 3,
                 width: 8,
                 height: 10,
+                raster_px_64: encode_raster_px_64(18.0),
             },
             CachedGlyphRasterPlacement {
                 glyph_id: 8,
@@ -271,6 +299,7 @@ fn build_cached_text_layout_tracks_bounds_for_nominal_glyphs() {
                 draw_y: 5,
                 width: 6,
                 height: 7,
+                raster_px_64: encode_raster_px_64(18.0),
             },
         ],
         22,
@@ -284,11 +313,17 @@ fn build_cached_text_layout_tracks_bounds_for_nominal_glyphs() {
                     glyph_id: 7,
                     draw_x: -1,
                     draw_y: 3,
+                    width: 8,
+                    height: 10,
+                    raster_px_64: encode_raster_px_64(18.0),
                 },
                 CachedLigatureGlyphPlacement {
                     glyph_id: 8,
                     draw_x: 10,
                     draw_y: 5,
+                    width: 6,
+                    height: 7,
+                    raster_px_64: encode_raster_px_64(18.0),
                 },
             ],
             offset_x: -1,
@@ -297,6 +332,46 @@ fn build_cached_text_layout_tracks_bounds_for_nominal_glyphs() {
             height: 10,
             advance: 22,
         }
+    );
+}
+
+#[test]
+fn composite_alpha_bitmap_preserves_straight_alpha_for_overlaps() {
+    let mut surface = Surface::new(1, 1, PixelFormat::RGBA32)
+        .unwrap_or_else(|error| panic!("failed to create surface: {error}"));
+    surface
+        .fill_rect(None, Color::RGBA(0, 0, 0, 0))
+        .unwrap_or_else(|error| panic!("failed to clear surface: {error}"));
+
+    composite_alpha_bitmap(
+        &mut surface,
+        0,
+        0,
+        1,
+        1,
+        &[128],
+        RenderColor::rgba(10, 20, 30, 255),
+    );
+    composite_alpha_bitmap(
+        &mut surface,
+        0,
+        0,
+        1,
+        1,
+        &[128],
+        RenderColor::rgba(10, 20, 30, 255),
+    );
+
+    surface.with_lock(|pixels| {
+        assert_eq!(&pixels[..4], &[10, 20, 30, 191]);
+    });
+}
+
+#[test]
+fn collapse_subpixel_bitmap_to_alpha_averages_channels() {
+    assert_eq!(
+        collapse_subpixel_bitmap_to_alpha(2, &[255, 0, 0, 0, 255, 255]),
+        vec![85, 170]
     );
 }
 
@@ -660,9 +735,8 @@ fn restore_saved_theme_selection_clears_unknown_theme() {
 }
 
 #[test]
-fn draw_buffer_text_inverts_the_cursor_glyph_color() -> Result<(), String> {
+fn draw_buffer_text_keeps_cursor_line_as_one_text_run() -> Result<(), String> {
     let default_color = Color::RGB(240, 240, 240);
-    let inverted_color = Color::RGB(16, 18, 24);
     let line = "abc";
     let char_map = LineCharMap::new(line);
     let mut scene = Vec::new();
@@ -682,36 +756,17 @@ fn draw_buffer_text_inverts_the_cursor_glyph_color() -> Result<(), String> {
         None,
         default_color,
         8,
-        Some(TextColorOverride {
-            start: 1,
-            end: 2,
-            color: inverted_color,
-        }),
     )
     .map_err(|error| error.to_string())?;
 
     assert_eq!(
         scene,
-        vec![
-            DrawCommand::Text {
-                x: 0,
-                y: 0,
-                text: "a".to_owned(),
-                color: to_render_color(default_color),
-            },
-            DrawCommand::Text {
-                x: 8,
-                y: 0,
-                text: "b".to_owned(),
-                color: to_render_color(inverted_color),
-            },
-            DrawCommand::Text {
-                x: 16,
-                y: 0,
-                text: "c".to_owned(),
-                color: to_render_color(default_color),
-            },
-        ]
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "abc".to_owned(),
+            color: to_render_color(default_color),
+        },]
     );
     Ok(())
 }
@@ -748,7 +803,6 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
         None,
         Color::RGB(240, 240, 240),
         8,
-        None,
     )
     .map_err(|error| error.to_string())?;
 
@@ -795,10 +849,12 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
 }
 
 #[test]
-fn block_cursor_text_override_uses_segment_relative_utf8_offsets() {
+fn block_cursor_text_overlay_positions_multibyte_cursor_text() {
     let line = "aéz";
     let char_map = LineCharMap::new(line);
-    let override_info = block_cursor_text_override(
+    let overlay = block_cursor_text_overlay(
+        24,
+        line,
         &char_map,
         LineWrapSegment {
             start_col: 0,
@@ -808,11 +864,13 @@ fn block_cursor_text_override_uses_segment_relative_utf8_offsets() {
         0,
         1,
         Some(Color::RGB(1, 2, 3)),
+        8,
     )
-    .expect("cursor on a multibyte character should produce an override");
+    .expect("cursor on a multibyte character should produce an overlay");
 
-    assert_eq!(override_info.start, 1);
-    assert_eq!(override_info.end, 3);
+    assert_eq!(overlay.draw_x, 32);
+    assert_eq!(overlay.text, "é");
+    assert_eq!(overlay.color, Color::RGB(1, 2, 3));
 }
 
 #[test]

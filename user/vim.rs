@@ -913,7 +913,7 @@ pub fn package() -> PluginPackage {
         leader_binding("a p", "acp.pick-session", PluginKeymapScope::Workspace),
         // buffer
         leader_binding("b b", "picker.open-buffers", PluginKeymapScope::Workspace),
-        leader_binding("b w", "pane.close", PluginKeymapScope::Workspace),
+        leader_binding("d w", "pane.close", PluginKeymapScope::Workspace),
         leader_binding("d b", "buffer.close", PluginKeymapScope::Workspace),
         leader_binding("b k", "buffer.close-picker", PluginKeymapScope::Workspace),
         // Git
@@ -975,23 +975,18 @@ mod tests {
     #[test]
     fn package_exports_lsp_navigation_bindings() {
         let package = package();
-        assert!(
-            package
-                .key_bindings()
-                .iter()
-                .any(|binding| binding.chord() == "g d"
-                    && binding.command_name() == "lsp.definition")
-        );
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == "g d" && binding.command_name() == "lsp.definition"));
         assert!(package.key_bindings().iter().any(
             |binding| binding.chord() == "g r r" && binding.command_name() == "lsp.references"
         ));
-        assert!(
-            package
-                .key_bindings()
-                .iter()
-                .any(|binding| binding.chord() == "g i"
-                    && binding.command_name() == "lsp.implementation")
-        );
+        assert!(package
+            .key_bindings()
+            .iter()
+            .any(|binding| binding.chord() == "g i"
+                && binding.command_name() == "lsp.implementation"));
     }
 
     #[test]

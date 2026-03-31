@@ -97,7 +97,7 @@ use sdl3::{
     mouse::{MouseButton, MouseWheelDirection},
     pixels::{Color, PixelFormat},
     rect::Rect,
-    render::{BlendMode, Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
+    render::{Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
     surface::Surface,
     ttf::Font,
     video::{Window, WindowContext},
@@ -10284,15 +10284,19 @@ fn load_font_set<'ttf>(
             })?
             .into_boxed_slice(),
     );
-    let primary_raster_font =
-        RasterFont::from_bytes(primary_font_data, fontdue::FontSettings::default()).map_err(
-            |error| {
-                ShellError::Runtime(format!(
-                    "failed to parse primary font `{}`: {error}",
-                    primary_path.display()
-                ))
-            },
-        )?;
+    let primary_raster_font = RasterFont::from_bytes(
+        primary_font_data,
+        fontdue::FontSettings {
+            scale: settings.font_size.max(1) as f32,
+            ..fontdue::FontSettings::default()
+        },
+    )
+    .map_err(|error| {
+        ShellError::Runtime(format!(
+            "failed to parse primary font `{}`: {error}",
+            primary_path.display()
+        ))
+    })?;
     let primary_shape_face = ShapeFace::from_slice(primary_font_data, 0).ok_or_else(|| {
         ShellError::Runtime(format!(
             "failed to parse shaping data for primary font `{}`",
@@ -10302,6 +10306,12 @@ fn load_font_set<'ttf>(
     let primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let primary_pixel_size = primary_raster_font
+        .horizontal_line_metrics(settings.font_size.max(1) as f32)
+        .map(|metrics| metrics.ascent - metrics.descent)
+        .filter(|height| *height > f32::EPSILON)
+        .map(|height| settings.font_size.max(1) as f32 * primary.height().max(1) as f32 / height)
+        .unwrap_or(settings.font_size.max(1) as f32);
     let cell_width = primary
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
@@ -10343,7 +10353,7 @@ fn load_font_set<'ttf>(
         primary,
         primary_raster_font,
         primary_shape_face,
-        primary_pixel_size: settings.font_size as f32,
+        primary_pixel_size,
         ligatures_enabled: user_library.ligature_config().enabled,
         icon_fonts,
         icon_chars,
@@ -26281,16 +26291,21 @@ fn render_buffer(
                     theme_registry,
                     text_color,
                     cell_width,
-                    block_cursor_text_override(
-                        &wrapped.char_map,
-                        *segment,
-                        line_index,
-                        cursor_row,
-                        cursor_col,
-                        matches!(input_mode, InputMode::Normal | InputMode::Visual)
-                            .then_some(base_background),
-                    ),
                 )?;
+                if let Some(overlay) = block_cursor_text_overlay(
+                    segment_x,
+                    &wrapped.line,
+                    &wrapped.char_map,
+                    *segment,
+                    line_index,
+                    cursor_row,
+                    cursor_col,
+                    matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                        .then_some(base_background),
+                    cell_width,
+                ) {
+                    draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
+                }
                 if user_library.lsp_show_buffer_diagnostics() && buffer.lsp_enabled() {
                     draw_diagnostic_underlines_for_segment(
                         target,
@@ -27557,21 +27572,24 @@ fn draw_terminal_cursor(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TextColorOverride {
-    start: usize,
-    end: usize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CursorTextOverlay {
+    draw_x: i32,
+    text: String,
     color: Color,
 }
 
-fn block_cursor_text_override(
+fn block_cursor_text_overlay(
+    x: i32,
+    line: &str,
     char_map: &LineCharMap,
     segment: LineWrapSegment,
     line_index: usize,
     cursor_row: usize,
     cursor_col: usize,
     color: Option<Color>,
-) -> Option<TextColorOverride> {
+    cell_width: i32,
+) -> Option<CursorTextOverlay> {
     let color = color?;
     if line_index != cursor_row || cursor_col < segment.start_col || cursor_col >= segment.end_col {
         return None;
@@ -27579,16 +27597,10 @@ fn block_cursor_text_override(
     if cursor_col >= char_map.len() {
         return None;
     }
-    let segment_start = char_map
-        .bytes
-        .get(segment.start_col)
-        .copied()
-        .unwrap_or_default();
-    let start = char_map.bytes.get(cursor_col).copied()?;
-    let end = char_map.bytes.get(cursor_col.saturating_add(1)).copied()?;
-    (start < end).then_some(TextColorOverride {
-        start: start.saturating_sub(segment_start),
-        end: end.saturating_sub(segment_start),
+    let text = char_map.slice(line, cursor_col, cursor_col.saturating_add(1));
+    (!text.is_empty()).then_some(CursorTextOverlay {
+        draw_x: x + cursor_col.saturating_sub(segment.start_col) as i32 * cell_width,
+        text: text.to_owned(),
         color,
     })
 }
@@ -27605,7 +27617,6 @@ fn draw_buffer_text(
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
     cell_width: i32,
-    text_override: Option<TextColorOverride>,
 ) -> Result<(), ShellError> {
     let segment_end_col = segment.end_col.min(char_map.len());
     let segment_start_col = segment.start_col.min(segment_end_col);
@@ -27643,7 +27654,6 @@ fn draw_buffer_text(
         clipped_spans,
         theme_registry,
         default_color,
-        text_override,
         segment_byte_offsets,
         segment_base_byte,
     ) {
@@ -27661,31 +27671,10 @@ fn line_color_segments(
     line_syntax_spans: Option<&[LineSyntaxSpan]>,
     theme_registry: Option<&ThemeRegistry>,
     default_color: Color,
-    text_override: Option<TextColorOverride>,
     column_byte_offsets: &[usize],
     base_byte: usize,
 ) -> Vec<(String, Color)> {
-    let text_override = text_override.and_then(|text_override| {
-        let start = clamp_to_char_boundary(line, text_override.start);
-        let end = clamp_to_char_boundary(line, text_override.end.min(line.len()));
-        (start < end).then_some(TextColorOverride {
-            start,
-            end,
-            color: text_override.color,
-        })
-    });
     let Some(line_syntax_spans) = line_syntax_spans else {
-        if let Some(text_override) = text_override {
-            return line_color_segments(
-                line,
-                Some(&[]),
-                theme_registry,
-                default_color,
-                Some(text_override),
-                column_byte_offsets,
-                base_byte,
-            );
-        }
         return vec![(line.to_owned(), default_color)];
     };
 
@@ -27711,7 +27700,7 @@ fn line_color_segments(
             Some((start, end, span.theme_token.as_str()))
         })
         .collect::<Vec<_>>();
-    if relevant_spans.is_empty() && text_override.is_none() {
+    if relevant_spans.is_empty() {
         return vec![(line.to_owned(), default_color)];
     }
 
@@ -27719,10 +27708,6 @@ fn line_color_segments(
     for (start, end, _) in &relevant_spans {
         breakpoints.push(*start);
         breakpoints.push(*end);
-    }
-    if let Some(text_override) = text_override {
-        breakpoints.push(text_override.start);
-        breakpoints.push(text_override.end);
     }
     breakpoints.sort_unstable();
     breakpoints.dedup();
@@ -27737,22 +27722,13 @@ fn line_color_segments(
         let Some(text) = line.get(start..end) else {
             continue;
         };
-        let color = if let Some(text_override) = text_override
-            && start >= text_override.start
-            && end <= text_override.end
-        {
-            text_override.color
-        } else {
-            relevant_spans
-                .iter()
-                .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
-                .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
-                .and_then(|(_, _, token)| {
-                    theme_registry.and_then(|registry| registry.resolve(token))
-                })
-                .map(to_sdl_color)
-                .unwrap_or(default_color)
-        };
+        let color = relevant_spans
+            .iter()
+            .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
+            .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
+            .and_then(|(_, _, token)| theme_registry.and_then(|registry| registry.resolve(token)))
+            .map(to_sdl_color)
+            .unwrap_or(default_color);
         segments.push((text.to_owned(), color));
     }
 
@@ -28193,6 +28169,9 @@ struct CachedLigatureGlyphPlacement {
     glyph_id: u16,
     draw_x: i32,
     draw_y: i32,
+    width: u32,
+    height: u32,
+    raster_px_64: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28202,6 +28181,7 @@ struct CachedGlyphRasterPlacement {
     draw_y: i32,
     width: u32,
     height: u32,
+    raster_px_64: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28510,16 +28490,113 @@ fn alpha_bitmap_surface(
     Ok(surface)
 }
 
+fn composite_alpha_bitmap(
+    surface: &mut Surface<'_>,
+    dest_x: i32,
+    dest_y: i32,
+    width: usize,
+    height: usize,
+    bitmap: &[u8],
+    color: RenderColor,
+) {
+    let pitch = surface.pitch() as usize;
+    let surface_width = surface.width() as i32;
+    let surface_height = surface.height() as i32;
+    surface.with_lock_mut(|pixels| {
+        for row in 0..height {
+            let y = dest_y.saturating_add(row as i32);
+            if !(0..surface_height).contains(&y) {
+                continue;
+            }
+            let src_row_start = row * width;
+            let dst_row_start = y as usize * pitch;
+            for col in 0..width {
+                let x = dest_x.saturating_add(col as i32);
+                if !(0..surface_width).contains(&x) {
+                    continue;
+                }
+                let src_alpha = bitmap[src_row_start + col];
+                if src_alpha == 0 {
+                    continue;
+                }
+                let src_alpha = ((src_alpha as u16 * color.a as u16) / 255) as u8;
+                if src_alpha == 0 {
+                    continue;
+                }
+                let pixel_start = dst_row_start + x as usize * 4;
+                let dst_alpha = pixels[pixel_start + 3];
+                let out_alpha = src_alpha as u16
+                    + ((dst_alpha as u16 * (255u16.saturating_sub(src_alpha as u16))) / 255);
+                pixels[pixel_start] = color.r;
+                pixels[pixel_start + 1] = color.g;
+                pixels[pixel_start + 2] = color.b;
+                pixels[pixel_start + 3] = out_alpha.min(255) as u8;
+            }
+        }
+    });
+}
+
+fn collapse_subpixel_bitmap_to_alpha(width: usize, bitmap: &[u8]) -> Vec<u8> {
+    bitmap
+        .chunks_exact(width * 3)
+        .flat_map(|row| {
+            row.chunks_exact(3).map(|subpixel| {
+                ((u16::from(subpixel[0]) + u16::from(subpixel[1]) + u16::from(subpixel[2]) + 1)
+                    / 3) as u8
+            })
+        })
+        .collect()
+}
+
+fn encode_raster_px_64(pixel_size: f32) -> u16 {
+    (pixel_size.max(1.0) * 64.0)
+        .round()
+        .clamp(1.0, u16::MAX as f32) as u16
+}
+
+fn decode_raster_px_64(encoded: u16) -> f32 {
+    (encoded.max(1) as f32) / 64.0
+}
+
+fn adjusted_contextual_ligature_pixel_size(
+    raster_font: &RasterFont,
+    base_pixel_size: f32,
+    nominal_character: char,
+    ligature_glyph_id: u16,
+) -> f32 {
+    let nominal_glyph_id = raster_font.lookup_glyph_index(nominal_character);
+    if nominal_glyph_id == ligature_glyph_id {
+        return base_pixel_size;
+    }
+    let nominal_metrics = raster_font.metrics(nominal_character, base_pixel_size);
+    let ligature_metrics = raster_font.metrics_indexed(ligature_glyph_id, base_pixel_size);
+    if nominal_metrics.height == 0 || ligature_metrics.height == 0 {
+        return base_pixel_size;
+    }
+    let height_scale = nominal_metrics.height as f32 / ligature_metrics.height as f32;
+    let width_scale = if nominal_metrics.width != 0 && ligature_metrics.width != 0 {
+        nominal_metrics.width as f32 / ligature_metrics.width as f32
+    } else {
+        1.0
+    };
+    let scale = height_scale.max(width_scale).clamp(1.0, 1.25);
+    base_pixel_size * scale
+}
+
 fn render_primary_text_texture<'texture>(
     texture_creator: &'texture WindowTextureCreator,
     fonts: &FontSet<'_>,
     text: &str,
     color: RenderColor,
 ) -> Result<RenderedTextTexture<'texture>, ShellError> {
-    // Keep plain text on the same raster path as ligatures so lines do not
-    // visibly switch renderer when a ligature appears.
-    let layout = nominal_primary_text_layout(fonts, text, fonts.primary().ascent());
-    render_cached_ligature_texture(texture_creator, fonts, &layout, color)
+    let surface = fonts
+        .primary()
+        .render(text)
+        .blended(from_render_color(color))
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let advance = surface.width() as i32;
+    let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
+    Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance))
 }
 
 fn draw_text_texture_with_cache<'texture, F>(
@@ -28669,6 +28746,9 @@ fn build_cached_text_layout(
                 glyph_id: glyph.glyph_id,
                 draw_x: glyph.draw_x,
                 draw_y: glyph.draw_y,
+                width: glyph.width,
+                height: glyph.height,
+                raster_px_64: glyph.raster_px_64,
             }
         })
         .collect();
@@ -28681,37 +28761,6 @@ fn build_cached_text_layout(
         height: (max_y - min_y).max(1) as u32,
         advance,
     }
-}
-
-fn nominal_primary_text_layout(
-    fonts: &FontSet<'_>,
-    text: &str,
-    primary_ascent: i32,
-) -> CachedLigatureLayout {
-    let glyphs = text
-        .chars()
-        .enumerate()
-        .filter_map(|(index, character)| {
-            let glyph_id = fonts.primary_raster_font().lookup_glyph_index(character);
-            let metrics = fonts
-                .primary_raster_font()
-                .metrics_indexed(glyph_id, fonts.primary_pixel_size());
-            if metrics.width == 0 || metrics.height == 0 {
-                return None;
-            }
-            Some(CachedGlyphRasterPlacement {
-                glyph_id,
-                draw_x: index as i32 * fonts.cell_width() + metrics.xmin,
-                draw_y: primary_ascent - metrics.height as i32 - metrics.ymin,
-                width: metrics.width as u32,
-                height: metrics.height as u32,
-            })
-        })
-        .collect();
-    build_cached_text_layout(
-        glyphs,
-        monospace_text_width(text, fonts.cell_width()) as i32,
-    )
 }
 
 fn cached_ligature_layout(
@@ -28729,10 +28778,27 @@ fn cached_ligature_layout(
 
     let mut pen_x = 0.0_f32;
     let mut glyphs = Vec::new();
+    let text_characters = text.chars().collect::<Vec<_>>();
     for (index, glyph) in shaped.glyphs.iter().enumerate() {
+        let raster_pixel_size = if uses_cell_grid {
+            text_characters
+                .get(index)
+                .copied()
+                .map(|character| {
+                    adjusted_contextual_ligature_pixel_size(
+                        fonts.primary_raster_font(),
+                        fonts.primary_pixel_size(),
+                        character,
+                        glyph.glyph_id,
+                    )
+                })
+                .unwrap_or_else(|| fonts.primary_pixel_size())
+        } else {
+            fonts.primary_pixel_size()
+        };
         let metrics = fonts
             .primary_raster_font()
-            .metrics_indexed(glyph.glyph_id, fonts.primary_pixel_size());
+            .metrics_indexed(glyph.glyph_id, raster_pixel_size);
         if metrics.width != 0 && metrics.height != 0 {
             let glyph_origin_x = if uses_cell_grid {
                 index as f32 * fonts.cell_width() as f32
@@ -28750,6 +28816,7 @@ fn cached_ligature_layout(
                 draw_y,
                 width: metrics.width as u32,
                 height: metrics.height as u32,
+                raster_px_64: encode_raster_px_64(raster_pixel_size),
             });
         }
         pen_x += glyph.x_advance;
@@ -28779,31 +28846,25 @@ fn render_cached_ligature_texture<'texture>(
         .fill_rect(None, Color::RGBA(0, 0, 0, 0))
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     for glyph in &layout.glyphs {
-        let (metrics, bitmap) = fonts
-            .primary_raster_font()
-            .rasterize_indexed(glyph.glyph_id, fonts.primary_pixel_size());
-        if metrics.width == 0 || metrics.height == 0 {
+        if glyph.width == 0 || glyph.height == 0 {
             continue;
         }
-        let mut glyph_surface =
-            alpha_bitmap_surface(metrics.width, metrics.height, &bitmap, color)?;
-        glyph_surface
-            .set_blend_mode(BlendMode::Blend)
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-        glyph_surface
-            .blit(
-                None,
-                &mut composed,
-                Some(Rect::new(
-                    glyph.draw_x - layout.offset_x,
-                    glyph.draw_y - layout.offset_y,
-                    glyph_surface.width(),
-                    glyph_surface.height(),
-                )),
-            )
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        let raster_pixel_size = decode_raster_px_64(glyph.raster_px_64);
+        let (_, subpixel_bitmap) = fonts
+            .primary_raster_font()
+            .rasterize_indexed_subpixel(glyph.glyph_id, raster_pixel_size);
+        let bitmap = collapse_subpixel_bitmap_to_alpha(glyph.width as usize, &subpixel_bitmap);
+        composite_alpha_bitmap(
+            &mut composed,
+            glyph.draw_x - layout.offset_x,
+            glyph.draw_y - layout.offset_y,
+            glyph.width as usize,
+            glyph.height as usize,
+            &bitmap,
+            color,
+        );
     }
-    let texture = ManagedTexture::from_surface_nearest(texture_creator, &composed)?;
+    let texture = ManagedTexture::from_surface(texture_creator, &composed)?;
     Ok(RenderedTextTexture::from_texture(
         texture,
         layout.offset_x,
