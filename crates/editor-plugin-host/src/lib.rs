@@ -464,11 +464,26 @@ fn run_actions(
                 let hook = action
                     .hook()
                     .ok_or_else(|| "emit-hook action missing payload".to_owned())?;
+                let window_id = runtime.model().active_window_id();
                 let workspace_id = runtime
                     .model()
                     .active_workspace_id()
                     .map_err(|error| error.to_string())?;
                 let mut event = HookEvent::new().with_workspace(workspace_id);
+                if let Some(window_id) = window_id {
+                    event = event.with_window(window_id);
+                }
+                if let Ok(workspace) = runtime.model().workspace(workspace_id)
+                    && let Some(pane_id) = workspace.active_pane_id()
+                {
+                    event = event.with_pane(pane_id);
+                    if let Some(buffer_id) = workspace
+                        .pane(pane_id)
+                        .and_then(|pane| pane.active_buffer())
+                    {
+                        event = event.with_buffer(buffer_id);
+                    }
+                }
                 if let Some(detail) = hook.detail() {
                     event = event.with_detail(detail);
                 }
@@ -548,13 +563,23 @@ fn map_vim_mode(vim_mode: PluginVimMode) -> KeymapVimMode {
 
 #[cfg(test)]
 mod tests {
-    use editor_core::{EditorRuntime, HookEvent, KeymapScope, builtins};
+    use editor_core::{BufferKind, EditorRuntime, HookEvent, KeymapScope, builtins};
     use editor_plugin_api::{
         PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginKeyBinding,
         PluginKeymapScope, PluginPackage,
     };
 
     use super::{auto_loaded_packages, bootstrap, load_auto_loaded_packages};
+
+    type HookContext = (
+        Option<editor_core::WindowId>,
+        Option<editor_core::WorkspaceId>,
+        Option<editor_core::PaneId>,
+        Option<editor_core::BufferId>,
+    );
+
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    struct HookContextLog(Option<HookContext>);
 
     #[test]
     fn bootstrap_uses_the_selected_abi_strategy() {
@@ -690,6 +715,78 @@ mod tests {
         assert_eq!(
             runtime.model().workspace(workspace_id)?.buffer_count(),
             baseline_buffers + 1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn emitted_hook_actions_include_active_window_pane_and_buffer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "scratch", None)?;
+        let buffer_id = runtime.model_mut().create_buffer(
+            workspace_id,
+            "*scratch*",
+            BufferKind::Scratch,
+            None,
+        )?;
+        runtime.model_mut().focus_buffer(workspace_id, buffer_id)?;
+        let pane_id = runtime
+            .model()
+            .workspace(workspace_id)?
+            .active_pane_id()
+            .ok_or("active pane missing")?;
+
+        runtime.register_hook(
+            "tests.buffer-scoped",
+            "Captures the active command context for emitted hooks.",
+        )?;
+        runtime.services_mut().insert(HookContextLog::default());
+        runtime.subscribe_hook(
+            "tests.buffer-scoped",
+            "tests.capture-context",
+            |event, runtime| {
+                let log = runtime
+                    .services_mut()
+                    .get_mut::<HookContextLog>()
+                    .ok_or_else(|| "hook context log missing".to_owned())?;
+                log.0 = Some((
+                    event.window_id,
+                    event.workspace_id,
+                    event.pane_id,
+                    event.buffer_id,
+                ));
+                Ok(())
+            },
+        )?;
+
+        let packages = vec![
+            PluginPackage::new("tests", true, "Hook context test package.").with_commands(vec![
+                PluginCommand::new(
+                    "tests.emit-context",
+                    "Emits a hook with the active runtime context.",
+                    vec![PluginAction::emit_hook("tests.buffer-scoped", None::<&str>)],
+                ),
+            ]),
+        ];
+
+        let loaded = load_auto_loaded_packages(&mut runtime, &packages)?;
+        assert_eq!(loaded, 1);
+
+        runtime.execute_command("tests.emit-context")?;
+
+        assert_eq!(
+            runtime.services().get::<HookContextLog>(),
+            Some(&HookContextLog(Some((
+                Some(window_id),
+                Some(workspace_id),
+                Some(pane_id),
+                Some(buffer_id),
+            ))))
         );
 
         Ok(())

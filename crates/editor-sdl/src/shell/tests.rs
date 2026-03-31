@@ -6,6 +6,7 @@ use agent_client_protocol::{
 use editor_lsp::LspLogDirection;
 use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 struct CommandLog(Vec<String>);
@@ -203,16 +204,21 @@ fn contextual_ligature_raster_size_expands_changed_glyphs() {
         .unwrap_or_else(|| panic!("failed to parse Berkeley Mono test font"));
     let shaped = shape_ascii_ligature_run_with_face(&face, 18.0, true, "=>")
         .unwrap_or_else(|| panic!("expected `=>` to shape"));
-    let raster_font = fontdue::Font::from_bytes(berkeley_mono_font, fontdue::FontSettings::default())
-        .unwrap_or_else(|error| panic!("failed to parse Berkeley Mono raster font: {error}"));
+    let raster_font =
+        fontdue::Font::from_bytes(berkeley_mono_font, fontdue::FontSettings::default())
+            .unwrap_or_else(|error| panic!("failed to parse Berkeley Mono raster font: {error}"));
 
     assert!(
         "=>".chars()
             .zip(shaped.glyphs.iter())
             .any(|(character, glyph)| {
                 raster_font.lookup_glyph_index(character) != glyph.glyph_id
-                    && adjusted_contextual_ligature_pixel_size(&raster_font, 18.0, character, glyph.glyph_id)
-                        > 18.0
+                    && adjusted_contextual_ligature_pixel_size(
+                        &raster_font,
+                        18.0,
+                        character,
+                        glyph.glyph_id,
+                    ) > 18.0
             })
     );
 }
@@ -380,6 +386,14 @@ fn keydown_chord_maps_alt_x() {
     assert_eq!(
         keydown_chord(Keycode::X, Mod::LALTMOD).as_deref(),
         Some("Alt+x")
+    );
+}
+
+#[test]
+fn keydown_chord_maps_ctrl_tab() {
+    assert_eq!(
+        keydown_chord(Keycode::Tab, ctrl_mod()).as_deref(),
+        Some("Ctrl+Tab")
     );
 }
 
@@ -1103,6 +1117,41 @@ fn install_acp_test_buffer(
     }
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn state_with_user_library() -> Result<ShellState, String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(user::UserLibraryImpl);
+    ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+        .map_err(|error| error.to_string())
+}
+
+fn install_user_plugin_buffer(
+    state: &mut ShellState,
+    name: &str,
+    kind: &str,
+) -> Result<BufferId, String> {
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            name,
+            BufferKind::Plugin(kind.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    sync_active_buffer(&mut state.runtime)?;
     Ok(buffer_id)
 }
 
@@ -2555,6 +2604,56 @@ fn plugin_sections_switching_output_pane_changes_focus_and_read_only_state() -> 
 }
 
 #[test]
+fn calculator_ctrl_tab_switches_sections_without_changing_workspace_pane() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(
+        &mut state,
+        user::calculator::BUFFER_NAME,
+        user::calculator::CALCULATOR_KIND,
+    )?;
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    let active_pane_id = shell_ui(&state.runtime)?
+        .active_pane_id()
+        .ok_or_else(|| "active pane is missing".to_owned())?;
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::Tab, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+
+    assert!(handled);
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_pane_id(),
+        Some(active_pane_id)
+    );
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.plugin_active_section_index(), Some(1));
+    assert!(buffer.is_read_only());
+    Ok(())
+}
+
+#[test]
+fn calculator_switch_pane_command_targets_workspace_buffer_when_popup_has_focus()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(
+        &mut state,
+        user::calculator::BUFFER_NAME,
+        user::calculator::CALCULATOR_KIND,
+    )?;
+    let _popup_buffer_id = install_terminal_popup_test_buffer(&mut state)?;
+
+    state
+        .runtime
+        .execute_command("calculator.switch-pane")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.plugin_active_section_index(), Some(1));
+    assert!(buffer.is_read_only());
+    Ok(())
+}
+
+#[test]
 fn plugin_sections_replace_output_lines_in_place() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["old", "lines"])?;
@@ -2604,6 +2703,122 @@ fn plugin_sections_can_append_output_lines() -> Result<(), String> {
 }
 
 #[test]
+fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_plugin_sections_test_buffer(&mut state, &["alpha"], &["beta"])?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let pane_layout = plugin_section_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "plugin section layout missing".to_owned())?;
+    let header_height = (16 + 10).max(16) as u32;
+    let header_rect = PixelRectToRect::rect(
+        pane_layout.panes[0].rect.x() + 1,
+        pane_layout.panes[0].rect.y() + 1,
+        pane_layout.panes[0].rect.width().saturating_sub(2),
+        header_height,
+    );
+    let base_background = Color::RGB(15, 16, 20);
+    let panel_background = theme_color(
+        None,
+        "ui.panel.background",
+        adjust_color(base_background, 8),
+    );
+    let header_background = theme_color(
+        None,
+        "ui.panel.header.background",
+        adjust_color(panel_background, 12),
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_plugin_section_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        None,
+        base_background,
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == header_rect.x()
+                && rect.y == header_rect.y()
+                && rect.width == header_rect.width()
+                && rect.height == header_rect.height()
+                && *color == to_render_color(header_background)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_plugin_sections_draw_visual_selection_highlight() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id =
+        install_plugin_sections_test_buffer(&mut state, &["alpha beta"], &["gamma delta"])?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    assert!(buffer.plugin_switch_pane());
+    buffer.set_cursor(TextPoint::new(0, 5));
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let selection_color = Color::RGBA(55, 71, 99, 255);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_plugin_section_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 5),
+        ))),
+        None,
+        InputMode::Visual,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        selection_color,
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+    )));
+    Ok(())
+}
+
+#[test]
 fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(
@@ -2630,6 +2845,34 @@ fn sync_active_viewport_matches_acp_footer_visible_rows() -> Result<(), String> 
         buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
             >= buffer.line_count()
     );
+    Ok(())
+}
+
+#[test]
+fn acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, "*acp*", user::acp::ACP_BUFFER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.init_acp_view("GitHub Copilot");
+    }
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    let active_pane_id = shell_ui(&state.runtime)?
+        .active_pane_id()
+        .ok_or_else(|| "active pane is missing".to_owned())?;
+
+    state
+        .runtime
+        .execute_command("acp.switch-pane")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_pane_id(),
+        Some(active_pane_id)
+    );
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.acp_active_pane(), Some(AcpPane::Plan));
     Ok(())
 }
 

@@ -737,6 +737,7 @@ dependencies = [
  "sdl3-ttf-sys",
  "tokio",
  "tokio-util",
+ "volt-user",
  "wry",
 ]
 

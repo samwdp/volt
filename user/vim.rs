@@ -975,18 +975,23 @@ mod tests {
     #[test]
     fn package_exports_lsp_navigation_bindings() {
         let package = package();
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == "g d" && binding.command_name() == "lsp.definition"));
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == "g d"
+                    && binding.command_name() == "lsp.definition")
+        );
         assert!(package.key_bindings().iter().any(
             |binding| binding.chord() == "g r r" && binding.command_name() == "lsp.references"
         ));
-        assert!(package
-            .key_bindings()
-            .iter()
-            .any(|binding| binding.chord() == "g i"
-                && binding.command_name() == "lsp.implementation"));
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == "g i"
+                    && binding.command_name() == "lsp.implementation")
+        );
     }
 
     #[test]

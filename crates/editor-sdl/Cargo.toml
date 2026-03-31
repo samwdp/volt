@@ -44,3 +44,6 @@ wry = { version = "0.53", features = ["devtools"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+[dev-dependencies]
+user = { package = "volt-user", path = "../../user" }

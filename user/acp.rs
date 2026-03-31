@@ -124,7 +124,7 @@ pub fn package() -> PluginPackage {
     let key_bindings = vec![
         PluginKeyBinding::new("Shift+Tab", "acp.cycle-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
-        PluginKeyBinding::new("Ctrl+Tab", "acp.switch-pane", PluginKeymapScope::Global),
+        PluginKeyBinding::new("Ctrl+Tab", "acp.switch-pane", PluginKeymapScope::Workspace),
         PluginKeyBinding::new("Ctrl+m", "acp.pick-model", PluginKeymapScope::Workspace)
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+s", "acp.pick-session", PluginKeymapScope::Workspace)

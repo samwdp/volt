@@ -8123,6 +8123,10 @@ impl ShellState {
             return Ok(());
         }
 
+        if self.try_plugin_buffer_keybinding(chord, vim_mode)? {
+            return Ok(());
+        }
+
         if self
             .runtime
             .keymaps()
@@ -10743,8 +10747,8 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_EVALUATE,
             "shell.plugin-evaluate",
-            |_, runtime| {
-                let buffer_id = active_shell_buffer_id(runtime)?;
+            |event, runtime| {
+                let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
                 evaluate_active_plugin_buffer(runtime, buffer_id)
             },
         )
@@ -10753,7 +10757,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_SWITCH_PANE,
             "shell.plugin-switch-pane",
-            |_, runtime| switch_active_plugin_pane(runtime),
+            |event, runtime| switch_active_plugin_pane(runtime, event.buffer_id),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -18654,8 +18658,11 @@ fn evaluate_active_plugin_buffer(
     Ok(())
 }
 
-fn switch_active_plugin_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
+fn switch_active_plugin_pane(
+    runtime: &mut EditorRuntime,
+    buffer_id: Option<BufferId>,
+) -> Result<(), String> {
+    let buffer_id = buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
     let switched_to_read_only = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         if buffer.plugin_switch_pane() {
@@ -23712,6 +23719,7 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
             Keycode::Grave => Some("Ctrl+`".to_owned()),
             Keycode::Period | Keycode::KpPeriod => Some("Ctrl+.".to_owned()),
             Keycode::Return | Keycode::KpEnter => Some("Ctrl+Enter".to_owned()),
+            Keycode::Tab => Some("Ctrl+Tab".to_owned()),
             _ => None,
         };
     }
@@ -26103,12 +26111,16 @@ fn render_buffer(
             rect,
             layout,
             active,
+            visual_selection,
+            yank_flash,
             input_mode,
             theme_registry,
             base_background,
             foreground,
             muted,
             border_color,
+            selection,
+            yank_flash_color,
             cursor,
             cursor_roundness,
             cell_width,
@@ -26604,12 +26616,16 @@ fn render_plugin_section_buffer_body(
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     theme_registry: Option<&ThemeRegistry>,
     base_background: Color,
     foreground: Color,
     muted: Color,
     border_color: Color,
+    selection: Color,
+    yank_flash_color: Color,
     cursor: Color,
     cursor_roundness: u32,
     cell_width: i32,
@@ -26649,12 +26665,22 @@ fn render_plugin_section_buffer_body(
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     for (index, pane_layout) in section_layout.panes.iter().copied().enumerate() {
-        let (text, scroll_row, cursor_point, pane_active, title, pane_mode) = if index == 0 {
+        let pane_active = active && state.active_section == index;
+        let pane_visual_selection = if state.active_section == index {
+            visual_selection
+        } else {
+            None
+        };
+        let pane_yank_flash = if state.active_section == index {
+            yank_flash
+        } else {
+            None
+        };
+        let (text, scroll_row, cursor_point, title, pane_mode) = if index == 0 {
             (
                 &buffer.text,
                 buffer.scroll_row,
                 (state.active_section == 0).then_some(buffer.text.cursor()),
-                active && state.active_section == 0,
                 state.base_title.as_str(),
                 if state.base_writable {
                     input_mode
@@ -26670,7 +26696,6 @@ fn render_plugin_section_buffer_body(
                 &pane.text,
                 pane.scroll_row,
                 (state.active_section == index).then_some(pane.cursor()),
-                active && state.active_section == index,
                 pane.title.as_str(),
                 if pane.writable {
                     input_mode
@@ -26687,6 +26712,8 @@ fn render_plugin_section_buffer_body(
             pane_active,
             pane_layout,
             title,
+            pane_visual_selection,
+            pane_yank_flash,
             pane_mode,
             theme_registry,
             panel_background,
@@ -26695,6 +26722,8 @@ fn render_plugin_section_buffer_body(
             muted,
             border_color,
             active_border,
+            selection,
+            yank_flash_color,
             cursor,
             cursor_roundness,
             cell_width,
@@ -26713,6 +26742,8 @@ fn render_text_panel(
     pane_active: bool,
     pane_layout: TextPaneLayout,
     title: &str,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     _theme_registry: Option<&ThemeRegistry>,
     panel_background: Color,
@@ -26721,6 +26752,8 @@ fn render_text_panel(
     muted: Color,
     border_color: Color,
     active_border: Color,
+    selection: Color,
+    yank_flash_color: Color,
     cursor: Color,
     cursor_roundness: u32,
     cell_width: i32,
@@ -26747,11 +26780,7 @@ fn render_text_panel(
         rect.width().saturating_sub(2),
         header_height as u32,
     );
-    let header_color = if pane_active {
-        blend_color(cursor, header_background, 0.25)
-    } else {
-        header_background
-    };
+    let header_color = header_background;
     let header_radius = 9.min(header_rect.height() / 2);
     fill_rounded_rect(target, header_rect, header_radius, header_color)?;
     if header_rect.height() > header_radius {
@@ -26774,6 +26803,13 @@ fn render_text_panel(
     let mut cursor_screen: Option<(usize, usize)> = None;
     for line_index in scroll_row.min(line_count.saturating_sub(1))..line_count {
         let line = text.line(line_index).unwrap_or_default();
+        let line_len = text.line_len_chars(line_index).unwrap_or(0);
+        let selection_range = visual_selection.and_then(|selection_state| {
+            selection_columns_for_visual(selection_state, line_index, line_len)
+        });
+        let yank_range = yank_flash.and_then(|selection_state| {
+            selection_columns_for_visual(selection_state, line_index, line_len)
+        });
         let segments = wrap_line_segments(
             &LineCharMap::new(&line),
             pane_layout.wrap_cols,
@@ -26782,6 +26818,39 @@ fn render_text_panel(
         for segment in &segments {
             if visual_row >= pane_layout.visible_rows {
                 break;
+            }
+            let y = body_y + visual_row as i32 * line_height;
+            if let Some((selection_start, selection_end)) = selection_range {
+                let start = selection_start.max(segment.start_col);
+                let end = selection_end.min(segment.end_col);
+                if start < end {
+                    fill_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            body_x + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            y,
+                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                        ),
+                        selection,
+                    )?;
+                }
+            }
+            if let Some((selection_start, selection_end)) = yank_range {
+                let start = selection_start.max(segment.start_col);
+                let end = selection_end.min(segment.end_col);
+                if start < end {
+                    fill_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            body_x + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            y,
+                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                        ),
+                        yank_flash_color,
+                    )?;
+                }
             }
             if cursor_screen.is_none()
                 && let Some(cursor_point) = cursor_point
@@ -26795,13 +26864,7 @@ fn render_text_panel(
                 ));
             }
             let rendered = acp_slice_chars(&line, segment.start_col, segment.end_col);
-            draw_text(
-                target,
-                body_x,
-                body_y + visual_row as i32 * line_height,
-                &rendered,
-                foreground,
-            )?;
+            draw_text(target, body_x, y, &rendered, foreground)?;
             visual_row = visual_row.saturating_add(1);
         }
         if visual_row >= pane_layout.visible_rows {
@@ -28541,8 +28604,8 @@ fn collapse_subpixel_bitmap_to_alpha(width: usize, bitmap: &[u8]) -> Vec<u8> {
         .chunks_exact(width * 3)
         .flat_map(|row| {
             row.chunks_exact(3).map(|subpixel| {
-                ((u16::from(subpixel[0]) + u16::from(subpixel[1]) + u16::from(subpixel[2]) + 1)
-                    / 3) as u8
+                ((u16::from(subpixel[0]) + u16::from(subpixel[1]) + u16::from(subpixel[2]) + 1) / 3)
+                    as u8
             })
         })
         .collect()
