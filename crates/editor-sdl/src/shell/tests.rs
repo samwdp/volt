@@ -1349,7 +1349,11 @@ fn install_terminal_popup_test_buffer(state: &mut ShellState) -> Result<BufferId
         BufferKind::Terminal,
         &NullUserLibrary,
     );
-    shell_ui_mut(&mut state.runtime)?.set_popup_focus(true);
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_popup_buffer(buffer_id);
+        ui.set_popup_focus(true);
+    }
     Ok(buffer_id)
 }
 
@@ -4305,6 +4309,44 @@ fn inactive_split_render_reads_saved_buffer_input_mode() -> Result<(), String> {
 }
 
 #[test]
+fn popup_terminal_focus_restores_its_own_vim_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let split_buffer = install_scratch_test_buffer(&mut state, "*popup-split*")?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let popup_buffer = install_terminal_popup_test_buffer(&mut state)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(
+        ui.input_mode_for_buffer(split_buffer, false),
+        InputMode::Insert
+    );
+
+    let anchor = TextPoint::new(0, 0);
+    shell_ui_mut(&mut state.runtime)?.enter_visual_mode(anchor, VisualSelectionKind::Character);
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_anchor, Some(anchor));
+
+    shell_ui_mut(&mut state.runtime)?.set_popup_focus(false);
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert_eq!(
+        ui.input_mode_for_buffer(popup_buffer, false),
+        InputMode::Visual
+    );
+
+    shell_ui_mut(&mut state.runtime)?.set_popup_focus(true);
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_anchor, Some(anchor));
+    Ok(())
+}
+
+#[test]
 fn visual_mode_is_buffer_local_across_buffer_switches() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_a = install_scratch_test_buffer(&mut state, "*visual-a*")?;
@@ -4605,6 +4647,46 @@ fn terminal_vim_edit_shortcuts_enter_insert_mode_instead_of_read_only_errors() -
 }
 
 #[test]
+fn popup_terminal_event_context_prefers_popup_buffer_when_focused() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let pane_buffer = install_scratch_test_buffer(&mut state, "*popup-pane*")?;
+    let popup_buffer = install_terminal_popup_test_buffer(&mut state)?;
+
+    let context = active_buffer_event_context(&state.runtime)?;
+    assert_eq!(context.buffer_id, popup_buffer);
+    assert!(context.is_terminal);
+    assert_ne!(context.buffer_id, pane_buffer);
+
+    shell_ui_mut(&mut state.runtime)?.set_popup_focus(false);
+
+    let context = active_buffer_event_context(&state.runtime)?;
+    assert_eq!(context.buffer_id, pane_buffer);
+    assert!(!context.is_terminal);
+    Ok(())
+}
+
+#[test]
+fn terminal_put_shortcuts_paste_yanks_in_normal_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+    {
+        let vim = shell_ui_mut(&mut state.runtime)?.vim_mut();
+        vim.active_register = Some('a');
+        vim.registers.insert(
+            'a',
+            YankRegister::Character("volt terminal paste".to_owned()),
+        );
+    }
+
+    assert!(handle_terminal_vim_edit(&mut state.runtime, "put-after")?);
+    assert!(terminal_buffer_state(&state.runtime)?.contains(buffer_id));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    assert_eq!(shell_ui(&state.runtime)?.vim().pending, None);
+    Ok(())
+}
+
+#[test]
 fn terminal_popup_bootstraps_session_and_enters_insert_mode() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_terminal_popup_test_buffer(&mut state)?;
@@ -4765,6 +4847,8 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
         true,
         InputMode::Normal,
         None,
+        None,
+        None,
         Color::RGB(15, 16, 20),
         Color::RGB(110, 170, 255),
         Color::RGB(215, 221, 232),
@@ -4772,6 +4856,8 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
         "status".to_owned(),
         Color::RGB(110, 170, 255),
         Color::RGB(140, 144, 152),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
         8,
         16,
     )
@@ -4795,6 +4881,197 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
             .iter()
             .any(|command| matches!(command, DrawCommand::FillRoundedRect { .. }))
     );
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    let selection_color = Color::RGBA(55, 71, 99, 255);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.replace_with_lines_follow_output(vec!["echo hello".to_owned(), String::new()]);
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            2,
+            12,
+            vec![
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        10,
+                        "echo hello",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+                editor_terminal::TerminalRenderLine::new(vec![]),
+            ],
+            None,
+            None,
+        ));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_terminal_buffer(
+        &mut target,
+        buffer,
+        buffer
+            .terminal_render()
+            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+        rect,
+        layout,
+        true,
+        InputMode::Visual,
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 4),
+        ))),
+        None,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(110, 170, 255),
+        Color::RGB(215, 221, 232),
+        Color::RGB(40, 44, 52),
+        "status".to_owned(),
+        Color::RGB(110, 170, 255),
+        Color::RGB(140, 144, 152),
+        selection_color,
+        Color::RGBA(112, 196, 255, 120),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_uses_buffer_cursor_in_normal_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    let cursor_color = Color::RGB(110, 170, 255);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.replace_with_lines_follow_output(vec![
+            "echo hello".to_owned(),
+            "second line".to_owned(),
+        ]);
+        buffer.set_cursor(TextPoint::new(1, 2));
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            2,
+            12,
+            vec![
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        10,
+                        "echo hello",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        11,
+                        "second line",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+            ],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                0,
+                0,
+                1,
+                editor_terminal::TerminalCursorShape::Beam,
+                "e",
+            )),
+            None,
+        ));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let text_x = rect.x() + 12;
+    let expected_x = text_x + 2 * 8;
+    let expected_y = layout.body_y + 16;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_terminal_buffer(
+        &mut target,
+        buffer,
+        buffer
+            .terminal_render()
+            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+        rect,
+        layout,
+        true,
+        InputMode::Normal,
+        None,
+        None,
+        None,
+        Color::RGB(15, 16, 20),
+        cursor_color,
+        Color::RGB(215, 221, 232),
+        Color::RGB(40, 44, 52),
+        "status".to_owned(),
+        Color::RGB(110, 170, 255),
+        Color::RGB(140, 144, 152),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == expected_x
+                && rect.y == expected_y
+                && *color == to_render_color(cursor_color)
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == text_x
+                && rect.y == layout.body_y
+                && *color == to_render_color(cursor_color)
+    )));
     Ok(())
 }
 

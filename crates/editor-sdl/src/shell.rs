@@ -5440,6 +5440,7 @@ pub(crate) struct ShellUiState {
     notifications: NotificationCenter,
     last_lsp_notification_revision: u64,
     popup_focus: bool,
+    popup_buffer_id: Option<BufferId>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
     autocomplete_worker: AutocompleteWorkerState,
@@ -5491,6 +5492,7 @@ impl ShellUiState {
             notifications: NotificationCenter::default(),
             last_lsp_notification_revision: 0,
             popup_focus: false,
+            popup_buffer_id: None,
             yank_flash: None,
             git_summary: GitSummaryState::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
@@ -5512,8 +5514,40 @@ impl ShellUiState {
         self.picker.is_some()
     }
 
+    fn focused_buffer_id(&self) -> Option<BufferId> {
+        if self.popup_focus {
+            self.popup_buffer_id.or_else(|| self.active_buffer_id())
+        } else {
+            self.active_buffer_id()
+        }
+    }
+
+    fn set_popup_buffer(&mut self, buffer_id: BufferId) {
+        if self.popup_buffer_id == Some(buffer_id) {
+            return;
+        }
+        if self.popup_focus {
+            if let Some(previous_buffer_id) = self.popup_buffer_id {
+                self.persist_buffer_vim_state(previous_buffer_id);
+            }
+            self.popup_buffer_id = Some(buffer_id);
+            self.restore_buffer_vim_state(buffer_id);
+        } else {
+            self.popup_buffer_id = Some(buffer_id);
+        }
+    }
+
+    fn clear_popup_buffer(&mut self) {
+        self.popup_buffer_id = None;
+    }
+
     fn set_popup_focus(&mut self, focus: bool) {
+        if self.popup_focus == focus {
+            return;
+        }
+        self.persist_active_buffer_vim_state();
         self.popup_focus = focus;
+        self.restore_active_buffer_vim_state();
     }
 
     fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {
@@ -5597,7 +5631,7 @@ impl ShellUiState {
     }
 
     fn persist_active_buffer_vim_state(&mut self) {
-        if let Some(buffer_id) = self.active_buffer_id() {
+        if let Some(buffer_id) = self.focused_buffer_id() {
             self.persist_buffer_vim_state(buffer_id);
         }
     }
@@ -5612,7 +5646,7 @@ impl ShellUiState {
     }
 
     fn restore_active_buffer_vim_state(&mut self) {
-        if let Some(buffer_id) = self.active_buffer_id() {
+        if let Some(buffer_id) = self.focused_buffer_id() {
             self.restore_buffer_vim_state(buffer_id);
         } else {
             self.vim
@@ -7021,7 +7055,11 @@ impl ShellState {
                     browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
                 if runtime_popup.is_some() && mouse_y >= pane_height as i32 {
                     self.mouse_drag = None;
-                    self.ui_mut()?.set_popup_focus(true);
+                    if let Some(popup) = runtime_popup.as_ref() {
+                        let ui = self.ui_mut()?;
+                        ui.set_popup_buffer(popup.active_buffer);
+                        ui.set_popup_focus(true);
+                    }
                     if let Some(buffer_id) = clicked_browser_buffer {
                         self.browser_host
                             .focus_buffer(buffer_id)
@@ -7409,9 +7447,8 @@ impl ShellState {
                         } else if !active_buffer.is_read_only {
                             let (indent_size, use_tabs) = {
                                 let ui = self.ui()?;
-                                let buffer_id = ui.active_buffer_id().ok_or_else(|| {
-                                    ShellError::Runtime("active buffer is missing".to_owned())
-                                })?;
+                                let buffer_id = active_shell_buffer_id(&self.runtime)
+                                    .map_err(ShellError::Runtime)?;
                                 let language_id =
                                     ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                                 let theme_registry = self.runtime.services().get::<ThemeRegistry>();
@@ -8382,9 +8419,8 @@ impl ShellState {
                 }
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
-                    let buffer_id = ui.active_buffer_id().ok_or_else(|| {
-                        ShellError::Runtime("active buffer is missing".to_owned())
-                    })?;
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                     let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                     (
@@ -8440,9 +8476,8 @@ impl ShellState {
                 }
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
-                    let buffer_id = ui.active_buffer_id().ok_or_else(|| {
-                        ShellError::Runtime("active buffer is missing".to_owned())
-                    })?;
+                    let buffer_id =
+                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                     let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                     (
@@ -9502,6 +9537,7 @@ impl ShellState {
     fn runtime_popup(&mut self) -> Result<Option<RuntimePopupSnapshot>, ShellError> {
         let popup = active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?;
         if let Some(popup) = popup.as_ref() {
+            self.ui_mut()?.set_popup_buffer(popup.active_buffer);
             ensure_shell_buffer(&mut self.runtime, popup.active_buffer)
                 .map_err(ShellError::Runtime)?;
             if ensure_terminal_session(&mut self.runtime, popup.active_buffer)
@@ -9509,6 +9545,10 @@ impl ShellState {
             {
                 self.ui_mut()?.enter_insert_mode();
             }
+        } else {
+            let ui = self.ui_mut()?;
+            ui.set_popup_focus(false);
+            ui.clear_popup_buffer();
         }
         Ok(popup)
     }
@@ -12742,9 +12782,7 @@ fn active_buffer_event_context(
     runtime: &EditorRuntime,
 ) -> Result<ActiveBufferEventContext, String> {
     let ui = shell_ui(runtime)?;
-    let buffer_id = ui
-        .active_buffer_id()
-        .ok_or_else(|| "active buffer is missing".to_owned())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
     let buffer = ui
         .buffer(buffer_id)
         .ok_or_else(|| "active shell buffer is missing".to_owned())?;
@@ -12900,6 +12938,14 @@ fn handle_terminal_vim_edit(runtime: &mut EditorRuntime, detail: &str) -> Result
         }
         "enter-replace-mode" | "replace-char" => {
             shell_ui_mut(runtime)?.enter_replace_mode();
+            Ok(true)
+        }
+        "put-after" => {
+            put_yank(runtime, true)?;
+            Ok(true)
+        }
+        "put-before" => {
+            put_yank(runtime, false)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -15782,12 +15828,14 @@ fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Re
         .map_err(|error| error.to_string())?;
     {
         let user_library = shell_user_library(runtime);
-        shell_ui_mut(runtime)?.ensure_popup_buffer(
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_popup_buffer(
             buffer_id,
             BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             &*user_library,
         );
+        ui.set_popup_buffer(buffer_id);
     }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
@@ -17345,18 +17393,7 @@ fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
-    start_change_recording(runtime)?;
-    let (indent_size, use_tabs) = {
-        let ui = shell_ui(runtime)?;
-        let buffer_id = active_shell_buffer_id(runtime)?;
-        let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
-        let theme_registry = runtime.services().get::<ThemeRegistry>();
-        (
-            theme_lang_indent(theme_registry, language_id),
-            theme_lang_use_tabs(theme_registry, language_id),
-        )
-    };
+fn resolve_put_yank(runtime: &mut EditorRuntime) -> Result<Option<YankRegister>, String> {
     let (active_register, fallback_yank) = {
         let vim = shell_ui_mut(runtime)?.vim_mut();
         (vim.active_register.take(), vim.yank.clone())
@@ -17386,8 +17423,30 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
             fallback_yank
         }
     };
-    let Some(yank) = yank else {
+    Ok(yank)
+}
+
+fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
+    let Some(yank) = resolve_put_yank(runtime)? else {
         return Ok(());
+    };
+    if active_shell_buffer_is_terminal(runtime)? {
+        let text = yank_to_clipboard_text(&yank);
+        write_active_terminal_text(runtime, text.as_ref())?;
+        shell_ui_mut(runtime)?.vim_mut().clear_transient();
+        return Ok(());
+    }
+
+    start_change_recording(runtime)?;
+    let (indent_size, use_tabs) = {
+        let ui = shell_ui(runtime)?;
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+        let theme_registry = runtime.services().get::<ThemeRegistry>();
+        (
+            theme_lang_indent(theme_registry, language_id),
+            theme_lang_use_tabs(theme_registry, language_id),
+        )
     };
 
     {
@@ -17686,12 +17745,14 @@ fn open_git_status_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     {
         let user_library = shell_user_library(runtime);
-        shell_ui_mut(runtime)?.ensure_popup_buffer(
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_popup_buffer(
             buffer_id,
             "*git-status*",
             BufferKind::Plugin(GIT_STATUS_KIND.to_owned()),
             &*user_library,
         );
+        ui.set_popup_buffer(buffer_id);
     }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     refresh_git_status_buffer(runtime, buffer_id)
@@ -18442,7 +18503,11 @@ fn open_oil_help_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .open_popup_buffer(workspace_id, "Oil Help", buffer_id)
         .map_err(|error| error.to_string())?;
-    shell_ui_mut(runtime)?.set_popup_focus(true);
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_buffer(buffer_id);
+        ui.set_popup_focus(true);
+    }
     let buffer = runtime
         .model()
         .workspace(workspace_id)
@@ -21520,7 +21585,7 @@ fn refresh_pending_terminal(
         cell_width,
         line_height,
     )?;
-    let active_buffer_id = shell_ui(runtime)?.active_buffer_id();
+    let active_buffer_id = active_shell_buffer_id(runtime).ok();
     let terminal_buffer_ids = terminal_buffer_state(runtime)?.buffer_ids();
     if terminal_buffer_ids.is_empty() {
         return Ok(false);
@@ -22495,7 +22560,9 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
             .model_mut()
             .close_popup(workspace_id, popup_id)
             .map_err(|error| error.to_string())?;
-        shell_ui_mut(runtime)?.set_popup_focus(false);
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_focus(false);
+        ui.clear_popup_buffer();
         return Ok(());
     }
 
@@ -22509,12 +22576,14 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     {
         let user_library = shell_user_library(runtime);
-        shell_ui_mut(runtime)?.ensure_popup_buffer(
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_popup_buffer(
             buffer_id,
             "*popup*",
             BufferKind::Diagnostics,
             &*user_library,
         );
+        ui.set_popup_buffer(buffer_id);
     }
     shell_ui_mut(runtime)?.set_popup_focus(true);
     Ok(())
@@ -22533,6 +22602,7 @@ fn cycle_runtime_popup_buffer(runtime: &mut EditorRuntime, forward: bool) -> Res
         return Ok(());
     };
     ensure_shell_buffer(runtime, buffer_id)?;
+    shell_ui_mut(runtime)?.set_popup_buffer(buffer_id);
     Ok(())
 }
 
@@ -22694,7 +22764,9 @@ fn move_workspace_window(
                     .map_err(|error| error.to_string())
             };
             if !focus_active && direction == WindowMoveDirection::Down {
-                shell_ui_mut(runtime)?.set_popup_focus(true);
+                let ui = shell_ui_mut(runtime)?;
+                ui.set_popup_buffer(popup.active_buffer);
+                ui.set_popup_focus(true);
                 emit_switch(runtime)?;
                 return Ok(());
             }
@@ -26025,9 +26097,15 @@ fn render_buffer(
         .map(|summary| (summary.branch.as_deref(), summary.added, summary.removed))
         .unwrap_or((None, 0, 0));
     let lsp_diagnostics = statusline_lsp_diagnostics(buffer.lsp_diagnostics());
-    let terminal_cursor = buffer
-        .terminal_render()
-        .and_then(TerminalRenderSnapshot::cursor);
+    let terminal_cursor = (buffer_is_terminal(&buffer.kind)
+        && active
+        && matches!(input_mode, InputMode::Insert | InputMode::Replace))
+    .then(|| {
+        buffer
+            .terminal_render()
+            .and_then(TerminalRenderSnapshot::cursor)
+    })
+    .flatten();
     let statusline_line = terminal_cursor
         .map(|cursor| cursor.row() as usize + 1)
         .unwrap_or(buffer.cursor_row() + 1);
@@ -26068,6 +26146,8 @@ fn render_buffer(
             layout,
             active,
             input_mode,
+            visual_selection,
+            yank_flash,
             theme_registry,
             base_background,
             cursor,
@@ -26076,6 +26156,8 @@ fn render_buffer(
             statusline,
             statusline_active,
             statusline_inactive,
+            selection,
+            yank_flash_color,
             cell_width,
             line_height,
         )?;
@@ -27454,12 +27536,14 @@ fn acp_slice_chars(text: &str, start: usize, end: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 fn render_terminal_buffer(
     target: &mut DrawTarget<'_>,
-    _buffer: &ShellBuffer,
+    buffer: &ShellBuffer,
     terminal_render: &TerminalRenderSnapshot,
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
     input_mode: InputMode,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
     _theme_registry: Option<&ThemeRegistry>,
     base_background: Color,
     cursor_color: Color,
@@ -27468,6 +27552,8 @@ fn render_terminal_buffer(
     statusline: String,
     statusline_active: Color,
     statusline_inactive: Color,
+    selection_color: Color,
+    yank_flash_color: Color,
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
@@ -27489,6 +27575,43 @@ fn render_terminal_buffer(
                     Color::RGB(background.r, background.g, background.b),
                 )?;
             }
+        }
+        let line_len = buffer
+            .text
+            .line(row_index)
+            .map(|line| line.chars().count())
+            .unwrap_or_default();
+        if let Some((selection_start, selection_end)) = visual_selection
+            .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
+        {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    text_x + selection_start as i32 * cell_width,
+                    y,
+                    (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
+                    line_height.max(1) as u32,
+                ),
+                selection_color,
+            )?;
+        }
+        if let Some((selection_start, selection_end)) = yank_flash
+            .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
+        {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    text_x + selection_start as i32 * cell_width,
+                    y,
+                    (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
+                    line_height.max(1) as u32,
+                ),
+                yank_flash_color,
+            )?;
+        }
+        for run in line.runs() {
+            let run_x = text_x + run.col() as i32 * cell_width;
+            let run_width = (run.width_cells() as i32 * cell_width).max(1) as u32;
             if run.text().chars().any(|character| character != ' ') {
                 draw_text(
                     target,
@@ -27508,18 +27631,44 @@ fn render_terminal_buffer(
         }
     }
 
-    if active && let Some(cursor) = terminal_render.cursor() {
+    let live_terminal_cursor = active
+        .then(|| terminal_render.cursor())
+        .flatten()
+        .filter(|_| matches!(input_mode, InputMode::Insert | InputMode::Replace));
+    let buffer_cursor = if matches!(input_mode, InputMode::Normal | InputMode::Visual) || !active {
+        let row = buffer.cursor_row();
+        let col = buffer.cursor_col();
+        let text = buffer
+            .text
+            .line(row)
+            .and_then(|line| line.chars().nth(col))
+            .map(|character| character.to_string())
+            .unwrap_or_else(|| " ".to_owned());
+        Some(editor_terminal::TerminalCursorSnapshot::new(
+            row.min(layout.visible_rows.saturating_sub(1)) as u16,
+            col.min(terminal_render.cols() as usize) as u16,
+            1,
+            match input_mode {
+                InputMode::Normal | InputMode::Visual => {
+                    editor_terminal::TerminalCursorShape::Block
+                }
+                InputMode::Insert | InputMode::Replace => {
+                    editor_terminal::TerminalCursorShape::Beam
+                }
+            },
+            text,
+        ))
+        .filter(|_| row < layout.visible_rows)
+    } else {
+        None
+    };
+    if let Some(cursor) = live_terminal_cursor.or(buffer_cursor.as_ref()) {
         draw_terminal_cursor(
             target,
             text_x,
             layout.body_y,
             cursor,
-            match input_mode {
-                InputMode::Normal | InputMode::Visual => {
-                    editor_terminal::TerminalCursorShape::Block
-                }
-                InputMode::Insert | InputMode::Replace => cursor.shape(),
-            },
+            cursor.shape(),
             cursor_color,
             base_background,
             cell_width,
