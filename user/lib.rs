@@ -39,6 +39,8 @@ pub mod gitfringe;
 pub mod hover;
 /// Bundled icon-font symbols and metadata (backed by editor-icons).
 pub mod icon_font;
+/// Native image-viewer commands and keybindings.
+pub mod image;
 /// Bundled icon-font symbol modules (re-exported from editor-icons).
 pub use editor_plugin_api::symbols as icon_font_symbols;
 /// Interactive read-only buffer workflows.
@@ -98,6 +100,7 @@ pub fn packages() -> Vec<PluginPackage> {
         browser::package(),
         calculator::package(),
         compile::package(),
+        image::package(),
         interactive::package(),
         pane::package(),
         hover::package(),

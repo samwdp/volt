@@ -408,6 +408,11 @@ impl TextBuffer {
         self.path.as_deref()
     }
 
+    /// Attaches a backing file path without changing the current text contents.
+    pub fn set_path(&mut self, path: impl Into<PathBuf>) {
+        self.path = Some(path.into());
+    }
+
     /// Returns the preferred newline representation for serialization.
     pub const fn preferred_line_ending(&self) -> LineEnding {
         self.preferred_line_ending

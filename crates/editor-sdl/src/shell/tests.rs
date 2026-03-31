@@ -44,6 +44,22 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+fn write_test_png(path: &Path) -> Result<(), String> {
+    let image = image::RgbaImage::from_pixel(40, 20, image::Rgba([255, 0, 0, 255]));
+    image.save(path).map_err(|error| error.to_string())
+}
+
+fn write_test_svg(path: &Path) -> Result<(), String> {
+    std::fs::write(
+        path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">
+  <rect width="40" height="20" fill="#1f6feb"/>
+  <circle cx="10" cy="10" r="6" fill="#f2cc60"/>
+</svg>"##,
+    )
+    .map_err(|error| error.to_string())
+}
+
 const MATERIAL_ICONS_FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/font/material-design-icons.ttf"
@@ -398,6 +414,22 @@ fn keydown_chord_maps_ctrl_tab() {
 }
 
 #[test]
+fn keydown_chord_maps_image_zoom_controls() {
+    assert_eq!(
+        keydown_chord(Keycode::Equals, ctrl_mod()).as_deref(),
+        Some("Ctrl+=")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::Minus, ctrl_mod()).as_deref(),
+        Some("Ctrl+-")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::_0, ctrl_mod()).as_deref(),
+        Some("Ctrl+0")
+    );
+}
+
+#[test]
 fn terminal_key_for_event_maps_special_keys() {
     assert_eq!(
         terminal_key_for_event(Keycode::Tab, Mod::LSHIFTMOD),
@@ -464,6 +496,119 @@ fn terminal_placeholder_lines_describe_shell_launch_not_vertical_slice() {
     assert!(body.contains("Press i to enter terminal input mode"));
     assert!(!body.contains("vertical slice"));
     assert!(!body.contains("compiled terminal package"));
+}
+
+#[test]
+fn open_workspace_file_routes_png_to_image_buffer() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("open-image-png");
+    let path = root.join("sample.png");
+    write_test_png(&path)?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let image_state = buffer
+        .image_state()
+        .ok_or_else(|| "image state missing".to_owned())?;
+
+    assert_eq!(buffer.kind, BufferKind::Image);
+    assert_eq!(buffer.path(), Some(path.as_path()));
+    assert_eq!(image_state.format, ImageBufferFormat::Raster);
+    assert_eq!(image_state.mode, ImageBufferMode::Rendered);
+    assert!(buffer.is_read_only());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn svg_image_buffers_toggle_between_rendered_and_source_modes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("open-image-svg");
+    let path = root.join("sample.svg");
+    write_test_svg(&path)?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let image_state = buffer
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?;
+        assert_eq!(buffer.kind, BufferKind::Image);
+        assert_eq!(image_state.format, ImageBufferFormat::Svg);
+        assert_eq!(image_state.mode, ImageBufferMode::Rendered);
+        assert!(buffer.is_read_only());
+    }
+
+    toggle_active_image_buffer_mode(&mut state.runtime)?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        assert!(buffer.is_svg_source_mode());
+        assert!(buffer.supports_text_file_actions());
+        assert!(!buffer.is_read_only());
+        assert!(buffer.text.text().contains("<svg"));
+    }
+
+    toggle_active_image_buffer_mode(&mut state.runtime)?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let image_state = buffer
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?;
+        assert_eq!(image_state.mode, ImageBufferMode::Rendered);
+        assert!(buffer.is_read_only());
+    }
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn image_zoom_controls_adjust_zoom_multiplier() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("image-zoom");
+    let path = root.join("sample.png");
+    write_test_png(&path)?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?
+            .zoom,
+        1.0
+    );
+
+    zoom_active_image_buffer_in(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?
+            .zoom,
+        IMAGE_ZOOM_STEP
+    );
+
+    zoom_active_image_buffer_out(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?
+            .zoom,
+        1.0
+    );
+
+    zoom_active_image_buffer_in(&mut state.runtime)?;
+    reset_active_image_buffer_zoom(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .image_state()
+            .ok_or_else(|| "image state missing".to_owned())?
+            .zoom,
+        1.0
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[test]
@@ -2718,7 +2863,7 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
     let layout = buffer_footer_layout(buffer, rect, 16, 8);
     let pane_layout = plugin_section_buffer_layout(buffer, rect, layout, 8, 16)
         .ok_or_else(|| "plugin section layout missing".to_owned())?;
-    let header_height = (16 + 10).max(16) as u32;
+    let header_height = (16 + 10) as u32;
     let header_rect = PixelRectToRect::rect(
         pane_layout.panes[0].rect.x() + 1,
         pane_layout.panes[0].rect.y() + 1,
@@ -2818,6 +2963,59 @@ fn render_plugin_sections_draw_visual_selection_highlight() -> Result<(), String
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_image_buffer_body_draws_centered_clipped_image() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.kind = BufferKind::Image;
+    buffer.image_state = Some(ImageBufferState {
+        format: ImageBufferFormat::Raster,
+        mode: ImageBufferMode::Rendered,
+        decoded: DecodedImage {
+            width: 200,
+            height: 100,
+            pixels: Arc::<[u8]>::from(vec![255; 200 * 100 * 4]),
+        },
+        zoom: 1.5,
+    });
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let viewport = image_buffer_viewport_rect(rect, layout)
+        .ok_or_else(|| "image viewport missing".to_owned())?;
+    let expected = centered_image_draw_rect(viewport, 200, 100, 1.5)
+        .ok_or_else(|| "image draw rect missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_image_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        None,
+        Color::RGB(15, 16, 20),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Image {
+            rect,
+            clip_rect,
+            image_width,
+            image_height,
+            ..
+        } if *rect == to_pixel_rect(expected)
+            && *clip_rect == Some(to_pixel_rect(viewport))
+            && *image_width == 200
+            && *image_height == 100
     )));
     Ok(())
 }

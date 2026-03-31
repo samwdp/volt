@@ -97,6 +97,7 @@ pub enum DrawCommand {
     /// Draws an RGBA image scaled into the given rectangle.
     Image {
         rect: PixelRect,
+        clip_rect: Option<PixelRect>,
         image_width: u32,
         image_height: u32,
         pixels: Arc<[u8]>,

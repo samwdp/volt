@@ -28,7 +28,7 @@ editor-syntax = { path = "../editor-syntax" }
 editor-terminal = { path = "../editor-terminal" }
 editor-theme = { path = "../editor-theme" }
 sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf", "raw-window-handle"] }
-image = { version = "0.25.1", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25.1", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 base64 = "0.22.1"
 fontdue = "0.9.3"
 rustybuzz = "0.20.1"
@@ -38,6 +38,7 @@ tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 async-trait = "0.1.89"
 notify = "8.2.0"
+resvg = "0.47.0"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 wry = { version = "0.53", features = ["devtools"] }

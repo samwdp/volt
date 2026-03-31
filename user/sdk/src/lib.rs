@@ -82,6 +82,14 @@ pub mod browser_hooks {
     pub const URL: &str = "ui.browser.url";
 }
 
+/// Hook name constants for the native image viewer.
+pub mod image_hooks {
+    pub const ZOOM_IN: &str = "ui.image.zoom-in";
+    pub const ZOOM_OUT: &str = "ui.image.zoom-out";
+    pub const ZOOM_RESET: &str = "ui.image.zoom-reset";
+    pub const TOGGLE_MODE: &str = "ui.image.toggle-mode";
+}
+
 // ─── Buffer kind string constants ────────────────────────────────────────────
 
 /// Buffer kind strings used when creating or matching plugin buffers.

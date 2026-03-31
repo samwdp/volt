@@ -36,6 +36,8 @@ id_type!(BufferId, "Unique identifier for a buffer.");
 pub enum BufferKind {
     /// Editable file-backed content.
     File,
+    /// Native image viewing content.
+    Image,
     /// Internal scratch content not backed by a file.
     Scratch,
     /// Generic list or picker content.

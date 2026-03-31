@@ -67,8 +67,8 @@ use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::{
     LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction,
     PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks, browser_hooks,
-    buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, lsp_hooks, oil_hooks,
-    oil_protocol, plugin_hooks,
+    buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks, lsp_hooks,
+    oil_hooks, oil_protocol, plugin_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -181,6 +181,10 @@ const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
+const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
+const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
+const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
+const HOOK_IMAGE_TOGGLE_MODE: &str = image_hooks::TOGGLE_MODE;
 const AUTOCOMPLETE_BUFFER_PROVIDER: &str = "buffer";
 const AUTOCOMPLETE_LSP_PROVIDER: &str = "lsp";
 const HOVER_PROVIDER_TEST: &str = "test-hover";
@@ -318,6 +322,9 @@ const NOTIFICATION_VISIBLE_LIMIT: usize = 3;
 const NOTIFICATION_MAX_STORED: usize = 12;
 const NOTIFICATION_STACK_GAP: i32 = 10;
 const NOTIFICATION_MAX_BODY_LINES: usize = 4;
+const IMAGE_ZOOM_STEP: f32 = 1.25;
+const IMAGE_ZOOM_MIN: f32 = 0.1;
+const IMAGE_ZOOM_MAX: f32 = 8.0;
 
 // ─── Local constants (formerly from user modules) ────────────────────────────
 const BROWSER_BUFFER_NAME: &str = "*browser*";
@@ -2069,6 +2076,7 @@ pub(crate) struct ShellBuffer {
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
     plugin_section_state: Option<PluginSectionBufferState>,
+    image_state: Option<ImageBufferState>,
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
@@ -2208,6 +2216,28 @@ struct AcpDecodedImage {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+}
+
+type DecodedImage = AcpDecodedImage;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageBufferFormat {
+    Raster,
+    Svg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageBufferMode {
+    Rendered,
+    Source,
+}
+
+#[derive(Debug, Clone)]
+struct ImageBufferState {
+    format: ImageBufferFormat,
+    mode: ImageBufferMode,
+    decoded: DecodedImage,
+    zoom: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2823,6 +2853,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             plugin_section_state,
+            image_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2878,6 +2909,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             plugin_section_state,
+            image_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2936,6 +2968,7 @@ impl ShellBuffer {
             input,
             section_state: None,
             plugin_section_state,
+            image_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -2983,6 +3016,7 @@ impl ShellBuffer {
                 .plugin_section_state
                 .as_ref()
                 .is_some_and(|state| !state.active_section_writable())
+            || (self.kind == BufferKind::Image && !self.is_svg_source_mode())
     }
 
     fn has_input_field(&self) -> bool {
@@ -3025,6 +3059,96 @@ impl ShellBuffer {
 
     fn plugin_sections(&self) -> Option<&PluginSectionBufferState> {
         self.plugin_section_state.as_ref()
+    }
+
+    fn image_state(&self) -> Option<&ImageBufferState> {
+        self.image_state.as_ref()
+    }
+
+    fn image_state_mut(&mut self) -> Option<&mut ImageBufferState> {
+        self.image_state.as_mut()
+    }
+
+    fn is_rendered_image_buffer(&self) -> bool {
+        self.image_state()
+            .is_some_and(|state| state.mode == ImageBufferMode::Rendered)
+    }
+
+    fn is_svg_source_mode(&self) -> bool {
+        self.image_state().is_some_and(|state| {
+            state.format == ImageBufferFormat::Svg && state.mode == ImageBufferMode::Source
+        })
+    }
+
+    fn supports_text_file_actions(&self) -> bool {
+        self.kind == BufferKind::File || self.is_svg_source_mode()
+    }
+
+    fn set_image_state(&mut self, state: ImageBufferState) {
+        self.image_state = Some(state);
+    }
+
+    fn image_zoom_in(&mut self) -> bool {
+        let Some(state) = self.image_state_mut() else {
+            return false;
+        };
+        if state.mode != ImageBufferMode::Rendered {
+            return false;
+        }
+        let next = (state.zoom * IMAGE_ZOOM_STEP).clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX);
+        if (next - state.zoom).abs() < f32::EPSILON {
+            return false;
+        }
+        state.zoom = next;
+        true
+    }
+
+    fn image_zoom_out(&mut self) -> bool {
+        let Some(state) = self.image_state_mut() else {
+            return false;
+        };
+        if state.mode != ImageBufferMode::Rendered {
+            return false;
+        }
+        let next = (state.zoom / IMAGE_ZOOM_STEP).clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX);
+        if (next - state.zoom).abs() < f32::EPSILON {
+            return false;
+        }
+        state.zoom = next;
+        true
+    }
+
+    fn reset_image_zoom(&mut self) -> bool {
+        let Some(state) = self.image_state_mut() else {
+            return false;
+        };
+        if state.mode != ImageBufferMode::Rendered || (state.zoom - 1.0).abs() < f32::EPSILON {
+            return false;
+        }
+        state.zoom = 1.0;
+        true
+    }
+
+    fn toggle_svg_image_mode(&mut self) -> Result<bool, String> {
+        let Some(state) = self.image_state.as_mut() else {
+            return Ok(false);
+        };
+        if state.format != ImageBufferFormat::Svg {
+            return Ok(false);
+        }
+        match state.mode {
+            ImageBufferMode::Rendered => {
+                state.mode = ImageBufferMode::Source;
+                Ok(true)
+            }
+            ImageBufferMode::Source => {
+                let path = self.text.path().map(Path::to_path_buf);
+                let decoded = rasterize_svg_text(&self.text.text(), path.as_deref())?;
+                state.decoded = decoded;
+                state.mode = ImageBufferMode::Rendered;
+                Ok(true)
+            }
+        }
     }
 
     fn set_plugin_output_lines(&mut self, lines: Vec<String>) {
@@ -5069,19 +5193,49 @@ fn acp_tool_kind_icon(kind: ToolKind) -> &'static str {
     }
 }
 
-fn acp_decode_image(
-    image: &agent_client_protocol::ImageContent,
-) -> Result<AcpDecodedImage, String> {
+fn acp_decode_image(image: &agent_client_protocol::ImageContent) -> Result<DecodedImage, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(image.data.as_bytes())
         .map_err(|error| error.to_string())?;
-    let decoded = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+    decode_raster_image_bytes(&bytes)
+}
+
+fn decode_raster_image_bytes(bytes: &[u8]) -> Result<DecodedImage, String> {
+    let decoded = image::load_from_memory(bytes).map_err(|error| error.to_string())?;
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(AcpDecodedImage {
+    Ok(DecodedImage {
         width,
         height,
         pixels: Arc::<[u8]>::from(rgba.into_raw()),
+    })
+}
+
+fn decode_raster_image_path(path: &Path) -> Result<DecodedImage, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    decode_raster_image_bytes(&bytes)
+}
+
+fn rasterize_svg_text(text: &str, path: Option<&Path>) -> Result<DecodedImage, String> {
+    let mut options = resvg::usvg::Options {
+        resources_dir: path.and_then(Path::parent).map(Path::to_path_buf),
+        ..resvg::usvg::Options::default()
+    };
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_str(text, &options).map_err(|error| error.to_string())?;
+    let size = tree.size().to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+        .ok_or_else(|| "failed to allocate SVG render target".to_owned())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
+    Ok(DecodedImage {
+        width: pixmap.width(),
+        height: pixmap.height(),
+        pixels: Arc::<[u8]>::from(pixmap.take()),
     })
 }
 
@@ -10650,6 +10804,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_IMAGE_ZOOM_IN,
+        "Zooms the active native image buffer in.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_IMAGE_ZOOM_OUT,
+        "Zooms the active native image buffer out.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_IMAGE_ZOOM_RESET,
+        "Resets the active native image buffer to its fitted zoom.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_IMAGE_TOGGLE_MODE,
+        "Toggles the active SVG image buffer between preview and source mode.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_SCROLL_HALF_PAGE_DOWN,
         "Scrolls down by half a page in Vim normal mode.",
     )?;
@@ -11833,6 +12007,38 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_IMAGE_ZOOM_IN, "shell.image-zoom-in", |_, runtime| {
+            zoom_active_image_buffer_in(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_IMAGE_ZOOM_OUT, "shell.image-zoom-out", |_, runtime| {
+            zoom_active_image_buffer_out(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_IMAGE_ZOOM_RESET,
+            "shell.image-zoom-reset",
+            |_, runtime| {
+                reset_active_image_buffer_zoom(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_IMAGE_TOGGLE_MODE,
+            "shell.image-toggle-mode",
+            |_, runtime| {
+                toggle_active_image_buffer_mode(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
             let (action, query, picker_kind) = {
                 let ui = shell_ui_mut(runtime)?;
@@ -12762,6 +12968,36 @@ fn active_shell_buffer_read_only(runtime: &EditorRuntime) -> Result<bool, String
 fn active_shell_buffer_has_input(runtime: &EditorRuntime) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     Ok(shell_buffer(runtime, buffer_id)?.has_input_field())
+}
+
+fn zoom_active_image_buffer_in(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.image_zoom_in();
+    Ok(())
+}
+
+fn zoom_active_image_buffer_out(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.image_zoom_out();
+    Ok(())
+}
+
+fn reset_active_image_buffer_zoom(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.reset_image_zoom();
+    Ok(())
+}
+
+fn toggle_active_image_buffer_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let switched_to_source = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if !buffer.toggle_svg_image_mode()? {
+            return Ok(());
+        }
+        buffer.is_svg_source_mode()
+    };
+    if switched_to_source {
+        queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    }
+    Ok(())
 }
 
 fn enter_insert_mode_for_input_buffer(
@@ -15952,7 +16188,7 @@ fn save_buffer(
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let (path, buffer_kind) = {
+    let path = {
         let workspace = runtime
             .model()
             .workspace(workspace_id)
@@ -15960,10 +16196,10 @@ fn save_buffer(
         let buffer = workspace
             .buffer(buffer_id)
             .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-        (buffer.path().map(Path::to_path_buf), buffer.kind().clone())
+        buffer.path().map(Path::to_path_buf)
     };
 
-    if buffer_kind != BufferKind::File {
+    if !shell_buffer(runtime, buffer_id)?.supports_text_file_actions() {
         return Ok(());
     }
 
@@ -16141,7 +16377,7 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
     };
 
     for buffer_id in buffer_ids {
-        let (buffer_kind, path) = {
+        let path = {
             let workspace = runtime
                 .model()
                 .workspace(workspace_id)
@@ -16149,10 +16385,10 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
             let buffer = workspace
                 .buffer(buffer_id)
                 .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-            (buffer.kind().clone(), buffer.path().map(Path::to_path_buf))
+            buffer.path().map(Path::to_path_buf)
         };
 
-        if buffer_kind != BufferKind::File {
+        if !shell_buffer(runtime, buffer_id)?.supports_text_file_actions() {
             continue;
         }
 
@@ -16168,7 +16404,8 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
             continue;
         }
 
-        let path = path.ok_or_else(|| format!("file buffer `{buffer_id}` is missing a path"))?;
+        let path =
+            path.ok_or_else(|| format!("text-editable buffer `{buffer_id}` is missing a path"))?;
         save_buffer(runtime, workspace_id, buffer_id)
             .map_err(|error| format!("failed to save `{}`: {error}", path.display()))?;
     }
@@ -16182,7 +16419,7 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (path, extension, original_cursor, selection, buffer_kind) = {
+    let (path, extension, original_cursor, selection, supports_text_actions) = {
         let ui = shell_ui(runtime)?;
         let buffer = ui
             .buffer(buffer_id)
@@ -16212,11 +16449,11 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
             extension,
             original_cursor,
             selection,
-            buffer.kind.clone(),
+            buffer.supports_text_file_actions(),
         )
     };
 
-    if buffer_kind != BufferKind::File {
+    if !supports_text_actions {
         return Err("workspace.format only supports file buffers".to_owned());
     }
 
@@ -17510,7 +17747,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
                 buffer.set_cursor(TextPoint::new(origin.line, target_col));
             }
         }
-        if buffer.kind == BufferKind::File {
+        if buffer.supports_text_file_actions() {
             format_current_line_indent(buffer, indent_size, use_tabs);
         }
         buffer.mark_syntax_dirty();
@@ -23028,6 +23265,95 @@ fn file_open_detail(path: &Path) -> Option<String> {
         .map(|extension| format!(".{extension}"))
 }
 
+fn image_format_for_path(path: &Path) -> Option<ImageBufferFormat> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "svg" => Some(ImageBufferFormat::Svg),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp" | "tif" | "tiff" => {
+            Some(ImageBufferFormat::Raster)
+        }
+        _ => None,
+    }
+}
+
+fn open_image_workspace_file(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    display_name: &str,
+    path: &Path,
+    format: ImageBufferFormat,
+) -> Result<BufferId, String> {
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            display_name,
+            BufferKind::Image,
+            Some(path.to_path_buf()),
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("new image buffer `{buffer_id}` is missing"))?;
+    let user_library = shell_user_library(runtime);
+    let shell_buffer = match format {
+        ImageBufferFormat::Raster => {
+            let decoded = decode_raster_image_path(path)?;
+            let mut text = TextBuffer::new();
+            text.set_path(path.to_path_buf());
+            let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+            shell_buffer.set_image_state(ImageBufferState {
+                format,
+                mode: ImageBufferMode::Rendered,
+                decoded,
+                zoom: 1.0,
+            });
+            shell_buffer
+        }
+        ImageBufferFormat::Svg => {
+            let text = TextBuffer::load_from_path(path)
+                .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+            let decoded = rasterize_svg_text(&text.text(), Some(path))?;
+            let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+            shell_buffer.set_image_state(ImageBufferState {
+                format,
+                mode: ImageBufferMode::Rendered,
+                decoded,
+                zoom: 1.0,
+            });
+            shell_buffer.set_language_id(language_id_for_path(runtime, path).ok());
+            shell_buffer
+        }
+    };
+
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buffer);
+        ui.focus_buffer_in_active_pane(buffer_id);
+    }
+
+    if let Some(detail) = file_open_detail(path) {
+        runtime
+            .emit_hook(
+                builtins::FILE_OPEN,
+                HookEvent::new()
+                    .with_workspace(workspace_id)
+                    .with_buffer(buffer_id)
+                    .with_detail(detail),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    if format == ImageBufferFormat::Svg {
+        queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    }
+
+    Ok(buffer_id)
+}
+
 fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<BufferId, String> {
     let workspace_id = runtime
         .model()
@@ -23044,6 +23370,15 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
 
     let workspace_root = active_workspace_root(runtime)?;
     let display_name = workspace_relative_path(workspace_root.as_deref(), path);
+    if let Some(format) = image_format_for_path(path) {
+        return open_image_workspace_file(
+            runtime,
+            workspace_id,
+            display_name.as_str(),
+            path,
+            format,
+        );
+    }
     let text = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
     let buffer_id = runtime
@@ -23770,6 +24105,9 @@ fn git_remote_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<Strin
 fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
     if keymod.intersects(ctrl_mod()) {
         return match keycode {
+            Keycode::Equals | Keycode::KpPlus => Some("Ctrl+=".to_owned()),
+            Keycode::Minus | Keycode::KpMinus => Some("Ctrl+-".to_owned()),
+            Keycode::_0 | Keycode::Kp0 => Some("Ctrl+0".to_owned()),
             Keycode::B => Some("Ctrl+b".to_owned()),
             Keycode::C => Some("Ctrl+c".to_owned()),
             Keycode::D => Some("Ctrl+d".to_owned()),
@@ -24391,6 +24729,7 @@ fn buffer_interaction(
     user_library: &dyn UserLibrary,
 ) -> (bool, Option<InputField>) {
     match kind {
+        BufferKind::Image => (false, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
@@ -24453,6 +24792,10 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
         "*notes*" => initial_notes_lines(),
         "*errors*" => initial_errors_lines(None),
         _ => match kind {
+            BufferKind::Image => vec![
+                format!("{name} is a native image buffer."),
+                "Supported image files open directly into a centered preview.".to_owned(),
+            ],
             BufferKind::Scratch => vec![
                 format!("{name} is a scratch buffer created by the runtime."),
                 "This buffer can be focused from the generic buffer picker.".to_owned(),
@@ -24533,6 +24876,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
 fn buffer_kind_label(kind: &BufferKind) -> String {
     match kind {
         BufferKind::File => "file".to_owned(),
+        BufferKind::Image => "image".to_owned(),
         BufferKind::Scratch => "scratch".to_owned(),
         BufferKind::Picker => "picker".to_owned(),
         BufferKind::Terminal => "terminal".to_owned(),
@@ -25643,6 +25987,82 @@ fn buffer_visible_rows_for_height(buffer: &ShellBuffer, height: u32, line_height
     .visible_rows
 }
 
+fn image_buffer_viewport_rect(rect: Rect, layout: BufferFooterLayout) -> Option<Rect> {
+    let x = rect.x().saturating_add(8);
+    let y = layout.body_y;
+    let width = rect.width().saturating_sub(16);
+    let height = layout.pane_bottom.saturating_sub(y);
+    (width > 0 && height > 0).then(|| Rect::new(x, y, width, height as u32))
+}
+
+fn centered_image_draw_rect(
+    viewport: Rect,
+    image_width: u32,
+    image_height: u32,
+    zoom: f32,
+) -> Option<Rect> {
+    if image_width == 0 || image_height == 0 || viewport.width() == 0 || viewport.height() == 0 {
+        return None;
+    }
+    let fit_scale = (viewport.width() as f32 / image_width as f32)
+        .min(viewport.height() as f32 / image_height as f32);
+    let scale = (fit_scale * zoom).max(0.000_1);
+    let draw_width = ((image_width as f32 * scale).round() as u32).max(1);
+    let draw_height = ((image_height as f32 * scale).round() as u32).max(1);
+    let x = viewport.x() + (viewport.width() as i32 - draw_width as i32) / 2;
+    let y = viewport.y() + (viewport.height() as i32 - draw_height as i32) / 2;
+    Some(Rect::new(x, y, draw_width, draw_height))
+}
+
+fn render_image_buffer_body(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+) -> Result<(), ShellError> {
+    let Some(state) = buffer.image_state() else {
+        return Ok(());
+    };
+    if state.mode != ImageBufferMode::Rendered {
+        return Ok(());
+    }
+    let Some(viewport) = image_buffer_viewport_rect(rect, layout) else {
+        return Ok(());
+    };
+    let viewport_background = theme_color(
+        theme_registry,
+        "ui.panel.background",
+        adjust_color(
+            base_background,
+            if is_dark_color(base_background) {
+                4
+            } else {
+                -4
+            },
+        ),
+    );
+    fill_rect(target, viewport, viewport_background)?;
+    let Some(draw_rect) = centered_image_draw_rect(
+        viewport,
+        state.decoded.width,
+        state.decoded.height,
+        state.zoom,
+    ) else {
+        return Ok(());
+    };
+    draw_image(
+        target,
+        draw_rect,
+        state.decoded.width,
+        state.decoded.height,
+        Arc::clone(&state.decoded.pixels),
+        Some(viewport),
+    )?;
+    Ok(())
+}
+
 fn autocomplete_preview_lines(
     entry: Option<&AutocompleteEntry>,
     token: &str,
@@ -26185,6 +26605,15 @@ fn render_buffer(
             cursor_roundness,
             cell_width,
             line_height,
+        )?;
+    } else if buffer.is_rendered_image_buffer() {
+        render_image_buffer_body(
+            target,
+            buffer,
+            rect,
+            layout,
+            theme_registry,
+            base_background,
         )?;
     } else if buffer.has_plugin_sections() {
         render_plugin_section_buffer_body(
@@ -27387,6 +27816,7 @@ fn render_acp_pane(
                             decoded.width,
                             decoded.height,
                             Arc::clone(&decoded.pixels),
+                            Some(image_rect),
                         )?;
                     }
                 }
@@ -28607,6 +29037,7 @@ fn present_scene_to_canvas<'texture>(
                 image_width,
                 image_height,
                 pixels,
+                clip_rect,
             } => {
                 let mut pixels = pixels.to_vec();
                 let surface = Surface::from_data(
@@ -28618,8 +29049,12 @@ fn present_scene_to_canvas<'texture>(
                 )
                 .map_err(|error| ShellError::Sdl(error.to_string()))?;
                 let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
+                canvas.set_clip_rect(clip_rect.as_ref().map(|clip_rect| {
+                    Rect::new(clip_rect.x, clip_rect.y, clip_rect.width, clip_rect.height)
+                }));
                 texture
                     .copy_to_canvas(canvas, Rect::new(rect.x, rect.y, rect.width, rect.height))?;
+                canvas.set_clip_rect(None);
             }
         }
     }
@@ -29252,6 +29687,7 @@ fn draw_image(
     image_width: u32,
     image_height: u32,
     pixels: Arc<[u8]>,
+    clip_rect: Option<Rect>,
 ) -> Result<(), ShellError> {
     match target {
         DrawTarget::Scene(scene) => scene.push(DrawCommand::Image {
@@ -29259,6 +29695,7 @@ fn draw_image(
             image_width,
             image_height,
             pixels,
+            clip_rect: clip_rect.map(to_pixel_rect),
         }),
     }
     Ok(())
