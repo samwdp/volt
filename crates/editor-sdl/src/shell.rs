@@ -1112,6 +1112,7 @@ struct InputField {
     placeholder: Option<String>,
     hint: Option<String>,
     cursor: usize,
+    selection_anchor: Option<usize>,
 }
 
 impl InputField {
@@ -1122,6 +1123,7 @@ impl InputField {
             placeholder: None,
             hint: None,
             cursor: 0,
+            selection_anchor: None,
         }
     }
 
@@ -1214,9 +1216,13 @@ impl InputField {
         self.text.clear();
         self.text.push_str(&filtered);
         self.cursor = self.text.chars().count();
+        self.selection_anchor = None;
     }
 
     fn backspace(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
         if self.cursor == 0 {
             return false;
         }
@@ -1228,6 +1234,9 @@ impl InputField {
     }
 
     fn delete_forward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
         if self.cursor >= self.text.chars().count() {
             return false;
         }
@@ -1237,6 +1246,7 @@ impl InputField {
     }
 
     fn move_left(&mut self) -> bool {
+        self.selection_anchor = None;
         if self.cursor == 0 {
             return false;
         }
@@ -1245,6 +1255,7 @@ impl InputField {
     }
 
     fn move_right(&mut self) -> bool {
+        self.selection_anchor = None;
         let total = self.text.chars().count();
         if self.cursor >= total {
             return false;
@@ -1254,6 +1265,7 @@ impl InputField {
     }
 
     fn move_up(&mut self) -> bool {
+        self.selection_anchor = None;
         let starts = self.line_starts();
         let total = self.text.chars().count();
         let (line, col) = self.cursor_line_col_with_starts(&starts);
@@ -1268,6 +1280,7 @@ impl InputField {
     }
 
     fn move_down(&mut self) -> bool {
+        self.selection_anchor = None;
         let starts = self.line_starts();
         let total = self.text.chars().count();
         let (line, col) = self.cursor_line_col_with_starts(&starts);
@@ -1284,6 +1297,7 @@ impl InputField {
     fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.selection_anchor = None;
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -1294,9 +1308,159 @@ impl InputField {
         if filtered.is_empty() {
             return;
         }
+        let _ = self.delete_selection();
         let insert_at = self.byte_index_for_char(self.cursor);
         self.text.insert_str(insert_at, &filtered);
         self.cursor = self.cursor.saturating_add(filtered.chars().count());
+    }
+
+    fn char_count(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn cursor_char(&self) -> usize {
+        self.cursor.min(self.char_count())
+    }
+
+    fn cursor_point(&self) -> TextPoint {
+        let buffer = TextBuffer::from_text(&self.text);
+        buffer.point_from_char_index(self.cursor_char())
+    }
+
+    fn move_line_start(&mut self) -> bool {
+        self.selection_anchor = None;
+        let before = self.cursor_char();
+        let (line, _) = self.cursor_line_col();
+        let starts = self.line_starts();
+        self.cursor = starts.get(line).copied().unwrap_or(0);
+        self.cursor != before
+    }
+
+    fn move_line_end(&mut self) -> bool {
+        self.selection_anchor = None;
+        let before = self.cursor_char();
+        let starts = self.line_starts();
+        let total = self.char_count();
+        let (line, _) = self.cursor_line_col_with_starts(&starts);
+        self.cursor = starts[line] + Self::line_len_for(&starts, total, line);
+        self.cursor != before
+    }
+
+    fn start_selection(&mut self) {
+        self.selection_anchor = Some(self.cursor_char());
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    fn selected_char_range(&self, kind: VisualSelectionKind) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        let total = self.char_count();
+        if total == 0 {
+            return None;
+        }
+        match kind {
+            VisualSelectionKind::Character => {
+                let head = self.cursor_char().min(total.saturating_sub(1));
+                if head >= anchor {
+                    Some((anchor, (head + 1).min(total)))
+                } else {
+                    Some((head, (anchor + 1).min(total)))
+                }
+            }
+            VisualSelectionKind::Line => {
+                let anchor_point = {
+                    let buffer = TextBuffer::from_text(&self.text);
+                    buffer.point_from_char_index(anchor.min(total))
+                };
+                let head_point = {
+                    let buffer = TextBuffer::from_text(&self.text);
+                    buffer.point_from_char_index(self.cursor_char().min(total))
+                };
+                let starts = self.line_starts();
+                let start_line = anchor_point.line.min(head_point.line);
+                let end_line = anchor_point.line.max(head_point.line);
+                let start = starts.get(start_line).copied().unwrap_or(0);
+                let end = if end_line + 1 < starts.len() {
+                    starts[end_line + 1]
+                } else {
+                    total
+                };
+                Some((start, end))
+            }
+            VisualSelectionKind::Block => None,
+        }
+    }
+
+    fn selected_text(&self, kind: VisualSelectionKind) -> Option<String> {
+        let (start, end) = self.selected_char_range(kind)?;
+        let start_byte = self.byte_index_for_char(start);
+        let end_byte = self.byte_index_for_char(end);
+        (start_byte < end_byte).then(|| self.text[start_byte..end_byte].to_owned())
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selected_char_range(VisualSelectionKind::Character) else {
+            return false;
+        };
+        self.delete_range(start, end);
+        self.cursor = start;
+        self.selection_anchor = None;
+        true
+    }
+
+    fn selection_visual_ranges(
+        &self,
+        kind: VisualSelectionKind,
+        available_cols: usize,
+    ) -> Vec<(usize, usize, usize)> {
+        let Some((start, end)) = self.selected_char_range(kind) else {
+            return Vec::new();
+        };
+        let prompt_len = self.prompt.chars().count();
+        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let starts = self.line_starts();
+        let total = self.char_count();
+        let mut visual_row_offsets = Vec::with_capacity(starts.len());
+        let mut visual_row = 0usize;
+        for line_index in 0..starts.len() {
+            visual_row_offsets.push(visual_row);
+            let line_len = Self::line_len_for(&starts, total, line_index);
+            visual_row += if line_len == 0 {
+                1
+            } else {
+                line_len.div_ceil(cols_per_row)
+            };
+        }
+        let mut ranges = Vec::new();
+        for (line_index, line_start) in starts.iter().copied().enumerate() {
+            let line_len = Self::line_len_for(&starts, total, line_index);
+            let line_end = line_start + line_len;
+            let line_selection_start = start.max(line_start);
+            let line_selection_end = end.min(line_end);
+            if line_selection_start >= line_selection_end {
+                continue;
+            }
+            let start_col = line_selection_start - line_start;
+            let end_col = line_selection_end - line_start;
+            let start_row = start_col / cols_per_row;
+            let end_row = end_col.saturating_sub(1) / cols_per_row;
+            for row in start_row..=end_row {
+                let row_start = row * cols_per_row;
+                let row_end = ((row + 1) * cols_per_row).min(line_len.max(1));
+                let selection_start = start_col.max(row_start);
+                let selection_end = end_col.min(row_end);
+                if selection_start < selection_end {
+                    ranges.push((
+                        visual_row_offsets[line_index] + row,
+                        selection_start - row_start,
+                        selection_end - row_start,
+                    ));
+                }
+            }
+        }
+        ranges
     }
 
     fn cursor_line_col(&self) -> (usize, usize) {
@@ -7578,6 +7742,16 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     return Ok(false);
                 }
+                if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                    && active_buffer.has_input
+                    && input_field_paste_shortcut_requested(keycode, keymod)
+                {
+                    if let Some(text) = read_system_clipboard() {
+                        paste_text_into_active_input_buffer(&mut self.runtime, &text)
+                            .map_err(ShellError::Runtime)?;
+                    }
+                    return Ok(false);
+                }
                 if keymod.intersects(ctrl_mod())
                     && keycode == Keycode::J
                     && matches!(input_mode, InputMode::Insert | InputMode::Replace)
@@ -11474,6 +11648,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             let buffer_id = active_shell_buffer_id(runtime)?;
             let is_directory = buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind);
             let cursor_point = active_shell_buffer_mut(runtime)?.cursor_point();
+            let has_input = active_shell_buffer_has_input(runtime)?;
             let finish_change = {
                 let vim = shell_ui(runtime)?.vim();
                 vim.recording_change && vim.finish_change_on_normal
@@ -11497,6 +11672,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             apply_pending_block_insert(runtime)?;
             shell_ui_mut(runtime)?.enter_normal_mode();
             active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
+            if has_input && let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                if previous_mode == InputMode::Visual {
+                    input.clear_selection();
+                } else if matches!(previous_mode, InputMode::Insert | InputMode::Replace)
+                    && input.cursor_char() > 0
+                {
+                    let _ = input.move_left();
+                }
+            }
             if let Some((anchor, head, kind)) = visual_snapshot {
                 store_last_visual_selection(runtime, anchor, head, kind)?;
             }
@@ -11554,6 +11738,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_replace_char(runtime)?;
                 }
                 "enter-replace-mode" => {
+                    if active_shell_buffer_has_input(runtime)? {
+                        shell_ui_mut(runtime)?.enter_replace_mode();
+                        return Ok(());
+                    }
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     shell_ui_mut(runtime)?.enter_replace_mode();
@@ -11562,18 +11750,39 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     toggle_case_chars(runtime)?;
                 }
                 "append" => {
+                    if active_shell_buffer_has_input(runtime)? {
+                        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                            let _ = input.move_right();
+                        }
+                        shell_ui_mut(runtime)?.enter_insert_mode();
+                        return Ok(());
+                    }
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.append_after_cursor();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "append-line-end" => {
+                    if active_shell_buffer_has_input(runtime)? {
+                        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                            input.move_line_end();
+                        }
+                        shell_ui_mut(runtime)?.enter_insert_mode();
+                        return Ok(());
+                    }
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.append_line_end();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "insert-line-start" => {
+                    if active_shell_buffer_has_input(runtime)? {
+                        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                            input.move_line_start();
+                        }
+                        shell_ui_mut(runtime)?.enter_insert_mode();
+                        return Ok(());
+                    }
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     active_shell_buffer_mut(runtime)?.insert_line_start();
@@ -15502,7 +15711,7 @@ fn move_buffer_with_motion(
     motion: ShellMotion,
     count: Option<usize>,
 ) -> bool {
-    let repeat = count.unwrap_or(1).max(1);
+    let repeat = count.unwrap_or(1);
     match motion {
         ShellMotion::Left => (0..repeat).fold(false, |moved, _| buffer.move_left() || moved),
         ShellMotion::Down => (0..repeat).fold(false, |moved, _| buffer.move_down() || moved),
@@ -15576,6 +15785,133 @@ fn move_buffer_with_motion(
             }
         }
     }
+}
+
+fn move_input_with_motion(
+    input: &mut InputField,
+    motion: ShellMotion,
+    count: Option<usize>,
+) -> bool {
+    let repeat = count.unwrap_or(1).max(1);
+    let original_anchor = input.selection_anchor;
+    let original_cursor = input.cursor_char();
+    let original_point = input.cursor_point();
+    let mut buffer = TextBuffer::from_text(input.text());
+    buffer.set_cursor(input.cursor_point());
+    let moved = match motion {
+        ShellMotion::Left => (0..repeat).fold(false, |moved, _| buffer.move_left() || moved),
+        ShellMotion::Down => (0..repeat).fold(false, |moved, _| buffer.move_down() || moved),
+        ShellMotion::Up => (0..repeat).fold(false, |moved, _| buffer.move_up() || moved),
+        ShellMotion::Right => (0..repeat).fold(false, |moved, _| buffer.move_right() || moved),
+        ShellMotion::WordForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_forward() || moved)
+        }
+        ShellMotion::BigWordForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_forward() || moved)
+        }
+        ShellMotion::WordBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_backward() || moved)
+        }
+        ShellMotion::BigWordBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_backward() || moved)
+        }
+        ShellMotion::WordEnd => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_end_forward() || moved)
+        }
+        ShellMotion::BigWordEnd => (0..repeat).fold(false, |moved, _| {
+            buffer.move_big_word_end_forward() || moved
+        }),
+        ShellMotion::WordEndBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_end_backward() || moved)
+        }
+        ShellMotion::BigWordEndBackward => (0..repeat).fold(false, |moved, _| {
+            buffer.move_big_word_end_backward() || moved
+        }),
+        ShellMotion::LineStart => {
+            buffer.set_cursor(TextPoint::new(buffer.cursor().line, 0));
+            buffer.cursor() != original_point
+        }
+        ShellMotion::LineFirstNonBlank => {
+            let line = buffer.line(buffer.cursor().line).unwrap_or_default();
+            let column = line
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .count();
+            buffer.set_cursor(TextPoint::new(buffer.cursor().line, column));
+            buffer.cursor() != original_point
+        }
+        ShellMotion::LineEnd => {
+            let line = buffer.cursor().line;
+            let line_repeat = repeat.saturating_sub(1);
+            let moved_line = if line_repeat == 0 {
+                false
+            } else {
+                (0..line_repeat).fold(false, |moved, _| buffer.move_down() || moved)
+            };
+            let line_len = buffer.line_len_chars(buffer.cursor().line).unwrap_or(0);
+            buffer.set_cursor(TextPoint::new(buffer.cursor().line, line_len));
+            moved_line || buffer.cursor().line != line || line_len != original_point.column
+        }
+        ShellMotion::FirstLine => {
+            let line = count.unwrap_or(1).saturating_sub(1);
+            buffer.set_cursor(TextPoint::new(line, 0));
+            buffer.cursor() != original_point
+        }
+        ShellMotion::LastLine => {
+            let line = count
+                .map(|value| value.saturating_sub(1))
+                .unwrap_or_else(|| buffer.line_count().saturating_sub(1));
+            buffer.set_cursor(TextPoint::new(line, 0));
+            buffer.cursor() != original_point
+        }
+        ShellMotion::SentenceForward
+        | ShellMotion::SentenceBackward
+        | ShellMotion::ParagraphForward
+        | ShellMotion::ParagraphBackward
+        | ShellMotion::MatchPair
+        | ShellMotion::ScreenTop
+        | ShellMotion::ScreenMiddle
+        | ShellMotion::ScreenBottom => false,
+    };
+    input.cursor = buffer.point_to_char_index(buffer.cursor());
+    if original_anchor.is_none() {
+        input.selection_anchor = None;
+    } else {
+        input.selection_anchor = original_anchor;
+    }
+    moved || input.cursor_char() != original_cursor
+}
+
+fn input_field_paste_shortcut_requested(keycode: Keycode, keymod: Mod) -> bool {
+    keycode == Keycode::V
+        && keymod.intersects(ctrl_mod())
+        && keymod.intersects(shift_mod())
+        && !keymod.intersects(alt_mod() | gui_mod())
+}
+
+fn paste_text_into_active_input_buffer(
+    runtime: &mut EditorRuntime,
+    text: &str,
+) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let is_acp = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer_is_acp(&buffer.kind)
+    };
+    let handled = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if let Some(input) = buffer.input_field_mut() {
+            input.insert_text(text);
+            true
+        } else {
+            false
+        }
+    };
+    if handled && is_acp {
+        acp::maybe_open_slash_completion(runtime, buffer_id)?;
+        acp::refresh_acp_input_hint(runtime, buffer_id)?;
+    }
+    Ok(handled)
 }
 
 fn motion_is_inclusive(motion: ShellMotion) -> bool {
@@ -16119,6 +16455,48 @@ fn apply_directory_delete_if_needed(runtime: &mut EditorRuntime) -> Result<(), S
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
+    if active_shell_buffer_has_input(runtime)? {
+        let kind = shell_ui(runtime)?.vim().visual_kind;
+        let selected = {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            let Some(input) = buffer.input_field_mut() else {
+                return Ok(());
+            };
+            input.selected_text(kind)
+        };
+        let Some(selected) = selected else {
+            return Ok(());
+        };
+        match operator {
+            VimOperator::Yank => {
+                let yank = match kind {
+                    VisualSelectionKind::Line => YankRegister::Line(selected),
+                    VisualSelectionKind::Character => YankRegister::Character(selected),
+                    VisualSelectionKind::Block => return Ok(()),
+                };
+                store_yank_register(runtime, yank, true)?;
+                if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                    input.clear_selection();
+                }
+                shell_ui_mut(runtime)?.enter_normal_mode();
+                return Ok(());
+            }
+            VimOperator::Delete | VimOperator::Change => {
+                if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                    input.delete_selection();
+                }
+                if operator == VimOperator::Change {
+                    shell_ui_mut(runtime)?.enter_insert_mode();
+                } else {
+                    shell_ui_mut(runtime)?.enter_normal_mode();
+                }
+                return Ok(());
+            }
+            VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+                return Ok(());
+            }
+        }
+    }
     let (selection, cursor, kind, anchor) = {
         let ui = shell_ui(runtime)?;
         let anchor = ui
@@ -17395,7 +17773,21 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
     {
         return Ok(());
     }
-    move_buffer_with_motion(active_shell_buffer_mut(runtime)?, motion, count);
+    let input_mode = shell_ui(runtime)?.input_mode();
+    let handled_input = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        if let Some(input) = buffer.input_field_mut() {
+            if matches!(input_mode, InputMode::Visual) && input.selection_anchor.is_none() {
+                input.start_selection();
+            }
+            Some(move_input_with_motion(input, motion, count))
+        } else {
+            None
+        }
+    };
+    if handled_input.is_none() {
+        move_buffer_with_motion(active_shell_buffer_mut(runtime)?, motion, count);
+    }
     Ok(())
 }
 
@@ -18002,6 +18394,18 @@ fn start_visual_mode_with_kind(
     runtime: &mut EditorRuntime,
     kind: VisualSelectionKind,
 ) -> Result<(), String> {
+    if active_shell_buffer_has_input(runtime)? {
+        let cursor = {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            let Some(input) = buffer.input_field_mut() else {
+                return Ok(());
+            };
+            input.start_selection();
+            input.cursor_point()
+        };
+        shell_ui_mut(runtime)?.enter_visual_mode(cursor, kind);
+        return Ok(());
+    }
     let cursor = active_shell_buffer_mut(runtime)?.cursor_point();
     shell_ui_mut(runtime)?.enter_visual_mode(cursor, kind);
     Ok(())
@@ -27524,6 +27928,24 @@ fn render_buffer(
         let prompt = input.prompt();
         let prompt_len = prompt.chars().count();
         let prompt_padding = " ".repeat(prompt_len);
+        let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
+        let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
+        if active && matches!(input_mode, InputMode::Visual) {
+            for (row, start_col, end_col) in
+                input.selection_visual_ranges(VisualSelectionKind::Character, available_input_cols)
+            {
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(
+                        input_x + ((prompt_len + start_col) as i32 * cell_width),
+                        layout.input_y + row as i32 * line_height,
+                        ((end_col.saturating_sub(start_col)) as i32 * cell_width.max(1)) as u32,
+                        line_height.max(1) as u32,
+                    ),
+                    selection,
+                )?;
+            }
+        }
         if input.text().is_empty() {
             if let Some(placeholder) = input.placeholder() {
                 let line = format!("{prompt}{placeholder}");
@@ -27532,8 +27954,6 @@ fn render_buffer(
                 draw_text(target, input_x, layout.input_y, prompt, input_foreground)?;
             }
         } else {
-            let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
-            let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
             for (index, line) in input
                 .wrapped_visual_rows(available_input_cols)
                 .into_iter()
@@ -27570,8 +27990,6 @@ fn render_buffer(
             }
         }
         if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
-            let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
-            let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
             let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
             let input_col = prompt_len + col_in_visual_row;
             let cursor_width = (cell_width / 4).max(2) as u32;
@@ -27586,6 +28004,27 @@ fn render_buffer(
                 cursor_roundness,
                 cursor,
             )?;
+        } else if active && matches!(input_mode, InputMode::Normal | InputMode::Visual) {
+            let cursor_char = input.cursor_char();
+            let char_count = input.char_count();
+            if char_count > 0 {
+                let cursor_index = cursor_char.min(char_count.saturating_sub(1));
+                let mut cursor_input = input.clone();
+                cursor_input.cursor = cursor_index;
+                cursor_input.clear_selection();
+                let (input_row, col_in_visual_row) =
+                    cursor_input.cursor_visual_row_col(available_input_cols);
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(
+                        input_x + ((prompt_len + col_in_visual_row) as i32 * cell_width),
+                        layout.input_y + input_row as i32 * line_height,
+                        cell_width.max(1) as u32,
+                        line_height.max(1) as u32,
+                    ),
+                    cursor,
+                )?;
+            }
         }
     }
 

@@ -3816,6 +3816,90 @@ fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
 }
 
 #[test]
+fn acp_input_field_visual_yank_copies_selected_text() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "alpha beta", None)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.cursor = 0;
+    }
+
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+    start_visual_mode_with_kind(&mut state.runtime, VisualSelectionKind::Character)?;
+    apply_motion_command(&mut state.runtime, ShellMotion::Right)?;
+    apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        ui.vim().yank,
+        Some(YankRegister::Character("al".to_owned()))
+    );
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .selection_anchor,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn paste_text_into_active_input_buffer_updates_acp_input() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "alpha", None)?;
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        " beta"
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "alpha beta"
+    );
+    Ok(())
+}
+
+#[test]
+fn paste_text_into_active_input_buffer_updates_browser_input() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        "example.com/docs"
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .text(),
+        "example.com/docs"
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_location_updates_rename_buffer_with_current_url() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;
@@ -5352,6 +5436,26 @@ fn browser_devtools_shortcut_requested_recognizes_f12_and_ctrl_shift_i() {
     assert!(browser_devtools_shortcut_requested(
         Keycode::I,
         ctrl_mod() | shift_mod()
+    ));
+}
+
+#[test]
+fn input_field_paste_shortcut_requested_recognizes_ctrl_shift_v_only() {
+    assert!(input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | shift_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        shift_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | shift_mod() | Mod::LALTMOD
     ));
 }
 
