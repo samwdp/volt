@@ -93,6 +93,20 @@ fn summarize_context(header: &str, kind: &str) -> Option<String> {
     {
         return Some(summary);
     }
+    if is_loop_kind(kind) {
+        return extract_control_flow_header(&header, &["for", "while", "loop", "do"])
+            .or(Some(header));
+    }
+    if is_conditional_kind(kind) {
+        return extract_control_flow_header(
+            &header,
+            &[
+                "else if", "if", "else", "match", "switch", "case", "default", "try", "catch",
+                "finally",
+            ],
+        )
+        .or(Some(header));
+    }
     None
 }
 
@@ -142,6 +156,36 @@ fn is_function_kind(kind: &str) -> bool {
     kind.contains("function") || kind.contains("method") || kind.contains("constructor")
 }
 
+fn is_loop_kind(kind: &str) -> bool {
+    kind.contains("for") || kind.contains("while") || kind.contains("loop") || kind.contains("do")
+}
+
+fn is_conditional_kind(kind: &str) -> bool {
+    kind.contains("if")
+        || kind.contains("else")
+        || kind.contains("match")
+        || kind.contains("switch")
+        || kind.contains("case")
+        || kind.contains("default")
+        || kind.contains("try")
+        || kind.contains("catch")
+        || kind.contains("finally")
+}
+
+fn extract_control_flow_header(header: &str, keywords: &[&str]) -> Option<String> {
+    let lowercase = header.to_ascii_lowercase();
+    for keyword in keywords {
+        let Some(start) = lowercase.find(keyword) else {
+            continue;
+        };
+        let summary = collapse_whitespace(trim_context_header(header[start..].trim()));
+        if !summary.is_empty() {
+            return Some(summary);
+        }
+    }
+    None
+}
+
 fn context_icon(kind: &str, summary: &str) -> &'static str {
     if kind.contains("class") || summary.starts_with("class ") {
         icon_font::symbols::cod::COD_SYMBOL_CLASS
@@ -159,6 +203,10 @@ fn context_icon(kind: &str, summary: &str) -> &'static str {
         || summary.starts_with("module ")
     {
         icon_font::symbols::cod::COD_SYMBOL_NAMESPACE
+    } else if is_loop_kind(kind) {
+        icon_font::symbols::md::MD_REPEAT
+    } else if is_conditional_kind(kind) {
+        icon_font::symbols::md::MD_SOURCE_BRANCH
     } else {
         icon_font::symbols::cod::COD_SYMBOL_METHOD
     }
@@ -166,7 +214,11 @@ fn context_icon(kind: &str, summary: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ghost_text_lines, extract_signature};
+    use super::{
+        build_ghost_text_lines, context_icon, extract_control_flow_header, extract_signature,
+        summarize_context,
+    };
+    use crate::icon_font;
     use editor_syntax::{SyntaxNodeContext, SyntaxPoint};
 
     #[test]
@@ -207,5 +259,71 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].text.contains("render(value: usize)"));
         assert!(lines[1].text.contains("impl Demo"));
+    }
+
+    #[test]
+    fn summarize_context_handles_loops_and_conditionals() {
+        assert_eq!(
+            summarize_context("for item in items {", "for_statement"),
+            Some("for item in items".to_owned())
+        );
+        assert_eq!(
+            summarize_context("if value > 0 {", "if_statement"),
+            Some("if value > 0".to_owned())
+        );
+        assert_eq!(
+            summarize_context("} else if value < 0 {", "else_if_clause"),
+            Some("else if value < 0".to_owned())
+        );
+        assert_eq!(
+            summarize_context("match value {", "match_expression"),
+            Some("match value".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_control_flow_header_finds_embedded_keywords() {
+        assert_eq!(
+            extract_control_flow_header("} catch (error) {", &["catch", "finally"]),
+            Some("catch (error)".to_owned())
+        );
+        assert_eq!(
+            extract_control_flow_header("} finally {", &["catch", "finally"]),
+            Some("finally".to_owned())
+        );
+    }
+
+    #[test]
+    fn build_ghost_text_lines_includes_loop_contexts() {
+        let buffer = "fn render() {\n    for item in items {\n        draw(item);\n    }\n}\n";
+        let contexts = vec![
+            SyntaxNodeContext {
+                kind: "for_statement".to_owned(),
+                start_position: SyntaxPoint::new(1, 4),
+                end_position: SyntaxPoint::new(3, 5),
+            },
+            SyntaxNodeContext {
+                kind: "function_item".to_owned(),
+                start_position: SyntaxPoint::new(0, 0),
+                end_position: SyntaxPoint::new(4, 1),
+            },
+        ];
+
+        let lines = build_ghost_text_lines(buffer, 2, &contexts);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].text.contains("for item in items"));
+        assert!(lines[1].text.contains("render()"));
+    }
+
+    #[test]
+    fn control_flow_contexts_use_distinct_icons() {
+        assert_eq!(
+            context_icon("for_statement", "for item in items"),
+            icon_font::symbols::md::MD_REPEAT
+        );
+        assert_eq!(
+            context_icon("if_statement", "if value > 0"),
+            icon_font::symbols::md::MD_SOURCE_BRANCH
+        );
     }
 }
