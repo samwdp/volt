@@ -19620,18 +19620,7 @@ fn run_shell_command_in_buffer(
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut args = terminal_config.args;
     let shell_program = terminal_config.program;
-    if cfg!(target_os = "windows")
-        && Path::new(&shell_program)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
-    {
-        args.push("/C".to_owned());
-    } else if cfg!(target_os = "windows") {
-        args.push("-Command".to_owned());
-    } else {
-        args.push("-c".to_owned());
-    }
+    args.push(shell_command_eval_flag(&shell_program).to_owned());
     args.push(command.clone());
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
@@ -19663,6 +19652,24 @@ fn run_shell_command_in_buffer(
     buffer.append_output_lines(&output_lines);
     buffer.append_output_lines(&[status_line]);
     Ok(())
+}
+
+fn shell_command_eval_flag(program: &str) -> &'static str {
+    let shell = Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if cfg!(target_os = "windows") {
+        if shell.eq_ignore_ascii_case("cmd") {
+            "/C"
+        } else if shell.eq_ignore_ascii_case("powershell") || shell.eq_ignore_ascii_case("pwsh") {
+            "-Command"
+        } else {
+            "-c"
+        }
+    } else {
+        "-c"
+    }
 }
 
 /// Re-run the last stored build command for the active workspace.
