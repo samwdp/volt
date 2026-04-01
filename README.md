@@ -9,6 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-brightgreen?style=flat-square" />
   <img alt="License" src="https://img.shields.io/github/license/samwdp/volt?style=flat-square" />
   <a href="https://github.com/samwdp/volt/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/samwdp/volt/ci.yml?style=flat-square&label=build" /></a>
+  <a href="https://github.com/samwdp/volt/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/samwdp/volt/release.yml?style=flat-square&label=release" /></a>
 </p>
 
 ---
