@@ -63,7 +63,7 @@ use editor_lsp::{
     LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot,
     LspTextEdit,
 };
-use editor_picker::{PickerItem, PickerSession};
+use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
     LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction,
     PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks, browser_hooks,
@@ -5686,6 +5686,11 @@ impl PickerOverlay {
             mode: PickerMode::Static,
             kind: PickerKind::Generic,
         }
+    }
+
+    fn with_result_order(mut self, result_order: PickerResultOrder) -> Self {
+        self.session = self.session.with_result_order(result_order);
+        self
     }
 
     fn search(
