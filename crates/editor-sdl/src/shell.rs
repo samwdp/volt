@@ -28949,6 +28949,7 @@ struct CursorTextOverlay {
     color: Color,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_cursor_text_overlay(
     x: i32,
     line: &str,
