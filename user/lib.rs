@@ -69,6 +69,8 @@ pub mod terminal;
 pub mod theme;
 /// Tree-sitter installer and grammar management package.
 pub mod treesitter;
+/// Tree-sitter-backed ghost text context annotations.
+pub mod treesitter_context;
 /// Undo tree picker and history navigation.
 pub mod undotree;
 /// Vim-style bindings and motions.
@@ -86,10 +88,11 @@ use editor_plugin_api::{
     DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme,
     abi::{
         AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
-        AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontSymbol,
-        AbiLanguageConfiguration, AbiLanguageServerSpec, AbiLigatureConfig, AbiOilDefaults,
-        AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSectionTree, AbiStatuslineContext,
-        AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiGhostTextContext, AbiGhostTextLine, AbiGitStatusPrefix, AbiGitStatusSnapshot,
+        AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
+        AbiLigatureConfig, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
+        AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot,
+        UserLibraryModule, UserLibraryModuleRef,
     },
 };
 
@@ -161,8 +164,9 @@ pub fn themes() -> Vec<Theme> {
 pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilDefaults,
-    OilKeyAction, OilKeybindings, StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, GhostTextContext, GhostTextLine, GitStatusPrefix,
+    HoverProvider, LigatureConfig, OilDefaults, OilKeyAction, OilKeybindings, StatuslineContext,
+    TerminalConfig, UserLibrary, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -419,6 +423,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn browser_url_placeholder(&self) -> String {
         browser::URL_PLACEHOLDER.to_owned()
+    }
+
+    fn ghost_text_lines(&self, context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
+        treesitter_context::ghost_text_lines(context)
     }
 
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
@@ -753,6 +761,26 @@ extern "C" fn exported_browser_url_placeholder() -> RString {
     UserLibraryImpl.browser_url_placeholder().into()
 }
 
+extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<AbiGhostTextLine> {
+    let context = GhostTextContext {
+        buffer_name: context.buffer_name.as_str(),
+        language_id: context
+            .language_id
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
+        buffer_text: context.buffer_text.as_str(),
+        cursor_line: context.cursor_line,
+        cursor_column: context.cursor_column,
+    };
+    UserLibraryImpl
+        .ghost_text_lines(&context)
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
 extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RString {
     let context = StatuslineContext {
         vim_mode: context.vim_mode.as_str(),
@@ -907,6 +935,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         run_plugin_buffer_evaluator: exported_run_plugin_buffer_evaluator,
         default_build_command: exported_default_build_command,
         ligature_config_v1: exported_ligature_config,
+        ghost_text_lines: exported_ghost_text_lines,
     }
     .leak_into_prefix()
 }

@@ -991,6 +991,62 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 }
 
 #[test]
+fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Result<(), String> {
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_line_ghost_text_for_segment(
+        &mut target,
+        24,
+        8,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: 1,
+        },
+        1,
+        Some(" render(value: usize)"),
+        Color::RGB(140, 144, 152),
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 40,
+            y: 8,
+            text: " render(value: usize)".to_owned(),
+            color: to_render_color(Color::RGB(140, 144, 152)),
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result<(), String> {
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_line_ghost_text_for_segment(
+        &mut target,
+        0,
+        0,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: 10,
+        },
+        24,
+        Some("hidden"),
+        Color::RGB(140, 144, 152),
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.is_empty());
+    Ok(())
+}
+
+#[test]
 fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
     let line = AcpRenderedTextLine {
         prefix: vec![

@@ -14,9 +14,10 @@ use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_theme::{Color, Theme, ThemeOption};
 
 use crate::{
-    AcpClient, AutocompleteProvider, AutocompleteProviderItem, GitStatusPrefix, HoverProvider,
-    HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults, OilKeyAction,
-    OilKeybindings, OilSortMode, StatuslineContext, TerminalConfig, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, AutocompleteProviderItem, GhostTextContext, GhostTextLine,
+    GitStatusPrefix, HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo,
+    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, StatuslineContext, TerminalConfig,
+    WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -1528,6 +1529,56 @@ impl From<StatuslineContext<'_>> for AbiStatuslineContext {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiGhostTextContext {
+    pub buffer_name: RString,
+    pub language_id: ROption<RString>,
+    pub buffer_text: RString,
+    pub cursor_line: usize,
+    pub cursor_column: usize,
+}
+
+impl From<GhostTextContext<'_>> for AbiGhostTextContext {
+    fn from(value: GhostTextContext<'_>) -> Self {
+        Self {
+            buffer_name: value.buffer_name.to_owned().into(),
+            language_id: value
+                .language_id
+                .map(|language_id| RString::from(language_id.to_owned()))
+                .into(),
+            buffer_text: value.buffer_text.to_owned().into(),
+            cursor_line: value.cursor_line,
+            cursor_column: value.cursor_column,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiGhostTextLine {
+    pub line: usize,
+    pub text: RString,
+}
+
+impl From<GhostTextLine> for AbiGhostTextLine {
+    fn from(value: GhostTextLine) -> Self {
+        Self {
+            line: value.line,
+            text: value.text.into(),
+        }
+    }
+}
+
+impl From<AbiGhostTextLine> for GhostTextLine {
+    fn from(value: AbiGhostTextLine) -> Self {
+        Self {
+            line: value.line,
+            text: value.text.into_string(),
+        }
+    }
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, StableAbi)]
 #[sabi(kind(Prefix(prefix_ref = UserLibraryModuleRef, prefix_fields = UserLibraryModule_Prefix)))]
 pub struct UserLibraryModule {
@@ -1585,8 +1636,9 @@ pub struct UserLibraryModule {
     pub icon_symbols: extern "C" fn() -> RVec<AbiIconFontSymbol>,
     pub run_plugin_buffer_evaluator: extern "C" fn(RString, RString) -> RVec<RString>,
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
-    #[sabi(last_prefix_field)]
     pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
+    #[sabi(last_prefix_field)]
+    pub ghost_text_lines: extern "C" fn(AbiGhostTextContext) -> RVec<AbiGhostTextLine>,
 }
 
 impl RootModule for UserLibraryModuleRef {
