@@ -15723,7 +15723,7 @@ fn move_buffer_with_motion(
     motion: ShellMotion,
     count: Option<usize>,
 ) -> bool {
-    let repeat = count.unwrap_or(1).max(1);
+    let repeat = count.unwrap_or(1);
     match motion {
         ShellMotion::Left => (0..repeat).fold(false, |moved, _| buffer.move_left() || moved),
         ShellMotion::Down => (0..repeat).fold(false, |moved, _| buffer.move_down() || moved),
