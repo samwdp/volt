@@ -7486,14 +7486,11 @@ impl ShellState {
             Event::KeyDown {
                 keycode: Some(keycode),
                 keymod,
-                repeat,
+                repeat: _,
                 ..
             } => {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-                if repeat && !repeated_keydown_allowed(keycode, keymod) {
-                    return Ok(false);
-                }
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
                 let is_ctrl_k = keymod.intersects(ctrl_mod()) && keycode == Keycode::K;
                 let is_ctrl_key = matches!(keycode, Keycode::LCtrl | Keycode::RCtrl);
@@ -24749,10 +24746,6 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
         Keycode::Return | Keycode::KpEnter => Some("Enter".to_owned()),
         _ => None,
     }
-}
-
-fn repeated_keydown_allowed(_keycode: Keycode, _keymod: Mod) -> bool {
-    true
 }
 
 fn text_chord(text: &str) -> Option<String> {

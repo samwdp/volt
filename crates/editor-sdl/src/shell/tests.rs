@@ -430,14 +430,6 @@ fn keydown_chord_maps_image_zoom_controls() {
 }
 
 #[test]
-fn repeated_keydown_is_allowed_for_all_keys() {
-    assert!(repeated_keydown_allowed(Keycode::Left, Mod::NOMOD));
-    assert!(repeated_keydown_allowed(Keycode::PageDown, Mod::NOMOD));
-    assert!(repeated_keydown_allowed(Keycode::Return, Mod::NOMOD));
-    assert!(repeated_keydown_allowed(Keycode::S, ctrl_mod()));
-}
-
-#[test]
 fn terminal_key_for_event_maps_special_keys() {
     assert_eq!(
         terminal_key_for_event(Keycode::Tab, Mod::LSHIFTMOD),
@@ -4610,6 +4602,43 @@ fn terminal_scroll_for_motion_maps_terminal_viewport_navigation() {
         Some(TerminalViewportScroll::Bottom)
     );
     assert_eq!(terminal_scroll_for_motion(ShellMotion::Left, None), None);
+}
+
+#[test]
+fn repeated_keydown_events_move_the_cursor() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 240;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(&mut state, "*repeat*", vec!["abcd".to_owned()])?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 3));
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Left),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: true,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(0, 2)
+    );
+    Ok(())
 }
 
 #[test]
