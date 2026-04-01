@@ -29061,6 +29061,7 @@ fn draw_line_ghost_text_for_segment(
         return Ok(());
     }
     let visible_cols = visible_end.saturating_sub(segment.start_col);
+    // Leave one monospace cell between the closing delimiter and the ghost text.
     let draw_x = x + visible_cols as i32 * cell_width + cell_width;
     draw_text(target, draw_x, y, ghost_text, color)
 }

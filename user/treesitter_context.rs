@@ -33,7 +33,9 @@ fn syntax_registry() -> &'static Mutex<SyntaxRegistry> {
     REGISTRY.get_or_init(|| {
         let mut registry = SyntaxRegistry::new();
         if let Err(error) = registry.register_all(syntax_languages()) {
-            panic!("failed to register user syntax languages for ghost text: {error:?}");
+            panic!(
+                "failed to register user syntax languages for ghost text; check user syntax registrations and installed grammars: {error:?}"
+            );
         }
         Mutex::new(registry)
     })
@@ -50,7 +52,7 @@ fn build_ghost_text_lines(
     }
     let mut by_line = BTreeMap::new();
     for context in contexts {
-        if context.end_position.line <= cursor_line {
+        if context.end_position.line < cursor_line {
             continue;
         }
         let Some(text) = format_context_label(&lines, context) else {
@@ -65,17 +67,17 @@ fn build_ghost_text_lines(
 }
 
 fn format_context_label(lines: &[&str], context: &SyntaxNodeContext) -> Option<String> {
-    let header = lines.get(context.start_position.line)?.trim();
-    if header.is_empty() {
+    let context_line = lines.get(context.start_position.line)?.trim();
+    if context_line.is_empty() {
         return None;
     }
-    let summary = summarize_context(header, &context.kind)?;
+    let summary = summarize_context(context_line, &context.kind)?;
     let icon = context_icon(&context.kind, &summary);
     Some(format!("{icon} {summary}"))
 }
 
 fn summarize_context(header: &str, kind: &str) -> Option<String> {
-    let header = header.split('{').next().unwrap_or(header);
+    let header = trim_context_header(header);
     let header = collapse_whitespace(header);
     if header.is_empty() {
         return None;
@@ -95,6 +97,10 @@ fn summarize_context(header: &str, kind: &str) -> Option<String> {
         return extract_signature(&header).or_else(|| Some(header));
     }
     None
+}
+
+fn trim_context_header(header: &str) -> &str {
+    header.split('{').next().unwrap_or(header)
 }
 
 fn extract_signature(header: &str) -> Option<String> {
@@ -181,7 +187,7 @@ mod tests {
     #[test]
     fn build_ghost_text_lines_prefers_inner_context_on_shared_closing_line() {
         let buffer =
-            "class Demo {\n    fn render(value: usize) {\n        let current = value;\n    }\n}\n";
+            "impl Demo {\n    fn render(value: usize) {\n        let current = value;\n    }\n}\n";
         let contexts = vec![
             SyntaxNodeContext {
                 kind: "function_item".to_owned(),
@@ -203,6 +209,6 @@ mod tests {
         let lines = build_ghost_text_lines(buffer, 2, &contexts);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].text.contains("render(value: usize)"));
-        assert!(lines[1].text.contains("class Demo") || lines[1].text.contains("impl Demo"));
+        assert!(lines[1].text.contains("impl Demo"));
     }
 }
