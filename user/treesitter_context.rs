@@ -83,7 +83,7 @@ fn summarize_context(header: &str, kind: &str) -> Option<String> {
         return None;
     }
     if is_function_kind(kind) {
-        return extract_signature(&header).or_else(|| Some(header));
+        return extract_signature(&header).or(Some(header));
     }
     if let Some(summary) = extract_named_keyword(&header, &["class", "struct", "interface", "enum"])
     {
@@ -92,9 +92,6 @@ fn summarize_context(header: &str, kind: &str) -> Option<String> {
     if let Some(summary) = extract_named_keyword(&header, &["trait", "impl", "namespace", "module"])
     {
         return Some(summary);
-    }
-    if kind.contains("function") || kind.contains("method") || kind.contains("constructor") {
-        return extract_signature(&header).or_else(|| Some(header));
     }
     None
 }
@@ -108,13 +105,13 @@ fn extract_signature(header: &str) -> Option<String> {
     let close = header[open..].find(')')?;
     let close = open + close;
     let prefix = header[..open].trim_end();
-    let name_start = prefix
-        .char_indices()
-        .rev()
-        .find(|(_, ch)| ch.is_whitespace() || matches!(ch, ':' | '.' | '>' | '<'))
-        .map(|(index, ch)| index + ch.len_utf8())
-        .unwrap_or(0);
-    let name = prefix[name_start..].trim();
+    let name = prefix
+        .split_whitespace()
+        .last()
+        .and_then(|token| token.rsplit("::").next())
+        .and_then(|token| token.rsplit('.').next())
+        .unwrap_or(prefix)
+        .trim();
     if name.is_empty() {
         return None;
     }

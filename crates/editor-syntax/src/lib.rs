@@ -875,16 +875,17 @@ impl SyntaxRegistry {
         loop {
             let start = node.start_position();
             let end = node.end_position();
+            let parent = node.parent();
             // Only keep ancestors whose closing line is at or after the cursor so
             // callers can render closing-line context breadcrumbs.
-            if node.is_named() && node.parent().is_some() && end.row >= point.row {
+            if node.is_named() && parent.is_some() && end.row >= point.row {
                 contexts.push(SyntaxNodeContext {
                     kind: node.kind().to_owned(),
                     start_position: SyntaxPoint::new(start.row, start.column),
                     end_position: SyntaxPoint::new(end.row, end.column),
                 });
             }
-            let Some(parent) = node.parent() else {
+            let Some(parent) = parent else {
                 break;
             };
             node = parent;
@@ -1174,6 +1175,9 @@ fn load_language(
 
 /// Converts an editor [`TextPoint`] (character columns) into a tree-sitter [`Point`]
 /// whose columns are measured in UTF-8 bytes.
+///
+/// Out-of-bounds coordinates are clamped to the nearest valid line/column in the
+/// provided buffer before converting character columns into byte columns.
 fn text_point_to_tree_sitter_point(buffer: &TextBuffer, point: TextPoint) -> Point {
     let max_line = buffer.line_count().saturating_sub(1);
     let line = point.line.min(max_line);
