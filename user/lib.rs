@@ -1270,11 +1270,12 @@ mod tests {
     fn user_library_exports_themes() {
         let themes = themes();
         let ids = themes.iter().map(|theme| theme.id()).collect::<Vec<_>>();
-        assert_eq!(themes.len(), 6);
+        assert_eq!(themes.len(), 7);
         assert!(ids.contains(&"volt-dark"));
         assert!(ids.contains(&"volt-light"));
         assert!(ids.contains(&"gruvbox-dark"));
         assert!(ids.contains(&"gruvbox-light"));
+        assert!(ids.contains(&"rosepine-dark"));
         assert!(ids.contains(&"vscode-dark"));
         assert!(ids.contains(&"vscode-light"));
         assert!(
