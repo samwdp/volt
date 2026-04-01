@@ -3632,6 +3632,15 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
 }
 
 #[test]
+fn vim_search_entries_trim_whitespace_from_labels() {
+    let buffer = TextBuffer::from_text("alpha\n   split here   \nbeta\n");
+    let data = vim_search_entries(&buffer.snapshot(), VimSearchDirection::Forward, "split");
+
+    assert_eq!(data.entries.len(), 1);
+    assert_eq!(data.entries[0].item.label(), "split here");
+}
+
+#[test]
 fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     state

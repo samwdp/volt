@@ -15693,7 +15693,7 @@ fn vim_search_entries(
             PickerEntry {
                 item: PickerItem::new(
                     format!("{}:{}", matched.point.line, matched.point.column),
-                    matched.line_text,
+                    matched.line_text.trim().to_owned(),
                     detail,
                     None::<String>,
                 ),
