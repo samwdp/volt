@@ -34,7 +34,7 @@ fn syntax_registry() -> &'static Mutex<SyntaxRegistry> {
         let mut registry = SyntaxRegistry::new();
         if let Err(error) = registry.register_all(syntax_languages()) {
             panic!(
-                "failed to register user syntax languages for ghost text; check user syntax registrations and installed grammars: {error:?}"
+                "ghost text syntax registration failed; verify user/lang definitions and installed grammars: {error:?}"
             );
         }
         Mutex::new(registry)
