@@ -1547,6 +1547,7 @@ pub struct UserLibraryModule {
     pub acp_client_by_id: extern "C" fn(RString) -> ROption<AbiAcpClient>,
     pub workspace_roots: extern "C" fn() -> RVec<AbiWorkspaceRoot>,
     pub terminal_config: extern "C" fn() -> AbiTerminalConfig,
+    pub commandline_enabled: extern "C" fn() -> bool,
     pub ligature_config: extern "C" fn() -> AbiLigatureConfig,
     pub oil_defaults: extern "C" fn() -> AbiOilDefaults,
     pub oil_keybindings: extern "C" fn() -> AbiOilKeybindings,
@@ -1584,8 +1585,9 @@ pub struct UserLibraryModule {
     pub icon_symbols: extern "C" fn() -> RVec<AbiIconFontSymbol>,
     pub run_plugin_buffer_evaluator: extern "C" fn(RString, RString) -> RVec<RString>,
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
-    #[sabi(last_prefix_field)]
     pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
+    #[sabi(last_prefix_field)]
+    pub commandline_enabled_v1: extern "C" fn() -> bool,
 }
 
 impl RootModule for UserLibraryModuleRef {

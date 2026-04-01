@@ -186,6 +186,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.terminal_config()().into()
     }
 
+    fn commandline_enabled(&self) -> bool {
+        self.module.commandline_enabled_v1()()
+    }
+
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
         self.module.ligature_config_v1()().into()
     }

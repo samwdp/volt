@@ -128,6 +128,9 @@ impl UserLibrary for NullUserLibrary {
             args: Vec::new(),
         };
     }
+    fn commandline_enabled(&self) -> bool {
+        true
+    }
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
     }

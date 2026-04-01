@@ -538,8 +538,11 @@ pub fn package() -> PluginPackage {
         ),
         PluginCommand::new(
             "vim.command-line",
-            "Opens a Vim-style command picker.",
-            vec![PluginAction::emit_hook("ui.picker.open", Some("commands"))],
+            "Opens a Vim-style command line.",
+            vec![PluginAction::emit_hook(
+                "editor.vim.command-line",
+                None::<&str>,
+            )],
         ),
     ];
 
