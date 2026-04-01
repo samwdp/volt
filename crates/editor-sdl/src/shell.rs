@@ -136,6 +136,7 @@ const HOOK_SCROLL_LINE_UP: &str = "editor.vim.scroll-line-up";
 const HOOK_MODE_INSERT: &str = "editor.mode.insert";
 const HOOK_MODE_NORMAL: &str = "editor.mode.normal";
 const HOOK_VIM_EDIT: &str = "editor.vim.edit";
+const HOOK_VIM_COMMAND_LINE: &str = "editor.vim.command-line";
 const HOOK_BUFFER_SAVE: &str = "buffer.save";
 const HOOK_BUFFER_CLOSE: &str = "buffer.close";
 const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
@@ -1345,6 +1346,110 @@ impl InputField {
         let end_byte = self.byte_index_for_char(end);
         if start_byte < end_byte {
             self.text.replace_range(start_byte..end_byte, "");
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CommandLineCompletionState {
+    seed: String,
+    matches: Vec<String>,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CommandLineOverlay {
+    input: InputField,
+    completion: Option<CommandLineCompletionState>,
+}
+
+impl CommandLineOverlay {
+    fn new() -> Self {
+        let mut input = InputField::new(":");
+        input.set_placeholder(Some(
+            "command, !shell command, or %s/find/replace/g".to_owned(),
+        ));
+        Self {
+            input,
+            completion: None,
+        }
+    }
+
+    fn input(&self) -> &InputField {
+        &self.input
+    }
+
+    fn text(&self) -> &str {
+        self.input.text()
+    }
+
+    fn append_text(&mut self, text: &str) {
+        let filtered: String = text
+            .chars()
+            .filter(|character| !matches!(character, '\r' | '\n'))
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        self.input.insert_text(&filtered);
+        self.completion = None;
+    }
+
+    fn backspace(&mut self) {
+        self.input.backspace();
+        self.completion = None;
+    }
+
+    fn delete_forward(&mut self) {
+        self.input.delete_forward();
+        self.completion = None;
+    }
+
+    fn move_left(&mut self) {
+        let _ = self.input.move_left();
+        self.completion = None;
+    }
+
+    fn move_right(&mut self) {
+        let _ = self.input.move_right();
+        self.completion = None;
+    }
+
+    fn cycle_completion(&mut self, matches: Vec<String>, reverse: bool) {
+        if matches.is_empty() {
+            self.completion = None;
+            return;
+        }
+        let seed = self.input.text().to_owned();
+        let same_cycle = self
+            .completion
+            .as_ref()
+            .is_some_and(|state| state.matches == matches && self.input.text() != state.seed);
+        let index = if let Some(state) = &self.completion {
+            if same_cycle {
+                let len = state.matches.len();
+                if reverse {
+                    state.index.checked_sub(1).unwrap_or(len.saturating_sub(1))
+                } else {
+                    (state.index + 1) % len
+                }
+            } else if reverse {
+                matches.len().saturating_sub(1)
+            } else {
+                0
+            }
+        } else if reverse {
+            matches.len().saturating_sub(1)
+        } else {
+            0
+        };
+        if let Some(selected) = matches.get(index) {
+            self.input.set_text(selected);
+            self.completion = Some(CommandLineCompletionState {
+                seed,
+                matches,
+                index,
+            });
         }
     }
 }
@@ -5589,6 +5694,7 @@ pub(crate) struct ShellUiState {
     pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
+    command_line: Option<CommandLineOverlay>,
     autocomplete: Option<AutocompleteOverlay>,
     hover: Option<HoverOverlay>,
     notifications: NotificationCenter,
@@ -5641,6 +5747,7 @@ impl ShellUiState {
             pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
+            command_line: None,
             autocomplete: None,
             hover: None,
             notifications: NotificationCenter::default(),
@@ -5666,6 +5773,10 @@ impl ShellUiState {
 
     fn picker_visible(&self) -> bool {
         self.picker.is_some()
+    }
+
+    fn command_line_visible(&self) -> bool {
+        self.command_line.is_some()
     }
 
     fn focused_buffer_id(&self) -> Option<BufferId> {
@@ -5814,6 +5925,7 @@ impl ShellUiState {
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -5824,6 +5936,7 @@ impl ShellUiState {
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -5834,6 +5947,7 @@ impl ShellUiState {
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -5844,6 +5958,7 @@ impl ShellUiState {
         self.vim.visual_kind = kind;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -5880,6 +5995,7 @@ impl ShellUiState {
         }
         self.restore_active_buffer_vim_state();
         self.close_picker();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -5968,6 +6084,7 @@ impl ShellUiState {
             view.active_pane = index;
         }
         self.restore_active_buffer_vim_state();
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
     }
@@ -6075,6 +6192,7 @@ impl ShellUiState {
     }
 
     fn set_picker(&mut self, picker: PickerOverlay) {
+        self.close_command_line();
         self.close_autocomplete();
         self.close_hover();
         self.vim_search_worker.clear_pending();
@@ -6088,6 +6206,25 @@ impl ShellUiState {
         self.picker = None;
     }
 
+    fn command_line(&self) -> Option<&CommandLineOverlay> {
+        self.command_line.as_ref()
+    }
+
+    fn command_line_mut(&mut self) -> Option<&mut CommandLineOverlay> {
+        self.command_line.as_mut()
+    }
+
+    fn set_command_line(&mut self, command_line: CommandLineOverlay) {
+        self.close_picker();
+        self.close_autocomplete();
+        self.close_hover();
+        self.command_line = Some(command_line);
+    }
+
+    fn close_command_line(&mut self) {
+        self.command_line = None;
+    }
+
     fn autocomplete(&self) -> Option<&AutocompleteOverlay> {
         self.autocomplete.as_ref()
     }
@@ -6098,6 +6235,7 @@ impl ShellUiState {
 
     fn set_autocomplete(&mut self, autocomplete: AutocompleteOverlay) {
         self.close_picker();
+        self.close_command_line();
         self.close_hover();
         self.autocomplete_worker.clear_pending();
         self.autocomplete = Some(autocomplete);
@@ -6118,6 +6256,7 @@ impl ShellUiState {
 
     fn set_hover(&mut self, hover: HoverOverlay) {
         self.close_picker();
+        self.close_command_line();
         self.close_autocomplete();
         self.hover = Some(hover);
     }
@@ -7462,6 +7601,9 @@ impl ShellState {
                     }
                     return Ok(false);
                 }
+                if self.handle_command_line_keydown(keycode, keymod)? {
+                    return Ok(false);
+                }
                 if self.handle_focused_hover_keydown(keycode, keymod)? {
                     return Ok(false);
                 }
@@ -8018,6 +8160,10 @@ impl ShellState {
         Ok(self.ui()?.picker_visible())
     }
 
+    pub(crate) fn command_line_visible(&self) -> Result<bool, ShellError> {
+        Ok(self.ui()?.command_line_visible())
+    }
+
     fn popup_visible(&mut self) -> Result<bool, ShellError> {
         Ok(self.picker_visible()? || self.runtime_popup()?.is_some())
     }
@@ -8527,6 +8673,13 @@ impl ShellState {
     }
 
     fn handle_text_input_inner(&mut self, text: &str) -> Result<(), ShellError> {
+        if self.command_line_visible()? {
+            clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+            if let Some(command_line) = self.ui_mut()?.command_line_mut() {
+                command_line.append_text(text);
+            }
+            return Ok(());
+        }
         if self.picker_visible()? {
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(picker) = self.ui_mut()?.picker_mut() {
@@ -9258,12 +9411,68 @@ impl ShellState {
         Ok(handled)
     }
 
+    fn handle_command_line_keydown(
+        &mut self,
+        keycode: Keycode,
+        keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        if !self.command_line_visible()? {
+            return Ok(false);
+        }
+        match keycode {
+            Keycode::Escape => {
+                self.ui_mut()?.close_command_line();
+                Ok(true)
+            }
+            Keycode::Return | Keycode::KpEnter => {
+                submit_vim_command_line(&mut self.runtime).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            Keycode::Backspace => {
+                if let Some(command_line) = self.ui_mut()?.command_line_mut() {
+                    command_line.backspace();
+                }
+                Ok(true)
+            }
+            Keycode::Delete => {
+                if let Some(command_line) = self.ui_mut()?.command_line_mut() {
+                    command_line.delete_forward();
+                }
+                Ok(true)
+            }
+            Keycode::Left => {
+                if let Some(command_line) = self.ui_mut()?.command_line_mut() {
+                    command_line.move_left();
+                }
+                Ok(true)
+            }
+            Keycode::Right => {
+                if let Some(command_line) = self.ui_mut()?.command_line_mut() {
+                    command_line.move_right();
+                }
+                Ok(true)
+            }
+            Keycode::Tab => {
+                cycle_vim_command_line_completion(
+                    &mut self.runtime,
+                    keymod.intersects(shift_mod()),
+                )
+                .map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            _ => Ok(keydown_chord(keycode, keymod).is_some()),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn try_runtime_keybinding(
         &mut self,
         keycode: Keycode,
         keymod: Mod,
     ) -> Result<bool, ShellError> {
+        if self.handle_command_line_keydown(keycode, keymod)? {
+            return Ok(true);
+        }
         let active_buffer =
             active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
         let (input_mode, picker_visible) = {
@@ -9484,6 +9693,14 @@ impl ShellState {
             .ui()?
             .autocomplete()
             .is_some_and(AutocompleteOverlay::is_visible))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn command_line_text(&self) -> Result<Option<String>, ShellError> {
+        Ok(self
+            .ui()?
+            .command_line()
+            .map(|command_line| command_line.text().to_owned()))
     }
 
     #[cfg(test)]
@@ -10673,6 +10890,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Switches the shell into normal mode.",
     )?;
     register_hook(runtime, HOOK_VIM_EDIT, "Runs a Vim editing action.")?;
+    register_hook(
+        runtime,
+        HOOK_VIM_COMMAND_LINE,
+        "Opens the Vim command line under the active status line.",
+    )?;
     register_hook(runtime, HOOK_BUFFER_SAVE, "Saves the active file buffer.")?;
     register_hook(runtime, HOOK_BUFFER_CLOSE, "Closes the active buffer.")?;
     register_hook(
@@ -11626,6 +11848,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             shell_ui_mut(runtime)?.set_picker(picker);
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_VIM_COMMAND_LINE,
+            "shell.vim-command-line",
+            |_, runtime| open_vim_command_line(runtime),
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_NEXT, "shell.picker-next", |_, runtime| {
@@ -17322,6 +17551,248 @@ fn repeat_last_find(runtime: &mut EditorRuntime, reverse: bool) -> Result<(), St
     }
 }
 
+fn open_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if !shell_user_library(runtime).commandline_enabled() {
+        let picker = picker::picker_overlay(runtime, "commands")?;
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+    clear_key_sequence(runtime)?;
+    shell_ui_mut(runtime)?.set_command_line(CommandLineOverlay::new());
+    Ok(())
+}
+
+fn cycle_vim_command_line_completion(
+    runtime: &mut EditorRuntime,
+    reverse: bool,
+) -> Result<(), String> {
+    let seed = shell_ui(runtime)?
+        .command_line()
+        .map(|command_line| command_line.text().to_owned())
+        .unwrap_or_default();
+    let matches = vim_command_line_completion_matches(runtime, &seed);
+    if matches.is_empty() {
+        return Ok(());
+    }
+    if let Some(command_line) = shell_ui_mut(runtime)?.command_line_mut() {
+        command_line.cycle_completion(matches, reverse);
+    }
+    Ok(())
+}
+
+fn vim_command_line_completion_matches(runtime: &EditorRuntime, seed: &str) -> Vec<String> {
+    let trimmed = seed.trim();
+    if trimmed.starts_with('!') {
+        return Vec::new();
+    }
+    if trimmed.starts_with('%') {
+        let candidate = "%s///g";
+        return candidate
+            .starts_with(trimmed)
+            .then_some(candidate.to_owned())
+            .into_iter()
+            .collect();
+    }
+    runtime
+        .commands()
+        .command_names()
+        .into_iter()
+        .filter(|name| name.starts_with(trimmed))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn submit_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let text = shell_ui(runtime)?
+        .command_line()
+        .map(|command_line| command_line.text().trim().to_owned())
+        .unwrap_or_default();
+    shell_ui_mut(runtime)?.close_command_line();
+    execute_vim_command_line(runtime, &text)
+}
+
+fn execute_vim_command_line(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Ok(());
+    }
+    if let Some(shell_command) = command.strip_prefix('!') {
+        return run_shell_command_from_vim_command_line(runtime, shell_command.trim());
+    }
+    if command.starts_with("%s") {
+        return apply_vim_substitute_command(runtime, command);
+    }
+    if runtime.commands().contains(command) {
+        runtime
+            .execute_command(command)
+            .map_err(|error| error.to_string())?;
+        sync_active_buffer(runtime)?;
+        return Ok(());
+    }
+    let matches = runtime
+        .commands()
+        .command_names()
+        .into_iter()
+        .filter(|name| name.starts_with(command))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [matched] => {
+            runtime
+                .execute_command(matched)
+                .map_err(|error| error.to_string())?;
+            sync_active_buffer(runtime)?;
+            Ok(())
+        }
+        [] => Err(format!("unknown command `{command}`")),
+        _ => Err(format!("ambiguous command `{command}`")),
+    }
+}
+
+fn apply_vim_substitute_command(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
+    let (pattern, replacement, flags) = parse_vim_substitute_command(command)?;
+    if pattern.is_empty() {
+        return Err(":%s requires a search pattern".to_owned());
+    }
+    let replace_all = flags.contains('g');
+    if flags.chars().any(|flag| flag != 'g') {
+        return Err(format!("unsupported :%s flags `{flags}`"));
+    }
+    let (original_cursor, end, replaced, replacements) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        if buffer.is_read_only() {
+            return Err(":%s is blocked for read-only buffers".to_owned());
+        }
+        let original_cursor = buffer.cursor_point();
+        let end = if buffer.line_count() == 0 {
+            TextPoint::default()
+        } else {
+            let last_line = buffer.line_count().saturating_sub(1);
+            TextPoint::new(last_line, buffer.line_len_chars(last_line))
+        };
+        let (replaced, replacements) =
+            substitute_buffer_text(&buffer.text.text(), &pattern, &replacement, replace_all);
+        (original_cursor, end, replaced, replacements)
+    };
+    if replacements == 0 {
+        return Err(format!("no matches found for `{pattern}`"));
+    }
+    let buffer = active_shell_buffer_mut(runtime)?;
+    buffer.replace_range(TextRange::new(TextPoint::default(), end), &replaced);
+    buffer.set_cursor(original_cursor);
+    buffer.mark_syntax_dirty();
+    Ok(())
+}
+
+fn parse_vim_substitute_command(command: &str) -> Result<(String, String, String), String> {
+    let rest = command
+        .strip_prefix("%s")
+        .ok_or_else(|| ":%s command must start with `%s`".to_owned())?;
+    let Some(delimiter) = rest.chars().next() else {
+        return Err(":%s requires a delimiter".to_owned());
+    };
+    let mut remaining = &rest[delimiter.len_utf8()..];
+    let (pattern, next) = split_vim_substitute_segment(remaining, delimiter)?;
+    remaining = next;
+    let (replacement, next) = split_vim_substitute_segment(remaining, delimiter)?;
+    remaining = next;
+    Ok((pattern, replacement, remaining.trim().to_owned()))
+}
+
+fn split_vim_substitute_segment(input: &str, delimiter: char) -> Result<(String, &str), String> {
+    let mut escaped = false;
+    for (index, character) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == delimiter {
+            let segment = unescape_vim_substitute_segment(&input[..index]);
+            let remaining = &input[index + delimiter.len_utf8()..];
+            return Ok((segment, remaining));
+        }
+    }
+    Err(format!("missing closing `{delimiter}` in :%s command"))
+}
+
+fn unescape_vim_substitute_segment(segment: &str) -> String {
+    let mut text = String::new();
+    let mut escaped = false;
+    for character in segment.chars() {
+        if escaped {
+            text.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        text.push(character);
+    }
+    if escaped {
+        text.push('\\');
+    }
+    text
+}
+
+fn substitute_buffer_text(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    replace_all: bool,
+) -> (String, usize) {
+    let mut replacements = 0usize;
+    let lines = text
+        .split('\n')
+        .map(|line| {
+            let (updated, count) = substitute_line_text(line, pattern, replacement, replace_all);
+            replacements = replacements.saturating_add(count);
+            updated
+        })
+        .collect::<Vec<_>>();
+    (lines.join("\n"), replacements)
+}
+
+fn substitute_line_text(
+    line: &str,
+    pattern: &str,
+    replacement: &str,
+    replace_all: bool,
+) -> (String, usize) {
+    if pattern.is_empty() {
+        return (line.to_owned(), 0);
+    }
+    if !replace_all {
+        if let Some(index) = line.find(pattern) {
+            let mut updated = String::new();
+            updated.push_str(&line[..index]);
+            updated.push_str(replacement);
+            updated.push_str(&line[index + pattern.len()..]);
+            return (updated, 1);
+        }
+        return (line.to_owned(), 0);
+    }
+    let mut remaining = line;
+    let mut updated = String::new();
+    let mut replacements = 0usize;
+    while let Some(index) = remaining.find(pattern) {
+        updated.push_str(&remaining[..index]);
+        updated.push_str(replacement);
+        remaining = &remaining[index + pattern.len()..];
+        replacements = replacements.saturating_add(1);
+    }
+    if replacements == 0 {
+        return (line.to_owned(), 0);
+    }
+    updated.push_str(remaining);
+    (updated, replacements)
+}
+
 fn open_vim_search_prompt(
     runtime: &mut EditorRuntime,
     direction: VimSearchDirection,
@@ -18986,6 +19457,10 @@ fn compile_buffer_name(workspace_name: &str) -> String {
     format!("*compile {workspace_name}*")
 }
 
+fn command_output_buffer_name(workspace_name: &str) -> String {
+    format!("*command {workspace_name}*")
+}
+
 /// Open (or focus) the `*compile <workspace>*` compilation buffer and
 /// pre-fill its input field with the default build command for `language`
 /// (obtained from the user library).  The user can edit the command and press
@@ -19067,6 +19542,134 @@ fn open_compile_buffer(
     }
 
     Ok(())
+}
+
+fn open_command_output_buffer(runtime: &mut EditorRuntime) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let workspace_name = runtime
+        .model()
+        .active_workspace()
+        .map_err(|error| error.to_string())?
+        .name()
+        .to_owned();
+    let buf_name = command_output_buffer_name(&workspace_name);
+    let existing = shell_ui(runtime).ok().and_then(|ui| {
+        ui.buffers
+            .iter()
+            .find(|buffer| buffer.display_name() == buf_name)
+            .map(ShellBuffer::id)
+    });
+    if let Some(existing) = existing {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        ui.focus_buffer_in_active_pane(existing);
+        ui.enter_normal_mode();
+        return Ok(existing);
+    }
+    let id = runtime
+        .model_mut()
+        .create_buffer(workspace_id, &buf_name, BufferKind::Compilation, None)
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(id)
+        .ok_or_else(|| format!("buffer `{id}` is missing"))?;
+    let user_library = shell_user_library(runtime);
+    let initial = vec![format!("# {workspace_name} — command output")];
+    let shell_buf = ShellBuffer::from_runtime_buffer(buffer, initial, &*user_library);
+    let ui = shell_ui_mut(runtime)?;
+    ui.insert_buffer(shell_buf);
+    ui.focus_buffer_in_active_pane(id);
+    ui.enter_normal_mode();
+    Ok(id)
+}
+
+fn run_shell_command_from_vim_command_line(
+    runtime: &mut EditorRuntime,
+    command: &str,
+) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(":! requires a shell command".to_owned());
+    }
+    let buffer_id = open_command_output_buffer(runtime)?;
+    run_shell_command_in_buffer(runtime, buffer_id, command)
+}
+
+fn run_shell_command_in_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    command: &str,
+) -> Result<(), String> {
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Ok(());
+    }
+    let terminal_config = shell_user_library(runtime).terminal_config();
+    let cwd = active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut args = terminal_config.args;
+    let shell_program = terminal_config.program;
+    args.push(shell_command_eval_flag(&shell_program).to_owned());
+    args.push(command.clone());
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.append_output_lines(&[format!("$ {command}"), String::new()]);
+        buffer.clear_input();
+    }
+    let spec = JobSpec::command("command", shell_program, args).with_cwd(cwd);
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
+    drop(manager);
+    let result = handle.wait().map_err(|error| error.to_string())?;
+    let transcript = result.transcript();
+    let output_lines: Vec<String> = transcript.lines().map(str::to_owned).collect();
+    let status_line = if result.succeeded() {
+        "── ✓ Command succeeded ────────────────────────────────────────────────".to_owned()
+    } else {
+        format!(
+            "── ✗ Command failed (exit {}) ──────────────────────────────────────",
+            result.exit_code().unwrap_or(-1)
+        )
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.append_output_lines(&output_lines);
+    buffer.append_output_lines(&[status_line]);
+    Ok(())
+}
+
+fn shell_command_eval_flag(program: &str) -> &'static str {
+    let shell = Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if cfg!(target_os = "windows") {
+        if shell.eq_ignore_ascii_case("cmd") {
+            "/C"
+        } else if shell.eq_ignore_ascii_case("powershell") || shell.eq_ignore_ascii_case("pwsh") {
+            "-Command"
+        } else {
+            "-c"
+        }
+    } else {
+        "-c"
+    }
 }
 
 /// Re-run the last stored build command for the active workspace.
@@ -24973,6 +25576,7 @@ fn render_shell_state(
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
+            let command_line = active.then(|| state.command_line()).flatten();
             render_buffer(
                 target,
                 fonts,
@@ -24983,6 +25587,7 @@ fn render_shell_state(
                 yank_flash,
                 input_mode,
                 state.vim().recording_macro,
+                command_line,
                 user_library,
                 workspace_name,
                 lsp_server,
@@ -25136,6 +25741,7 @@ fn render_runtime_popup_overlay(
             yank_flash,
             input_mode,
             state.vim().recording_macro,
+            None,
             user_library,
             workspace_name,
             lsp_server,
@@ -25888,6 +26494,7 @@ const BUFFER_OVERLAY_BOTTOM_GAP: i32 = 8;
 struct BufferFooterLayout {
     body_y: i32,
     statusline_y: i32,
+    commandline_y: Option<i32>,
     input_y: i32,
     input_box_height: i32,
     input_hint_gap: i32,
@@ -25901,10 +26508,24 @@ fn buffer_footer_layout(
     line_height: i32,
     cell_width: i32,
 ) -> BufferFooterLayout {
+    buffer_footer_layout_with_command_line(buffer, rect, line_height, cell_width, false)
+}
+
+fn buffer_footer_layout_with_command_line(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    line_height: i32,
+    cell_width: i32,
+    command_line_visible: bool,
+) -> BufferFooterLayout {
     let line_height = line_height.max(1);
     let body_y = rect.y() + BUFFER_BODY_TOP_PADDING;
-    let statusline_y =
-        rect.y() + rect.height() as i32 - line_height - BUFFER_STATUSLINE_BOTTOM_PADDING;
+    let command_line_reserved = if command_line_visible { line_height } else { 0 };
+    let statusline_y = rect.y() + rect.height() as i32
+        - line_height
+        - command_line_reserved
+        - BUFFER_STATUSLINE_BOTTOM_PADDING;
+    let commandline_y = command_line_visible.then_some(statusline_y + line_height);
     let available_input_cols = if cell_width > 0 {
         ((rect.width() as i32 - 16) / cell_width).max(1) as usize
     } else {
@@ -25939,6 +26560,7 @@ fn buffer_footer_layout(
     BufferFooterLayout {
         body_y,
         statusline_y,
+        commandline_y,
         input_y,
         input_box_height,
         input_hint_gap,
@@ -26437,6 +27059,7 @@ fn render_buffer(
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     recording_macro: Option<char>,
+    command_line: Option<&CommandLineOverlay>,
     user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
@@ -26554,7 +27177,13 @@ fn render_buffer(
         cell_width,
     );
 
-    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        command_line.is_some(),
+    );
     if buffer_is_terminal(&buffer.kind)
         && let Some(terminal_render) = buffer.terminal_render()
     {
@@ -26581,6 +27210,22 @@ fn render_buffer(
             cell_width,
             line_height,
         )?;
+        if let Some(command_line) = command_line {
+            render_command_line_overlay(
+                target,
+                command_line,
+                rect,
+                layout,
+                active,
+                input_mode,
+                border_color,
+                text_color,
+                muted,
+                cursor,
+                cell_width,
+                line_height,
+            )?;
+        }
         return Ok(());
     }
     let text_x = rect.x() + 12 + cell_width + cell_width * 5;
@@ -27002,6 +27647,22 @@ fn render_buffer(
         draw_text(target, draw_x, layout.statusline_y, segment, color)?;
         draw_x += monospace_text_width(segment, cell_width) as i32;
     }
+    if let Some(command_line) = command_line {
+        render_command_line_overlay(
+            target,
+            command_line,
+            rect,
+            layout,
+            active,
+            input_mode,
+            border_color,
+            foreground,
+            muted,
+            cursor,
+            cell_width,
+            line_height,
+        )?;
+    }
 
     let _ = ascent;
     fill_rect(
@@ -27015,6 +27676,73 @@ fn render_buffer(
         border_color,
     )?;
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_command_line_overlay(
+    target: &mut DrawTarget<'_>,
+    command_line: &CommandLineOverlay,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    input_mode: InputMode,
+    border_color: Color,
+    foreground: Color,
+    muted: Color,
+    cursor: Color,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(commandline_y) = layout.commandline_y else {
+        return Ok(());
+    };
+    let text_x = rect.x() + 12;
+    let input = command_line.input();
+    let prompt = input.prompt();
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + 8,
+            commandline_y - 4,
+            rect.width().saturating_sub(16),
+            line_height.max(1) as u32,
+        ),
+        border_color,
+    )?;
+    let rendered = if input.text().is_empty() {
+        input.placeholder().map_or_else(
+            || prompt.to_owned(),
+            |placeholder| format!("{prompt}{placeholder}"),
+        )
+    } else {
+        format!("{prompt}{}", input.text())
+    };
+    let color = if input.text().is_empty() {
+        muted
+    } else {
+        foreground
+    };
+    draw_text(target, text_x, commandline_y, &rendered, color)?;
+    if active {
+        let cursor_color = if matches!(input_mode, InputMode::Replace) {
+            adjust_color(cursor, -24)
+        } else {
+            cursor
+        };
+        let cursor_col = prompt.chars().count() + input.cursor;
+        let cursor_width = (cell_width / 4).max(2) as u32;
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                text_x + cursor_col as i32 * cell_width.max(1),
+                commandline_y,
+                cursor_width,
+                line_height.max(2) as u32,
+            ),
+            cursor_color,
+        )?;
+    }
     Ok(())
 }
 
@@ -28221,6 +28949,7 @@ struct CursorTextOverlay {
     color: Color,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_cursor_text_overlay(
     x: i32,
     line: &str,

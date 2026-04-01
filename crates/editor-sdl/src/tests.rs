@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -50,6 +51,14 @@ fn set_active_buffer_text(
 fn flush_picker_searches(state: &mut ShellState) -> Result<(), Box<dyn std::error::Error>> {
     state.flush_picker_searches_for_test()?;
     Ok(())
+}
+
+fn user_shell_state() -> Result<ShellState, Box<dyn std::error::Error>> {
+    Ok(ShellState::new_with_user_library(
+        temp_workspace_root("user-shell").join("shell.log"),
+        false,
+        Arc::new(user::UserLibraryImpl),
+    )?)
 }
 
 #[test]
@@ -101,6 +110,47 @@ fn vim_extended_motions_and_edit_commands_work() -> Result<(), Box<dyn std::erro
     assert!(state.try_runtime_keybinding(Keycode::R, Mod::LCTRLMOD)?);
     assert_eq!(state.active_buffer_mut()?.text.text(), "alpha beta!");
 
+    Ok(())
+}
+
+#[test]
+fn vim_command_line_opens_and_tab_completes_commands() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+
+    state.runtime.execute_command("vim.command-line")?;
+    assert!(state.command_line_visible()?);
+
+    state.handle_text_input("picker.open-bu")?;
+    assert_eq!(
+        state.command_line_text()?,
+        Some("picker.open-bu".to_owned())
+    );
+
+    assert!(state.try_runtime_keybinding(Keycode::Tab, Mod::NOMOD)?);
+    assert_eq!(
+        state.command_line_text()?,
+        Some("picker.open-buffers".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn vim_command_line_runs_shell_commands_and_substitutions() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(&mut state, "alpha beta\nalpha")?;
+
+    state.runtime.execute_command("vim.command-line")?;
+    state.handle_text_input("%s/alpha/omega/g")?;
+    assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "omega beta\nomega");
+
+    state.runtime.execute_command("vim.command-line")?;
+    state.handle_text_input("!echo volt-command-line")?;
+    assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
+    let active = state.active_buffer_mut()?;
+    assert!(active.display_name().contains("*command "));
+    assert!(active.text.text().contains("volt-command-line"));
     Ok(())
 }
 

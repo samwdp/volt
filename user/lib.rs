@@ -27,6 +27,8 @@ pub mod browser;
 pub mod buffer;
 /// Expression evaluator buffer plugin.
 pub mod calculator;
+/// Vim command-line enablement.
+pub mod commandline;
 /// Workspace build/compile commands.
 pub mod compile;
 /// Debug adapter integration hooks and commands.
@@ -273,6 +275,10 @@ impl UserLibrary for UserLibraryImpl {
             program: terminal::default_shell_program(),
             args: terminal::default_shell_args(),
         }
+    }
+
+    fn commandline_enabled(&self) -> bool {
+        commandline::enabled()
     }
 
     fn ligature_config(&self) -> LigatureConfig {
@@ -626,6 +632,10 @@ extern "C" fn exported_terminal_config() -> AbiTerminalConfig {
     UserLibraryImpl.terminal_config().into()
 }
 
+extern "C" fn exported_commandline_enabled() -> bool {
+    UserLibraryImpl.commandline_enabled()
+}
+
 extern "C" fn exported_ligature_config() -> AbiLigatureConfig {
     UserLibraryImpl.ligature_config().into()
 }
@@ -865,6 +875,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         acp_client_by_id: exported_acp_client_by_id,
         workspace_roots: exported_workspace_roots,
         terminal_config: exported_terminal_config,
+        commandline_enabled: exported_commandline_enabled,
         ligature_config: exported_ligature_config,
         oil_defaults: exported_oil_defaults,
         oil_keybindings: exported_oil_keybindings,
@@ -1259,11 +1270,12 @@ mod tests {
     fn user_library_exports_themes() {
         let themes = themes();
         let ids = themes.iter().map(|theme| theme.id()).collect::<Vec<_>>();
-        assert_eq!(themes.len(), 6);
+        assert_eq!(themes.len(), 7);
         assert!(ids.contains(&"volt-dark"));
         assert!(ids.contains(&"volt-light"));
         assert!(ids.contains(&"gruvbox-dark"));
         assert!(ids.contains(&"gruvbox-light"));
+        assert!(ids.contains(&"rosepine-dark"));
         assert!(ids.contains(&"vscode-dark"));
         assert!(ids.contains(&"vscode-light"));
         assert!(

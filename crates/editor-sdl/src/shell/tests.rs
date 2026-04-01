@@ -2706,6 +2706,23 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
 }
 
 #[test]
+fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout_with_command_line(buffer, rect, 18, 8, true);
+    let commandline_y = layout
+        .commandline_y
+        .ok_or_else(|| "command line row is missing".to_owned())?;
+
+    assert!(layout.statusline_y < commandline_y);
+    assert_eq!(commandline_y - layout.statusline_y, 18);
+    Ok(())
+}
+
+#[test]
 fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String>
 {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;

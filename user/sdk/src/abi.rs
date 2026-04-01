@@ -1547,6 +1547,7 @@ pub struct UserLibraryModule {
     pub acp_client_by_id: extern "C" fn(RString) -> ROption<AbiAcpClient>,
     pub workspace_roots: extern "C" fn() -> RVec<AbiWorkspaceRoot>,
     pub terminal_config: extern "C" fn() -> AbiTerminalConfig,
+    pub commandline_enabled: extern "C" fn() -> bool,
     pub ligature_config: extern "C" fn() -> AbiLigatureConfig,
     pub oil_defaults: extern "C" fn() -> AbiOilDefaults,
     pub oil_keybindings: extern "C" fn() -> AbiOilKeybindings,

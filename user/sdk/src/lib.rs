@@ -266,6 +266,7 @@ pub trait UserLibrary: Send + Sync {
     fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
     fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
     fn terminal_config(&self) -> TerminalConfig;
+    fn commandline_enabled(&self) -> bool;
     fn ligature_config(&self) -> LigatureConfig;
     fn oil_defaults(&self) -> OilDefaults;
     fn oil_keybindings(&self) -> OilKeybindings;
