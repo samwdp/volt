@@ -7491,16 +7491,7 @@ impl ShellState {
             } => {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-                let hover_repeat_allowed = self
-                    .ui()?
-                    .hover()
-                    .map(|hover| hover.focused)
-                    .unwrap_or(false)
-                    && matches!(
-                        keycode,
-                        Keycode::Up | Keycode::Down | Keycode::PageUp | Keycode::PageDown
-                    );
-                if repeat && !hover_repeat_allowed && !repeated_keydown_allowed(keycode, keymod) {
+                if repeat && !repeated_keydown_allowed(keycode, keymod) {
                     return Ok(false);
                 }
                 let is_ctrl_c = keymod.intersects(ctrl_mod()) && keycode == Keycode::C;
@@ -24760,12 +24751,8 @@ fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
     }
 }
 
-fn repeated_keydown_allowed(keycode: Keycode, keymod: Mod) -> bool {
-    matches!(keycode, Keycode::Backspace | Keycode::Delete)
-        || matches!(
-            keydown_chord(keycode, keymod).as_deref(),
-            Some("Ctrl+n" | "Ctrl+p")
-        )
+fn repeated_keydown_allowed(_keycode: Keycode, _keymod: Mod) -> bool {
+    true
 }
 
 fn text_chord(text: &str) -> Option<String> {

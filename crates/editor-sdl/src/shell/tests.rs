@@ -430,6 +430,14 @@ fn keydown_chord_maps_image_zoom_controls() {
 }
 
 #[test]
+fn repeated_keydown_is_allowed_for_all_keys() {
+    assert!(repeated_keydown_allowed(Keycode::Left, Mod::NOMOD));
+    assert!(repeated_keydown_allowed(Keycode::PageDown, Mod::NOMOD));
+    assert!(repeated_keydown_allowed(Keycode::Return, Mod::NOMOD));
+    assert!(repeated_keydown_allowed(Keycode::S, ctrl_mod()));
+}
+
+#[test]
 fn terminal_key_for_event_maps_special_keys() {
     assert_eq!(
         terminal_key_for_event(Keycode::Tab, Mod::LSHIFTMOD),
