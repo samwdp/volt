@@ -760,7 +760,11 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Insert),
         // Command-line editing
         normal_binding(":", "vim.command-line", PluginKeymapScope::Workspace),
-        normal_binding("Alt+x", "vim.command-line", PluginKeymapScope::Workspace),
+        normal_binding(
+            "Alt+x",
+            "picker.open-commands",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("Ctrl+.", "workspace.list-files", PluginKeymapScope::Global),
         // Visual mode
         visual_binding("v", "vim.enter-visual-mode", PluginKeymapScope::Workspace),
@@ -1001,7 +1005,7 @@ mod tests {
     fn package_exports_alt_x_for_command_line() {
         let package = package();
         assert!(package.key_bindings().iter().any(|binding| {
-            binding.chord() == "Alt+x" && binding.command_name() == "vim.command-line"
+            binding.chord() == "Alt+x" && binding.command_name() == "picker.open-commands"
         }));
     }
 }

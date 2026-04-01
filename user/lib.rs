@@ -907,7 +907,6 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         run_plugin_buffer_evaluator: exported_run_plugin_buffer_evaluator,
         default_build_command: exported_default_build_command,
         ligature_config_v1: exported_ligature_config,
-        commandline_enabled_v1: exported_commandline_enabled,
     }
     .leak_into_prefix()
 }

@@ -1585,9 +1585,8 @@ pub struct UserLibraryModule {
     pub icon_symbols: extern "C" fn() -> RVec<AbiIconFontSymbol>,
     pub run_plugin_buffer_evaluator: extern "C" fn(RString, RString) -> RVec<RString>,
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
-    pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
     #[sabi(last_prefix_field)]
-    pub commandline_enabled_v1: extern "C" fn() -> bool,
+    pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
 }
 
 impl RootModule for UserLibraryModuleRef {

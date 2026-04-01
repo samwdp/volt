@@ -187,7 +187,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn commandline_enabled(&self) -> bool {
-        self.module.commandline_enabled_v1()()
+        self.module.commandline_enabled()()
     }
 
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {

@@ -117,7 +117,7 @@ fn vim_extended_motions_and_edit_commands_work() -> Result<(), Box<dyn std::erro
 fn vim_command_line_opens_and_tab_completes_commands() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = user_shell_state()?;
 
-    assert!(state.try_runtime_keybinding(Keycode::X, Mod::LALTMOD)?);
+    state.runtime.execute_command("vim.command-line")?;
     assert!(state.command_line_visible()?);
 
     state.handle_text_input("picker.open-bu")?;
@@ -140,12 +140,12 @@ fn vim_command_line_runs_shell_commands_and_substitutions() -> Result<(), Box<dy
     let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "alpha beta\nalpha")?;
 
-    assert!(state.try_runtime_keybinding(Keycode::X, Mod::LALTMOD)?);
+    state.runtime.execute_command("vim.command-line")?;
     state.handle_text_input("%s/alpha/omega/g")?;
     assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
     assert_eq!(state.active_buffer_mut()?.text.text(), "omega beta\nomega");
 
-    assert!(state.try_runtime_keybinding(Keycode::X, Mod::LALTMOD)?);
+    state.runtime.execute_command("vim.command-line")?;
     state.handle_text_input("!echo volt-command-line")?;
     assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
     let active = state.active_buffer_mut()?;
