@@ -997,8 +997,7 @@ fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Res
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        24,
-        8,
+        (24, 8),
         LineWrapSegment {
             start_col: 0,
             end_col: 1,
@@ -1029,8 +1028,7 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        0,
-        0,
+        (0, 0),
         LineWrapSegment {
             start_col: 0,
             end_col: 10,

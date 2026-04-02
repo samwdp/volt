@@ -27894,8 +27894,7 @@ fn render_buffer(
                 }
                 draw_line_ghost_text_for_segment(
                     target,
-                    segment_x,
-                    y,
+                    (segment_x, y),
                     *segment,
                     line_len,
                     ghost_text_by_line.get(&line_index).map(String::as_str),
@@ -29489,8 +29488,7 @@ fn draw_buffer_text(
 
 fn draw_line_ghost_text_for_segment(
     target: &mut DrawTarget<'_>,
-    x: i32,
-    y: i32,
+    origin: (i32, i32),
     segment: LineWrapSegment,
     line_len: usize,
     ghost_text: Option<&str>,
@@ -29506,8 +29504,8 @@ fn draw_line_ghost_text_for_segment(
     }
     let visible_cols = visible_end.saturating_sub(segment.start_col);
     // Leave one monospace cell between the closing delimiter and the ghost text.
-    let draw_x = x + visible_cols as i32 * cell_width + cell_width;
-    draw_text(target, draw_x, y, ghost_text, color)
+    let draw_x = origin.0 + visible_cols as i32 * cell_width + cell_width;
+    draw_text(target, draw_x, origin.1, ghost_text, color)
 }
 
 fn line_color_segments(

@@ -17,7 +17,7 @@ pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
     let Ok(mut registry) = syntax_registry().lock() else {
         return Vec::new();
     };
-    let buffer = TextBuffer::from_text(context.buffer_text.to_owned());
+    let buffer = TextBuffer::from_text(context.buffer_text);
     let Ok(contexts) = registry.ancestor_contexts_for_language(
         language_id,
         &buffer,
