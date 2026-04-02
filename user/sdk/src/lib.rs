@@ -255,12 +255,18 @@ pub struct StatuslineContext<'a> {
 /// Context passed to the user library when producing inline ghost-text annotations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GhostTextContext<'a> {
+    /// Stable numeric identifier for the active buffer.
+    pub buffer_id: u64,
+    /// Monotonic buffer revision for the current text snapshot.
+    pub buffer_revision: u64,
     /// Active buffer display name.
     pub buffer_name: &'a str,
     /// Active buffer language identifier, if any.
     pub language_id: Option<&'a str>,
     /// Complete buffer text.
     pub buffer_text: &'a str,
+    /// Zero-based topmost visible logical line in the current viewport.
+    pub viewport_top_line: usize,
     /// Zero-based cursor line.
     pub cursor_line: usize,
     /// Zero-based cursor column.

@@ -758,6 +758,8 @@ pub fn package() -> PluginPackage {
         // Insert mode keys
         PluginKeyBinding::new("Escape", "vim.enter-normal-mode", PluginKeymapScope::Global)
             .with_vim_mode(PluginVimMode::Insert),
+        PluginKeyBinding::new("Escape", "vim.enter-normal-mode", PluginKeymapScope::Global)
+            .with_vim_mode(PluginVimMode::Normal),
         // Command-line editing
         normal_binding(":", "vim.command-line", PluginKeymapScope::Workspace),
         normal_binding(

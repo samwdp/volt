@@ -118,8 +118,6 @@ pub fn packages() -> Vec<PluginPackage> {
         multicursor::package(),
         picker::package(),
         treesitter::package(),
-        treesittercontext_headerline::package(),
-        treesittercontext_ghosttext::package(),
         undotree::package(),
         workspace::package(),
         git::package(),
@@ -772,6 +770,8 @@ extern "C" fn exported_browser_url_placeholder() -> RString {
 
 extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<AbiGhostTextLine> {
     let context = GhostTextContext {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.buffer_revision,
         buffer_name: context.buffer_name.as_str(),
         language_id: context
             .language_id
@@ -779,6 +779,7 @@ extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<Ab
             .into_option()
             .map(|value| value.as_str()),
         buffer_text: context.buffer_text.as_str(),
+        viewport_top_line: context.viewport_top_line,
         cursor_line: context.cursor_line,
         cursor_column: context.cursor_column,
     };
@@ -792,6 +793,8 @@ extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<Ab
 
 extern "C" fn exported_headerline_lines(context: AbiGhostTextContext) -> RVec<RString> {
     let context = GhostTextContext {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.buffer_revision,
         buffer_name: context.buffer_name.as_str(),
         language_id: context
             .language_id
@@ -799,6 +802,7 @@ extern "C" fn exported_headerline_lines(context: AbiGhostTextContext) -> RVec<RS
             .into_option()
             .map(|value| value.as_str()),
         buffer_text: context.buffer_text.as_str(),
+        viewport_top_line: context.viewport_top_line,
         cursor_line: context.cursor_line,
         cursor_column: context.cursor_column,
     };
@@ -1072,6 +1076,21 @@ mod tests {
         assert_eq!(
             library.handle_plugin_evaluate(calculator::CALCULATOR_KIND, "1 + 1"),
             vec!["2".to_owned()]
+        );
+    }
+
+    #[test]
+    fn user_library_packages_exclude_tree_sitter_context_renderers() {
+        let packages = packages();
+        assert!(
+            packages
+                .iter()
+                .all(|package| package.name() != "treesittercontext_headerline")
+        );
+        assert!(
+            packages
+                .iter()
+                .all(|package| package.name() != "treesittercontext_ghosttext")
         );
     }
 

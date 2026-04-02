@@ -22,6 +22,13 @@ impl InputMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum VimTarget {
+    #[default]
+    Buffer,
+    Input,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VimOperator {
     Delete,
@@ -259,6 +266,7 @@ pub(crate) struct BlockInsertState {
 #[derive(Debug, Clone)]
 pub(crate) struct VimBufferState {
     pub(crate) input_mode: InputMode,
+    pub(crate) target: VimTarget,
     pub(crate) count: Option<usize>,
     pub(crate) pending: Option<VimPending>,
     pub(crate) visual_anchor: Option<TextPoint>,
@@ -276,6 +284,7 @@ impl Default for VimBufferState {
     fn default() -> Self {
         Self {
             input_mode: InputMode::Normal,
+            target: VimTarget::Buffer,
             count: None,
             pending: None,
             visual_anchor: None,
@@ -300,6 +309,7 @@ pub(crate) struct YankFlash {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct VimState {
+    pub(crate) target: VimTarget,
     pub(crate) count: Option<usize>,
     pub(crate) pending: Option<VimPending>,
     pub(crate) visual_anchor: Option<TextPoint>,
@@ -353,6 +363,7 @@ impl VimState {
     pub(crate) fn active_buffer_state(&self, input_mode: InputMode) -> VimBufferState {
         VimBufferState {
             input_mode,
+            target: self.target,
             count: self.count,
             pending: self.pending,
             visual_anchor: self.visual_anchor,
@@ -373,6 +384,7 @@ impl VimState {
         state: &VimBufferState,
     ) {
         *input_mode = state.input_mode;
+        self.target = state.target;
         self.count = state.count;
         self.pending = state.pending;
         self.visual_anchor = state.visual_anchor;

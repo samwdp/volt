@@ -42,7 +42,7 @@ use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary}
 use crate::state::{
     BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
     LastSearch, ScrollCommand, ShellMotion, VimBufferState, VimFindKind, VimMark, VimOperator,
-    VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTextObjectKind,
+    VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTarget, VimTextObjectKind,
     VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
@@ -269,6 +269,7 @@ const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_PICKER_ROUNDNESS: &str = "picker_roundness";
+const OPTION_SCROLL_OFF: &str = "scrolloff";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
@@ -588,6 +589,34 @@ fn theme_lang_use_tabs(theme_registry: Option<&ThemeRegistry>, language_id: Opti
     };
     let key = format!("langs.{language_id}.use_tabs");
     registry.resolve_bool(&key).unwrap_or(false)
+}
+
+fn theme_scrolloff(theme_registry: Option<&ThemeRegistry>) -> usize {
+    theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_SCROLL_OFF))
+        .map(|value| value.max(0.0).round() as usize)
+        .unwrap_or(0)
+}
+
+fn buffer_context_overlay_snapshot(
+    buffer: &ShellBuffer,
+    active: bool,
+    user_library: &dyn UserLibrary,
+    theme_registry: Option<&ThemeRegistry>,
+) -> Option<BufferContextOverlaySnapshot> {
+    active.then(|| buffer.context_overlay_snapshot(user_library, theme_scrolloff(theme_registry)))
+}
+
+fn buffer_headerline_rows(
+    buffer: &ShellBuffer,
+    active: bool,
+    user_library: &dyn UserLibrary,
+    theme_registry: Option<&ThemeRegistry>,
+    visible_rows: usize,
+) -> usize {
+    buffer_context_overlay_snapshot(buffer, active, user_library, theme_registry)
+        .map(|snapshot| count_visible_headerline_lines(&snapshot.headerline_lines, visible_rows))
+        .unwrap_or(0)
 }
 
 fn lsp_formatting_options(
@@ -1758,6 +1787,7 @@ impl GitSummaryState {
 struct ActiveBufferEventContext {
     buffer_id: BufferId,
     has_input: bool,
+    vim_targets_input: bool,
     is_read_only: bool,
     is_git_status: bool,
     is_git_commit: bool,
@@ -1767,6 +1797,14 @@ struct ActiveBufferEventContext {
     is_terminal: bool,
     is_plugin_evaluatable: bool,
     is_compilation: bool,
+}
+
+fn default_vim_target(has_input: bool) -> VimTarget {
+    if has_input {
+        VimTarget::Input
+    } else {
+        VimTarget::Buffer
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2336,6 +2374,23 @@ fn push_number_after_keyword(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BufferContextOverlayCacheKey {
+    buffer_revision: u64,
+    buffer_name: String,
+    language_id: Option<String>,
+    viewport_top_line: usize,
+    cursor_line: usize,
+    cursor_column: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BufferContextOverlaySnapshot {
+    key: BufferContextOverlayCacheKey,
+    headerline_lines: Vec<String>,
+    ghost_text_by_line: BTreeMap<usize, String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
@@ -2364,6 +2419,7 @@ pub(crate) struct ShellBuffer {
     pub(crate) scroll_row: usize,
     viewport_lines: usize,
     wrap_cache: Option<WrapRowCache>,
+    context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
@@ -3113,6 +3169,7 @@ impl ShellBuffer {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
+        let vim_target = default_vim_target(input.is_some());
 
         Self {
             id: buffer.id(),
@@ -3141,6 +3198,7 @@ impl ShellBuffer {
             scroll_row: 0,
             viewport_lines: 1,
             wrap_cache: None,
+            context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -3152,7 +3210,10 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
-            vim_buffer_state: VimBufferState::default(),
+            vim_buffer_state: VimBufferState {
+                target: vim_target,
+                ..VimBufferState::default()
+            },
         }
     }
 
@@ -3160,6 +3221,7 @@ impl ShellBuffer {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
+        let vim_target = default_vim_target(input.is_some());
         let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
             Some(GitFringeState::new())
         } else {
@@ -3197,6 +3259,7 @@ impl ShellBuffer {
             scroll_row: 0,
             viewport_lines: 1,
             wrap_cache: None,
+            context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -3208,7 +3271,10 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
-            vim_buffer_state: VimBufferState::default(),
+            vim_buffer_state: VimBufferState {
+                target: vim_target,
+                ..VimBufferState::default()
+            },
         }
     }
 
@@ -3228,6 +3294,7 @@ impl ShellBuffer {
         let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind);
         let plugin_section_state = plugin_section_state_for_kind(&kind, user_library);
+        let vim_target = default_vim_target(input.is_some());
 
         Self {
             id: buffer_id,
@@ -3256,6 +3323,7 @@ impl ShellBuffer {
             scroll_row: 0,
             viewport_lines: 1,
             wrap_cache: None,
+            context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
             syntax_dirty: false,
@@ -3267,7 +3335,10 @@ impl ShellBuffer {
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
             last_edit_at: None,
-            vim_buffer_state: VimBufferState::default(),
+            vim_buffer_state: VimBufferState {
+                target: vim_target,
+                ..VimBufferState::default()
+            },
         }
     }
 
@@ -3277,6 +3348,53 @@ impl ShellBuffer {
 
     pub(crate) fn display_name(&self) -> &str {
         &self.name
+    }
+
+    fn context_overlay_snapshot(
+        &self,
+        user_library: &dyn UserLibrary,
+        scrolloff: usize,
+    ) -> BufferContextOverlaySnapshot {
+        let key = BufferContextOverlayCacheKey {
+            buffer_revision: self.text.revision(),
+            buffer_name: self.display_name().to_owned(),
+            language_id: self.language_id.clone(),
+            viewport_top_line: self.scroll_row.saturating_add(scrolloff),
+            cursor_line: self.cursor_row(),
+            cursor_column: self.cursor_col(),
+        };
+        if let Ok(cache) = self.context_overlay_cache.lock()
+            && let Some(snapshot) = cache.as_ref().filter(|snapshot| snapshot.key == key).cloned()
+        {
+            return snapshot;
+        }
+
+        let buffer_text = self.text.text();
+        let buffer_name = key.buffer_name.clone();
+        let language_id = key.language_id.clone();
+        let context = HostGhostTextContext {
+            buffer_id: self.id().get(),
+            buffer_revision: key.buffer_revision,
+            buffer_name: &buffer_name,
+            language_id: language_id.as_deref(),
+            buffer_text: &buffer_text,
+            viewport_top_line: key.viewport_top_line,
+            cursor_line: key.cursor_line,
+            cursor_column: key.cursor_column,
+        };
+        let snapshot = BufferContextOverlaySnapshot {
+            key,
+            headerline_lines: user_library.headerline_lines(&context),
+            ghost_text_by_line: user_library
+                .ghost_text_lines(&context)
+                .into_iter()
+                .map(|line| (line.line, line.text))
+                .collect(),
+        };
+        if let Ok(mut cache) = self.context_overlay_cache.lock() {
+            *cache = Some(snapshot.clone());
+        }
+        snapshot
     }
 
     fn is_read_only(&self) -> bool {
@@ -4997,7 +5115,59 @@ impl ShellBuffer {
         self.move_to_viewport_offset(middle)
     }
 
-    fn ensure_visible(&mut self, visible_rows: usize, wrap_cols: usize, indent_size: usize) {
+    fn max_scroll_row_for_wrapped_rows(
+        &self,
+        visible_rows: usize,
+        wrap_cols: usize,
+        indent_size: usize,
+    ) -> usize {
+        let line_count = self.line_count();
+        if line_count == 0 {
+            return 0;
+        }
+        let visible_rows = visible_rows.max(1);
+        let mut rows = 0usize;
+        for line_index in (0..line_count).rev() {
+            let line = self.text.line(line_index).unwrap_or_default();
+            let row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+            if rows.saturating_add(row_count) > visible_rows {
+                return if rows == 0 {
+                    line_index
+                } else {
+                    line_index.saturating_add(1)
+                };
+            }
+            rows = rows.saturating_add(row_count);
+        }
+        0
+    }
+
+    fn scroll_row_for_top_margin(
+        &self,
+        cursor_row: usize,
+        cursor_segment_index: usize,
+        min_cursor_row: usize,
+        wrap_cols: usize,
+        indent_size: usize,
+    ) -> usize {
+        let mut target = cursor_row;
+        let mut offset = cursor_segment_index;
+        while target > 0 && offset < min_cursor_row {
+            target = target.saturating_sub(1);
+            let line = self.text.line(target).unwrap_or_default();
+            offset = offset.saturating_add(line_wrap_row_count(&line, wrap_cols, indent_size));
+        }
+        target
+    }
+
+    fn ensure_visible(
+        &mut self,
+        visible_rows: usize,
+        wrap_cols: usize,
+        indent_size: usize,
+        reserved_top_rows: usize,
+        scrolloff: usize,
+    ) {
         if let Some(pane) = self.plugin_attached_pane_state_mut() {
             pane.ensure_cursor_visible();
             return;
@@ -5009,15 +5179,20 @@ impl ShellBuffer {
             return;
         }
         let visible_rows = visible_rows.max(1);
+        let reserved_top_rows = reserved_top_rows.min(visible_rows.saturating_sub(1));
+        let content_rows = visible_rows.saturating_sub(reserved_top_rows).max(1);
+        let min_cursor_row = scrolloff.min(content_rows.saturating_sub(1) / 2);
+        let max_cursor_row = content_rows
+            .saturating_sub(1)
+            .saturating_sub(min_cursor_row);
         let cursor_row = self.cursor_row();
-        if cursor_row < self.scroll_row {
-            self.scroll_row = cursor_row;
-            return;
-        }
         if self.line_count() == 0 {
             self.scroll_row = 0;
             return;
         }
+        let max_scroll_row =
+            self.max_scroll_row_for_wrapped_rows(content_rows, wrap_cols, indent_size);
+        self.scroll_row = self.scroll_row.min(max_scroll_row);
 
         let cursor_col = self.cursor_col();
         let cursor_line = self.text.line(cursor_row).unwrap_or_default();
@@ -5025,8 +5200,8 @@ impl ShellBuffer {
         let cursor_segment_index = segment_index_for_column(&cursor_segments, cursor_col);
 
         let line_count = self.line_count();
-        let distance = cursor_row.saturating_sub(self.scroll_row);
-        let threshold = visible_rows.saturating_mul(4).max(256);
+        let distance = cursor_row.abs_diff(self.scroll_row);
+        let threshold = content_rows.saturating_mul(4).max(256);
         let cache_valid = match self.wrap_cache.as_ref() {
             Some(cache) => cache.matches(wrap_cols, indent_size, line_count),
             None => false,
@@ -5045,22 +5220,40 @@ impl ShellBuffer {
                 .copied()
                 .unwrap_or(0)
                 .saturating_add(cursor_segment_index);
+            let top_target = cache
+                .prefix_rows
+                .partition_point(|&value| value <= base.saturating_sub(min_cursor_row))
+                .saturating_sub(1)
+                .min(cursor_row)
+                .min(max_scroll_row);
             let current_offset =
                 base.saturating_sub(cache.prefix_rows.get(self.scroll_row).copied().unwrap_or(0));
-            if current_offset < visible_rows {
+            if cursor_row < self.scroll_row || current_offset < min_cursor_row {
+                self.scroll_row = top_target;
                 return;
             }
-            let threshold = base.saturating_sub(visible_rows);
-            let mut target = cache
+            if current_offset <= max_cursor_row {
+                return;
+            }
+            let bottom_target = cache
                 .prefix_rows
-                .partition_point(|&value| value <= threshold);
-            if target > cursor_row {
-                target = cursor_row;
-            }
-            if target < self.scroll_row {
-                target = self.scroll_row;
-            }
-            self.scroll_row = target;
+                .partition_point(|&value| value < base.saturating_sub(max_cursor_row))
+                .min(cursor_row)
+                .min(max_scroll_row);
+            self.scroll_row = bottom_target;
+            return;
+        }
+
+        if cursor_row < self.scroll_row {
+            self.scroll_row = self
+                .scroll_row_for_top_margin(
+                    cursor_row,
+                    cursor_segment_index,
+                    min_cursor_row,
+                    wrap_cols,
+                    indent_size,
+                )
+                .min(max_scroll_row);
             return;
         }
 
@@ -5073,22 +5266,32 @@ impl ShellBuffer {
             row_counts.push(row_count);
         }
         row_offset = row_offset.saturating_add(cursor_segment_index);
-        if row_offset < visible_rows {
+        if row_offset < min_cursor_row {
+            self.scroll_row = self
+                .scroll_row_for_top_margin(
+                    cursor_row,
+                    cursor_segment_index,
+                    min_cursor_row,
+                    wrap_cols,
+                    indent_size,
+                )
+                .min(max_scroll_row);
             return;
         }
+        if row_offset <= max_cursor_row {
+            return;
+        }
+
         let mut offset = row_offset;
         let mut new_scroll = self.scroll_row;
         for row_count in row_counts {
-            if offset < visible_rows || new_scroll >= cursor_row {
+            if offset <= max_cursor_row || new_scroll >= cursor_row {
                 break;
             }
             offset = offset.saturating_sub(row_count);
             new_scroll = new_scroll.saturating_add(1);
         }
-        if new_scroll > cursor_row {
-            new_scroll = cursor_row;
-        }
-        self.scroll_row = new_scroll;
+        self.scroll_row = new_scroll.min(max_scroll_row);
     }
 }
 
@@ -6033,25 +6236,37 @@ impl ShellUiState {
         }
     }
 
+    fn vim_target_for_buffer(&self, buffer_id: BufferId, active: bool) -> VimTarget {
+        if active {
+            self.vim.target
+        } else {
+            self.buffer(buffer_id)
+                .map(|buffer| buffer.vim_buffer_state.target)
+                .unwrap_or(VimTarget::Buffer)
+        }
+    }
+
     fn visual_selection_for_buffer(
         &self,
         buffer: &ShellBuffer,
         active: bool,
     ) -> Option<VisualSelection> {
-        let (input_mode, visual_anchor, visual_kind) = if active {
+        let (input_mode, target, visual_anchor, visual_kind) = if active {
             (
                 self.input_mode,
+                self.vim.target,
                 self.vim.visual_anchor,
                 self.vim.visual_kind,
             )
         } else {
             (
                 buffer.vim_buffer_state.input_mode,
+                buffer.vim_buffer_state.target,
                 buffer.vim_buffer_state.visual_anchor,
                 buffer.vim_buffer_state.visual_kind,
             )
         };
-        if input_mode != InputMode::Visual {
+        if input_mode != InputMode::Visual || target == VimTarget::Input {
             return None;
         }
         visual_anchor.and_then(|anchor| visual_selection(buffer, anchor, visual_kind))
@@ -6138,6 +6353,17 @@ impl ShellUiState {
 
     fn vim_mut(&mut self) -> &mut VimState {
         &mut self.vim
+    }
+
+    fn active_buffer_targets_input(&self) -> bool {
+        self.focused_buffer_id()
+            .and_then(|buffer_id| self.buffer(buffer_id))
+            .is_some_and(|buffer| buffer.has_input_field() && self.vim.target == VimTarget::Input)
+    }
+
+    fn set_active_vim_target(&mut self, target: VimTarget) {
+        self.vim.target = target;
+        self.persist_active_buffer_vim_state();
     }
 
     pub(crate) fn active_workspace(&self) -> WorkspaceId {
@@ -8109,6 +8335,7 @@ impl ShellState {
             buffer_point_at_screen(
                 buffer,
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                &*shell_user_library(&self.runtime),
                 theme_registry,
                 mouse_x,
                 mouse_y,
@@ -8163,6 +8390,7 @@ impl ShellState {
             buffer_point_at_screen(
                 buffer,
                 PixelRectToRect::rect(drag.rect.x, drag.rect.y, drag.rect.width, drag.rect.height),
+                &*shell_user_library(&self.runtime),
                 theme_registry,
                 mouse_x,
                 mouse_y,
@@ -8866,7 +9094,7 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     return Ok(());
                 }
-                if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                if active_buffer.vim_targets_input {
                     let buffer_id =
                         active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let handled = {
@@ -8923,7 +9151,7 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     return Ok(());
                 }
-                if active_shell_buffer_has_input(&self.runtime).map_err(ShellError::Runtime)? {
+                if active_buffer.vim_targets_input {
                     let buffer_id =
                         active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let handled = {
@@ -10034,21 +10262,62 @@ impl ShellState {
         let mut visible_buffers = panes
             .iter()
             .zip(pane_rects.iter())
-            .map(|(pane, rect)| (pane.buffer_id, rect.width, rect.height))
+            .enumerate()
+            .map(|(pane_index, (pane, rect))| {
+                (
+                    pane.buffer_id,
+                    rect.width,
+                    rect.height,
+                    pane_index == ui.active_pane_index()
+                        && !ui.picker_visible()
+                        && !runtime_popup
+                            .as_ref()
+                            .map(|popup| ui.popup_focus_active(popup))
+                            .unwrap_or(false),
+                )
+            })
             .collect::<Vec<_>>();
         if let Some(popup) = runtime_popup.as_ref() {
-            visible_buffers.push((popup.active_buffer, render_width, popup_height.max(1)));
+            visible_buffers.push((
+                popup.active_buffer,
+                render_width,
+                popup_height.max(1),
+                ui.popup_focus_active(popup),
+            ));
         }
-        for (buffer_id, width, height) in visible_buffers {
-            let (language_id, visible_rows, is_acp, has_plugin_sections) = {
+        for (buffer_id, width, height, active) in visible_buffers {
+            let (
+                language_id,
+                visible_rows,
+                is_acp,
+                has_plugin_sections,
+                reserved_top_rows,
+                scrolloff,
+            ) = {
+                let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
+                let visible_rows = buffer_visible_rows_for_height(buffer, height, line_height);
+                let is_acp = buffer.is_acp_buffer();
+                let has_plugin_sections = buffer.has_plugin_sections();
                 (
                     buffer.language_id().map(str::to_owned),
-                    buffer_visible_rows_for_height(buffer, height, line_height),
-                    buffer.is_acp_buffer(),
-                    buffer.has_plugin_sections(),
+                    visible_rows,
+                    is_acp,
+                    has_plugin_sections,
+                    (active && !is_acp && !has_plugin_sections)
+                        .then_some(buffer_headerline_rows(
+                            buffer,
+                            active,
+                            &*shell_user_library(&self.runtime),
+                            theme_registry,
+                            visible_rows,
+                        ))
+                        .unwrap_or(0),
+                    (!is_acp && !has_plugin_sections)
+                        .then_some(theme_scrolloff(theme_registry))
+                        .unwrap_or(0),
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -10067,7 +10336,13 @@ impl ShellState {
             } else {
                 buffer.set_viewport_lines(visible_rows);
             }
-            buffer.ensure_visible(visible_rows, wrap_cols, indent_size);
+            buffer.ensure_visible(
+                visible_rows,
+                wrap_cols,
+                indent_size,
+                reserved_top_rows,
+                scrolloff,
+            );
         }
         Ok(())
     }
@@ -11641,6 +11916,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 shell_ui_mut(runtime)?.enter_insert_mode();
                 return Ok(());
             }
+            if active_shell_buffer_has_input(runtime)? {
+                shell_ui_mut(runtime)?.set_active_vim_target(VimTarget::Input);
+            }
             start_change_recording(runtime)?;
             mark_change_finish_on_normal(runtime)?;
             shell_ui_mut(runtime)?.enter_insert_mode();
@@ -11654,6 +11932,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             let is_directory = buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind);
             let cursor_point = active_shell_buffer_mut(runtime)?.cursor_point();
             let has_input = active_shell_buffer_has_input(runtime)?;
+            let targeted_input = active_shell_buffer_vim_targets_input(runtime)?;
             let finish_change = {
                 let vim = shell_ui(runtime)?.vim();
                 vim.recording_change && vim.finish_change_on_normal
@@ -11675,9 +11954,19 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
             };
             apply_pending_block_insert(runtime)?;
+            if has_input && previous_mode == InputMode::Normal && targeted_input {
+                let ui = shell_ui_mut(runtime)?;
+                ui.set_active_vim_target(VimTarget::Buffer);
+                ui.enter_normal_mode();
+                active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
+                return Ok(());
+            }
             shell_ui_mut(runtime)?.enter_normal_mode();
             active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
-            if has_input && let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+            if targeted_input
+                && has_input
+                && let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut()
+            {
                 if previous_mode == InputMode::Visual {
                     input.clear_selection();
                 } else if matches!(previous_mode, InputMode::Insert | InputMode::Replace)
@@ -11708,7 +11997,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             if handle_terminal_vim_edit(runtime, detail)? {
                 return Ok(());
             }
-            if vim_edit_requires_write(detail) && active_shell_buffer_read_only(runtime)? {
+            if vim_edit_requires_write(detail)
+                && active_shell_buffer_read_only(runtime)?
+                && !vim_edit_targets_input(runtime, detail)?
+            {
                 let action = format!("{detail} blocked");
                 report_read_only(runtime, &action);
                 return Ok(());
@@ -11743,7 +12035,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_replace_char(runtime)?;
                 }
                 "enter-replace-mode" => {
-                    if active_shell_buffer_has_input(runtime)? {
+                    if active_shell_buffer_vim_targets_input(runtime)? {
                         shell_ui_mut(runtime)?.enter_replace_mode();
                         return Ok(());
                     }
@@ -11755,7 +12047,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     toggle_case_chars(runtime)?;
                 }
                 "append" => {
-                    if active_shell_buffer_has_input(runtime)? {
+                    if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             let _ = input.move_right();
                         }
@@ -11768,7 +12060,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "append-line-end" => {
-                    if active_shell_buffer_has_input(runtime)? {
+                    if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             input.move_line_end();
                         }
@@ -11781,7 +12073,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "insert-line-start" => {
-                    if active_shell_buffer_has_input(runtime)? {
+                    if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             input.move_line_start();
                         }
@@ -13440,9 +13732,27 @@ fn enter_insert_mode_for_input_buffer(
         .map(ShellBuffer::has_input_field)
         .unwrap_or(false);
     if has_input {
-        shell_ui_mut(runtime)?.enter_insert_mode();
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
     }
     Ok(())
+}
+
+fn active_shell_buffer_vim_targets_input(runtime: &EditorRuntime) -> Result<bool, String> {
+    Ok(shell_ui(runtime)?.active_buffer_targets_input())
+}
+
+fn vim_edit_targets_input(runtime: &EditorRuntime, detail: &str) -> Result<bool, String> {
+    if !active_shell_buffer_has_input(runtime)? {
+        return Ok(false);
+    }
+    Ok(match detail {
+        "enter-replace-mode" | "append" | "append-line-end" | "insert-line-start" => {
+            active_shell_buffer_vim_targets_input(runtime)?
+        }
+        _ => false,
+    })
 }
 
 fn active_buffer_event_context(
@@ -13456,6 +13766,7 @@ fn active_buffer_event_context(
     Ok(ActiveBufferEventContext {
         buffer_id,
         has_input: buffer.has_input_field(),
+        vim_targets_input: ui.active_buffer_targets_input(),
         is_read_only: buffer.is_read_only(),
         is_git_status: buffer_is_git_status(&buffer.kind),
         is_git_commit: buffer_is_git_commit(&buffer.kind),
@@ -16460,7 +16771,7 @@ fn apply_directory_delete_if_needed(runtime: &mut EditorRuntime) -> Result<(), S
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
-    if active_shell_buffer_has_input(runtime)? {
+    if active_shell_buffer_vim_targets_input(runtime)? {
         let kind = shell_ui(runtime)?.vim().visual_kind;
         let selected = {
             let buffer = active_shell_buffer_mut(runtime)?;
@@ -17779,13 +18090,18 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
         return Ok(());
     }
     let input_mode = shell_ui(runtime)?.input_mode();
+    let target_input = active_shell_buffer_vim_targets_input(runtime)?;
     let handled_input = {
         let buffer = active_shell_buffer_mut(runtime)?;
-        if let Some(input) = buffer.input_field_mut() {
-            if matches!(input_mode, InputMode::Visual) && input.selection_anchor.is_none() {
-                input.start_selection();
+        if target_input {
+            if let Some(input) = buffer.input_field_mut() {
+                if matches!(input_mode, InputMode::Visual) && input.selection_anchor.is_none() {
+                    input.start_selection();
+                }
+                Some(move_input_with_motion(input, motion, count))
+            } else {
+                None
             }
-            Some(move_input_with_motion(input, motion, count))
         } else {
             None
         }
@@ -18399,7 +18715,7 @@ fn start_visual_mode_with_kind(
     runtime: &mut EditorRuntime,
     kind: VisualSelectionKind,
 ) -> Result<(), String> {
-    if active_shell_buffer_has_input(runtime)? {
+    if active_shell_buffer_vim_targets_input(runtime)? {
         let cursor = {
             let buffer = active_shell_buffer_mut(runtime)?;
             let Some(input) = buffer.input_field_mut() else {
@@ -25963,18 +26279,19 @@ fn render_shell_state(
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
+            let vim_targets_input = state.vim_target_for_buffer(buffer.id(), active) == VimTarget::Input;
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
             let command_line = active.then(|| state.command_line()).flatten();
             render_buffer(
                 target,
-                fonts,
                 buffer,
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 active,
                 visual_range,
                 yank_flash,
                 input_mode,
+                vim_targets_input,
                 state.vim().recording_macro,
                 command_line,
                 user_library,
@@ -26089,7 +26406,7 @@ struct CursorScreenAnchor {
 #[allow(clippy::too_many_arguments)]
 fn render_runtime_popup_overlay(
     target: &mut DrawTarget<'_>,
-    fonts: &FontSet<'_>,
+    _fonts: &FontSet<'_>,
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
     popup_rect: Rect,
@@ -26118,17 +26435,18 @@ fn render_runtime_popup_overlay(
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let input_mode = state.input_mode_for_buffer(buffer.id(), popup_focus);
+        let vim_targets_input = state.vim_target_for_buffer(buffer.id(), popup_focus) == VimTarget::Input;
         let visual_range = state.visual_selection_for_buffer(buffer, popup_focus);
         let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
             target,
-            fonts,
             buffer,
             popup_rect,
             popup_focus,
             visual_range,
             yank_flash,
             input_mode,
+            vim_targets_input,
             state.vim().recording_macro,
             None,
             user_library,
@@ -26282,9 +26600,14 @@ fn render_autocomplete_overlay(
     let Some(buffer) = state.buffer(autocomplete.buffer_id) else {
         return Ok(());
     };
-    let Some(anchor) =
-        buffer_cursor_screen_anchor(buffer, pane_rect, theme_registry, cell_width, line_height)
-    else {
+    let Some(anchor) = buffer_cursor_screen_anchor(
+        buffer,
+        pane_rect,
+        user_library,
+        theme_registry,
+        cell_width,
+        line_height,
+    ) else {
         return Ok(());
     };
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
@@ -26439,9 +26762,15 @@ fn render_hover_overlay(
     let Some(provider) = hover.current_provider() else {
         return Ok(());
     };
-    let anchor =
-        buffer_cursor_screen_anchor(buffer, pane_rect, theme_registry, cell_width, line_height)
-            .unwrap_or_else(|| fallback_overlay_anchor(buffer, pane_rect, line_height));
+    let anchor = buffer_cursor_screen_anchor(
+        buffer,
+        pane_rect,
+        _user_library,
+        theme_registry,
+        cell_width,
+        line_height,
+    )
+    .unwrap_or_else(|| fallback_overlay_anchor(buffer, pane_rect, line_height));
 
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
@@ -27261,12 +27590,21 @@ fn statusline_icon_colors(
 fn buffer_cursor_screen_anchor(
     buffer: &ShellBuffer,
     rect: Rect,
+    user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
 ) -> Option<CursorScreenAnchor> {
     let cell_width = cell_width.max(1);
     let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
+    let headerline_rows = buffer_headerline_rows(
+        buffer,
+        true,
+        user_library,
+        theme_registry,
+        layout.visible_rows,
+    )
+    .min(layout.visible_rows.saturating_sub(1));
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -27276,7 +27614,7 @@ fn buffer_cursor_screen_anchor(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows,
+        layout.visible_rows.saturating_sub(headerline_rows),
         wrap_cols,
         indent_size,
     );
@@ -27298,7 +27636,7 @@ fn buffer_cursor_screen_anchor(
             }
         }
         visual_row = visual_row.saturating_add(wrapped.segments.len());
-        if visual_row >= layout.visible_rows {
+        if visual_row >= layout.visible_rows.saturating_sub(headerline_rows) {
             break;
         }
     }
@@ -27310,7 +27648,7 @@ fn buffer_cursor_screen_anchor(
             + fringe_width
             + line_number_width
             + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-        y: layout.body_y + cursor_row_on_screen as i32 * line_height,
+        y: layout.body_y + (headerline_rows + cursor_row_on_screen) as i32 * line_height,
         pane_bottom: layout.pane_bottom,
     })
 }
@@ -27319,6 +27657,7 @@ fn buffer_cursor_screen_anchor(
 fn buffer_point_at_screen(
     buffer: &ShellBuffer,
     rect: Rect,
+    user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     x: i32,
     y: i32,
@@ -27328,8 +27667,17 @@ fn buffer_point_at_screen(
 ) -> Option<TextPoint> {
     let line_height = line_height.max(1);
     let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
-    let body_top = layout.body_y;
-    let body_height = layout.visible_rows as i32 * line_height;
+    let headerline_rows = buffer_headerline_rows(
+        buffer,
+        true,
+        user_library,
+        theme_registry,
+        layout.visible_rows,
+    )
+    .min(layout.visible_rows.saturating_sub(1));
+    let body_top = layout.body_y + headerline_rows as i32 * line_height;
+    let body_height =
+        layout.visible_rows.saturating_sub(headerline_rows).max(1) as i32 * line_height;
     let body_bottom = body_top + body_height;
     if body_height <= 0 {
         return None;
@@ -27348,7 +27696,7 @@ fn buffer_point_at_screen(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows,
+        layout.visible_rows.saturating_sub(headerline_rows),
         wrap_cols,
         indent_size,
     );
@@ -27440,13 +27788,13 @@ fn collect_wrapped_lines(
 #[allow(clippy::too_many_arguments)]
 fn render_buffer(
     target: &mut DrawTarget<'_>,
-    _fonts: &FontSet<'_>,
     buffer: &ShellBuffer,
     rect: Rect,
     active: bool,
     visual_selection: Option<VisualSelection>,
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
+    vim_targets_input: bool,
     recording_macro: Option<char>,
     command_line: Option<&CommandLineOverlay>,
     user_library: &dyn UserLibrary,
@@ -27678,36 +28026,19 @@ fn render_buffer(
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let cursor_row = buffer.cursor_row();
         let cursor_col = buffer.cursor_col();
-        let buffer_text = buffer.text.text();
-        let context = active.then_some(HostGhostTextContext {
-            buffer_name: buffer.display_name(),
-            language_id: buffer.language_id(),
-            buffer_text: &buffer_text,
-            cursor_line: cursor_row,
-            cursor_column: cursor_col,
-        });
-        let headerline_lines = context
+        let context_overlay =
+            buffer_context_overlay_snapshot(buffer, active, user_library, theme_registry);
+        let headerline_lines = context_overlay
             .as_ref()
-            .map(|context| {
-                visible_headerline_lines(
-                    user_library.headerline_lines(context),
-                    layout.visible_rows,
-                )
-            })
+            .map(|snapshot| visible_headerline_lines(snapshot.headerline_lines.clone(), layout.visible_rows))
             .unwrap_or_default();
-        let ghost_text_by_line = context
-            .as_ref()
-            .map(|context| {
-                user_library
-                    .ghost_text_lines(context)
-                    .into_iter()
-                    .map(|line| (line.line, line.text))
-                    .collect::<BTreeMap<_, _>>()
-            })
+        let ghost_text_by_line = context_overlay
+            .map(|snapshot| snapshot.ghost_text_by_line)
             .unwrap_or_default();
         let headerline_rows = headerline_lines.len();
-        let body_y = layout.body_y + headerline_rows as i32 * line_height;
-        let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
+        let body_y = layout.body_y;
+        let top_reserved_rows = headerline_rows.min(layout.visible_rows.saturating_sub(1));
+        let visible_rows = layout.visible_rows.saturating_sub(top_reserved_rows).max(1);
         let wrapped_lines = collect_wrapped_lines(
             buffer,
             buffer.scroll_row,
@@ -27740,6 +28071,7 @@ fn render_buffer(
 
         let show_text_cursor = !buffer.has_input_field()
             || !active
+            || !vim_targets_input
             || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
         if show_text_cursor
             && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
@@ -27758,7 +28090,7 @@ fn render_buffer(
                         + fringe_width
                         + line_number_width
                         + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                    body_y + cursor_row_on_screen as i32 * line_height,
+                    body_y + (top_reserved_rows + cursor_row_on_screen) as i32 * line_height,
                     cursor_width,
                     line_height.max(2) as u32,
                 ),
@@ -27774,27 +28106,6 @@ fn render_buffer(
         let headerline_width = rect
             .width()
             .saturating_sub((text_x - rect.x()).max(0) as u32 + 12);
-        for (index, headerline) in headerline_lines.iter().enumerate() {
-            draw_text(
-                target,
-                text_x,
-                layout.body_y + index as i32 * line_height,
-                &truncate_text_to_width(headerline, headerline_width, cell_width),
-                statusline_active,
-            )?;
-        }
-        if headerline_rows > 0 {
-            fill_rect(
-                target,
-                PixelRectToRect::rect(
-                    rect.x() + 8,
-                    body_y.saturating_sub(3),
-                    rect.width().saturating_sub(16),
-                    1,
-                ),
-                border_color,
-            )?;
-        }
         let mut visual_row = 0usize;
         for wrapped in wrapped_lines {
             let line_index = wrapped.line_index;
@@ -27809,7 +28120,7 @@ fn render_buffer(
                 if visual_row >= visible_rows {
                     break;
                 }
-                let y = body_y + visual_row as i32 * line_height;
+                let y = body_y + (top_reserved_rows + visual_row) as i32 * line_height;
                 let segment_indent_cols = if segment_index == 0 {
                     0
                 } else {
@@ -27911,7 +28222,7 @@ fn render_buffer(
                     line_index,
                     cursor_row,
                     cursor_col,
-                    matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                    (matches!(input_mode, InputMode::Normal | InputMode::Visual) && !vim_targets_input)
                         .then_some(base_background),
                     cell_width,
                 ) {
@@ -27947,6 +28258,38 @@ fn render_buffer(
             if visual_row >= visible_rows {
                 break;
             }
+        }
+        if headerline_rows > 0 {
+            for (index, headerline) in headerline_lines.iter().enumerate() {
+                let y = layout.body_y + index as i32 * line_height;
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(
+                        rect.x() + 8,
+                        y,
+                        rect.width().saturating_sub(16),
+                        line_height.max(1) as u32,
+                    ),
+                    base_background,
+                )?;
+                draw_text(
+                    target,
+                    text_x,
+                    y,
+                    &truncate_text_to_width(headerline, headerline_width, cell_width),
+                    statusline_active,
+                )?;
+            }
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x() + 8,
+                    layout.body_y + headerline_rows as i32 * line_height - 3,
+                    rect.width().saturating_sub(16),
+                    1,
+                ),
+                border_color,
+            )?;
         }
     }
 
@@ -28001,7 +28344,7 @@ fn render_buffer(
         let prompt_padding = " ".repeat(prompt_len);
         let text_width = rect.width() as i32 - (text_x - rect.x()) - 12;
         let available_input_cols = (text_width / cell_width.max(1)).max(1) as usize;
-        if active && matches!(input_mode, InputMode::Visual) {
+        if active && vim_targets_input && matches!(input_mode, InputMode::Visual) {
             for (row, start_col, end_col) in
                 input.selection_visual_ranges(VisualSelectionKind::Character, available_input_cols)
             {
@@ -28060,7 +28403,7 @@ fn render_buffer(
                 draw_text(target, input_x, hint_y, &hint_line, placeholder_color)?;
             }
         }
-        if active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
+        if active && vim_targets_input && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
             let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
             let input_col = prompt_len + col_in_visual_row;
             let cursor_width = (cell_width / 4).max(2) as u32;
@@ -28075,7 +28418,7 @@ fn render_buffer(
                 cursor_roundness,
                 cursor,
             )?;
-        } else if active && matches!(input_mode, InputMode::Normal | InputMode::Visual) {
+        } else if active && vim_targets_input && matches!(input_mode, InputMode::Normal | InputMode::Visual) {
             let cursor_char = input.cursor_char();
             let char_count = input.char_count();
             if char_count > 0 {
@@ -29565,6 +29908,18 @@ fn visible_headerline_lines(lines: Vec<String>, visible_rows: usize) -> Vec<Stri
         .collect::<Vec<_>>();
     let start = lines.len().saturating_sub(max_rows);
     lines.into_iter().skip(start).collect()
+}
+
+fn count_visible_headerline_lines(lines: &[String], visible_rows: usize) -> usize {
+    let max_rows = visible_rows.saturating_sub(1);
+    if max_rows == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        .min(max_rows)
 }
 
 fn line_color_segments(

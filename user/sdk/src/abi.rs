@@ -1531,9 +1531,12 @@ impl From<StatuslineContext<'_>> for AbiStatuslineContext {
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiGhostTextContext {
+    pub buffer_id: u64,
+    pub buffer_revision: u64,
     pub buffer_name: RString,
     pub language_id: ROption<RString>,
     pub buffer_text: RString,
+    pub viewport_top_line: usize,
     pub cursor_line: usize,
     pub cursor_column: usize,
 }
@@ -1541,12 +1544,15 @@ pub struct AbiGhostTextContext {
 impl From<GhostTextContext<'_>> for AbiGhostTextContext {
     fn from(value: GhostTextContext<'_>) -> Self {
         Self {
+            buffer_id: value.buffer_id,
+            buffer_revision: value.buffer_revision,
             buffer_name: value.buffer_name.to_owned().into(),
             language_id: value
                 .language_id
                 .map(|language_id| RString::from(language_id.to_owned()))
                 .into(),
             buffer_text: value.buffer_text.to_owned().into(),
+            viewport_top_line: value.viewport_top_line,
             cursor_line: value.cursor_line,
             cursor_column: value.cursor_column,
         }
