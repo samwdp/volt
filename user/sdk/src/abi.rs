@@ -1637,8 +1637,9 @@ pub struct UserLibraryModule {
     pub run_plugin_buffer_evaluator: extern "C" fn(RString, RString) -> RVec<RString>,
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
     pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
-    #[sabi(last_prefix_field)]
     pub ghost_text_lines: extern "C" fn(AbiGhostTextContext) -> RVec<AbiGhostTextLine>,
+    #[sabi(last_prefix_field)]
+    pub headerline_lines: extern "C" fn(AbiGhostTextContext) -> RVec<RString>,
 }
 
 impl RootModule for UserLibraryModuleRef {

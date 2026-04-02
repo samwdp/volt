@@ -1,6 +1,7 @@
 #![doc = r#"Shared extension-facing types used by the core editor and the compiled user library."#]
 
 pub mod abi;
+pub mod treesitter;
 
 use abi_stable::{
     StableAbi,
@@ -13,7 +14,9 @@ pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
 pub use editor_git::{GitStatusSnapshot, StatusEntry};
 pub use editor_icons::{IconFontCategory, IconFontSymbol};
 pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind};
-pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+pub use editor_syntax::{
+    CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxNodeContext, SyntaxPoint,
+};
 pub use editor_theme::{Color, Theme, ThemeOption};
 
 pub use abi::{
@@ -319,6 +322,9 @@ pub trait UserLibrary: Send + Sync {
     fn browser_input_hint(&self, url: Option<&str>) -> String;
     fn browser_url_prompt(&self) -> String;
     fn browser_url_placeholder(&self) -> String;
+    fn headerline_lines(&self, _context: &GhostTextContext<'_>) -> Vec<String> {
+        Vec::new()
+    }
     fn ghost_text_lines(&self, _context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
         Vec::new()
     }

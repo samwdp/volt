@@ -328,6 +328,13 @@ impl UserLibrary for DynamicUserLibrary {
             .collect()
     }
 
+    fn headerline_lines(&self, context: &editor_plugin_api::GhostTextContext<'_>) -> Vec<String> {
+        self.module.headerline_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
         self.module.statusline_render()(AbiStatuslineContext::from(*context)).into()
     }
