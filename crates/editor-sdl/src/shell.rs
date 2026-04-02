@@ -1210,9 +1210,17 @@ impl InputField {
     }
 
     fn cursor_visual_row_col(&self, available_cols: usize) -> (usize, usize) {
+        self.visual_row_col_for_cursor(self.cursor_char(), available_cols)
+    }
+
+    fn visual_row_col_for_cursor(
+        &self,
+        cursor_char: usize,
+        available_cols: usize,
+    ) -> (usize, usize) {
         let prompt_len = self.prompt.chars().count();
         let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
-        let (logical_line, col_in_logical_line) = self.cursor_line_col();
+        let (logical_line, col_in_logical_line) = self.line_col_for_char(cursor_char);
         let mut visual_row = 0usize;
         for (idx, line) in self.text.split('\n').enumerate() {
             if idx == logical_line {
@@ -1229,6 +1237,18 @@ impl InputField {
         let col_in_wrap_row = col_in_logical_line % cols_per_row;
         visual_row += wrap_row;
         (visual_row, col_in_wrap_row)
+    }
+
+    fn line_col_for_char(&self, cursor_char: usize) -> (usize, usize) {
+        let mut consumed = 0usize;
+        for (line_index, line) in self.text.split('\n').enumerate() {
+            let line_len = line.chars().count();
+            if cursor_char <= consumed + line_len {
+                return (line_index, cursor_char.saturating_sub(consumed));
+            }
+            consumed = consumed.saturating_add(line_len + 1);
+        }
+        self.cursor_line_col()
     }
 
     fn append_text(&mut self, text: &str) {
@@ -2675,6 +2695,10 @@ impl PluginSectionBufferState {
             .and_then(|index| self.attached_sections.get(index))
     }
 
+    fn has_active_attached_section(&self) -> bool {
+        self.active_section > 0
+    }
+
     fn active_attached_section_mut(&mut self) -> Option<&mut PluginTextPaneState> {
         self.active_section
             .checked_sub(1)
@@ -3440,11 +3464,8 @@ impl ShellBuffer {
                 .plugin_section_state
                 .as_ref()
                 .is_some_and(|state| !state.active_section_writable())
-            || matches!(
-                self.acp_active_pane(),
-                Some(AcpPane::Plan | AcpPane::Output | AcpPane::Footer)
-            )
-            || matches!(self.browser_active_pane(), Some(BrowserPane::Footer))
+            || self.acp_active_pane_is_read_only()
+            || self.browser_active_pane_is_read_only()
             || (self.kind == BufferKind::Image && !self.is_svg_source_mode())
     }
 
@@ -3714,6 +3735,17 @@ impl ShellBuffer {
         true
     }
 
+    fn acp_active_pane_is_read_only(&self) -> bool {
+        matches!(
+            self.acp_active_pane(),
+            Some(AcpPane::Plan | AcpPane::Output | AcpPane::Footer)
+        )
+    }
+
+    fn browser_active_pane_is_read_only(&self) -> bool {
+        matches!(self.browser_active_pane(), Some(BrowserPane::Footer))
+    }
+
     fn browser_footer_pane(&self) -> Option<&PluginTextPaneState> {
         self.browser_state.as_ref().map(|state| &state.footer_pane)
     }
@@ -3741,7 +3773,7 @@ impl ShellBuffer {
         if self
             .plugin_section_state
             .as_ref()
-            .is_some_and(|state| state.active_section > 0)
+            .is_some_and(PluginSectionBufferState::has_active_attached_section)
         {
             return self.plugin_attached_pane_state_mut();
         }
@@ -3907,8 +3939,7 @@ impl ShellBuffer {
     }
 
     fn input_field(&self) -> Option<&InputField> {
-        self.input
-            .as_ref()
+        self.standalone_input_field()
             .or_else(|| self.acp_state.as_ref().map(|state| &state.input))
             .or_else(|| self.browser_state.as_ref().map(|state| &state.input))
     }
@@ -27571,11 +27602,12 @@ fn browser_buffer_layout(
     } else {
         1
     };
+    let footer_line_count = state.footer_pane.line_count().max(1);
     let footer_rows = state
         .footer_pane
         .min_rows
-        .unwrap_or_else(|| state.footer_pane.line_count().max(1))
-        .max(state.footer_pane.line_count().max(1));
+        .unwrap_or(footer_line_count)
+        .max(footer_line_count);
     let footer_chrome = text_panel_chrome_height("", line_height);
     let input_chrome = text_panel_chrome_height("", line_height);
     let footer_height = footer_chrome + footer_rows as i32 * line_height;
@@ -28956,7 +28988,7 @@ fn text_panel_header_height(title: &str, line_height: i32) -> i32 {
     if title.trim().is_empty() {
         0
     } else {
-        (line_height.max(1) + 10).max(line_height.max(1))
+        line_height.max(1) + 10
     }
 }
 
@@ -29499,11 +29531,8 @@ fn render_input_panel(
         let char_count = input.char_count();
         if char_count > 0 {
             let cursor_index = cursor_char.min(char_count.saturating_sub(1));
-            let mut cursor_input = input.clone();
-            cursor_input.cursor = cursor_index;
-            cursor_input.clear_selection();
             let (input_row, col_in_visual_row) =
-                cursor_input.cursor_visual_row_col(available_input_cols);
+                input.visual_row_col_for_cursor(cursor_index, available_input_cols);
             fill_rect(
                 target,
                 PixelRectToRect::rect(
@@ -29549,11 +29578,12 @@ fn acp_buffer_layout(
     let body_width = panel_width.saturating_sub(20);
     let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
     let input_rows = state.input.visual_line_count(wrap_cols).max(1);
+    let footer_line_count = state.footer_pane.line_count().max(1);
     let footer_rows = state
         .footer_pane
         .min_rows
-        .unwrap_or_else(|| state.footer_pane.line_count().max(1))
-        .max(state.footer_pane.line_count().max(1));
+        .unwrap_or(footer_line_count)
+        .max(footer_line_count);
     let input_chrome = text_panel_chrome_height("", line_height);
     let footer_chrome = text_panel_chrome_height("", line_height);
     let plan_chrome = text_panel_chrome_height("Plan", line_height);
