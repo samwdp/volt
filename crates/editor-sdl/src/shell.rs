@@ -10309,18 +10309,22 @@ impl ShellState {
                     visible_rows,
                     is_acp,
                     has_plugin_sections,
-                    (active && !is_acp && !has_plugin_sections)
-                        .then_some(buffer_headerline_rows(
+                    if active && !is_acp && !has_plugin_sections {
+                        buffer_headerline_rows(
                             buffer,
                             active,
                             &*shell_user_library(&self.runtime),
                             theme_registry,
                             visible_rows,
-                        ))
-                        .unwrap_or(0),
-                    (!is_acp && !has_plugin_sections)
-                        .then_some(theme_scrolloff(theme_registry))
-                        .unwrap_or(0),
+                        )
+                    } else {
+                        0
+                    },
+                    if !is_acp && !has_plugin_sections {
+                        theme_scrolloff(theme_registry)
+                    } else {
+                        0
+                    },
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
