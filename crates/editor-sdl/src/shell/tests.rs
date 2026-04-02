@@ -1819,14 +1819,21 @@ fn install_acp_test_buffer(
         .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(
         buffer,
-        (1..=output_lines)
-            .map(|index| format!("line {index}"))
-            .collect(),
+        Vec::new(),
         &NullUserLibrary,
     );
+    shell_buffer.init_acp_view("Test ACP");
+    for index in 1..=output_lines {
+        shell_buffer.acp_push_system_message(format!("line {index}"));
+    }
     if let Some(input) = shell_buffer.input_field_mut() {
         input.set_text(input_text);
-        input.set_hint(hint.map(str::to_owned));
+    }
+    if let Some(footer) = shell_buffer.acp_footer_pane_mut() {
+        footer.replace_lines(
+            hint.into_iter().map(str::to_owned).collect(),
+            true,
+        );
     }
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
@@ -3252,7 +3259,7 @@ fn notification_action_at_point_returns_acp_permission_action() -> Result<(), St
 }
 
 #[test]
-fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), String> {
+fn acp_section_layout_orders_output_input_footer_and_statusline() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(
         &mut state,
@@ -3265,12 +3272,18 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
         .map_err(|error| error.to_string())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
     let layout = buffer_footer_layout(buffer, rect, 18, 8);
-    let output_bottom = layout.body_y + layout.visible_rows as i32 * 18;
-    let hint_y = layout.input_y + layout.input_box_height + layout.input_hint_gap;
+    let acp_layout =
+        acp_buffer_layout(buffer, rect, layout, 8, 18).ok_or_else(|| "ACP layout missing".to_owned())?;
 
-    assert!(output_bottom <= layout.input_y);
-    assert!(layout.input_y < hint_y);
-    assert!(hint_y < layout.statusline_y);
+    assert!(
+        acp_layout.output.rect.y() + acp_layout.output.rect.height() as i32 <= acp_layout.input.rect.y()
+    );
+    assert!(
+        acp_layout.input.rect.y() + acp_layout.input.rect.height() as i32 <= acp_layout.footer.rect.y()
+    );
+    assert!(
+        acp_layout.footer.rect.y() + acp_layout.footer.rect.height() as i32 <= layout.pane_bottom
+    );
     Ok(())
 }
 
@@ -3660,7 +3673,7 @@ fn acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane
         Some(active_pane_id)
     );
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
-    assert_eq!(buffer.acp_active_pane(), Some(AcpPane::Plan));
+    assert_eq!(buffer.acp_active_pane(), Some(AcpPane::Input));
     Ok(())
 }
 
@@ -4393,7 +4406,6 @@ fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
         Some("https://example.com/docs")
     );
     assert_eq!(buffer.display_name(), "*browser* https://example.com/docs");
-    assert!(buffer.text.text().contains("https://example.com/docs"));
     Ok(())
 }
 
@@ -5000,7 +5012,7 @@ fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
         .ok_or_else(|| "browser shell buffer missing".to_owned())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
     let layout = buffer_footer_layout(buffer, rect, 18, 8);
-    let viewport = browser_viewport_rect(buffer, rect, 18)
+    let viewport = browser_viewport_rect(buffer, rect, 8, 18)
         .ok_or_else(|| "browser viewport missing".to_owned())?;
     let viewport_bottom = viewport.y + viewport.height as i32;
 

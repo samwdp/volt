@@ -48,7 +48,7 @@ pub fn package() -> PluginPackage {
             vec![PluginAction::emit_hook("ui.browser.focus-input", None::<&str>)],
         ),
     ])
-    .with_buffers(vec![PluginBuffer::new(BROWSER_KIND, Vec::new()).with_key_bindings(vec![
+    .with_buffers(vec![PluginBuffer::new(BROWSER_KIND, Vec::<String>::new()).with_key_bindings(vec![
         PluginKeyBinding::new("I", "browser.focus-input", PluginKeymapScope::Workspace)
             .with_vim_mode(PluginVimMode::Normal),
     ])])

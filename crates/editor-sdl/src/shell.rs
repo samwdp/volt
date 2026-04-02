@@ -1178,10 +1178,6 @@ impl InputField {
         self.placeholder = placeholder;
     }
 
-    fn set_hint(&mut self, hint: Option<String>) {
-        self.hint = hint;
-    }
-
     fn text_line_count(&self) -> usize {
         self.line_starts().len().max(1)
     }
@@ -3147,7 +3143,7 @@ fn acp_spinner_segment(role: AcpColorRole) -> AcpRenderedSegment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct BrowserBufferState {
     current_url: Option<String>,
     active_pane: BrowserPane,
@@ -5207,6 +5203,7 @@ impl ShellBuffer {
         match self.acp_active_pane() {
             Some(AcpPane::Plan) => self.acp_plan_viewport_lines(),
             Some(AcpPane::Output) => self.acp_output_viewport_lines(),
+            Some(AcpPane::Input | AcpPane::Footer) => self.viewport_lines.max(1),
             None => self.viewport_lines.max(1),
         }
     }
@@ -11629,6 +11626,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_ACP_FOCUS_INPUT,
+        "Focuses the ACP input section.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_IMAGE_ZOOM_IN,
         "Zooms the active native image buffer in.",
     )?;
@@ -11737,6 +11739,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_BROWSER_URL,
         "Detects a URL in the active buffer and opens it in the popup browser.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_FOCUS_INPUT,
+        "Focuses the browser input section.",
     )?;
     register_hook(runtime, HOOK_GIT_DIFF_OPEN, "Opens the git diff buffer.")?;
     register_hook(runtime, HOOK_GIT_LOG_OPEN, "Opens the git log buffer.")?;
@@ -17108,6 +17115,8 @@ fn clear_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
 fn focus_acp_input_section(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     if shell_buffer_mut(runtime, buffer_id)?.focus_acp_input() {
+        start_change_recording(runtime)?;
+        mark_change_finish_on_normal(runtime)?;
         let ui = shell_ui_mut(runtime)?;
         ui.set_active_vim_target(VimTarget::Input);
         ui.enter_insert_mode();
@@ -17118,6 +17127,8 @@ fn focus_acp_input_section(runtime: &mut EditorRuntime) -> Result<(), String> {
 fn focus_browser_input_section(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     if shell_buffer_mut(runtime, buffer_id)?.focus_browser_input() {
+        start_change_recording(runtime)?;
+        mark_change_finish_on_normal(runtime)?;
         let ui = shell_ui_mut(runtime)?;
         ui.set_active_vim_target(VimTarget::Input);
         ui.enter_insert_mode();
