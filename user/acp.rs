@@ -140,10 +140,12 @@ pub fn package() -> PluginPackage {
     PluginPackage::new("acp", true, "Agent Client Protocol integrations.")
         .with_commands(commands)
         .with_key_bindings(key_bindings)
-        .with_buffers(vec![PluginBuffer::new(ACP_BUFFER_KIND, Vec::<String>::new()).with_key_bindings(vec![
-            PluginKeyBinding::new("I", "acp.focus-input", PluginKeymapScope::Workspace)
-                .with_vim_mode(PluginVimMode::Normal),
-        ])])
+        .with_buffers(vec![
+            PluginBuffer::new(ACP_BUFFER_KIND, Vec::<String>::new()).with_key_bindings(vec![
+                PluginKeyBinding::new("I", "acp.focus-input", PluginKeymapScope::Workspace)
+                    .with_vim_mode(PluginVimMode::Normal),
+            ]),
+        ])
 }
 
 fn hook_command(

@@ -1817,11 +1817,7 @@ fn install_acp_test_buffer(
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(
-        buffer,
-        Vec::new(),
-        &NullUserLibrary,
-    );
+    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &NullUserLibrary);
     shell_buffer.init_acp_view("Test ACP");
     for index in 1..=output_lines {
         shell_buffer.acp_push_system_message(format!("line {index}"));
@@ -1830,10 +1826,7 @@ fn install_acp_test_buffer(
         input.set_text(input_text);
     }
     if let Some(footer) = shell_buffer.acp_footer_pane_mut() {
-        footer.replace_lines(
-            hint.into_iter().map(str::to_owned).collect(),
-            true,
-        );
+        footer.replace_lines(hint.into_iter().map(str::to_owned).collect(), true);
     }
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
@@ -3272,14 +3265,16 @@ fn acp_section_layout_orders_output_input_footer_and_statusline() -> Result<(), 
         .map_err(|error| error.to_string())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
     let layout = buffer_footer_layout(buffer, rect, 18, 8);
-    let acp_layout =
-        acp_buffer_layout(buffer, rect, layout, 8, 18).ok_or_else(|| "ACP layout missing".to_owned())?;
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "ACP layout missing".to_owned())?;
 
     assert!(
-        acp_layout.output.rect.y() + acp_layout.output.rect.height() as i32 <= acp_layout.input.rect.y()
+        acp_layout.output.rect.y() + acp_layout.output.rect.height() as i32
+            <= acp_layout.input.rect.y()
     );
     assert!(
-        acp_layout.input.rect.y() + acp_layout.input.rect.height() as i32 <= acp_layout.footer.rect.y()
+        acp_layout.input.rect.y() + acp_layout.input.rect.height() as i32
+            <= acp_layout.footer.rect.y()
     );
     assert!(
         acp_layout.footer.rect.y() + acp_layout.footer.rect.height() as i32 <= layout.pane_bottom

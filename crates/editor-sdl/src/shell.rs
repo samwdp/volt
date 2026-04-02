@@ -3719,7 +3719,9 @@ impl ShellBuffer {
     }
 
     fn browser_footer_pane_mut(&mut self) -> Option<&mut PluginTextPaneState> {
-        self.browser_state.as_mut().map(|state| &mut state.footer_pane)
+        self.browser_state
+            .as_mut()
+            .map(|state| &mut state.footer_pane)
     }
 
     fn active_aux_text_pane_state(&self) -> Option<&PluginTextPaneState> {
@@ -12915,10 +12917,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
-        .subscribe_hook(HOOK_ACP_FOCUS_INPUT, "shell.acp-focus-input", |_, runtime| {
-            focus_acp_input_section(runtime)?;
-            Ok(())
-        })
+        .subscribe_hook(
+            HOOK_ACP_FOCUS_INPUT,
+            "shell.acp-focus-input",
+            |_, runtime| {
+                focus_acp_input_section(runtime)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_IMAGE_ZOOM_IN, "shell.image-zoom-in", |_, runtime| {
@@ -26287,15 +26293,21 @@ fn buffer_interaction(
     }
 }
 
-fn browser_state_for_kind(kind: &BufferKind, user_library: &dyn UserLibrary) -> Option<BrowserBufferState> {
+fn browser_state_for_kind(
+    kind: &BufferKind,
+    user_library: &dyn UserLibrary,
+) -> Option<BrowserBufferState> {
     if !buffer_is_browser(kind) {
         return None;
     }
     let mut state = BrowserBufferState::default();
     state.input.prompt = user_library.browser_url_prompt();
-    state.input
+    state
+        .input
         .set_placeholder(Some(user_library.browser_url_placeholder()));
-    state.footer_pane.replace_lines(vec![user_library.browser_input_hint(None)], true);
+    state
+        .footer_pane
+        .replace_lines(vec![user_library.browser_input_hint(None)], true);
     Some(state)
 }
 
@@ -28967,7 +28979,12 @@ fn plugin_section_buffer_layout(
     let gap = 8i32;
     let total_gap = gap.saturating_mul(section_count.saturating_sub(1) as i32);
     let titles = std::iter::once(state.base_title.as_str())
-        .chain(state.attached_sections.iter().map(|pane| pane.title.as_str()))
+        .chain(
+            state
+                .attached_sections
+                .iter()
+                .map(|pane| pane.title.as_str()),
+        )
         .collect::<Vec<_>>();
     let pane_chrome = titles
         .iter()
@@ -28976,11 +28993,7 @@ fn plugin_section_buffer_layout(
     let total_height = layout
         .pane_bottom
         .saturating_sub(layout.body_y)
-        .max(
-            pane_chrome.iter().sum::<i32>()
-                + total_gap
-                + line_height * section_count as i32,
-        );
+        .max(pane_chrome.iter().sum::<i32>() + total_gap + line_height * section_count as i32);
     let body_width = panel_width.saturating_sub(20);
     let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
     let total_row_budget = ((total_height - pane_chrome.iter().sum::<i32>() - total_gap)
@@ -29165,7 +29178,11 @@ fn render_browser_buffer_body(
         "ui.panel.background",
         adjust_color(
             base_background,
-            if is_dark_color(base_background) { 8 } else { -8 },
+            if is_dark_color(base_background) {
+                8
+            } else {
+                -8
+            },
         ),
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
@@ -29544,17 +29561,21 @@ fn acp_buffer_layout(
     let total_height = layout.pane_bottom.saturating_sub(layout.body_y).max(
         plan_chrome + output_chrome + input_chrome + footer_chrome + gap * 3 + line_height * 4,
     );
-    let bottom_reserved =
-        input_chrome + input_rows as i32 * line_height + footer_chrome + footer_rows as i32 * line_height;
+    let bottom_reserved = input_chrome
+        + input_rows as i32 * line_height
+        + footer_chrome
+        + footer_rows as i32 * line_height;
     let top_height = total_height.saturating_sub(bottom_reserved + gap * 3);
-    let total_row_budget =
-        ((top_height - plan_chrome - output_chrome).max(line_height * 2) / line_height).max(2)
-            as usize;
+    let total_row_budget = ((top_height - plan_chrome - output_chrome).max(line_height * 2)
+        / line_height)
+        .max(2) as usize;
     let plan_target_rows = acp_pane_content_rows(&state.plan_pane, wrap_cols).clamp(1, 10);
     let plan_rows = plan_target_rows.min(total_row_budget.saturating_sub(1).max(1));
     let output_rows = total_row_budget.saturating_sub(plan_rows).max(1);
-    let used_top_height =
-        plan_chrome + output_chrome + gap + ((plan_rows.saturating_add(output_rows)) as i32 * line_height);
+    let used_top_height = plan_chrome
+        + output_chrome
+        + gap
+        + ((plan_rows.saturating_add(output_rows)) as i32 * line_height);
     let output_extra = top_height.saturating_sub(used_top_height);
     let plan_height = plan_chrome + plan_rows as i32 * line_height;
     let output_height = output_chrome + output_rows as i32 * line_height + output_extra;
@@ -29570,12 +29591,7 @@ fn acp_buffer_layout(
             wrap_cols,
         },
         output: AcpPaneLayout {
-            rect: Rect::new(
-                panel_x,
-                output_y,
-                panel_width,
-                output_height as u32,
-            ),
+            rect: Rect::new(panel_x, output_y, panel_width, output_height as u32),
             visible_rows: output_rows,
             wrap_cols,
         },

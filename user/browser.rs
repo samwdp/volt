@@ -45,13 +45,18 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "browser.focus-input",
             "Focuses the browser input section and enters insert mode.",
-            vec![PluginAction::emit_hook("ui.browser.focus-input", None::<&str>)],
+            vec![PluginAction::emit_hook(
+                "ui.browser.focus-input",
+                None::<&str>,
+            )],
         ),
     ])
-    .with_buffers(vec![PluginBuffer::new(BROWSER_KIND, Vec::<String>::new()).with_key_bindings(vec![
-        PluginKeyBinding::new("I", "browser.focus-input", PluginKeymapScope::Workspace)
-            .with_vim_mode(PluginVimMode::Normal),
-    ])])
+    .with_buffers(vec![
+        PluginBuffer::new(BROWSER_KIND, Vec::<String>::new()).with_key_bindings(vec![
+            PluginKeyBinding::new("I", "browser.focus-input", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+        ]),
+    ])
 }
 
 /// Returns the lines rendered into the current browser buffer state.
