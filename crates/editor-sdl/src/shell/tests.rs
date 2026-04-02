@@ -3328,6 +3328,30 @@ fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() ->
 }
 
 #[test]
+fn plugin_sections_layout_reserves_extra_bottom_padding() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_plugin_sections_test_buffer(
+        &mut state,
+        &["a = 1", "b = 2", "sqrt(a + b)"],
+        &["(press Ctrl+c Ctrl+c to evaluate)"],
+    )?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
+    let panes = plugin_section_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "plugin section layout missing".to_owned())?;
+
+    assert_eq!(
+        panes.panes[1].rect.height(),
+        (plugin_section_panel_chrome_height("Output", 18) + panes.panes[1].visible_rows as i32 * 18)
+            as u32
+    );
+    Ok(())
+}
+
+#[test]
 fn plugin_sections_switching_output_pane_changes_focus_and_read_only_state() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_plugin_sections_test_buffer(&mut state, &["a = 1"], &["1"])?;

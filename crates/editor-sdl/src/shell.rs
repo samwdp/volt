@@ -29762,6 +29762,10 @@ fn text_panel_chrome_height(title: &str, line_height: i32) -> i32 {
     text_panel_header_height(title, line_height) + 12
 }
 
+fn plugin_section_panel_chrome_height(title: &str, line_height: i32) -> i32 {
+    text_panel_chrome_height(title, line_height) + 4
+}
+
 fn plugin_section_buffer_layout(
     buffer: &ShellBuffer,
     rect: Rect,
@@ -29786,7 +29790,7 @@ fn plugin_section_buffer_layout(
         .collect::<Vec<_>>();
     let pane_chrome = titles
         .iter()
-        .map(|title| text_panel_chrome_height(title, line_height))
+        .map(|title| plugin_section_panel_chrome_height(title, line_height))
         .collect::<Vec<_>>();
     let total_height = layout
         .pane_bottom
