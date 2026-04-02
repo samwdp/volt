@@ -16334,6 +16334,19 @@ fn advance_point_by_text(mut point: TextPoint, text: &str) -> TextPoint {
     point
 }
 
+fn statusline_mode_label(input_mode: InputMode, multicursor: bool) -> &'static str {
+    if multicursor {
+        match input_mode {
+            InputMode::Normal => "MC NORMAL",
+            InputMode::Insert => "MC INSERT",
+            InputMode::Replace => "MC REPLACE",
+            InputMode::Visual => "MC VISUAL",
+        }
+    } else {
+        input_mode.label()
+    }
+}
+
 fn move_text_buffer_with_motion(
     buffer: &mut TextBuffer,
     motion: ShellMotion,
@@ -16465,7 +16478,7 @@ fn find_next_multicursor_match(
             )
         })
         .collect::<Vec<_>>();
-    let search = |start: usize, end: usize| {
+    let search_range = |start: usize, end: usize| {
         (start..end).find_map(|candidate| {
             let candidate_end = candidate.saturating_add(needle_chars.len());
             if candidate_end > haystack.len()
@@ -16490,7 +16503,7 @@ fn find_next_multicursor_match(
             (exact == Some(range)).then_some(range)
         })
     };
-    search(
+    search_range(
         after_char_index.min(
             haystack
                 .len()
@@ -16503,7 +16516,7 @@ fn find_next_multicursor_match(
             .saturating_add(1),
     )
     .or_else(|| {
-        search(
+        search_range(
             0,
             after_char_index.min(
                 haystack
@@ -18513,6 +18526,8 @@ fn apply_text_object_operator(
         && apply_multicursor_text_object_operator(runtime, operator, kind)?
     {
         shell_ui_mut(runtime)?.vim_mut().clear_transient();
+        // Multicursor text objects intentionally operate on the linked token set as a whole, so
+        // the per-command around/count modifiers do not change that mirrored scope yet.
         let _ = around;
         let _ = count;
         return Ok(());
@@ -28603,16 +28618,7 @@ fn render_buffer(
         .map(|cursor| cursor.col() as usize + 1)
         .unwrap_or(buffer.cursor_col() + 1);
     let statusline_context = HostStatuslineContext {
-        vim_mode: if multicursor.is_some() {
-            match input_mode {
-                InputMode::Normal => "MC NORMAL",
-                InputMode::Insert => "MC INSERT",
-                InputMode::Replace => "MC REPLACE",
-                InputMode::Visual => "MC VISUAL",
-            }
-        } else {
-            input_mode.label()
-        },
+        vim_mode: statusline_mode_label(input_mode, multicursor.is_some()),
         recording_macro,
         workspace_name,
         buffer_name: buffer.display_name(),
@@ -30898,9 +30904,8 @@ fn multicursor_secondary_cursor_points(state: &MulticursorState) -> Vec<TextPoin
         .ranges
         .iter()
         .enumerate()
-        .filter_map(|(index, range)| {
-            (index != state.primary).then(|| advance_point_by_text(range.start(), &prefix))
-        })
+        .filter(|(index, _)| *index != state.primary)
+        .map(|(_, range)| advance_point_by_text(range.start(), &prefix))
         .collect()
 }
 
