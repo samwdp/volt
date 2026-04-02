@@ -30,21 +30,14 @@ pub fn summarize_context(header: &str, kind: &str) -> Option<String> {
         return Some(summary);
     }
     if is_loop_kind(kind) {
-        return extract_control_flow_header(&header, &["for", "while", "loop", "do"]).or(Some(header));
+        return extract_control_flow_header(&header, &["for", "while", "loop", "do"])
+            .or(Some(header));
     }
     if is_conditional_kind(kind) {
         return extract_control_flow_header(
             &header,
             &[
-                "else if",
-                "if",
-                "else",
-                "match",
-                "switch",
-                "case",
-                "default",
-                "try",
-                "catch",
+                "else if", "if", "else", "match", "switch", "case", "default", "try", "catch",
                 "finally",
             ],
         )
@@ -95,7 +88,9 @@ pub fn context_icon(kind: &str, summary: &str) -> &'static str {
         icon_font::symbols::cod::COD_SYMBOL_INTERFACE
     } else if kind.contains("enum") || summary.starts_with("enum ") {
         icon_font::symbols::cod::COD_SYMBOL_ENUM
-    } else if kind.contains("struct") || summary.starts_with("struct ") || summary.starts_with("impl ")
+    } else if kind.contains("struct")
+        || summary.starts_with("struct ")
+        || summary.starts_with("impl ")
     {
         icon_font::symbols::cod::COD_SYMBOL_STRUCTURE
     } else if kind.contains("namespace")

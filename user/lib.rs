@@ -69,11 +69,11 @@ pub mod terminal;
 pub mod theme;
 /// Tree-sitter installer and grammar management package.
 pub mod treesitter;
-mod treesittercontext_shared;
-/// Tree-sitter-backed sticky headerline context annotations.
-pub mod treesittercontext_headerline;
 /// Tree-sitter-backed ghost text context annotations.
 pub mod treesittercontext_ghosttext;
+/// Tree-sitter-backed sticky headerline context annotations.
+pub mod treesittercontext_headerline;
+mod treesittercontext_shared;
 /// Undo tree picker and history navigation.
 pub mod undotree;
 /// Vim-style bindings and motions.
