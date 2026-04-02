@@ -70,7 +70,10 @@ pub mod theme;
 /// Tree-sitter installer and grammar management package.
 pub mod treesitter;
 /// Tree-sitter-backed ghost text context annotations.
-pub mod treesitter_context;
+pub mod treesittercontext_ghosttext;
+/// Tree-sitter-backed sticky headerline context annotations.
+pub mod treesittercontext_headerline;
+mod treesittercontext_shared;
 /// Undo tree picker and history navigation.
 pub mod undotree;
 /// Vim-style bindings and motions.
@@ -115,7 +118,8 @@ pub fn packages() -> Vec<PluginPackage> {
         multicursor::package(),
         picker::package(),
         treesitter::package(),
-        treesitter_context::package(),
+        treesittercontext_headerline::package(),
+        treesittercontext_ghosttext::package(),
         undotree::package(),
         workspace::package(),
         git::package(),
@@ -427,11 +431,11 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn ghost_text_lines(&self, context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
-        treesitter_context::ghost_text_lines(context)
+        treesittercontext_ghosttext::ghost_text_lines(context)
     }
 
     fn headerline_lines(&self, context: &GhostTextContext<'_>) -> Vec<String> {
-        treesitter_context::headerline_lines(context)
+        treesittercontext_headerline::headerline_lines(context)
     }
 
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
