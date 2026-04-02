@@ -18,13 +18,14 @@ pub use editor_theme::{Color, Theme, ThemeOption};
 
 pub use abi::{
     AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor, AbiDebugAdapterSpec,
-    AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix,
-    AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory, AbiIconFontSymbol,
-    AbiLanguageConfiguration, AbiLanguageServerRootStrategy, AbiLanguageServerSpec,
-    AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings,
-    AbiOilSortMode, AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
-    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption,
-    AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGhostTextContext, AbiGhostTextLine,
+    AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
+    AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
+    AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo,
+    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSection,
+    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
+    AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
+    AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -248,6 +249,30 @@ pub struct StatuslineContext<'a> {
     pub git_removed: usize,
 }
 
+/// Context passed to the user library when producing inline ghost-text annotations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostTextContext<'a> {
+    /// Active buffer display name.
+    pub buffer_name: &'a str,
+    /// Active buffer language identifier, if any.
+    pub language_id: Option<&'a str>,
+    /// Complete buffer text.
+    pub buffer_text: &'a str,
+    /// Zero-based cursor line.
+    pub cursor_line: usize,
+    /// Zero-based cursor column.
+    pub cursor_column: usize,
+}
+
+/// One ghost-text annotation rendered on a specific buffer line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostTextLine {
+    /// Zero-based buffer line index that should receive the annotation.
+    pub line: usize,
+    /// Rendered ghost-text content, including any icon prefix.
+    pub text: String,
+}
+
 /// Stable contract implemented by the compiled user extension library.
 pub trait UserLibrary: Send + Sync {
     fn packages(&self) -> Vec<PluginPackage>;
@@ -294,6 +319,9 @@ pub trait UserLibrary: Send + Sync {
     fn browser_input_hint(&self, url: Option<&str>) -> String;
     fn browser_url_prompt(&self) -> String;
     fn browser_url_placeholder(&self) -> String;
+    fn ghost_text_lines(&self, _context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
+        Vec::new()
+    }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String;
     fn statusline_lsp_connected_icon(&self) -> &'static str;
     fn statusline_lsp_error_icon(&self) -> &'static str;

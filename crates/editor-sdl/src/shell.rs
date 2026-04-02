@@ -65,10 +65,10 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
-    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, OilDefaults, OilKeyAction,
-    PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks, browser_hooks,
-    buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks, lsp_hooks,
-    oil_hooks, oil_protocol, plugin_hooks,
+    GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
+    OilDefaults, OilKeyAction, PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks,
+    browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks,
+    lsp_hooks, oil_hooks, oil_protocol, plugin_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -27678,6 +27678,22 @@ fn render_buffer(
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let cursor_row = buffer.cursor_row();
         let cursor_col = buffer.cursor_col();
+        let buffer_text = active.then(|| buffer.text.text());
+        let ghost_text_by_line = if active {
+            user_library
+                .ghost_text_lines(&HostGhostTextContext {
+                    buffer_name: buffer.display_name(),
+                    language_id: buffer.language_id(),
+                    buffer_text: buffer_text.as_deref().unwrap_or_default(),
+                    cursor_line: cursor_row,
+                    cursor_column: cursor_col,
+                })
+                .into_iter()
+                .map(|line| (line.line, line.text))
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
         let wrapped_lines = collect_wrapped_lines(
             buffer,
             buffer.scroll_row,
@@ -27876,6 +27892,16 @@ fn render_buffer(
                         line_height,
                     )?;
                 }
+                draw_line_ghost_text_for_segment(
+                    target,
+                    segment_x,
+                    y,
+                    *segment,
+                    line_len,
+                    ghost_text_by_line.get(&line_index).map(String::as_str),
+                    muted,
+                    cell_width,
+                )?;
                 visual_row = visual_row.saturating_add(1);
             }
             if visual_row >= layout.visible_rows {
@@ -29459,6 +29485,29 @@ fn draw_buffer_text(
         draw_x += monospace_text_width(&colored_segment, cell_width) as i32;
     }
     Ok(())
+}
+
+fn draw_line_ghost_text_for_segment(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    segment: LineWrapSegment,
+    line_len: usize,
+    ghost_text: Option<&str>,
+    color: Color,
+    cell_width: i32,
+) -> Result<(), ShellError> {
+    let Some(ghost_text) = ghost_text.filter(|text| !text.is_empty()) else {
+        return Ok(());
+    };
+    let visible_end = segment.end_col.min(line_len);
+    if visible_end < line_len {
+        return Ok(());
+    }
+    let visible_cols = visible_end.saturating_sub(segment.start_col);
+    // Leave one monospace cell between the closing delimiter and the ghost text.
+    let draw_x = x + visible_cols as i32 * cell_width + cell_width;
+    draw_text(target, draw_x, y, ghost_text, color)
 }
 
 fn line_color_segments(

@@ -20,7 +20,8 @@ use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::abi::{
-    AbiDirectoryEntry, AbiGitStatusPrefix, AbiStatuslineContext, UserLibraryModuleRef,
+    AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
+    UserLibraryModuleRef,
 };
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
@@ -312,6 +313,16 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn browser_url_placeholder(&self) -> String {
         self.module.browser_url_placeholder()().into()
+    }
+
+    fn ghost_text_lines(
+        &self,
+        context: &editor_plugin_api::GhostTextContext<'_>,
+    ) -> Vec<editor_plugin_api::GhostTextLine> {
+        self.module.ghost_text_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {

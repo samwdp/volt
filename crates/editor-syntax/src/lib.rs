@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use editor_buffer::{TextBuffer, TextByteChunks, TextEdit};
+use editor_buffer::{TextBuffer, TextByteChunks, TextEdit, TextPoint};
 pub use tree_sitter::Language;
 use tree_sitter::{
     InputEdit, Parser, Point, Query, QueryCursor, Range, StreamingIterator, TextProvider, Tree,
@@ -332,6 +332,17 @@ pub struct SyntaxSnapshot {
     pub has_errors: bool,
     /// Highlight spans generated from the configured highlight query.
     pub highlight_spans: Vec<HighlightSpan>,
+}
+
+/// One named tree-sitter node in the ancestor chain for a cursor location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxNodeContext {
+    /// Tree-sitter node kind.
+    pub kind: String,
+    /// Starting line/column for the node.
+    pub start_position: SyntaxPoint,
+    /// Exclusive ending line/column for the node.
+    pub end_position: SyntaxPoint,
 }
 
 impl SyntaxSnapshot {
@@ -835,6 +846,53 @@ impl SyntaxRegistry {
         self.highlight_buffer_for_language_impl(language_id, buffer, None, None)
     }
 
+    /// Returns named ancestor nodes for a cursor location, ordered innermost to outermost.
+    pub fn ancestor_contexts_for_language(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        point: TextPoint,
+    ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
+        let language_id = language_id.to_owned();
+        if !self.languages.contains_key(&language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id));
+        }
+        self.ensure_loaded_language(&language_id)?;
+        let loaded = self
+            .loaded
+            .get(&language_id)
+            .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
+        let parse_result = parse_tree(&language_id, loaded, buffer, None)?;
+        let point = text_point_to_tree_sitter_point(buffer, point);
+        let Some(mut node) = parse_result
+            .tree
+            .root_node()
+            .named_descendant_for_point_range(point, point)
+        else {
+            return Ok(Vec::new());
+        };
+        let mut contexts = Vec::new();
+        loop {
+            let start = node.start_position();
+            let end = node.end_position();
+            let parent = node.parent();
+            // Only keep ancestors whose closing line is at or after the cursor so
+            // callers can render closing-line context breadcrumbs.
+            if node.is_named() && parent.is_some() && end.row >= point.row {
+                contexts.push(SyntaxNodeContext {
+                    kind: node.kind().to_owned(),
+                    start_position: SyntaxPoint::new(start.row, start.column),
+                    end_position: SyntaxPoint::new(end.row, end.column),
+                });
+            }
+            let Some(parent) = parent else {
+                break;
+            };
+            node = parent;
+        }
+        Ok(contexts)
+    }
+
     /// Parses and highlights a line window using a registered language identifier.
     pub fn highlight_buffer_for_language_window(
         &mut self,
@@ -1113,6 +1171,19 @@ fn load_language(
             })
         }
     }
+}
+
+/// Converts an editor [`TextPoint`] (character columns) into a tree-sitter [`Point`]
+/// whose columns are measured in UTF-8 bytes.
+///
+/// Out-of-bounds coordinates are clamped to the nearest valid line/column in the
+/// provided buffer before converting character columns into byte columns.
+fn text_point_to_tree_sitter_point(buffer: &TextBuffer, point: TextPoint) -> Point {
+    let max_line = buffer.line_count().saturating_sub(1);
+    let line = point.line.min(max_line);
+    let text = buffer.line(line).unwrap_or_default();
+    let column = text.chars().take(point.column).map(char::len_utf8).sum();
+    Point { row: line, column }
 }
 
 fn create_parser(language_id: &str, loaded: &LoadedLanguage) -> Result<Parser, SyntaxError> {
@@ -1755,7 +1826,7 @@ mod tests {
         CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
         SyntaxParseSession, SyntaxRegistry, ensure_installed_highlight_query_path,
     };
-    use editor_buffer::TextBuffer;
+    use editor_buffer::{TextBuffer, TextPoint};
 
     fn rust_language() -> super::Language {
         tree_sitter_rust::LANGUAGE.into()
@@ -1856,6 +1927,31 @@ fn main() {
                 .iter()
                 .any(|span| span.theme_token == "syntax.string")
         );
+    }
+
+    #[test]
+    fn ancestor_contexts_include_named_nodes_up_to_the_root() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let buffer = TextBuffer::from_text(
+            r#"impl Demo {
+    fn render(value: usize) {
+        let current = value;
+    }
+}
+"#,
+        );
+        let contexts =
+            must(registry.ancestor_contexts_for_language("rust", &buffer, TextPoint::new(2, 8)));
+
+        let kinds = contexts
+            .iter()
+            .map(|context| context.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"function_item"));
+        assert!(kinds.contains(&"impl_item"));
+        assert!(!kinds.contains(&"source_file"));
     }
 
     #[test]
