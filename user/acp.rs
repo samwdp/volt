@@ -1,6 +1,6 @@
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
-    plugin_hooks,
+    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginVimMode, plugin_hooks,
 };
 
 pub const ACP_BUFFER_KIND: &str = "acp";
@@ -102,6 +102,12 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "acp.focus-input",
+            "Focuses the ACP input section and enters insert mode.",
+            "ui.acp.focus-input",
+            None,
+        ),
+        hook_command(
             "acp.disconnect",
             "Disconnects the active ACP client.",
             "ui.acp.disconnect",
@@ -134,6 +140,10 @@ pub fn package() -> PluginPackage {
     PluginPackage::new("acp", true, "Agent Client Protocol integrations.")
         .with_commands(commands)
         .with_key_bindings(key_bindings)
+        .with_buffers(vec![PluginBuffer::new(ACP_BUFFER_KIND, Vec::new()).with_key_bindings(vec![
+            PluginKeyBinding::new("I", "acp.focus-input", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+        ])])
 }
 
 fn hook_command(
