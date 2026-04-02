@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn summarize_context_falls_back_to_generic_headers_for_unknown_named_nodes() {
+    fn summarize_context_handles_unknown_named_nodes() {
         assert_eq!(
             summarize_context("component Dashboard {", "component_declaration"),
             Some("component Dashboard".to_owned())

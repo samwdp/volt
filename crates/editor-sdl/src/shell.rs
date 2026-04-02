@@ -27932,13 +27932,15 @@ fn render_buffer(
                 }
                 draw_line_ghost_text_for_segment(
                     target,
-                    segment_x,
-                    y,
-                    *segment,
-                    line_len,
-                    ghost_text_by_line.get(&line_index).map(String::as_str),
-                    muted,
-                    cell_width,
+                    GhostTextSegmentDraw {
+                        x: segment_x,
+                        y,
+                        segment: *segment,
+                        line_len,
+                        ghost_text: ghost_text_by_line.get(&line_index).map(String::as_str),
+                        color: muted,
+                        cell_width,
+                    },
                 )?;
                 visual_row = visual_row.saturating_add(1);
             }
@@ -29525,27 +29527,31 @@ fn draw_buffer_text(
     Ok(())
 }
 
-fn draw_line_ghost_text_for_segment(
-    target: &mut DrawTarget<'_>,
+struct GhostTextSegmentDraw<'a> {
     x: i32,
     y: i32,
     segment: LineWrapSegment,
     line_len: usize,
-    ghost_text: Option<&str>,
+    ghost_text: Option<&'a str>,
     color: Color,
     cell_width: i32,
+}
+
+fn draw_line_ghost_text_for_segment(
+    target: &mut DrawTarget<'_>,
+    draw: GhostTextSegmentDraw<'_>,
 ) -> Result<(), ShellError> {
-    let Some(ghost_text) = ghost_text.filter(|text| !text.is_empty()) else {
+    let Some(ghost_text) = draw.ghost_text.filter(|text| !text.is_empty()) else {
         return Ok(());
     };
-    let visible_end = segment.end_col.min(line_len);
-    if visible_end < line_len {
+    let visible_end = draw.segment.end_col.min(draw.line_len);
+    if visible_end < draw.line_len {
         return Ok(());
     }
-    let visible_cols = visible_end.saturating_sub(segment.start_col);
+    let visible_cols = visible_end.saturating_sub(draw.segment.start_col);
     // Leave one monospace cell between the closing delimiter and the ghost text.
-    let draw_x = x + visible_cols as i32 * cell_width + cell_width;
-    draw_text(target, draw_x, y, ghost_text, color)
+    let draw_x = draw.x + visible_cols as i32 * draw.cell_width + draw.cell_width;
+    draw_text(target, draw_x, draw.y, ghost_text, draw.color)
 }
 
 fn visible_headerline_lines(lines: Vec<String>, visible_rows: usize) -> Vec<String> {

@@ -997,16 +997,18 @@ fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Res
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        24,
-        8,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: 1,
+        GhostTextSegmentDraw {
+            x: 24,
+            y: 8,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 1,
+            },
+            line_len: 1,
+            ghost_text: Some(" render(value: usize)"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
         },
-        1,
-        Some(" render(value: usize)"),
-        Color::RGB(140, 144, 152),
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1029,16 +1031,18 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        0,
-        0,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: 10,
+        GhostTextSegmentDraw {
+            x: 0,
+            y: 0,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 10,
+            },
+            line_len: 24,
+            ghost_text: Some("hidden"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
         },
-        24,
-        Some("hidden"),
-        Color::RGB(140, 144, 152),
-        8,
     )
     .map_err(|error| error.to_string())?;
 

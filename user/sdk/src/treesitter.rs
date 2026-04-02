@@ -19,7 +19,7 @@ pub fn ancestor_contexts_for_cursor(
     if registry.register_all(languages.iter().cloned()).is_err() {
         return Vec::new();
     }
-    let buffer = TextBuffer::from_text(buffer_text.to_owned());
+    let buffer = TextBuffer::from_text(buffer_text);
     registry
         .ancestor_contexts_for_language(
             language_id,
