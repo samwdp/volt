@@ -29,6 +29,9 @@ use editor_syntax::SyntaxRegistry;
 use editor_terminal::TerminalSession;
 use editor_theme::ThemeRegistry;
 
+#[cfg(test)]
+mod standalone_user;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartupProfile {
     name: &'static str,
