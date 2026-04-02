@@ -267,6 +267,7 @@
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
                 <a class="button button-ghost" href="language.html">Add a Language</a>
+                <a class="button button-ghost" href="changelog.html">Changelog</a>
                 <a class="button button-primary" href="#creating-a-new-plugin">Get Started</a>
             </div>
         </header>
@@ -322,10 +323,13 @@
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lib.rs                        <span class="hl-cyan">&#9474;</span>  Package registry &amp; trait impl
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; vim.rs                        <span class="hl-cyan">&#9474;</span>  Vim bindings
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; calculator.rs                 <span class="hl-cyan">&#9474;</span>  Calculator evaluator
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; multicursor.rs                <span class="hl-cyan">&#9474;</span>  Multiple cursor editing
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; undotree.rs                   <span class="hl-cyan">&#9474;</span>  Undo tree history picker
+<span class="hl-cyan">&#9474;</span>   &#9500;&#9472; treesitter.rs                 <span class="hl-cyan">&#9474;</span>  Tree-sitter grammar management
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; compile.rs                    <span class="hl-cyan">&#9474;</span>  Build / compile integration
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lsp.rs                        <span class="hl-cyan">&#9474;</span>  LSP lifecycle
 <span class="hl-cyan">&#9474;</span>   &#9500;&#9472; lang/                         <span class="hl-cyan">&#9474;</span>  Per-language configs
-<span class="hl-cyan">&#9474;</span>   &#9492;&#9472; ...                           <span class="hl-cyan">&#9474;</span>  26+ modules
+<span class="hl-cyan">&#9474;</span>   &#9492;&#9472; ...                           <span class="hl-cyan">&#9474;</span>  30+ modules
 <span class="hl-cyan">&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;</span></div>
 
                     <p class="reveal">
@@ -919,6 +923,58 @@ const LEADER_KEY: &amp;str = "Comma";</code></pre>
                         <code>git_branch</code>, and <code>lsp_diagnostics</code>.  Edit the rendering
                         functions to customize what appears in the statusline.
                     </p>
+
+                    <h3 class="reveal">Multiple Cursors</h3>
+                    <p class="reveal">
+                        The <code>multicursor</code> package (<code>user/multicursor.rs</code>) adds
+                        multi-cursor editing support.  Two commands are provided:
+                        <code>multicursor.add-next-match</code> adds a cursor at the next occurrence of
+                        the current word, and <code>multicursor.select-all-matches</code> selects all
+                        occurrences in the buffer.  Default keybindings can be changed in the
+                        <code>.with_key_bindings(vec![...])</code> block in that file.
+                    </p>
+
+                    <h3 class="reveal">Undo Tree</h3>
+                    <p class="reveal">
+                        The <code>undotree</code> package (<code>user/undotree.rs</code>) exposes the
+                        editor&#8217;s full undo history as a picker.  Run
+                        <code>undo-tree.open</code> to open the history picker and jump to any past
+                        state.  The package is auto-loaded and requires no configuration.
+                    </p>
+
+                    <h3 class="reveal">Tree-Sitter Grammar Management</h3>
+                    <p class="reveal">
+                        The <code>treesitter</code> package (<code>user/treesitter.rs</code>) provides
+                        the <code>treesitter.install</code> command, which opens a language picker to
+                        install grammars on demand.  Grammars are placed in the per-user grammar
+                        directory (<code>%LOCALAPPDATA%\volt\grammars</code> on Windows,
+                        <code>~/.local/share/volt/grammars</code> elsewhere, or the
+                        <code>VOLT_GRAMMAR_DIR</code> override).
+                    </p>
+
+                    <h3 class="reveal">Tree-Sitter Context Annotations</h3>
+                    <p class="reveal">
+                        Two auto-loaded packages provide ambient code context derived from the active
+                        tree-sitter parse tree:
+                    </p>
+                    <ul class="reveal">
+                        <li>
+                            <strong><code>treesittercontext_headerline</code></strong>
+                            (<code>user/treesittercontext_headerline.rs</code>) &#8212; displays sticky
+                            breadcrumb lines above the viewport showing the enclosing function, class,
+                            or block.
+                        </li>
+                        <li>
+                            <strong><code>treesittercontext_ghosttext</code></strong>
+                            (<code>user/treesittercontext_ghosttext.rs</code>) &#8212; renders inline
+                            ghost-text annotations at closing braces and scope boundaries.
+                        </li>
+                    </ul>
+                    <p class="reveal">
+                        Both packages are registered via <code>UserLibraryModule</code> fields rather
+                        than through <code>packages()</code>, so they do not appear in the package
+                        list but are always active.
+                    </p>
                 </section>
 
                 <hr>
@@ -1206,6 +1262,7 @@ cargo test -p volt-user tests::user_library_exports_themes -- --exact</code></pr
                     <li><a href="#autocomplete-providers">Autocomplete</a></li>
                     <li><a href="#adding-language-support">Languages</a></li>
                     <li><a href="#building-and-testing">Build &amp; Test</a></li>
+                    <li><a href="changelog.html">Changelog ↗</a></li>
                 </ul>
             </nav>
         </aside>

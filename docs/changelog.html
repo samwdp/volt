@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Volt Changelog</title>
+    <meta
+        name="description"
+        content="Volt editor changelog — what has changed across releases."
+    >
+    <link rel="icon" type="image/x-icon" href="assets/logo.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@700;800;900&display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .guide-body {
+            max-width: 860px;
+            margin: 0 auto;
+            padding: 0 0 64px;
+        }
+
+        .guide-body h2 {
+            font-size: clamp(1.4rem, 2.8vw, 1.9rem);
+            margin: 48px 0 16px;
+            color: var(--text);
+        }
+
+        .guide-body h3 {
+            font-size: 1.05rem;
+            margin: 28px 0 10px;
+            color: var(--text);
+        }
+
+        .guide-body p,
+        .guide-body li {
+            color: var(--text-dim);
+            line-height: 1.7;
+            font-size: 0.97rem;
+        }
+
+        .guide-body ul,
+        .guide-body ol {
+            padding-left: 1.4rem;
+            margin: 10px 0 16px;
+        }
+
+        .guide-body li {
+            margin-bottom: 6px;
+        }
+
+        .guide-body a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+        }
+
+        .guide-body a:hover {
+            text-decoration: underline;
+        }
+
+        .guide-body strong {
+            color: var(--text);
+        }
+
+        .guide-body code {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.88em;
+            background: rgba(255, 255, 255, 0.07);
+            border-radius: 5px;
+            padding: 1px 5px;
+        }
+
+        .guide-body hr {
+            border: none;
+            border-top: 1px solid var(--line);
+            margin: 40px 0;
+        }
+
+        /* Changelog entry card */
+        .cl-entry {
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 28px 32px 24px;
+            margin-bottom: 32px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .cl-entry::before {
+            content: "";
+            position: absolute;
+            inset: 0 0 auto;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-purple), transparent);
+        }
+
+        .cl-entry-header {
+            display: flex;
+            align-items: baseline;
+            gap: 14px;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+        }
+
+        .cl-version {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--accent-cyan);
+        }
+
+        .cl-date {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+
+        .cl-tag {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            border-radius: 6px;
+            padding: 2px 8px;
+        }
+
+        .cl-tag-new {
+            background: rgba(0, 232, 255, 0.14);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(0, 232, 255, 0.28);
+        }
+
+        .cl-tag-fix {
+            background: rgba(247, 76, 0, 0.14);
+            color: var(--accent-rust);
+            border: 1px solid rgba(247, 76, 0, 0.28);
+        }
+
+        .cl-tag-improved {
+            background: rgba(184, 119, 219, 0.14);
+            color: var(--accent-purple);
+            border: 1px solid rgba(184, 119, 219, 0.28);
+        }
+
+        .cl-tag-docs {
+            background: rgba(186, 230, 126, 0.14);
+            color: var(--accent-green);
+            border: 1px solid rgba(186, 230, 126, 0.28);
+        }
+
+        .cl-section {
+            margin-bottom: 18px;
+        }
+
+        .cl-section-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin: 0 0 8px;
+        }
+
+        .cl-section ul {
+            margin: 0;
+            padding-left: 1.2rem;
+        }
+
+        .cl-section li {
+            font-size: 0.95rem;
+            color: var(--text-dim);
+            line-height: 1.65;
+            margin-bottom: 5px;
+        }
+
+        .cl-section li strong {
+            color: var(--text);
+        }
+
+        .cl-pr {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.78em;
+            color: var(--text-dim);
+            margin-left: 6px;
+        }
+
+        .toc-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 22px 24px;
+            margin-bottom: 36px;
+        }
+
+        .toc-card h2 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--accent-cyan);
+            margin: 0 0 14px;
+        }
+
+        .toc-card ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 18px;
+        }
+
+        .toc-card li a {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.83rem;
+            color: var(--text-dim);
+        }
+
+        .toc-card li a:hover {
+            color: var(--accent-cyan);
+        }
+
+        @media (max-width: 560px) {
+            .cl-entry {
+                padding: 20px;
+            }
+
+            .toc-card {
+                padding: 18px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="site-shell">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+
+        <header class="topbar topbar--slim">
+            <a class="brand" href="index.html" aria-label="Volt Docs home">
+                <span class="brand-mark">
+                    <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
+                </span>
+                <span class="brand-copy">
+                    <strong>Volt Docs</strong>
+                    <small>Changelog</small>
+                </span>
+            </a>
+
+            <button
+                class="nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="page-sidebar"
+            >
+                Menu
+            </button>
+
+            <div class="topbar-actions">
+                <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="user-packages.html">User Packages</a>
+                <a class="button button-ghost" href="language.html">Add a Language</a>
+                <a class="button button-primary" href="#unreleased">Latest</a>
+            </div>
+        </header>
+
+        <div class="page-layout">
+        <main id="top">
+            <!-- Hero -->
+            <section class="hero section" style="display:block;">
+                <div class="hero-copy reveal" style="max-width:880px;margin:0 auto;">
+                    <a class="back-link" href="index.html">&#8592; Back to Volt Docs</a>
+                    <p class="eyebrow">Release history</p>
+                    <h1 style="max-width:none;font-size:clamp(2.2rem,4.6vw,4.4rem);">Changelog</h1>
+                    <p class="hero-text">
+                        A running record of what has been added, changed, fixed, or removed in Volt.
+                        Each section corresponds to a tagged release or an unreleased work-in-progress
+                        snapshot.  The format follows
+                        <a href="https://keepachangelog.com/en/1.1.0/" style="color:var(--accent-cyan);">Keep a Changelog</a>.
+                    </p>
+                </div>
+            </section>
+
+            <div class="guide-body">
+
+                <!-- Table of contents -->
+                <nav class="toc-card reveal" aria-label="Releases">
+                    <h2>Releases</h2>
+                    <ul>
+                        <li><a href="#unreleased">Unreleased</a></li>
+                    </ul>
+                </nav>
+
+                <!-- Unreleased -->
+                <section id="unreleased">
+                    <div class="cl-entry reveal">
+                        <div class="cl-entry-header">
+                            <span class="cl-version">Unreleased</span>
+                            <span class="cl-date">HEAD &mdash; ongoing</span>
+                        </div>
+
+                        <div class="cl-section">
+                            <p class="cl-section-label">Rendering</p>
+                            <ul>
+                                <li>
+                                    <strong>All multicursor cursors now render in the SDL shell.</strong>
+                                    Previously only the primary cursor was drawn; secondary cursors
+                                    added via <code>multicursor.add-next-match</code> or
+                                    <code>multicursor.select-all-matches</code> are now visible.
+                                    <span class="cl-pr">#39</span>
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="cl-section">
+                            <p class="cl-section-label">UI &amp; Docs</p>
+                            <ul>
+                                <li>
+                                    <strong>Adjusted plugin section bottom spacing</strong> in the docs
+                                    for better visual rhythm.
+                                    <span class="cl-pr">#40</span>
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="cl-section">
+                            <p class="cl-section-label">New features (undated)</p>
+                            <ul>
+                                <li>
+                                    <strong>Multiple cursor support.</strong>  The
+                                    <code>multicursor</code> package provides
+                                    <code>multicursor.add-next-match</code> and
+                                    <code>multicursor.select-all-matches</code> with default
+                                    Vim-mode keybindings.
+                                </li>
+                                <li>
+                                    <strong>Undo tree picker.</strong>  The <code>undotree</code>
+                                    package exposes the full undo history as a picker via
+                                    <code>undo-tree.open</code>.
+                                </li>
+                                <li>
+                                    <strong>Tree-sitter grammar installer.</strong>  The
+                                    <code>treesitter</code> package provides
+                                    <code>treesitter.install</code> to install grammars on demand
+                                    into the per-user grammar directory.
+                                </li>
+                                <li>
+                                    <strong>Tree-sitter context annotations.</strong>  Two new
+                                    built-in providers add ambient code context:
+                                    <code>treesittercontext_headerline</code> renders sticky
+                                    breadcrumb lines above the viewport, and
+                                    <code>treesittercontext_ghosttext</code> renders inline ghost-text
+                                    at scope boundaries.
+                                </li>
+                                <li>
+                                    <strong>Calculator buffer.</strong>  The <code>calculator</code>
+                                    package provides an expression-evaluator split-pane buffer with
+                                    autocomplete and hover providers.
+                                </li>
+                                <li>
+                                    <strong>Oil directory browser.</strong>  The <code>oil</code>
+                                    package provides an editable directory buffer with configurable
+                                    defaults and keybindings.
+                                </li>
+                                <li>
+                                    <strong>ACP (Agent Client Protocol) integration.</strong>  The
+                                    <code>acp</code> package provides structured integration with
+                                    AI-agent tooling through the plugin ABI.
+                                </li>
+                                <li>
+                                    <strong>Nerd Font / icon font support.</strong>  The
+                                    <code>icon_font</code> module exposes bundled icon-font symbol
+                                    metadata backed by <code>editor-icons</code>, enabling icon
+                                    glyphs in the status line, file pickers, and other UI surfaces.
+                                </li>
+                                <li>
+                                    <strong>Vim command-line.</strong>  The <code>commandline</code>
+                                    module enables the Vim <code>:</code> command-line surface,
+                                    configurable via <code>UserLibrary::commandline_enabled()</code>.
+                                </li>
+                                <li>
+                                    <strong>Text ligatures.</strong>  The <code>ligatures</code>
+                                    module exposes per-language ligature configuration surfaced to the
+                                    SDL renderer.
+                                </li>
+                                <li>
+                                    <strong>Image viewer.</strong>  The <code>image</code> package
+                                    provides a native image-viewer buffer kind with open commands and
+                                    keybindings.
+                                </li>
+                                <li>
+                                    <strong>Browser buffer.</strong>  The <code>browser</code> package
+                                    provides a slim in-editor browser buffer groundwork.
+                                </li>
+                                <li>
+                                    <strong>Interactive buffer workflows.</strong>  The
+                                    <code>interactive</code> package provides read-only interactive
+                                    buffer workflows used by pickers and output surfaces.
+                                </li>
+                                <li>
+                                    <strong>Extended language support.</strong>  New built-in language
+                                    modules: C, C++, C#, CSS, Git Commit (syntax-only), Go, HTML,
+                                    JavaScript / JSX, JSON, Makefile, Markdown (block + inline),
+                                    Odin, SCSS, SQL, TOML, TypeScript / TSX, YAML, Zig — 23 grammar
+                                    registrations in total (20 base modules, plus JSX, TSX, and
+                                    inline Markdown as separate variants).
+                                </li>
+                                <li>
+                                    <strong>Themes.</strong>  Seven compiled themes ship in the user
+                                    library: <code>volt-dark</code>, <code>volt-light</code>,
+                                    <code>vscode-dark</code>, <code>vscode-light</code>,
+                                    <code>gruvbox-dark</code>, <code>gruvbox-light</code>, and
+                                    <code>rosepine-dark</code>.
+                                </li>
+                                <li>
+                                    <strong><code>editor-icons</code> crate.</strong>  A new workspace
+                                    crate that provides bundled icon-font symbol tables and metadata
+                                    for use across the UI layer.
+                                </li>
+                                <li>
+                                    <strong>DAP (Debug Adapter Protocol) integration.</strong>  The
+                                    <code>dap</code> package and <code>editor-dap</code> crate provide
+                                    session planning and debug adapter lifecycle management.
+                                </li>
+                                <li>
+                                    <strong>Git fringe.</strong>  The <code>gitfringe</code> package
+                                    provides configurable gutter decorations for Git change indicators.
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <p class="reveal" style="font-size:0.88rem;color:var(--text-dim);margin-top:-8px;">
+                        No tagged releases have been cut yet.  This page will be updated with a
+                        version entry and date when the first tag is created.  To see commit-level
+                        detail, browse the
+                        <a href="https://github.com/samwdp/volt/commits/main">commit history on GitHub</a>.
+                    </p>
+                </section>
+
+            </div>
+        </main>
+
+        <aside
+            class="page-sidebar"
+            id="page-sidebar"
+            aria-label="Page navigation">
+            <nav class="sidebar-nav" aria-label="On this page">
+                <p class="sidebar-nav-label">Releases</p>
+                <ul>
+                    <li><a href="#unreleased">Unreleased</a></li>
+                    <li><a href="index.html">Home ↗</a></li>
+                    <li><a href="user-packages.html">Packages ↗</a></li>
+                    <li><a href="language.html">Languages ↗</a></li>
+                </ul>
+            </nav>
+        </aside>
+        </div>
+
+        <footer class="site-footer">
+            <p>
+                <strong>Volt</strong> pairs Vim-style editing with a layered Rust runtime, compiled
+                customization, and modern tooling integration.
+            </p>
+            <a href="#top">Back to top</a>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
