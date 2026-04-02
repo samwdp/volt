@@ -1,44 +1,40 @@
-use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet};
 
-use editor_buffer::{TextBuffer, TextPoint};
-use editor_plugin_api::{GhostTextContext, GhostTextLine};
-use editor_syntax::{SyntaxNodeContext, SyntaxRegistry};
+use editor_plugin_api::{
+    GhostTextContext, GhostTextLine, PluginPackage, SyntaxNodeContext, treesitter,
+};
 
-use crate::{icon_font, syntax_languages};
+use crate::icon_font;
 
-pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
-    let Some(language_id) = context.language_id else {
-        return Vec::new();
-    };
-    if context.buffer_text.is_empty() {
-        return Vec::new();
-    }
-    let Ok(mut registry) = syntax_registry().lock() else {
-        return Vec::new();
-    };
-    let buffer = TextBuffer::from_text(context.buffer_text.to_owned());
-    let Ok(contexts) = registry.ancestor_contexts_for_language(
-        language_id,
-        &buffer,
-        TextPoint::new(context.cursor_line, context.cursor_column),
-    ) else {
-        return Vec::new();
-    };
-    build_ghost_text_lines(context.buffer_text, context.cursor_line, &contexts)
+/// Returns the metadata for the tree-sitter context package.
+pub fn package() -> PluginPackage {
+    PluginPackage::new(
+        "treesitter-context",
+        true,
+        "Tree-sitter powered sticky headerline context and inline breadcrumbs.",
+    )
 }
 
-fn syntax_registry() -> &'static Mutex<SyntaxRegistry> {
-    static REGISTRY: OnceLock<Mutex<SyntaxRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        let mut registry = SyntaxRegistry::new();
-        if let Err(error) = registry.register_all(syntax_languages()) {
-            panic!(
-                "ghost text syntax registration failed; verify user/lang definitions and installed grammars: {error:?}"
-            );
-        }
-        Mutex::new(registry)
-    })
+pub fn headerline_lines(context: &GhostTextContext<'_>) -> Vec<String> {
+    let contexts = treesitter::ancestor_contexts_for_cursor(
+        &crate::syntax_languages(),
+        context.language_id,
+        context.buffer_text,
+        context.cursor_line,
+        context.cursor_column,
+    );
+    build_headerline_lines(context.buffer_text, &contexts)
+}
+
+pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
+    let contexts = treesitter::ancestor_contexts_for_cursor(
+        &crate::syntax_languages(),
+        context.language_id,
+        context.buffer_text,
+        context.cursor_line,
+        context.cursor_column,
+    );
+    build_ghost_text_lines(context.buffer_text, context.cursor_line, &contexts)
 }
 
 fn build_ghost_text_lines(
@@ -64,6 +60,24 @@ fn build_ghost_text_lines(
         .into_iter()
         .map(|(line, text)| GhostTextLine { line, text })
         .collect()
+}
+
+fn build_headerline_lines(buffer_text: &str, contexts: &[SyntaxNodeContext]) -> Vec<String> {
+    let lines = buffer_text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    let mut headerline = Vec::new();
+    for context in contexts.iter().rev() {
+        let Some(text) = format_context_label(&lines, context) else {
+            continue;
+        };
+        if seen.insert(text.clone()) {
+            headerline.push(text);
+        }
+    }
+    headerline
 }
 
 fn format_context_label(lines: &[&str], context: &SyntaxNodeContext) -> Option<String> {
@@ -107,7 +121,10 @@ fn summarize_context(header: &str, kind: &str) -> Option<String> {
         )
         .or(Some(header));
     }
-    None
+    if ignored_context_kind(kind) {
+        return None;
+    }
+    Some(header)
 }
 
 fn trim_context_header(header: &str) -> &str {
@@ -186,6 +203,25 @@ fn extract_control_flow_header(header: &str, keywords: &[&str]) -> Option<String
     None
 }
 
+fn ignored_context_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "block"
+            | "compound_statement"
+            | "statement_block"
+            | "declaration_list"
+            | "source_file"
+            | "program"
+            | "document"
+            | "body"
+            | "parameters"
+            | "parameter_list"
+            | "arguments"
+            | "argument_list"
+            | "field_declaration_list"
+    )
+}
+
 fn context_icon(kind: &str, summary: &str) -> &'static str {
     if kind.contains("class") || summary.starts_with("class ") {
         icon_font::symbols::cod::COD_SYMBOL_CLASS
@@ -215,8 +251,8 @@ fn context_icon(kind: &str, summary: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ghost_text_lines, context_icon, extract_control_flow_header, extract_signature,
-        summarize_context,
+        build_ghost_text_lines, build_headerline_lines, context_icon, extract_control_flow_header,
+        extract_signature, package, summarize_context,
     };
     use crate::icon_font;
     use editor_syntax::{SyntaxNodeContext, SyntaxPoint};
@@ -325,5 +361,51 @@ mod tests {
             context_icon("if_statement", "if value > 0"),
             icon_font::symbols::md::MD_SOURCE_BRANCH
         );
+    }
+
+    #[test]
+    fn build_headerline_lines_orders_contexts_outermost_first() {
+        let buffer =
+            "impl Demo {\n    fn render(value: usize) {\n        let current = value;\n    }\n}\n";
+        let contexts = vec![
+            SyntaxNodeContext {
+                kind: "function_item".to_owned(),
+                start_position: SyntaxPoint::new(1, 4),
+                end_position: SyntaxPoint::new(3, 5),
+            },
+            SyntaxNodeContext {
+                kind: "impl_item".to_owned(),
+                start_position: SyntaxPoint::new(0, 0),
+                end_position: SyntaxPoint::new(4, 1),
+            },
+        ];
+
+        assert_eq!(
+            build_headerline_lines(buffer, &contexts),
+            vec![
+                format!(
+                    "{} impl Demo",
+                    icon_font::symbols::cod::COD_SYMBOL_STRUCTURE
+                ),
+                format!(
+                    "{} render(value: usize)",
+                    icon_font::symbols::cod::COD_SYMBOL_METHOD
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn summarize_context_falls_back_to_generic_headers_for_unknown_named_nodes() {
+        assert_eq!(
+            summarize_context("component Dashboard {", "component_declaration"),
+            Some("component Dashboard".to_owned())
+        );
+        assert_eq!(summarize_context("{", "block"), None);
+    }
+
+    #[test]
+    fn package_is_auto_loaded() {
+        assert!(package().auto_load());
     }
 }

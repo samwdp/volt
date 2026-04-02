@@ -1047,6 +1047,26 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
 }
 
 #[test]
+fn visible_headerline_lines_keeps_innermost_contexts_when_space_is_limited() {
+    assert_eq!(
+        visible_headerline_lines(
+            vec![
+                "module app".to_owned(),
+                "impl Demo".to_owned(),
+                "render(value: usize)".to_owned(),
+            ],
+            3,
+        ),
+        vec!["impl Demo".to_owned(), "render(value: usize)".to_owned()]
+    );
+}
+
+#[test]
+fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
+    assert!(visible_headerline_lines(vec!["render()".to_owned()], 1).is_empty());
+}
+
+#[test]
 fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
     let line = AcpRenderedTextLine {
         prefix: vec![

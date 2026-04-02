@@ -115,6 +115,7 @@ pub fn packages() -> Vec<PluginPackage> {
         multicursor::package(),
         picker::package(),
         treesitter::package(),
+        treesitter_context::package(),
         undotree::package(),
         workspace::package(),
         git::package(),
@@ -427,6 +428,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn ghost_text_lines(&self, context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
         treesitter_context::ghost_text_lines(context)
+    }
+
+    fn headerline_lines(&self, context: &GhostTextContext<'_>) -> Vec<String> {
+        treesitter_context::headerline_lines(context)
     }
 
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
@@ -781,6 +786,26 @@ extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<Ab
         .into()
 }
 
+extern "C" fn exported_headerline_lines(context: AbiGhostTextContext) -> RVec<RString> {
+    let context = GhostTextContext {
+        buffer_name: context.buffer_name.as_str(),
+        language_id: context
+            .language_id
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
+        buffer_text: context.buffer_text.as_str(),
+        cursor_line: context.cursor_line,
+        cursor_column: context.cursor_column,
+    };
+    UserLibraryImpl
+        .headerline_lines(&context)
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
 extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RString {
     let context = StatuslineContext {
         vim_mode: context.vim_mode.as_str(),
@@ -936,6 +961,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         default_build_command: exported_default_build_command,
         ligature_config_v1: exported_ligature_config,
         ghost_text_lines: exported_ghost_text_lines,
+        headerline_lines: exported_headerline_lines,
     }
     .leak_into_prefix()
 }

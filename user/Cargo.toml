@@ -16,7 +16,6 @@ workspace = true
 
 [dependencies]
 abi_stable = "0.11"
-editor-buffer = { path = "../crates/editor-buffer" }
 editor-core = { path = "../crates/editor-core" }
 editor-fs = { path = "../crates/editor-fs" }
 editor-git = { path = "../crates/editor-git" }
@@ -27,4 +26,5 @@ editor-theme = { path = "../crates/editor-theme" }
 toml = "0.8.23"
 
 [dev-dependencies]
+editor-buffer = { path = "../crates/editor-buffer" }
 editor-syntax = { path = "../crates/editor-syntax" }
