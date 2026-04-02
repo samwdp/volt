@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use editor_plugin_api::{GhostTextContext, GhostTextLine, PluginPackage, treesitter};
 
-use crate::treesittercontext_shared::{
-    context_icon, extract_control_flow_header, extract_signature, format_context_label,
-    summarize_context,
-};
+use crate::treesittercontext_shared::format_context_label;
 
 /// Returns the metadata for the tree-sitter ghost text context package.
 pub fn package() -> PluginPackage {
