@@ -28777,7 +28777,9 @@ fn render_buffer(
         let mut cursor_col_on_screen = None;
         let mut cursor_indent_cols = 0usize;
         let multicursor_points = if active {
-            multicursor.map(multicursor_cursor_points).unwrap_or_default()
+            multicursor
+                .map(multicursor_cursor_points)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
