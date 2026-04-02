@@ -1,5 +1,8 @@
 use crate::icon_font::symbols::{cod, md};
-use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+use editor_plugin_api::{
+    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginVimMode,
+};
 
 pub const BROWSER_KIND: &str = "browser";
 pub const BUFFER_NAME: &str = "*browser*";
@@ -39,6 +42,20 @@ pub fn package() -> PluginPackage {
             "Detects a URL in the current buffer and opens it in the popup browser.",
             vec![PluginAction::emit_hook(HOOK_BROWSER_URL, None::<&str>)],
         ),
+        PluginCommand::new(
+            "browser.focus-input",
+            "Focuses the browser input section and enters insert mode.",
+            vec![PluginAction::emit_hook(
+                "ui.browser.focus-input",
+                None::<&str>,
+            )],
+        ),
+    ])
+    .with_buffers(vec![
+        PluginBuffer::new(BROWSER_KIND, Vec::<String>::new()).with_key_bindings(vec![
+            PluginKeyBinding::new("I", "browser.focus-input", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+        ]),
     ])
 }
 

@@ -478,9 +478,9 @@ fn update_acp_input_hint(
     let command_hint = active_command_input_hint(available_commands, &input_text);
     let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref());
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
-        && let Some(input) = buffer.input_field_mut()
+        && let Some(footer) = buffer.acp_footer_pane_mut()
     {
-        input.set_hint(hint);
+        footer.replace_lines(hint.into_iter().collect(), true);
     }
 }
 
@@ -974,8 +974,23 @@ pub(super) fn acp_permission_picker_submitted(
 
 pub(super) fn acp_switch_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    let _ = buffer.acp_switch_pane();
+    let (is_input, read_only) = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let _ = buffer.acp_switch_pane();
+        (
+            matches!(buffer.acp_active_pane(), Some(AcpPane::Input)),
+            buffer.is_read_only(),
+        )
+    };
+    let ui = shell_ui_mut(runtime)?;
+    ui.set_active_vim_target(if is_input {
+        VimTarget::Input
+    } else {
+        VimTarget::Buffer
+    });
+    if read_only {
+        ui.enter_normal_mode();
+    }
     Ok(())
 }
 
