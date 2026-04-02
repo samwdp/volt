@@ -5970,6 +5970,84 @@ fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), Strin
 }
 
 #[test]
+fn render_buffer_multicursor_draws_one_cursor_per_range() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*multicursor-render*",
+        vec!["alpha alpha alpha".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.input = Some(InputField::new(">"));
+        buffer.set_cursor(TextPoint::new(0, 6));
+    }
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let cursor_color = to_render_color(Color::RGB(110, 170, 255));
+    let multicursor = MulticursorState {
+        match_text: "alpha".to_owned(),
+        ranges: vec![
+            TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+            TextRange::new(TextPoint::new(0, 6), TextPoint::new(0, 11)),
+            TextRange::new(TextPoint::new(0, 12), TextPoint::new(0, 17)),
+        ],
+        primary: 1,
+        cursor_offset: 0,
+        visual_anchor_offset: None,
+    };
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        Some(&multicursor),
+        None,
+        InputMode::Insert,
+        true,
+        None,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let cursor_positions = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::FillRoundedRect { rect, color, .. }
+                if *color == cursor_color && rect.y == layout.body_y =>
+            {
+                Some(rect.x)
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let text_x = rect.x() + 12 + 8 + (5 * 8);
+    assert_eq!(
+        cursor_positions,
+        [text_x, text_x + 6 * 8, text_x + 12 * 8]
+            .into_iter()
+            .collect()
+    );
+    Ok(())
+}
+
+#[test]
 fn render_terminal_buffer_uses_buffer_cursor_in_normal_mode() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_terminal_test_buffer(&mut state)?;
