@@ -236,12 +236,107 @@ indent = 4
 format_on_save = true
 use_tabs = false
 
+[langs.c]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.cpp]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.csharp]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.css]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.gitcommit]
+indent = 4
+format_on_save = false
+use_tabs = false
+
+[langs.go]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.html]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.javascript]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.jsx]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.json]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.make]
+indent = 4
+format_on_save = false
+use_tabs = true
+
 [langs.markdown]
 indent = 0
+format_on_save = false
+use_tabs = false
+
+[langs.odin]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.python]
+indent = 4
+format_on_save = true
+use_tabs = false
+
+[langs.scss]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.sql]
+indent = 2
 format_on_save = false
 use_tabs = false
 
 [langs.typescript]
 indent = 2
 format_on_save = false
+use_tabs = false
+
+[langs.tsx]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.toml]
+indent = 4
+format_on_save = false
+use_tabs = false
+
+[langs.yaml]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.zig]
+indent = 4
+format_on_save = true
 use_tabs = false

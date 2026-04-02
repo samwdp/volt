@@ -5,7 +5,12 @@ use super::common;
 
 /// HTML language support and theme mappings.
 pub fn package() -> PluginPackage {
-    common::package("html", "HTML", &["html", "htm"], &["html|prettier|--write"])
+    common::package(
+        "html",
+        "HTML",
+        &["html", "htm"],
+        &["html|prettier|--write|--tab-width 2"],
+    )
 }
 
 /// Returns the syntax registration for the HTML tree-sitter language.

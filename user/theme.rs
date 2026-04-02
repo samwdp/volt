@@ -308,7 +308,7 @@ fn parse_option(option: &str, value: &toml::Value) -> Result<ThemeOption, String
 
 #[cfg(test)]
 mod tests {
-    use super::parse_theme;
+    use super::{list_theme_files, parse_theme};
     use editor_theme::Color;
 
     #[test]
@@ -368,5 +368,64 @@ blue = "#83a598"
             theme.color("ui.background"),
             Some(Color::rgb(0x83, 0xa5, 0x98))
         );
+    }
+
+    #[test]
+    fn bundled_themes_define_defaults_for_all_compiled_languages() {
+        let expected_language_ids = [
+            "c",
+            "cpp",
+            "csharp",
+            "css",
+            "gitcommit",
+            "go",
+            "html",
+            "javascript",
+            "json",
+            "make",
+            "markdown",
+            "odin",
+            "python",
+            "rust",
+            "scss",
+            "sql",
+            "toml",
+            "tsx",
+            "typescript",
+            "yaml",
+            "zig",
+            "jsx",
+        ];
+        let themes_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let theme_files = list_theme_files(&themes_dir)
+            .unwrap_or_else(|error| panic!("failed to list bundled themes: {error}"));
+
+        for path in theme_files {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let theme = parse_theme(&path, &source)
+                .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+            for language_id in expected_language_ids {
+                let indent_key = format!("langs.{language_id}.indent");
+                let format_key = format!("langs.{language_id}.format_on_save");
+                let tabs_key = format!("langs.{language_id}.use_tabs");
+                assert!(
+                    theme.option_number(&indent_key).is_some(),
+                    "theme {} missing {indent_key}",
+                    path.display()
+                );
+                assert!(
+                    theme.option_bool(&format_key).is_some(),
+                    "theme {} missing {format_key}",
+                    path.display()
+                );
+                assert!(
+                    theme.option_bool(&tabs_key).is_some(),
+                    "theme {} missing {tabs_key}",
+                    path.display()
+                );
+            }
+        }
     }
 }

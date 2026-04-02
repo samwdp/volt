@@ -17,7 +17,7 @@ pub fn package() -> PluginPackage {
             PluginAction::log_message("JSON language package attached."),
             PluginAction::emit_hook(
                 "workspace.formatter.register",
-                Some("json|prettier|--write"),
+                Some("json|prettier|--write|--tab-width 2"),
             ),
             PluginAction::emit_hook("lang.json.attached", Some("json")),
         ],
