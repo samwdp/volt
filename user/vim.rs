@@ -710,7 +710,6 @@ pub fn package() -> PluginPackage {
         ),
         // Undo/Redo commands
         normal_binding("u", "vim.undo", PluginKeymapScope::Workspace),
-        normal_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         normal_binding(
             "Ctrl+d",
             "vim.scroll-half-page-down",
@@ -867,7 +866,6 @@ pub fn package() -> PluginPackage {
         ),
         // Registers
         visual_binding("\"", "vim.select-register", PluginKeymapScope::Workspace),
-        visual_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         visual_binding(
             "Ctrl+d",
             "vim.scroll-half-page-down",

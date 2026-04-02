@@ -255,6 +255,15 @@ pub(crate) enum VisualSelection {
     Block(BlockSelection),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MulticursorState {
+    pub(crate) match_text: String,
+    pub(crate) ranges: Vec<TextRange>,
+    pub(crate) primary: usize,
+    pub(crate) cursor_offset: usize,
+    pub(crate) visual_anchor_offset: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BlockInsertState {
     pub(crate) selection: BlockSelection,
@@ -278,6 +287,7 @@ pub(crate) struct VimBufferState {
     pub(crate) finish_change_after_input: bool,
     pub(crate) change_buffer: Vec<VimRecordedInput>,
     pub(crate) block_insert: Option<BlockInsertState>,
+    pub(crate) multicursor: Option<MulticursorState>,
 }
 
 impl Default for VimBufferState {
@@ -296,6 +306,7 @@ impl Default for VimBufferState {
             finish_change_after_input: false,
             change_buffer: Vec::new(),
             block_insert: None,
+            multicursor: None,
         }
     }
 }
@@ -334,6 +345,7 @@ pub(crate) struct VimState {
     pub(crate) last_change: Vec<VimRecordedInput>,
     pub(crate) replaying: bool,
     pub(crate) block_insert: Option<BlockInsertState>,
+    pub(crate) multicursor: Option<MulticursorState>,
 }
 
 impl VimState {
@@ -375,6 +387,7 @@ impl VimState {
             finish_change_after_input: self.finish_change_after_input,
             change_buffer: self.change_buffer.clone(),
             block_insert: self.block_insert.clone(),
+            multicursor: self.multicursor.clone(),
         }
     }
 
@@ -397,5 +410,6 @@ impl VimState {
         self.finish_change_after_input = state.finish_change_after_input;
         self.change_buffer.clone_from(&state.change_buffer);
         self.block_insert.clone_from(&state.block_insert);
+        self.multicursor.clone_from(&state.multicursor);
     }
 }

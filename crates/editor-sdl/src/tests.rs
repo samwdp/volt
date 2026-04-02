@@ -281,6 +281,92 @@ fn vim_visual_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn vim_multicursor_ctrl_b_adds_next_exact_match() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(
+        &mut state,
+        "Volt is a new editor. Volt does things like Emacs + vim",
+    )?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.match_text, "Volt");
+    assert_eq!(mc.ranges.len(), 1);
+    assert_eq!(state.input_mode()?, InputMode::Normal);
+
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.ranges.len(), 2);
+    assert_eq!(mc.cursor_offset, 0);
+    assert_eq!(state.active_buffer_mut()?.cursor_col(), 22);
+    Ok(())
+}
+
+#[test]
+fn vim_multicursor_caw_changes_all_matches() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(
+        &mut state,
+        "Volt is a new editor. Volt does things like Emacs + vim",
+    )?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+
+    state.handle_text_input("c")?;
+    state.handle_text_input("a")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+
+    state.handle_text_input("Volt2")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+
+    assert_eq!(state.input_mode()?, InputMode::Normal);
+    assert!(state.ui()?.vim().multicursor.is_none());
+    assert_eq!(
+        state.active_buffer_mut()?.text.text(),
+        "Volt2 is a new editor. Volt2 does things like Emacs + vim"
+    );
+    Ok(())
+}
+
+#[test]
+fn vim_multicursor_motions_move_linked_cursor_offsets() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(
+        &mut state,
+        "Volt is a new editor. Volt does things like Emacs + vim",
+    )?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+
+    state.handle_text_input("l")?;
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.cursor_offset, 1);
+    assert_eq!(state.active_buffer_mut()?.cursor_col(), 23);
+    Ok(())
+}
+
+#[test]
 fn vim_counted_line_end_and_aliases_work() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
