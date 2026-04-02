@@ -26,6 +26,7 @@
 
 html {
     scroll-behavior: smooth;
+    overflow-x: hidden;
 }
 
 body {
@@ -851,7 +852,7 @@ pre {
 
 .page-layout {
     display: grid;
-    grid-template-columns: 1fr 216px;
+    grid-template-columns: minmax(0, 1fr) 216px;
     gap: 40px;
     align-items: start;
 }
@@ -922,16 +923,23 @@ pre {
     justify-content: space-between;
 }
 
+/* Guide body tables: scroll horizontally on narrow viewports */
+.guide-body table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
 @media (max-width: 1120px) {
     .page-layout {
-        grid-template-columns: 1fr 196px;
+        grid-template-columns: minmax(0, 1fr) 196px;
         gap: 28px;
     }
 }
 
 @media (max-width: 860px) {
     .page-layout {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .page-sidebar {
