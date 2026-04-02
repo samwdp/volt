@@ -52,6 +52,9 @@ mod tests {
                 .iter()
                 .any(|binding| binding.detail_filter() == Some(".htm"))
         );
-        assert_eq!(formatter_details, vec!["html|prettier|--write"]);
+        assert_eq!(
+            formatter_details,
+            vec!["html|prettier|--write|--tab-width 2"]
+        );
     }
 }
