@@ -267,6 +267,7 @@
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
                 <a class="button button-ghost" href="user-packages.html">User Packages</a>
+                <a class="button button-ghost" href="changelog.html">Changelog</a>
                 <a class="button button-primary" href="#common-helper">Quick Start</a>
             </div>
         </header>
@@ -306,8 +307,6 @@
                         <li><a href="#testing">Building and Testing</a></li>
                     </ul>
                 </nav>
-
-                <!-- Overview -->
                 <section id="overview">
                     <h2 class="reveal">Overview</h2>
 
@@ -339,6 +338,38 @@
                         functions.  No changes to <code>user/lib.rs</code> are needed for a standard
                         language module.
                     </p>
+
+                    <h3 class="reveal">Built-in Languages</h3>
+                    <p class="reveal">
+                        The following languages ship with Volt and serve as reference implementations:
+                    </p>
+                    <table class="reveal">
+                        <thead>
+                            <tr><th>Module</th><th>Language</th><th>Extensions</th><th>Notes</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>c.rs</code></td><td>C</td><td>.c, .h</td><td></td></tr>
+                            <tr><td><code>cpp.rs</code></td><td>C++</td><td>.cpp, .cc, .cxx, .hpp</td><td></td></tr>
+                            <tr><td><code>csharp.rs</code></td><td>C#</td><td>.cs</td><td></td></tr>
+                            <tr><td><code>css.rs</code></td><td>CSS</td><td>.css</td><td></td></tr>
+                            <tr><td><code>gitcommit.rs</code></td><td>Git Commit</td><td>COMMIT_EDITMSG</td><td>Syntax-only; no plugin package</td></tr>
+                            <tr><td><code>go.rs</code></td><td>Go</td><td>.go</td><td></td></tr>
+                            <tr><td><code>html.rs</code></td><td>HTML</td><td>.html, .htm</td><td></td></tr>
+                            <tr><td><code>javascript.rs</code></td><td>JavaScript / JSX</td><td>.js, .mjs, .jsx</td><td>Two variants: JS and JSX</td></tr>
+                            <tr><td><code>json.rs</code></td><td>JSON</td><td>.json</td><td></td></tr>
+                            <tr><td><code>make.rs</code></td><td>Makefile</td><td>Makefile, .mk</td><td></td></tr>
+                            <tr><td><code>markdown.rs</code></td><td>Markdown</td><td>.md, .markdown</td><td>Two variants: block and inline</td></tr>
+                            <tr><td><code>odin.rs</code></td><td>Odin</td><td>.odin</td><td></td></tr>
+                            <tr><td><code>python.rs</code></td><td>Python</td><td>.py</td><td></td></tr>
+                            <tr><td><code>rust.rs</code></td><td>Rust</td><td>.rs</td><td>Custom highlight query</td></tr>
+                            <tr><td><code>scss.rs</code></td><td>SCSS</td><td>.scss</td><td></td></tr>
+                            <tr><td><code>sql.rs</code></td><td>SQL</td><td>.sql</td><td></td></tr>
+                            <tr><td><code>toml.rs</code></td><td>TOML</td><td>.toml</td><td></td></tr>
+                            <tr><td><code>typescript.rs</code></td><td>TypeScript / TSX</td><td>.ts, .tsx</td><td>Two variants: TS and TSX</td></tr>
+                            <tr><td><code>yaml.rs</code></td><td>YAML</td><td>.yaml, .yml</td><td></td></tr>
+                            <tr><td><code>zig.rs</code></td><td>Zig</td><td>.zig</td><td></td></tr>
+                        </tbody>
+                    </table>
                 </section>
 
                 <hr>
@@ -901,6 +932,7 @@ cargo xtask ci</code></pre>
                     <li><a href="#lsp">LSP</a></li>
                     <li><a href="#theme-tokens">Theme Tokens</a></li>
                     <li><a href="#testing">Testing</a></li>
+                    <li><a href="changelog.html">Changelog ↗</a></li>
                 </ul>
             </nav>
         </aside>

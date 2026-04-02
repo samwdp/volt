@@ -13,13 +13,17 @@ const sections = navLinks
 
 if (navToggle && (topbar || pageSidebar)) {
     navToggle.addEventListener("click", () => {
-        if (pageSidebar) {
-            const isOpen = pageSidebar.classList.toggle("is-open");
-            navToggle.setAttribute("aria-expanded", String(isOpen));
-        } else if (topbar) {
-            const isOpen = topbar.classList.toggle("is-open");
-            navToggle.setAttribute("aria-expanded", String(isOpen));
+        let isOpen = false;
+        if (topbar) {
+            isOpen = topbar.classList.toggle("is-open");
         }
+        if (pageSidebar) {
+            pageSidebar.classList.toggle("is-open");
+            if (!topbar) {
+                isOpen = pageSidebar.classList.contains("is-open");
+            }
+        }
+        navToggle.setAttribute("aria-expanded", String(isOpen));
     });
 
     navLinks.forEach((link) => {
