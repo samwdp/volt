@@ -293,6 +293,7 @@ impl Workspace {
         let initial_pane_id = initial_pane.id();
         let mut panes = BTreeMap::new();
         panes.insert(initial_pane_id, initial_pane);
+        let root = root.or_else(|| std::env::current_dir().ok());
 
         Self {
             id,

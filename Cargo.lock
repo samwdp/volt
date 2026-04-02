@@ -699,6 +699,7 @@ name = "editor-plugin-api"
 version = "0.1.0"
 dependencies = [
  "abi_stable",
+ "editor-buffer",
  "editor-core",
  "editor-dap",
  "editor-fs",

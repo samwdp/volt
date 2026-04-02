@@ -26,6 +26,7 @@ use agent_client_protocol::{
     WriteTextFileResponse,
 };
 use async_trait::async_trait;
+use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
@@ -1983,7 +1984,8 @@ impl AcpManager {
                         }
                     })
                     .collect();
-                let picker = PickerOverlay::from_entries("ACP Sessions", entries);
+                let picker = PickerOverlay::from_entries("ACP Sessions", entries)
+                    .with_result_order(PickerResultOrder::Source);
                 shell_ui_mut(runtime)?.set_picker(picker);
             }
             AcpEvent::SessionLoaded {
@@ -3860,6 +3862,48 @@ mod tests {
         assert_eq!(
             shell_ui(&state.runtime)?.picker_kind(),
             Some(PickerKind::AcpPermission { request_id: 2 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_list_picker_preserves_source_order() -> Result<(), String> {
+        let (mut manager, _command_rx) = test_acp_manager();
+        let buffer_id = test_buffer_id()?;
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::SessionList {
+                buffer_id,
+                sessions: vec![
+                    SessionInfo::new(
+                        "session-2",
+                        std::env::current_dir().map_err(|error| error.to_string())?,
+                    )
+                    .title("Zulu")
+                    .updated_at("2026-03-31T23:59:59Z"),
+                    SessionInfo::new(
+                        "session-1",
+                        std::env::current_dir().map_err(|error| error.to_string())?,
+                    )
+                    .title("Alpha")
+                    .updated_at("2026-03-01T00:00:00Z"),
+                ],
+            },
+        )?;
+
+        let picker = shell_ui(&state.runtime)?
+            .picker()
+            .ok_or_else(|| "missing session picker".to_owned())?;
+        assert_eq!(
+            picker
+                .session()
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec!["Zulu", "Alpha"]
         );
         Ok(())
     }

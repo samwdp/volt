@@ -1,6 +1,7 @@
 #![doc = r#"Shared extension-facing types used by the core editor and the compiled user library."#]
 
 pub mod abi;
+pub mod treesitter;
 
 use abi_stable::{
     StableAbi,
@@ -13,18 +14,21 @@ pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
 pub use editor_git::{GitStatusSnapshot, StatusEntry};
 pub use editor_icons::{IconFontCategory, IconFontSymbol};
 pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind};
-pub use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+pub use editor_syntax::{
+    CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxNodeContext, SyntaxPoint,
+};
 pub use editor_theme::{Color, Theme, ThemeOption};
 
 pub use abi::{
     AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor, AbiDebugAdapterSpec,
-    AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix,
-    AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory, AbiIconFontSymbol,
-    AbiLanguageConfiguration, AbiLanguageServerRootStrategy, AbiLanguageServerSpec,
-    AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings,
-    AbiOilSortMode, AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
-    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption,
-    AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGhostTextContext, AbiGhostTextLine,
+    AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
+    AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
+    AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo,
+    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSection,
+    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
+    AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
+    AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -248,6 +252,30 @@ pub struct StatuslineContext<'a> {
     pub git_removed: usize,
 }
 
+/// Context passed to the user library when producing inline ghost-text annotations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostTextContext<'a> {
+    /// Active buffer display name.
+    pub buffer_name: &'a str,
+    /// Active buffer language identifier, if any.
+    pub language_id: Option<&'a str>,
+    /// Complete buffer text.
+    pub buffer_text: &'a str,
+    /// Zero-based cursor line.
+    pub cursor_line: usize,
+    /// Zero-based cursor column.
+    pub cursor_column: usize,
+}
+
+/// One ghost-text annotation rendered on a specific buffer line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostTextLine {
+    /// Zero-based buffer line index that should receive the annotation.
+    pub line: usize,
+    /// Rendered ghost-text content, including any icon prefix.
+    pub text: String,
+}
+
 /// Stable contract implemented by the compiled user extension library.
 pub trait UserLibrary: Send + Sync {
     fn packages(&self) -> Vec<PluginPackage>;
@@ -266,6 +294,7 @@ pub trait UserLibrary: Send + Sync {
     fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
     fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
     fn terminal_config(&self) -> TerminalConfig;
+    fn commandline_enabled(&self) -> bool;
     fn ligature_config(&self) -> LigatureConfig;
     fn oil_defaults(&self) -> OilDefaults;
     fn oil_keybindings(&self) -> OilKeybindings;
@@ -293,6 +322,12 @@ pub trait UserLibrary: Send + Sync {
     fn browser_input_hint(&self, url: Option<&str>) -> String;
     fn browser_url_prompt(&self) -> String;
     fn browser_url_placeholder(&self) -> String;
+    fn headerline_lines(&self, _context: &GhostTextContext<'_>) -> Vec<String> {
+        Vec::new()
+    }
+    fn ghost_text_lines(&self, _context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
+        Vec::new()
+    }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String;
     fn statusline_lsp_connected_icon(&self) -> &'static str;
     fn statusline_lsp_error_icon(&self) -> &'static str;

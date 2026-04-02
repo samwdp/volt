@@ -1,5 +1,8 @@
 use std::{fs, path::Path};
 
+#[path = "src/standalone_user.rs"]
+mod standalone_user;
+
 const STANDALONE_USER_VENDOR_CRATES: &[&str] = &[
     "editor-buffer",
     "editor-core",
@@ -48,6 +51,7 @@ fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
     copy_dir_recursive(&user_dir, &destination)?;
     vendor_user_support_crates(workspace_root, &destination)?;
     rewrite_standalone_user_manifests(&destination)?;
+    standalone_user::setup_standalone_user_repository(&destination)?;
 
     Ok(())
 }

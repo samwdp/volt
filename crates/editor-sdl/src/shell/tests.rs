@@ -991,6 +991,86 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 }
 
 #[test]
+fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Result<(), String> {
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_line_ghost_text_for_segment(
+        &mut target,
+        GhostTextSegmentDraw {
+            x: 24,
+            y: 8,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 1,
+            },
+            line_len: 1,
+            ghost_text: Some(" render(value: usize)"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 40,
+            y: 8,
+            text: " render(value: usize)".to_owned(),
+            color: to_render_color(Color::RGB(140, 144, 152)),
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result<(), String> {
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_line_ghost_text_for_segment(
+        &mut target,
+        GhostTextSegmentDraw {
+            x: 0,
+            y: 0,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 10,
+            },
+            line_len: 24,
+            ghost_text: Some("hidden"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.is_empty());
+    Ok(())
+}
+
+#[test]
+fn visible_headerline_lines_keeps_innermost_contexts_when_space_is_limited() {
+    assert_eq!(
+        visible_headerline_lines(
+            vec![
+                "module app".to_owned(),
+                "impl Demo".to_owned(),
+                "render(value: usize)".to_owned(),
+            ],
+            3,
+        ),
+        vec!["impl Demo".to_owned(), "render(value: usize)".to_owned()]
+    );
+}
+
+#[test]
+fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
+    assert!(visible_headerline_lines(vec!["render()".to_owned()], 1).is_empty());
+}
+
+#[test]
 fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
     let line = AcpRenderedTextLine {
         prefix: vec![
@@ -2706,6 +2786,23 @@ fn acp_footer_layout_orders_output_input_hint_and_statusline() -> Result<(), Str
 }
 
 #[test]
+fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout_with_command_line(buffer, rect, 18, 8, true);
+    let commandline_y = layout
+        .commandline_y
+        .ok_or_else(|| "command line row is missing".to_owned())?;
+
+    assert!(layout.statusline_y < commandline_y);
+    assert_eq!(commandline_y - layout.statusline_y, 18);
+    Ok(())
+}
+
+#[test]
 fn plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start() -> Result<(), String>
 {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
@@ -3615,6 +3712,15 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
 }
 
 #[test]
+fn vim_search_entries_trim_whitespace_from_labels() {
+    let buffer = TextBuffer::from_text("alpha\n   split here   \nbeta\n");
+    let data = vim_search_entries(&buffer.snapshot(), VimSearchDirection::Forward, "split");
+
+    assert_eq!(data.entries.len(), 1);
+    assert_eq!(data.entries[0].item.label(), "split here");
+}
+
+#[test]
 fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     state
@@ -3795,6 +3901,90 @@ fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
     );
     assert_eq!(buffer.display_name(), "*browser* https://example.com/docs");
     assert!(buffer.text.text().contains("https://example.com/docs"));
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_visual_yank_copies_selected_text() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "alpha beta", None)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.cursor = 0;
+    }
+
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+    start_visual_mode_with_kind(&mut state.runtime, VisualSelectionKind::Character)?;
+    apply_motion_command(&mut state.runtime, ShellMotion::Right)?;
+    apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        ui.vim().yank,
+        Some(YankRegister::Character("al".to_owned()))
+    );
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .selection_anchor,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn paste_text_into_active_input_buffer_updates_acp_input() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "alpha", None)?;
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        " beta"
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "alpha beta"
+    );
+    Ok(())
+}
+
+#[test]
+fn paste_text_into_active_input_buffer_updates_browser_input() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        "example.com/docs"
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .text(),
+        "example.com/docs"
+    );
     Ok(())
 }
 
@@ -4588,6 +4778,43 @@ fn terminal_scroll_for_motion_maps_terminal_viewport_navigation() {
 }
 
 #[test]
+fn repeated_keydown_events_move_the_cursor() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 240;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(&mut state, "*repeat*", vec!["abcd".to_owned()])?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 3));
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Left),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: true,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(0, 2)
+    );
+    Ok(())
+}
+
+#[test]
 fn mouse_wheel_scrolls_the_buffer_under_the_pointer() -> Result<(), String> {
     let render_width = 640;
     let render_height = 240;
@@ -5298,6 +5525,26 @@ fn browser_devtools_shortcut_requested_recognizes_f12_and_ctrl_shift_i() {
     assert!(browser_devtools_shortcut_requested(
         Keycode::I,
         ctrl_mod() | shift_mod()
+    ));
+}
+
+#[test]
+fn input_field_paste_shortcut_requested_recognizes_ctrl_shift_v_only() {
+    assert!(input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | shift_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        shift_mod()
+    ));
+    assert!(!input_field_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | shift_mod() | Mod::LALTMOD
     ));
 }
 

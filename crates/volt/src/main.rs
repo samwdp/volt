@@ -20,13 +20,17 @@ use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
 use editor_plugin_api::abi::{
-    AbiDirectoryEntry, AbiGitStatusPrefix, AbiStatuslineContext, UserLibraryModuleRef,
+    AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
+    UserLibraryModuleRef,
 };
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
 use editor_terminal::TerminalSession;
 use editor_theme::ThemeRegistry;
+
+#[cfg(test)]
+mod standalone_user;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartupProfile {
@@ -186,6 +190,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.terminal_config()().into()
     }
 
+    fn commandline_enabled(&self) -> bool {
+        self.module.commandline_enabled()()
+    }
+
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
         self.module.ligature_config_v1()().into()
     }
@@ -308,6 +316,23 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn browser_url_placeholder(&self) -> String {
         self.module.browser_url_placeholder()().into()
+    }
+
+    fn ghost_text_lines(
+        &self,
+        context: &editor_plugin_api::GhostTextContext<'_>,
+    ) -> Vec<editor_plugin_api::GhostTextLine> {
+        self.module.ghost_text_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn headerline_lines(&self, context: &editor_plugin_api::GhostTextContext<'_>) -> Vec<String> {
+        self.module.headerline_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {

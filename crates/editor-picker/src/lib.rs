@@ -81,6 +81,15 @@ impl PickerMatch {
     }
 }
 
+/// Ordering strategy for picker results after fuzzy matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerResultOrder {
+    /// Rank matches by fuzzy-match score and then by label.
+    ScoreThenLabel,
+    /// Preserve the order of the underlying items.
+    Source,
+}
+
 /// Mutable fuzzy picker session that tracks query, matches, and selection.
 #[derive(Debug, Clone)]
 pub struct PickerSession {
@@ -90,7 +99,7 @@ pub struct PickerSession {
     matches: Vec<PickerMatch>,
     selected_index: usize,
     result_limit: usize,
-    sort_results: bool,
+    result_order: PickerResultOrder,
 }
 
 impl PickerSession {
@@ -103,7 +112,7 @@ impl PickerSession {
             matches: Vec::new(),
             selected_index: 0,
             result_limit: usize::MAX,
-            sort_results: true,
+            result_order: PickerResultOrder::ScoreThenLabel,
         };
         session.recompute_matches();
         session
@@ -146,11 +155,16 @@ impl PickerSession {
         self
     }
 
-    /// Preserves the order of the underlying items when computing matches.
-    pub fn with_preserve_order(mut self) -> Self {
-        self.sort_results = false;
+    /// Configures how matches are ordered after fuzzy matching.
+    pub fn with_result_order(mut self, result_order: PickerResultOrder) -> Self {
+        self.result_order = result_order;
         self.recompute_matches();
         self
+    }
+
+    /// Preserves the order of the underlying items when computing matches.
+    pub fn with_preserve_order(self) -> Self {
+        self.with_result_order(PickerResultOrder::Source)
     }
 
     /// Updates the retained result limit and recomputes matches.
@@ -209,9 +223,13 @@ impl PickerSession {
             .iter()
             .filter_map(|item| match_item(&self.query, item))
             .collect();
-        if self.sort_results {
-            self.matches
-                .sort_by_key(|matched| (Reverse(matched.score), matched.item.label().to_owned()));
+        match self.result_order {
+            PickerResultOrder::ScoreThenLabel => {
+                self.matches.sort_by_key(|matched| {
+                    (Reverse(matched.score), matched.item.label().to_owned())
+                });
+            }
+            PickerResultOrder::Source => {}
         }
         if self.matches.len() > self.result_limit {
             self.matches.truncate(self.result_limit);
@@ -331,7 +349,7 @@ fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<Ter
 
 #[cfg(test)]
 mod tests {
-    use super::{PickerItem, PickerSession};
+    use super::{PickerItem, PickerResultOrder, PickerSession};
 
     fn item(id: &str, label: &str) -> PickerItem {
         PickerItem::new(id, label, label, None::<&str>)
@@ -352,6 +370,24 @@ mod tests {
                 .map(|matched| matched.item().label())
                 .collect::<Vec<_>>(),
             vec!["buffer.save", "terminal.open"]
+        );
+    }
+
+    #[test]
+    fn source_order_preserves_input_order() {
+        let session = PickerSession::new(
+            "Commands",
+            vec![item("z", "zeta"), item("a", "alpha"), item("m", "mu")],
+        )
+        .with_result_order(PickerResultOrder::Source);
+
+        assert_eq!(
+            session
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha", "mu"]
         );
     }
 

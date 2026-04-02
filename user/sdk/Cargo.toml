@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 abi_stable = "0.11"
+editor-buffer = { path = "../../crates/editor-buffer" }
 editor-core = { path = "../../crates/editor-core" }
 editor-dap = { path = "../../crates/editor-dap" }
 editor-fs = { path = "../../crates/editor-fs" }
