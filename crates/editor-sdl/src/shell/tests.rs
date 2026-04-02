@@ -1511,8 +1511,9 @@ fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> 
     let line_height = 16;
     let user_library: Arc<dyn UserLibrary> =
         Arc::new(HeaderlineTestUserLibrary::with_scrolloff(3.0));
-    let mut state = ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
-        .map_err(|error| error.to_string())?;
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
     let buffer_id = install_text_test_buffer(
         &mut state,
         "*scrolloff-theme*",
@@ -1547,8 +1548,7 @@ fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> 
         line_height,
     )
     .ok_or_else(|| "buffer cursor screen anchor was missing".to_owned())?;
-    let cursor_body_row =
-        ((anchor.y - layout.body_y) / line_height) as usize - headerline_rows;
+    let cursor_body_row = ((anchor.y - layout.body_y) / line_height) as usize - headerline_rows;
     assert_eq!(
         cursor_body_row,
         content_rows
@@ -4468,7 +4468,10 @@ fn acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer() -> Result<(
         }
     }
 
-    assert_eq!(shell_buffer(&state.runtime, buffer_id)?.acp_active_pane(), Some(AcpPane::Output));
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.acp_active_pane(),
+        Some(AcpPane::Output)
+    );
 
     assert!(
         state

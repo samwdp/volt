@@ -3364,7 +3364,10 @@ impl ShellBuffer {
             cursor_column: self.cursor_col(),
         };
         if let Ok(cache) = self.context_overlay_cache.lock()
-            && let Some(snapshot) = cache.as_ref().filter(|snapshot| snapshot.key == key).cloned()
+            && let Some(snapshot) = cache
+                .as_ref()
+                .filter(|snapshot| snapshot.key == key)
+                .cloned()
         {
             return snapshot;
         }
@@ -26279,7 +26282,8 @@ fn render_shell_state(
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
-            let vim_targets_input = state.vim_target_for_buffer(buffer.id(), active) == VimTarget::Input;
+            let vim_targets_input =
+                state.vim_target_for_buffer(buffer.id(), active) == VimTarget::Input;
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let yank_flash = state.yank_flash(buffer.id(), now);
             let command_line = active.then(|| state.command_line()).flatten();
@@ -26435,7 +26439,8 @@ fn render_runtime_popup_overlay(
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let input_mode = state.input_mode_for_buffer(buffer.id(), popup_focus);
-        let vim_targets_input = state.vim_target_for_buffer(buffer.id(), popup_focus) == VimTarget::Input;
+        let vim_targets_input =
+            state.vim_target_for_buffer(buffer.id(), popup_focus) == VimTarget::Input;
         let visual_range = state.visual_selection_for_buffer(buffer, popup_focus);
         let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
@@ -28030,7 +28035,9 @@ fn render_buffer(
             buffer_context_overlay_snapshot(buffer, active, user_library, theme_registry);
         let headerline_lines = context_overlay
             .as_ref()
-            .map(|snapshot| visible_headerline_lines(snapshot.headerline_lines.clone(), layout.visible_rows))
+            .map(|snapshot| {
+                visible_headerline_lines(snapshot.headerline_lines.clone(), layout.visible_rows)
+            })
             .unwrap_or_default();
         let ghost_text_by_line = context_overlay
             .map(|snapshot| snapshot.ghost_text_by_line)
@@ -28222,7 +28229,8 @@ fn render_buffer(
                     line_index,
                     cursor_row,
                     cursor_col,
-                    (matches!(input_mode, InputMode::Normal | InputMode::Visual) && !vim_targets_input)
+                    (matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                        && !vim_targets_input)
                         .then_some(base_background),
                     cell_width,
                 ) {
@@ -28403,7 +28411,10 @@ fn render_buffer(
                 draw_text(target, input_x, hint_y, &hint_line, placeholder_color)?;
             }
         }
-        if active && vim_targets_input && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
+        if active
+            && vim_targets_input
+            && matches!(input_mode, InputMode::Insert | InputMode::Replace)
+        {
             let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
             let input_col = prompt_len + col_in_visual_row;
             let cursor_width = (cell_width / 4).max(2) as u32;
@@ -28418,7 +28429,10 @@ fn render_buffer(
                 cursor_roundness,
                 cursor,
             )?;
-        } else if active && vim_targets_input && matches!(input_mode, InputMode::Normal | InputMode::Visual) {
+        } else if active
+            && vim_targets_input
+            && matches!(input_mode, InputMode::Normal | InputMode::Visual)
+        {
             let cursor_char = input.cursor_char();
             let char_count = input.char_count();
             if char_count > 0 {
