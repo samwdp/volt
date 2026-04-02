@@ -29105,7 +29105,7 @@ fn render_buffer(
         let mut cursor_indent_cols = 0usize;
         let multicursor_points = if active {
             multicursor
-                .map(multicursor_secondary_cursor_points)
+                .map(multicursor_cursor_points)
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -31534,7 +31534,7 @@ fn multicursor_ranges_for_line(
         .collect()
 }
 
-fn multicursor_secondary_cursor_points(state: &MulticursorState) -> Vec<TextPoint> {
+fn multicursor_cursor_points(state: &MulticursorState) -> Vec<TextPoint> {
     let prefix = state
         .match_text
         .chars()
@@ -31543,9 +31543,7 @@ fn multicursor_secondary_cursor_points(state: &MulticursorState) -> Vec<TextPoin
     state
         .ranges
         .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != state.primary)
-        .map(|(_, range)| advance_point_by_text(range.start(), &prefix))
+        .map(|range| advance_point_by_text(range.start(), &prefix))
         .collect()
 }
 
