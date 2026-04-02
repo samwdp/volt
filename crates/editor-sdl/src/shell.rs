@@ -41,9 +41,10 @@ use crate::browser_host::{
 use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary};
 use crate::state::{
     BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
-    LastSearch, ScrollCommand, ShellMotion, VimBufferState, VimFindKind, VimMark, VimOperator,
-    VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTarget, VimTextObjectKind,
-    VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash, YankRegister,
+    LastSearch, MulticursorState, ScrollCommand, ShellMotion, VimBufferState, VimFindKind, VimMark,
+    VimOperator, VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTarget,
+    VimTextObjectKind, VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash,
+    YankRegister,
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
@@ -6275,6 +6276,19 @@ impl ShellUiState {
         visual_anchor.and_then(|anchor| visual_selection(buffer, anchor, visual_kind))
     }
 
+    fn multicursor_for_buffer(
+        &self,
+        buffer_id: BufferId,
+        active: bool,
+    ) -> Option<&MulticursorState> {
+        if active {
+            self.vim.multicursor.as_ref()
+        } else {
+            self.buffer(buffer_id)
+                .and_then(|buffer| buffer.vim_buffer_state.multicursor.as_ref())
+        }
+    }
+
     fn persist_buffer_vim_state(&mut self, buffer_id: BufferId) {
         let state = self.vim.active_buffer_state(self.input_mode);
         if let Some(buffer) = self.buffer_mut(buffer_id) {
@@ -6310,6 +6324,7 @@ impl ShellUiState {
         self.input_mode = InputMode::Normal;
         self.vim.visual_anchor = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
+        self.vim.multicursor = None;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
         self.close_command_line();
@@ -8134,7 +8149,15 @@ impl ShellState {
                     Keycode::Return | Keycode::KpEnter
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_buffer.has_input {
+                        if self.ui()?.vim().multicursor.is_some() && !active_buffer.has_input {
+                            apply_multicursor_insert_text(
+                                &mut self.runtime,
+                                "\n",
+                                matches!(input_mode, InputMode::Replace),
+                            )
+                            .map_err(ShellError::Runtime)?;
+                            close_autocomplete = true;
+                        } else if active_buffer.has_input {
                             submit_input_buffer(&mut self.runtime).map_err(ShellError::Runtime)?;
                         } else if !active_buffer.is_read_only {
                             let (indent_size, use_tabs) = {
@@ -8161,7 +8184,11 @@ impl ShellState {
                     Keycode::Backspace
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_buffer.has_input {
+                        if self.ui()?.vim().multicursor.is_some() && !active_buffer.has_input {
+                            apply_multicursor_delete(&mut self.runtime, true)
+                                .map_err(ShellError::Runtime)?;
+                            refresh_autocomplete = true;
+                        } else if active_buffer.has_input {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.backspace();
                             }
@@ -8186,7 +8213,11 @@ impl ShellState {
                     Keycode::Delete
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
-                        if active_buffer.has_input {
+                        if self.ui()?.vim().multicursor.is_some() && !active_buffer.has_input {
+                            apply_multicursor_delete(&mut self.runtime, false)
+                                .map_err(ShellError::Runtime)?;
+                            refresh_autocomplete = true;
+                        } else if active_buffer.has_input {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.delete_forward();
                             }
@@ -9092,6 +9123,13 @@ impl ShellState {
         match self.input_mode()? {
             InputMode::Insert => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                if self.ui()?.vim().multicursor.is_some() && !active_buffer.vim_targets_input {
+                    apply_multicursor_insert_text(&mut self.runtime, text, false)
+                        .map_err(ShellError::Runtime)?;
+                    self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                    self.maybe_finish_change_after_input()?;
+                    return Ok(());
+                }
                 if active_buffer.is_terminal {
                     write_active_terminal_text(&mut self.runtime, text)
                         .map_err(ShellError::Runtime)?;
@@ -9149,6 +9187,13 @@ impl ShellState {
             }
             InputMode::Replace => {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                if self.ui()?.vim().multicursor.is_some() && !active_buffer.vim_targets_input {
+                    apply_multicursor_insert_text(&mut self.runtime, text, true)
+                        .map_err(ShellError::Runtime)?;
+                    self.record_vim_input(VimRecordedInput::Text(text.to_owned()))?;
+                    self.maybe_finish_change_after_input()?;
+                    return Ok(());
+                }
                 if active_buffer.is_terminal {
                     write_active_terminal_text(&mut self.runtime, text)
                         .map_err(ShellError::Runtime)?;
@@ -12042,6 +12087,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_replace_char(runtime)?;
                 }
                 "enter-replace-mode" => {
+                    if shell_ui(runtime)?.vim().multicursor.is_some() {
+                        let ui = shell_ui_mut(runtime)?;
+                        ui.input_mode = InputMode::Replace;
+                        ui.vim_mut().clear_transient();
+                        return Ok(());
+                    }
                     if active_shell_buffer_vim_targets_input(runtime)? {
                         shell_ui_mut(runtime)?.enter_replace_mode();
                         return Ok(());
@@ -12054,6 +12105,28 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     toggle_case_chars(runtime)?;
                 }
                 "append" => {
+                    if shell_ui(runtime)?.vim().multicursor.is_some() {
+                        let offset = {
+                            let state = shell_ui(runtime)?
+                                .vim()
+                                .multicursor
+                                .as_ref()
+                                .ok_or_else(|| "multicursor state is missing".to_owned())?;
+                            if state.match_text.is_empty() {
+                                0
+                            } else {
+                                state
+                                    .cursor_offset
+                                    .saturating_add(1)
+                                    .min(state.match_text.chars().count())
+                            }
+                        };
+                        set_multicursor_cursor_offset(runtime, offset)?;
+                        let ui = shell_ui_mut(runtime)?;
+                        ui.input_mode = InputMode::Insert;
+                        ui.vim_mut().clear_transient();
+                        return Ok(());
+                    }
                     if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             let _ = input.move_right();
@@ -12067,6 +12140,19 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "append-line-end" => {
+                    if shell_ui(runtime)?.vim().multicursor.is_some() {
+                        let offset = shell_ui(runtime)?
+                            .vim()
+                            .multicursor
+                            .as_ref()
+                            .map(|state| state.match_text.chars().count())
+                            .unwrap_or_default();
+                        set_multicursor_cursor_offset(runtime, offset)?;
+                        let ui = shell_ui_mut(runtime)?;
+                        ui.input_mode = InputMode::Insert;
+                        ui.vim_mut().clear_transient();
+                        return Ok(());
+                    }
                     if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             input.move_line_end();
@@ -12080,6 +12166,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "insert-line-start" => {
+                    if shell_ui(runtime)?.vim().multicursor.is_some() {
+                        set_multicursor_cursor_offset(runtime, 0)?;
+                        let ui = shell_ui_mut(runtime)?;
+                        ui.input_mode = InputMode::Insert;
+                        ui.vim_mut().clear_transient();
+                        return Ok(());
+                    }
                     if active_shell_buffer_vim_targets_input(runtime)? {
                         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
                             input.move_line_start();
@@ -12142,6 +12235,30 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.redo();
                     buffer.mark_syntax_dirty();
+                }
+                "multicursor-add-next-match" => {
+                    add_next_multicursor_match(runtime)?;
+                }
+                "multicursor-select-all-matches" => {
+                    add_next_multicursor_match(runtime)?;
+                    while shell_ui(runtime)?.vim().multicursor.is_some() {
+                        let before = shell_ui(runtime)?
+                            .vim()
+                            .multicursor
+                            .as_ref()
+                            .map(|state| state.ranges.len())
+                            .unwrap_or_default();
+                        add_next_multicursor_match(runtime)?;
+                        let after = shell_ui(runtime)?
+                            .vim()
+                            .multicursor
+                            .as_ref()
+                            .map(|state| state.ranges.len())
+                            .unwrap_or_default();
+                        if after <= before {
+                            break;
+                        }
+                    }
                 }
                 "enter-visual" => {
                     toggle_visual_mode(runtime)?;
@@ -16205,6 +16322,557 @@ fn move_input_with_motion(
     moved || input.cursor_char() != original_cursor
 }
 
+fn advance_point_by_text(mut point: TextPoint, text: &str) -> TextPoint {
+    for character in text.chars() {
+        if character == '\n' {
+            point.line = point.line.saturating_add(1);
+            point.column = 0;
+        } else {
+            point.column = point.column.saturating_add(1);
+        }
+    }
+    point
+}
+
+fn move_text_buffer_with_motion(
+    buffer: &mut TextBuffer,
+    motion: ShellMotion,
+    count: Option<usize>,
+) -> bool {
+    let repeat = count.unwrap_or(1).max(1);
+    match motion {
+        ShellMotion::Left => (0..repeat).fold(false, |moved, _| buffer.move_left() || moved),
+        ShellMotion::Down => (0..repeat).fold(false, |moved, _| buffer.move_down() || moved),
+        ShellMotion::Up => (0..repeat).fold(false, |moved, _| buffer.move_up() || moved),
+        ShellMotion::Right => (0..repeat).fold(false, |moved, _| buffer.move_right() || moved),
+        ShellMotion::WordForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_forward() || moved)
+        }
+        ShellMotion::BigWordForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_forward() || moved)
+        }
+        ShellMotion::WordBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_backward() || moved)
+        }
+        ShellMotion::BigWordBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_big_word_backward() || moved)
+        }
+        ShellMotion::WordEnd => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_end_forward() || moved)
+        }
+        ShellMotion::BigWordEnd => (0..repeat).fold(false, |moved, _| {
+            buffer.move_big_word_end_forward() || moved
+        }),
+        ShellMotion::SentenceForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_sentence_forward() || moved)
+        }
+        ShellMotion::SentenceBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_sentence_backward() || moved)
+        }
+        ShellMotion::ParagraphForward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_paragraph_forward() || moved)
+        }
+        ShellMotion::ParagraphBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_paragraph_backward() || moved)
+        }
+        ShellMotion::WordEndBackward => {
+            (0..repeat).fold(false, |moved, _| buffer.move_word_end_backward() || moved)
+        }
+        ShellMotion::BigWordEndBackward => (0..repeat).fold(false, |moved, _| {
+            buffer.move_big_word_end_backward() || moved
+        }),
+        ShellMotion::MatchPair => buffer.move_matching_delimiter(),
+        ShellMotion::LineStart => {
+            buffer.set_cursor(TextPoint::new(buffer.cursor().line, 0));
+            true
+        }
+        ShellMotion::LineFirstNonBlank => {
+            let point = buffer
+                .first_non_blank_in_line(buffer.cursor().line)
+                .unwrap_or(TextPoint::new(buffer.cursor().line, 0));
+            let moved = point != buffer.cursor();
+            buffer.set_cursor(point);
+            moved
+        }
+        ShellMotion::LineEnd => {
+            let line_repeat = repeat.saturating_sub(1);
+            let moved_line = if line_repeat == 0 {
+                false
+            } else {
+                (0..line_repeat).fold(false, |moved, _| buffer.move_down() || moved)
+            };
+            let line = buffer.cursor().line;
+            let column = buffer.line_len_chars(line).unwrap_or(0);
+            let moved = buffer.cursor().column != column;
+            buffer.set_cursor(TextPoint::new(line, column));
+            moved || moved_line
+        }
+        ShellMotion::FirstLine => {
+            let line = count.unwrap_or(1).saturating_sub(1);
+            let point = buffer
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            let moved = point != buffer.cursor();
+            buffer.set_cursor(point);
+            moved
+        }
+        ShellMotion::LastLine => {
+            let line = count
+                .map(|value| value.saturating_sub(1))
+                .unwrap_or_else(|| buffer.line_count().saturating_sub(1));
+            let point = buffer
+                .first_non_blank_in_line(line)
+                .unwrap_or(TextPoint::new(line, 0));
+            let moved = point != buffer.cursor();
+            buffer.set_cursor(point);
+            moved
+        }
+        ShellMotion::ScreenTop | ShellMotion::ScreenMiddle | ShellMotion::ScreenBottom => false,
+    }
+}
+
+fn find_multicursor_seed_range(buffer: &ShellBuffer) -> Option<(String, TextRange)> {
+    let point = buffer.cursor_point();
+    let range = buffer.text.word_range_at(point, false, 1).or_else(|| {
+        buffer
+            .text
+            .word_range_at_kind(point, WordKind::BigWord, false, 1)
+    })?;
+    let text = buffer.slice(range);
+    (!text.is_empty()).then_some((text, range))
+}
+
+fn find_next_multicursor_match(
+    buffer: &ShellBuffer,
+    needle: &str,
+    after_char_index: usize,
+    existing: &[TextRange],
+) -> Option<TextRange> {
+    if needle.is_empty() {
+        return None;
+    }
+    let haystack = buffer.text.text().chars().collect::<Vec<_>>();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    if needle_chars.is_empty() || haystack.len() < needle_chars.len() {
+        return None;
+    }
+    let existing = existing
+        .iter()
+        .map(|range| {
+            (
+                buffer.text.point_to_char_index(range.start()),
+                buffer.text.point_to_char_index(range.end()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let search = |start: usize, end: usize| {
+        (start..end).find_map(|candidate| {
+            let candidate_end = candidate.saturating_add(needle_chars.len());
+            if candidate_end > haystack.len()
+                || haystack[candidate..candidate_end] != needle_chars[..]
+                || existing.iter().any(|&(existing_start, existing_end)| {
+                    existing_start == candidate && existing_end == candidate_end
+                })
+            {
+                return None;
+            }
+            let start_point = buffer.text.point_from_char_index(candidate);
+            let end_point = buffer.text.point_from_char_index(candidate_end);
+            let range = TextRange::new(start_point, end_point);
+            let exact = buffer
+                .text
+                .word_range_at(start_point, false, 1)
+                .or_else(|| {
+                    buffer
+                        .text
+                        .word_range_at_kind(start_point, WordKind::BigWord, false, 1)
+                });
+            (exact == Some(range)).then_some(range)
+        })
+    };
+    search(
+        after_char_index.min(
+            haystack
+                .len()
+                .saturating_sub(needle_chars.len())
+                .saturating_add(1),
+        ),
+        haystack
+            .len()
+            .saturating_sub(needle_chars.len())
+            .saturating_add(1),
+    )
+    .or_else(|| {
+        search(
+            0,
+            after_char_index.min(
+                haystack
+                    .len()
+                    .saturating_sub(needle_chars.len())
+                    .saturating_add(1),
+            ),
+        )
+    })
+}
+
+fn sync_multicursor_primary_cursor(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let Some(primary_range) = state.ranges.get(state.primary).copied() else {
+        return Ok(());
+    };
+    let prefix = state
+        .match_text
+        .chars()
+        .take(state.cursor_offset.min(state.match_text.chars().count()))
+        .collect::<String>();
+    let point = advance_point_by_text(primary_range.start(), &prefix);
+    active_shell_buffer_mut(runtime)?.set_cursor(point);
+    Ok(())
+}
+
+fn replace_multicursor_ranges(
+    runtime: &mut EditorRuntime,
+    text: &str,
+    cursor_offset: usize,
+    visual_anchor_offset: Option<usize>,
+) -> Result<(), String> {
+    let mut state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let new_text_len = text.chars().count();
+    let original_ranges = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        state
+            .ranges
+            .iter()
+            .map(|range| {
+                let start = buffer.text.point_to_char_index(range.start());
+                let end = buffer.text.point_to_char_index(range.end());
+                (start, end)
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut adjusted_starts = Vec::with_capacity(original_ranges.len());
+    let mut delta = 0isize;
+    for (start, end) in &original_ranges {
+        adjusted_starts.push(start.saturating_add_signed(delta));
+        delta += new_text_len as isize - end.saturating_sub(*start) as isize;
+    }
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        for range in state.ranges.iter().rev().copied() {
+            buffer.replace_range(range, text);
+        }
+        buffer.mark_syntax_dirty();
+        state.ranges = adjusted_starts
+            .into_iter()
+            .map(|start| {
+                TextRange::new(
+                    buffer.text.point_from_char_index(start),
+                    buffer
+                        .text
+                        .point_from_char_index(start.saturating_add(new_text_len)),
+                )
+            })
+            .collect();
+    }
+    let text_len = text.chars().count();
+    state.match_text = text.to_owned();
+    state.cursor_offset = cursor_offset.min(text_len);
+    state.visual_anchor_offset = visual_anchor_offset.map(|offset| offset.min(text_len));
+    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
+    sync_multicursor_primary_cursor(runtime)?;
+    Ok(())
+}
+
+fn apply_multicursor_motion(
+    runtime: &mut EditorRuntime,
+    motion: ShellMotion,
+) -> Result<bool, String> {
+    let mut state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let mut buffer = TextBuffer::from_text(&state.match_text);
+    buffer.set_cursor(buffer.point_from_char_index(state.cursor_offset));
+    let moved = move_text_buffer_with_motion(
+        &mut buffer,
+        motion,
+        shell_ui_mut(runtime)?.vim_mut().take_count(),
+    );
+    state.cursor_offset = buffer.point_to_char_index(buffer.cursor());
+    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
+    sync_multicursor_primary_cursor(runtime)?;
+    Ok(moved)
+}
+
+fn set_multicursor_cursor_offset(runtime: &mut EditorRuntime, offset: usize) -> Result<(), String> {
+    let mut state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    state.cursor_offset = offset.min(state.match_text.chars().count());
+    state.visual_anchor_offset = None;
+    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
+    sync_multicursor_primary_cursor(runtime)
+}
+
+fn add_next_multicursor_match(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? || active_shell_buffer_is_terminal(runtime)?
+    {
+        return Ok(());
+    }
+    let mut state = if let Some(existing) = shell_ui(runtime)?.vim().multicursor.clone() {
+        existing
+    } else {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let Some((match_text, range)) = find_multicursor_seed_range(buffer) else {
+            return Ok(());
+        };
+        MulticursorState {
+            match_text,
+            ranges: vec![range],
+            primary: 0,
+            cursor_offset: buffer
+                .text
+                .point_to_char_index(buffer.cursor_point())
+                .saturating_sub(buffer.text.point_to_char_index(range.start())),
+            visual_anchor_offset: None,
+        }
+    };
+    let after_char = active_shell_buffer_mut(runtime)?
+        .text
+        .point_to_char_index(state.ranges[state.primary].end());
+    let next = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        find_next_multicursor_match(buffer, &state.match_text, after_char, &state.ranges)
+    };
+    if shell_ui(runtime)?.vim().multicursor.is_none() {
+        shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state.clone());
+        sync_multicursor_primary_cursor(runtime)?;
+        return Ok(());
+    }
+    let Some(next) = next else {
+        return Ok(());
+    };
+    state.ranges.push(next);
+    let buffer = active_shell_buffer_mut(runtime)?;
+    state
+        .ranges
+        .sort_by_key(|range| buffer.text.point_to_char_index(range.start()));
+    state.primary = state
+        .ranges
+        .iter()
+        .position(|range| *range == next)
+        .unwrap_or(state.primary);
+    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
+    sync_multicursor_primary_cursor(runtime)?;
+    Ok(())
+}
+
+fn multicursor_selection_offsets(
+    state: &MulticursorState,
+    input_mode: InputMode,
+) -> Option<(usize, usize)> {
+    if input_mode == InputMode::Visual {
+        state.visual_anchor_offset.map(|anchor| {
+            let start = anchor.min(state.cursor_offset);
+            let end = anchor.max(state.cursor_offset);
+            (start, end)
+        })
+    } else {
+        Some((0, state.match_text.chars().count()))
+    }
+}
+
+fn apply_multicursor_insert_text(
+    runtime: &mut EditorRuntime,
+    text: &str,
+    replace: bool,
+) -> Result<(), String> {
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let mut buffer = TextBuffer::from_text(&state.match_text);
+    buffer.set_cursor(buffer.point_from_char_index(state.cursor_offset));
+    if replace {
+        let cursor = buffer.cursor();
+        let next = buffer.point_after(cursor).unwrap_or(cursor);
+        if next != cursor {
+            buffer.replace(TextRange::new(cursor, next), text);
+        } else {
+            buffer.insert_text(text);
+        }
+    } else {
+        buffer.insert_text(text);
+    }
+    let new_text = buffer.text();
+    let new_offset = buffer.point_to_char_index(buffer.cursor());
+    replace_multicursor_ranges(runtime, &new_text, new_offset, None)
+}
+
+fn apply_multicursor_delete(runtime: &mut EditorRuntime, backward: bool) -> Result<(), String> {
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let mut buffer = TextBuffer::from_text(&state.match_text);
+    buffer.set_cursor(buffer.point_from_char_index(state.cursor_offset));
+    let changed = if backward {
+        buffer.backspace()
+    } else {
+        buffer.delete_forward()
+    };
+    if !changed {
+        return Ok(());
+    }
+    let new_text = buffer.text();
+    let new_offset = buffer.point_to_char_index(buffer.cursor());
+    replace_multicursor_ranges(runtime, &new_text, new_offset, None)
+}
+
+fn toggle_multicursor_visual_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let input_mode = shell_ui(runtime)?.input_mode();
+    let mut state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    if input_mode == InputMode::Visual {
+        state.visual_anchor_offset = None;
+        let ui = shell_ui_mut(runtime)?;
+        ui.input_mode = InputMode::Normal;
+        ui.vim_mut().multicursor = Some(state);
+        ui.vim_mut().clear_transient();
+        return Ok(());
+    }
+    state.visual_anchor_offset = Some(state.cursor_offset);
+    let ui = shell_ui_mut(runtime)?;
+    ui.input_mode = InputMode::Visual;
+    ui.vim_mut().multicursor = Some(state);
+    ui.vim_mut().clear_transient();
+    Ok(())
+}
+
+fn apply_multicursor_visual_operator(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+) -> Result<(), String> {
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let Some((start, end)) = multicursor_selection_offsets(&state, InputMode::Visual) else {
+        return Ok(());
+    };
+    if start == end {
+        let ui = shell_ui_mut(runtime)?;
+        ui.input_mode = InputMode::Normal;
+        ui.vim_mut().multicursor = Some(state);
+        return Ok(());
+    }
+    let selected = state
+        .match_text
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<String>();
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        store_yank_register(runtime, YankRegister::Character(selected.clone()), true)?;
+    }
+    match operator {
+        VimOperator::Delete | VimOperator::Change => {
+            let prefix = state.match_text.chars().take(start).collect::<String>();
+            let suffix = state.match_text.chars().skip(end).collect::<String>();
+            let replacement = format!("{prefix}{suffix}");
+            replace_multicursor_ranges(runtime, &replacement, start, None)?;
+            if operator == VimOperator::Change {
+                let ui = shell_ui_mut(runtime)?;
+                ui.input_mode = InputMode::Insert;
+                ui.vim_mut().clear_transient();
+            } else {
+                let ui = shell_ui_mut(runtime)?;
+                ui.input_mode = InputMode::Normal;
+                ui.vim_mut().clear_transient();
+            }
+        }
+        VimOperator::Yank => {
+            let ui = shell_ui_mut(runtime)?;
+            ui.input_mode = InputMode::Normal;
+            ui.vim_mut().clear_transient();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+            let prefix = state.match_text.chars().take(start).collect::<String>();
+            let middle = transform_case_text(&selected, operator);
+            let suffix = state.match_text.chars().skip(end).collect::<String>();
+            let replacement = format!("{prefix}{middle}{suffix}");
+            replace_multicursor_ranges(runtime, &replacement, end, None)?;
+            let ui = shell_ui_mut(runtime)?;
+            ui.input_mode = InputMode::Normal;
+            ui.vim_mut().clear_transient();
+        }
+    }
+    Ok(())
+}
+
+fn apply_multicursor_text_object_operator(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    kind: VimTextObjectKind,
+) -> Result<bool, String> {
+    if !matches!(kind, VimTextObjectKind::Word | VimTextObjectKind::BigWord) {
+        return Ok(false);
+    }
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let selected = state.match_text.clone();
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        store_yank_register(runtime, YankRegister::Character(selected), true)?;
+    }
+    match operator {
+        VimOperator::Delete => {
+            replace_multicursor_ranges(runtime, "", 0, None)?;
+            let ui = shell_ui_mut(runtime)?;
+            ui.input_mode = InputMode::Normal;
+            ui.vim_mut().clear_transient();
+        }
+        VimOperator::Change => {
+            replace_multicursor_ranges(runtime, "", 0, None)?;
+            let ui = shell_ui_mut(runtime)?;
+            ui.input_mode = InputMode::Insert;
+            ui.vim_mut().clear_transient();
+            mark_change_finish_on_normal(runtime)?;
+        }
+        VimOperator::Yank => {
+            let ui = shell_ui_mut(runtime)?;
+            ui.vim_mut().clear_transient();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {}
+    }
+    Ok(true)
+}
+
 fn input_field_paste_shortcut_requested(keycode: Keycode, keymod: Mod) -> bool {
     keycode == Keycode::V
         && keymod.intersects(ctrl_mod())
@@ -16778,6 +17446,11 @@ fn apply_directory_delete_if_needed(runtime: &mut EditorRuntime) -> Result<(), S
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
+    if shell_ui(runtime)?.vim().multicursor.is_some()
+        && !active_shell_buffer_vim_targets_input(runtime)?
+    {
+        return apply_multicursor_visual_operator(runtime, operator);
+    }
     if active_shell_buffer_vim_targets_input(runtime)? {
         let kind = shell_ui(runtime)?.vim().visual_kind;
         let selected = {
@@ -17836,6 +18509,14 @@ fn apply_text_object_operator(
     around: bool,
     count: usize,
 ) -> Result<(), String> {
+    if shell_ui(runtime)?.vim().multicursor.is_some()
+        && apply_multicursor_text_object_operator(runtime, operator, kind)?
+    {
+        shell_ui_mut(runtime)?.vim_mut().clear_transient();
+        let _ = around;
+        let _ = count;
+        return Ok(());
+    }
     let (range, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
@@ -18088,6 +18769,14 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
     if let Some((operator, count)) = pending_operator {
         let motion_count = shell_ui_mut(runtime)?.vim_mut().take_count();
         return apply_operator_motion(runtime, operator, count, motion, motion_count);
+    }
+
+    if shell_ui(runtime)?.vim().multicursor.is_some()
+        && !active_shell_buffer_vim_targets_input(runtime)?
+    {
+        let _ = apply_multicursor_motion(runtime, motion)?;
+        shell_ui_mut(runtime)?.vim_mut().clear_transient();
+        return Ok(());
     }
 
     let count = shell_ui_mut(runtime)?.vim_mut().take_count();
@@ -18758,6 +19447,11 @@ fn start_visual_text_object(runtime: &mut EditorRuntime, around: bool) -> Result
 }
 
 fn toggle_visual_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.vim().multicursor.is_some()
+        && !active_shell_buffer_vim_targets_input(runtime)?
+    {
+        return toggle_multicursor_visual_mode(runtime);
+    }
     let mode = shell_ui(runtime)?.input_mode();
     if mode != InputMode::Visual {
         return start_visual_mode(runtime);
@@ -26289,6 +26983,7 @@ fn render_shell_state(
             let vim_targets_input =
                 state.vim_target_for_buffer(buffer.id(), active) == VimTarget::Input;
             let visual_range = state.visual_selection_for_buffer(buffer, active);
+            let multicursor = state.multicursor_for_buffer(buffer.id(), active).cloned();
             let yank_flash = state.yank_flash(buffer.id(), now);
             let command_line = active.then(|| state.command_line()).flatten();
             render_buffer(
@@ -26297,6 +26992,7 @@ fn render_shell_state(
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 active,
                 visual_range,
+                multicursor.as_ref(),
                 yank_flash,
                 input_mode,
                 vim_targets_input,
@@ -26446,6 +27142,9 @@ fn render_runtime_popup_overlay(
         let vim_targets_input =
             state.vim_target_for_buffer(buffer.id(), popup_focus) == VimTarget::Input;
         let visual_range = state.visual_selection_for_buffer(buffer, popup_focus);
+        let multicursor = state
+            .multicursor_for_buffer(buffer.id(), popup_focus)
+            .cloned();
         let yank_flash = state.yank_flash(buffer.id(), now);
         render_buffer(
             target,
@@ -26453,6 +27152,7 @@ fn render_runtime_popup_overlay(
             popup_rect,
             popup_focus,
             visual_range,
+            multicursor.as_ref(),
             yank_flash,
             input_mode,
             vim_targets_input,
@@ -27801,6 +28501,7 @@ fn render_buffer(
     rect: Rect,
     active: bool,
     visual_selection: Option<VisualSelection>,
+    multicursor: Option<&MulticursorState>,
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
     vim_targets_input: bool,
@@ -27902,7 +28603,16 @@ fn render_buffer(
         .map(|cursor| cursor.col() as usize + 1)
         .unwrap_or(buffer.cursor_col() + 1);
     let statusline_context = HostStatuslineContext {
-        vim_mode: input_mode.label(),
+        vim_mode: if multicursor.is_some() {
+            match input_mode {
+                InputMode::Normal => "MC NORMAL",
+                InputMode::Insert => "MC INSERT",
+                InputMode::Replace => "MC REPLACE",
+                InputMode::Visual => "MC VISUAL",
+            }
+        } else {
+            input_mode.label()
+        },
         recording_macro,
         workspace_name,
         buffer_name: buffer.display_name(),
@@ -28060,6 +28770,13 @@ fn render_buffer(
         let mut cursor_row_on_screen = None;
         let mut cursor_col_on_screen = None;
         let mut cursor_indent_cols = 0usize;
+        let multicursor_points = if active {
+            multicursor
+                .map(multicursor_secondary_cursor_points)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut visual_row = 0usize;
         for wrapped in &wrapped_lines {
             if wrapped.line_index == cursor_row {
@@ -28124,6 +28841,9 @@ fn render_buffer(
             let selection_range = visual_selection.and_then(|selection_state| {
                 selection_columns_for_visual(selection_state, line_index, line_len)
             });
+            let multicursor_ranges = multicursor
+                .map(|state| multicursor_ranges_for_line(state, input_mode, line_index, line_len))
+                .unwrap_or_default();
             let yank_range = yank_flash.and_then(|selection_state| {
                 selection_columns_for_visual(selection_state, line_index, line_len)
             });
@@ -28152,6 +28872,23 @@ fn render_buffer(
                                 line_height.max(1) as u32,
                             ),
                             selection,
+                        )?;
+                    }
+                }
+                for (selection_start, selection_end) in multicursor_ranges.iter().copied() {
+                    let start = selection_start.max(segment.start_col);
+                    let end = selection_end.min(segment.end_col);
+                    if start < end {
+                        fill_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                segment_x
+                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                y,
+                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                line_height.max(1) as u32,
+                            ),
+                            blend_color(selection, cursor, 0.25),
                         )?;
                     }
                 }
@@ -28265,6 +29002,29 @@ fn render_buffer(
                         cell_width,
                     },
                 )?;
+                for point in multicursor_points.iter().copied().filter(|point| {
+                    point.line == line_index
+                        && point.column >= segment.start_col
+                        && point.column <= segment.end_col
+                }) {
+                    let cursor_width = match input_mode {
+                        InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+                        InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
+                    };
+                    fill_rounded_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            segment_x
+                                + (point.column.saturating_sub(segment.start_col) as i32
+                                    * cell_width),
+                            y,
+                            cursor_width,
+                            line_height.max(2) as u32,
+                        ),
+                        cursor_roundness,
+                        cursor,
+                    )?;
+                }
                 visual_row = visual_row.saturating_add(1);
             }
             if visual_row >= visible_rows {
@@ -30091,6 +30851,57 @@ fn selection_columns_for_visual(
             (start < end).then_some((start, end))
         }
     }
+}
+
+fn multicursor_ranges_for_line(
+    state: &MulticursorState,
+    input_mode: InputMode,
+    line_index: usize,
+    line_len: usize,
+) -> Vec<(usize, usize)> {
+    let Some((start_offset, end_offset)) = multicursor_selection_offsets(state, input_mode) else {
+        return Vec::new();
+    };
+    let start_text = state
+        .match_text
+        .chars()
+        .take(start_offset)
+        .collect::<String>();
+    let end_text = state
+        .match_text
+        .chars()
+        .take(end_offset)
+        .collect::<String>();
+    state
+        .ranges
+        .iter()
+        .filter_map(|range| {
+            selection_columns_for_visual(
+                VisualSelection::Range(TextRange::new(
+                    advance_point_by_text(range.start(), &start_text),
+                    advance_point_by_text(range.start(), &end_text),
+                )),
+                line_index,
+                line_len,
+            )
+        })
+        .collect()
+}
+
+fn multicursor_secondary_cursor_points(state: &MulticursorState) -> Vec<TextPoint> {
+    let prefix = state
+        .match_text
+        .chars()
+        .take(state.cursor_offset)
+        .collect::<String>();
+    state
+        .ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, range)| {
+            (index != state.primary).then(|| advance_point_by_text(range.start(), &prefix))
+        })
+        .collect()
 }
 
 fn index_syntax_lines(snapshot: SyntaxSnapshot) -> IndexedSyntaxLines {
