@@ -27678,26 +27678,40 @@ fn render_buffer(
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let cursor_row = buffer.cursor_row();
         let cursor_col = buffer.cursor_col();
-        let buffer_text = active.then(|| buffer.text.text());
-        let ghost_text_by_line = if active {
-            user_library
-                .ghost_text_lines(&HostGhostTextContext {
-                    buffer_name: buffer.display_name(),
-                    language_id: buffer.language_id(),
-                    buffer_text: buffer_text.as_deref().unwrap_or_default(),
-                    cursor_line: cursor_row,
-                    cursor_column: cursor_col,
-                })
-                .into_iter()
-                .map(|line| (line.line, line.text))
-                .collect::<BTreeMap<_, _>>()
-        } else {
-            BTreeMap::new()
-        };
+        let buffer_text = buffer.text.text();
+        let context = active.then_some(HostGhostTextContext {
+            buffer_name: buffer.display_name(),
+            language_id: buffer.language_id(),
+            buffer_text: &buffer_text,
+            cursor_line: cursor_row,
+            cursor_column: cursor_col,
+        });
+        let headerline_lines = context
+            .as_ref()
+            .map(|context| {
+                visible_headerline_lines(
+                    user_library.headerline_lines(context),
+                    layout.visible_rows,
+                )
+            })
+            .unwrap_or_default();
+        let ghost_text_by_line = context
+            .as_ref()
+            .map(|context| {
+                user_library
+                    .ghost_text_lines(context)
+                    .into_iter()
+                    .map(|line| (line.line, line.text))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let headerline_rows = headerline_lines.len();
+        let body_y = layout.body_y + headerline_rows as i32 * line_height;
+        let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
         let wrapped_lines = collect_wrapped_lines(
             buffer,
             buffer.scroll_row,
-            layout.visible_rows,
+            visible_rows,
             wrap_cols,
             indent_size,
         );
@@ -27719,7 +27733,7 @@ fn render_buffer(
                 }
             }
             visual_row = visual_row.saturating_add(wrapped.segments.len());
-            if visual_row >= layout.visible_rows {
+            if visual_row >= visible_rows {
                 break;
             }
         }
@@ -27730,7 +27744,7 @@ fn render_buffer(
         if show_text_cursor
             && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
                 (cursor_row_on_screen, cursor_col_on_screen)
-            && cursor_row_on_screen < layout.visible_rows
+            && cursor_row_on_screen < visible_rows
         {
             let cursor_width = match input_mode {
                 InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
@@ -27744,7 +27758,7 @@ fn render_buffer(
                         + fringe_width
                         + line_number_width
                         + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                    layout.body_y + cursor_row_on_screen as i32 * line_height,
+                    body_y + cursor_row_on_screen as i32 * line_height,
                     cursor_width,
                     line_height.max(2) as u32,
                 ),
@@ -27757,6 +27771,30 @@ fn render_buffer(
         let fringe_x = gutter_x;
         let line_number_x = gutter_x + fringe_width;
         let text_x = line_number_x + line_number_width;
+        let headerline_width = rect
+            .width()
+            .saturating_sub((text_x - rect.x()).max(0) as u32 + 12);
+        for (index, headerline) in headerline_lines.iter().enumerate() {
+            draw_text(
+                target,
+                text_x,
+                layout.body_y + index as i32 * line_height,
+                &truncate_text_to_width(headerline, headerline_width, cell_width),
+                statusline_active,
+            )?;
+        }
+        if headerline_rows > 0 {
+            fill_rect(
+                target,
+                PixelRectToRect::rect(
+                    rect.x() + 8,
+                    body_y.saturating_sub(3),
+                    rect.width().saturating_sub(16),
+                    1,
+                ),
+                border_color,
+            )?;
+        }
         let mut visual_row = 0usize;
         for wrapped in wrapped_lines {
             let line_index = wrapped.line_index;
@@ -27768,10 +27806,10 @@ fn render_buffer(
                 selection_columns_for_visual(selection_state, line_index, line_len)
             });
             for (segment_index, segment) in wrapped.segments.iter().enumerate() {
-                if visual_row >= layout.visible_rows {
+                if visual_row >= visible_rows {
                     break;
                 }
-                let y = layout.body_y + visual_row as i32 * line_height;
+                let y = body_y + visual_row as i32 * line_height;
                 let segment_indent_cols = if segment_index == 0 {
                     0
                 } else {
@@ -27894,17 +27932,19 @@ fn render_buffer(
                 }
                 draw_line_ghost_text_for_segment(
                     target,
-                    segment_x,
-                    y,
-                    *segment,
-                    line_len,
-                    ghost_text_by_line.get(&line_index).map(String::as_str),
-                    muted,
-                    cell_width,
+                    GhostTextSegmentDraw {
+                        x: segment_x,
+                        y,
+                        segment: *segment,
+                        line_len,
+                        ghost_text: ghost_text_by_line.get(&line_index).map(String::as_str),
+                        color: muted,
+                        cell_width,
+                    },
                 )?;
                 visual_row = visual_row.saturating_add(1);
             }
-            if visual_row >= layout.visible_rows {
+            if visual_row >= visible_rows {
                 break;
             }
         }
@@ -29487,27 +29527,44 @@ fn draw_buffer_text(
     Ok(())
 }
 
-fn draw_line_ghost_text_for_segment(
-    target: &mut DrawTarget<'_>,
+struct GhostTextSegmentDraw<'a> {
     x: i32,
     y: i32,
     segment: LineWrapSegment,
     line_len: usize,
-    ghost_text: Option<&str>,
+    ghost_text: Option<&'a str>,
     color: Color,
     cell_width: i32,
+}
+
+fn draw_line_ghost_text_for_segment(
+    target: &mut DrawTarget<'_>,
+    draw: GhostTextSegmentDraw<'_>,
 ) -> Result<(), ShellError> {
-    let Some(ghost_text) = ghost_text.filter(|text| !text.is_empty()) else {
+    let Some(ghost_text) = draw.ghost_text.filter(|text| !text.is_empty()) else {
         return Ok(());
     };
-    let visible_end = segment.end_col.min(line_len);
-    if visible_end < line_len {
+    let visible_end = draw.segment.end_col.min(draw.line_len);
+    if visible_end < draw.line_len {
         return Ok(());
     }
-    let visible_cols = visible_end.saturating_sub(segment.start_col);
+    let visible_cols = visible_end.saturating_sub(draw.segment.start_col);
     // Leave one monospace cell between the closing delimiter and the ghost text.
-    let draw_x = x + visible_cols as i32 * cell_width + cell_width;
-    draw_text(target, draw_x, y, ghost_text, color)
+    let draw_x = draw.x + visible_cols as i32 * draw.cell_width + draw.cell_width;
+    draw_text(target, draw_x, draw.y, ghost_text, draw.color)
+}
+
+fn visible_headerline_lines(lines: Vec<String>, visible_rows: usize) -> Vec<String> {
+    let max_rows = visible_rows.saturating_sub(1);
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    let lines = lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_rows);
+    lines.into_iter().skip(start).collect()
 }
 
 fn line_color_segments(

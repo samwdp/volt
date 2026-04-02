@@ -997,16 +997,18 @@ fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Res
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        24,
-        8,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: 1,
+        GhostTextSegmentDraw {
+            x: 24,
+            y: 8,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 1,
+            },
+            line_len: 1,
+            ghost_text: Some(" render(value: usize)"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
         },
-        1,
-        Some(" render(value: usize)"),
-        Color::RGB(140, 144, 152),
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1029,21 +1031,43 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
 
     draw_line_ghost_text_for_segment(
         &mut target,
-        0,
-        0,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: 10,
+        GhostTextSegmentDraw {
+            x: 0,
+            y: 0,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 10,
+            },
+            line_len: 24,
+            ghost_text: Some("hidden"),
+            color: Color::RGB(140, 144, 152),
+            cell_width: 8,
         },
-        24,
-        Some("hidden"),
-        Color::RGB(140, 144, 152),
-        8,
     )
     .map_err(|error| error.to_string())?;
 
     assert!(scene.is_empty());
     Ok(())
+}
+
+#[test]
+fn visible_headerline_lines_keeps_innermost_contexts_when_space_is_limited() {
+    assert_eq!(
+        visible_headerline_lines(
+            vec![
+                "module app".to_owned(),
+                "impl Demo".to_owned(),
+                "render(value: usize)".to_owned(),
+            ],
+            3,
+        ),
+        vec!["impl Demo".to_owned(), "render(value: usize)".to_owned()]
+    );
+}
+
+#[test]
+fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
+    assert!(visible_headerline_lines(vec!["render()".to_owned()], 1).is_empty());
 }
 
 #[test]
