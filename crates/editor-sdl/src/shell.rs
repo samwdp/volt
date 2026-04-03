@@ -28,6 +28,7 @@ use agent_client_protocol::{
 };
 use base64::Engine as _;
 use clipboard::*;
+use lopdf::{Document as PdfDocument, PdfMetadata};
 use notify::{
     Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
     recommended_watcher,
@@ -69,7 +70,7 @@ use editor_plugin_api::{
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
     OilDefaults, OilKeyAction, PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks,
     browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks,
-    lsp_hooks, oil_hooks, oil_protocol, plugin_hooks,
+    lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -183,12 +184,17 @@ const INTERACTIVE_READONLY_KIND: &str = "interactive-readonly";
 const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
+const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = "ui.browser.focus-input";
 const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
 const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
 const HOOK_IMAGE_TOGGLE_MODE: &str = image_hooks::TOGGLE_MODE;
+const HOOK_PDF_NEXT_PAGE: &str = pdf_hooks::NEXT_PAGE;
+const HOOK_PDF_PREVIOUS_PAGE: &str = pdf_hooks::PREVIOUS_PAGE;
+const HOOK_PDF_ROTATE_CLOCKWISE: &str = pdf_hooks::ROTATE_CLOCKWISE;
+const HOOK_PDF_DELETE_PAGE: &str = pdf_hooks::DELETE_PAGE;
 const AUTOCOMPLETE_BUFFER_PROVIDER: &str = "buffer";
 const AUTOCOMPLETE_LSP_PROVIDER: &str = "lsp";
 const HOVER_PROVIDER_TEST: &str = "test-hover";
@@ -234,6 +240,7 @@ const GIT_SECTION_STASHES: &str = git_sections::STASHES;
 const GIT_SECTION_UNPULLED: &str = git_sections::UNPULLED;
 const GIT_SECTION_UNPUSHED: &str = git_sections::UNPUSHED;
 const GIT_SECTION_COMMIT: &str = git_sections::COMMIT;
+const PDF_ROTATION_FULL_CIRCLE: i64 = 360;
 const TOKEN_GIT_STATUS_SECTION_HEADER: &str = "git.status.section.header";
 const TOKEN_GIT_STATUS_SECTION_COUNT: &str = "git.status.section.count";
 const TOKEN_GIT_STATUS_HEADER_LABEL: &str = "git.status.header.label";
@@ -2420,6 +2427,7 @@ pub(crate) struct ShellBuffer {
     section_state: Option<SectionedBufferState>,
     plugin_section_state: Option<PluginSectionBufferState>,
     image_state: Option<ImageBufferState>,
+    pdf_state: Option<PdfBufferState>,
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_view: Option<GitViewState>,
@@ -2592,6 +2600,44 @@ struct ImageBufferState {
     mode: ImageBufferMode,
     decoded: DecodedImage,
     zoom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfFitMode {
+    Page,
+}
+
+#[derive(Debug, Clone)]
+struct PdfBufferState {
+    document: PdfDocument,
+    metadata: PdfMetadata,
+    current_page: u32,
+    fit_mode: PdfFitMode,
+    zoom_percent: u16,
+    dirty: bool,
+}
+
+impl PdfBufferState {
+    fn new(document: PdfDocument, metadata: PdfMetadata) -> Self {
+        Self {
+            document,
+            metadata,
+            current_page: 1,
+            fit_mode: PdfFitMode::Page,
+            zoom_percent: 100,
+            dirty: false,
+        }
+    }
+
+    fn page_count(&self) -> u32 {
+        self.document.get_pages().len() as u32
+    }
+
+    fn clamp_current_page(&mut self) {
+        let page_count = self.page_count().max(1);
+        self.current_page = self.current_page.clamp(1, page_count);
+        self.metadata.page_count = page_count;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3239,6 +3285,7 @@ impl ShellBuffer {
             section_state: None,
             plugin_section_state,
             image_state: None,
+            pdf_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -3300,6 +3347,7 @@ impl ShellBuffer {
             section_state: None,
             plugin_section_state,
             image_state: None,
+            pdf_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -3364,6 +3412,7 @@ impl ShellBuffer {
             section_state: None,
             plugin_section_state,
             image_state: None,
+            pdf_state: None,
             acp_state: None,
             git_snapshot: None,
             git_view: None,
@@ -3520,6 +3569,19 @@ impl ShellBuffer {
         self.image_state.as_mut()
     }
 
+    fn pdf_state(&self) -> Option<&PdfBufferState> {
+        self.pdf_state.as_ref()
+    }
+
+    fn pdf_state_mut(&mut self) -> Option<&mut PdfBufferState> {
+        self.pdf_state.as_mut()
+    }
+
+    fn is_pdf_buffer(&self) -> bool {
+        self.pdf_state.is_some()
+            || matches!(&self.kind, BufferKind::Plugin(kind) if kind == PDF_BUFFER_KIND)
+    }
+
     fn is_rendered_image_buffer(&self) -> bool {
         self.image_state()
             .is_some_and(|state| state.mode == ImageBufferMode::Rendered)
@@ -3537,6 +3599,10 @@ impl ShellBuffer {
 
     fn set_image_state(&mut self, state: ImageBufferState) {
         self.image_state = Some(state);
+    }
+
+    fn set_pdf_state(&mut self, state: PdfBufferState) {
+        self.pdf_state = Some(state);
     }
 
     fn image_zoom_in(&mut self) -> bool {
@@ -3578,6 +3644,92 @@ impl ShellBuffer {
         }
         state.zoom = 1.0;
         true
+    }
+
+    fn refresh_pdf_preview(&mut self) {
+        let Some(state) = self.pdf_state().cloned() else {
+            return;
+        };
+        let display_name = self.display_name().to_owned();
+        let path = self.path().map(Path::to_path_buf);
+        self.replace_with_lines_preserve_view(pdf_buffer_lines(
+            display_name.as_str(),
+            path.as_deref(),
+            &state,
+        ));
+        if let Some(path) = path {
+            self.text.set_path(path);
+        }
+        self.text.mark_clean();
+    }
+
+    fn pdf_next_page(&mut self) -> bool {
+        let Some(state) = self.pdf_state_mut() else {
+            return false;
+        };
+        let page_count = state.page_count();
+        if state.current_page >= page_count {
+            return false;
+        }
+        state.current_page += 1;
+        self.refresh_pdf_preview();
+        true
+    }
+
+    fn pdf_previous_page(&mut self) -> bool {
+        let Some(state) = self.pdf_state_mut() else {
+            return false;
+        };
+        if state.current_page <= 1 {
+            return false;
+        }
+        state.current_page -= 1;
+        self.refresh_pdf_preview();
+        true
+    }
+
+    fn pdf_rotate_clockwise(&mut self) -> Result<bool, String> {
+        let Some(state) = self.pdf_state_mut() else {
+            return Ok(false);
+        };
+        let page_id = state
+            .document
+            .get_pages()
+            .get(&state.current_page)
+            .copied()
+            .ok_or_else(|| format!("missing page {}", state.current_page))?;
+        let page = state
+            .document
+            .get_dictionary_mut(page_id)
+            .map_err(|error| error.to_string())?;
+        let next_rotation = page
+            .get(b"Rotate")
+            .ok()
+            .and_then(|rotation| rotation.as_i64().ok())
+            .unwrap_or(0)
+            + 90;
+        page.set("Rotate", next_rotation.rem_euclid(PDF_ROTATION_FULL_CIRCLE));
+        state.dirty = true;
+        self.refresh_pdf_preview();
+        Ok(true)
+    }
+
+    fn pdf_delete_current_page(&mut self) -> Result<bool, String> {
+        let Some(state) = self.pdf_state_mut() else {
+            return Ok(false);
+        };
+        if state.page_count() <= 1 {
+            return Err("cannot delete the last remaining PDF page".to_owned());
+        }
+        state.document.delete_pages(&[state.current_page]);
+        state.document.prune_objects();
+        if state.current_page > state.page_count() {
+            state.current_page = state.page_count().max(1);
+        }
+        state.metadata.page_count = state.page_count();
+        state.dirty = true;
+        self.refresh_pdf_preview();
+        Ok(true)
     }
 
     fn toggle_svg_image_mode(&mut self) -> Result<bool, String> {
@@ -4204,10 +4356,24 @@ impl ShellBuffer {
     }
 
     fn is_dirty(&self) -> bool {
-        self.text.is_dirty()
+        self.text.is_dirty() || self.pdf_state().is_some_and(|state| state.dirty)
     }
 
     fn save_to_path(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        if let Some(state) = self.pdf_state_mut() {
+            state
+                .document
+                .save(path)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            state.dirty = false;
+            state.metadata = PdfDocument::load_metadata(path)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            self.text.set_path(path.to_path_buf());
+            self.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
+            self.backing_file_reload_pending = false;
+            self.backing_file_check_in_flight = false;
+            return Ok(());
+        }
         self.text.save_to_path(path)?;
         self.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
         self.backing_file_reload_pending = false;
@@ -4216,7 +4382,7 @@ impl ShellBuffer {
     }
 
     fn mark_backing_file_reload_pending(&mut self) {
-        if self.kind == BufferKind::File && self.text.path().is_some() {
+        if (self.kind == BufferKind::File || self.is_pdf_buffer()) && self.text.path().is_some() {
             self.backing_file_reload_pending = true;
         }
     }
@@ -4340,7 +4506,13 @@ impl ShellBuffer {
     }
 
     fn reload_from_disk_if_changed(&mut self, force: bool) -> Result<bool, String> {
-        if self.kind != BufferKind::File || self.text.is_dirty() {
+        if !matches!(self.kind, BufferKind::File) && !self.is_pdf_buffer() {
+            return Ok(false);
+        }
+        if self.kind == BufferKind::File && self.text.is_dirty() {
+            return Ok(false);
+        }
+        if self.is_pdf_buffer() && self.pdf_state().is_some_and(|state| state.dirty) {
             return Ok(false);
         }
         let Some(path) = self.text.path().map(Path::to_path_buf) else {
@@ -4365,6 +4537,33 @@ impl ShellBuffer {
         };
         if current_fingerprint == loaded_fingerprint {
             return Ok(false);
+        }
+
+        if self.is_pdf_buffer() {
+            let current_page = self
+                .pdf_state()
+                .map(|state| state.current_page)
+                .unwrap_or(1);
+            let fit_mode = self
+                .pdf_state()
+                .map(|state| state.fit_mode)
+                .unwrap_or(PdfFitMode::Page);
+            let zoom_percent = self
+                .pdf_state()
+                .map(|state| state.zoom_percent)
+                .unwrap_or(100);
+            let mut state = load_pdf_buffer_state(&path)
+                .map_err(|error| format!("failed to reload `{}`: {error}", path.display()))?;
+            state.current_page = current_page;
+            state.fit_mode = fit_mode;
+            state.zoom_percent = zoom_percent;
+            state.clamp_current_page();
+            self.pdf_state = Some(state);
+            self.refresh_pdf_preview();
+            self.backing_file_fingerprint = Some(current_fingerprint);
+            self.backing_file_reload_pending = false;
+            self.backing_file_check_in_flight = false;
+            return Ok(true);
         }
 
         let reloaded = match self.text.reload_from_path() {
@@ -7071,7 +7270,7 @@ impl ShellUiState {
 }
 
 fn shell_buffer_watch_path(buffer: &ShellBuffer) -> Option<PathBuf> {
-    (buffer.kind == BufferKind::File)
+    (buffer.kind == BufferKind::File || buffer.is_pdf_buffer())
         .then_some(())
         .and_then(|_| buffer.path().map(Path::to_path_buf))
 }
@@ -11573,7 +11772,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_VIM_COMMAND_LINE,
         "Opens the Vim command line under the active status line.",
     )?;
-    register_hook(runtime, HOOK_BUFFER_SAVE, "Saves the active file buffer.")?;
+    register_hook(
+        runtime,
+        HOOK_BUFFER_SAVE,
+        "Saves the active file-backed buffer.",
+    )?;
     register_hook(runtime, HOOK_BUFFER_CLOSE, "Closes the active buffer.")?;
     register_hook(
         runtime,
@@ -11726,6 +11929,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_IMAGE_TOGGLE_MODE,
         "Toggles the active SVG image buffer between preview and source mode.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PDF_PREVIOUS_PAGE,
+        "Moves the active PDF buffer to the previous page.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PDF_NEXT_PAGE,
+        "Moves the active PDF buffer to the next page.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PDF_ROTATE_CLOCKWISE,
+        "Rotates the active PDF page clockwise.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PDF_DELETE_PAGE,
+        "Deletes the active PDF page.",
     )?;
     register_hook(
         runtime,
@@ -13107,6 +13330,42 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_PDF_PREVIOUS_PAGE,
+            "shell.pdf-previous-page",
+            |_, runtime| {
+                pdf_previous_page(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_PDF_NEXT_PAGE, "shell.pdf-next-page", |_, runtime| {
+            pdf_next_page(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PDF_ROTATE_CLOCKWISE,
+            "shell.pdf-rotate-clockwise",
+            |_, runtime| {
+                pdf_rotate_clockwise(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PDF_DELETE_PAGE,
+            "shell.pdf-delete-page",
+            |_, runtime| {
+                pdf_delete_page(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_SUBMIT, "shell.picker-submit", |_, runtime| {
             let (action, query, picker_kind) = {
                 let ui = shell_ui_mut(runtime)?;
@@ -14065,6 +14324,26 @@ fn toggle_active_image_buffer_mode(runtime: &mut EditorRuntime) -> Result<(), St
     if switched_to_source {
         queue_buffer_syntax_refresh(runtime, buffer_id)?;
     }
+    Ok(())
+}
+
+fn pdf_previous_page(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.pdf_previous_page();
+    Ok(())
+}
+
+fn pdf_next_page(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.pdf_next_page();
+    Ok(())
+}
+
+fn pdf_rotate_clockwise(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.pdf_rotate_clockwise()?;
+    Ok(())
+}
+
+fn pdf_delete_page(runtime: &mut EditorRuntime) -> Result<(), String> {
+    active_shell_buffer_mut(runtime)?.pdf_delete_current_page()?;
     Ok(())
 }
 
@@ -18056,11 +18335,16 @@ fn save_buffer(
         buffer.path().map(Path::to_path_buf)
     };
 
-    if !shell_buffer(runtime, buffer_id)?.supports_text_file_actions() {
+    let supports_text_file_actions = shell_buffer(runtime, buffer_id)?.supports_text_file_actions();
+    let is_pdf_buffer = shell_buffer(runtime, buffer_id)?.is_pdf_buffer();
+    if !supports_text_file_actions && !is_pdf_buffer {
         return Ok(());
     }
 
     let path = path.ok_or_else(|| "buffer.save requires a file path".to_owned())?;
+    if is_pdf_buffer {
+        return save_buffer_inner(runtime, workspace_id, buffer_id, &path);
+    }
     let language_id = language_id_for_path(runtime, &path).ok();
     if theme_lang_format_on_save(
         runtime.services().get::<ThemeRegistry>(),
@@ -18245,7 +18529,8 @@ fn save_workspace(runtime: &mut EditorRuntime, workspace_id: WorkspaceId) -> Res
             buffer.path().map(Path::to_path_buf)
         };
 
-        if !shell_buffer(runtime, buffer_id)?.supports_text_file_actions() {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer.supports_text_file_actions() && !buffer.is_pdf_buffer() {
             continue;
         }
 
@@ -24031,6 +24316,15 @@ fn refresh_pending_file_reloads(
             }
         }
     }
+    {
+        let ui = shell_ui_mut(runtime)?;
+        for buffer in &mut ui.buffers {
+            if !buffer.is_pdf_buffer() || !buffer.backing_file_reload_pending {
+                continue;
+            }
+            changed |= buffer.reload_from_disk_if_changed(false)?;
+        }
+    }
     let results = shell_ui(runtime)?.file_reload_worker.take_results();
     if !results.is_empty() {
         let ui = shell_ui_mut(runtime)?;
@@ -25561,6 +25855,136 @@ fn image_format_for_path(path: &Path) -> Option<ImageBufferFormat> {
     }
 }
 
+/// Returns whether a path has a case-insensitive `.pdf` extension.
+fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+fn load_pdf_buffer_state(path: &Path) -> Result<PdfBufferState, String> {
+    let document = PdfDocument::load(path)
+        .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    let metadata = PdfDocument::load_metadata(path).map_err(|error| {
+        format!(
+            "failed to read PDF metadata for `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let mut state = PdfBufferState::new(document, metadata);
+    state.clamp_current_page();
+    Ok(state)
+}
+
+fn pdf_fit_mode_label(mode: PdfFitMode) -> &'static str {
+    match mode {
+        PdfFitMode::Page => "fit page",
+    }
+}
+
+fn pdf_inherited_page_value<'a>(
+    document: &'a PdfDocument,
+    page_number: u32,
+    key: &[u8],
+) -> Option<&'a lopdf::Object> {
+    let mut page_id = document.get_pages().get(&page_number).copied()?;
+    loop {
+        let page = document.get_dictionary(page_id).ok()?;
+        if let Ok(value) = page.get(key) {
+            return Some(value);
+        }
+        page_id = page.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+}
+
+fn pdf_page_rotation(document: &PdfDocument, page_number: u32) -> Option<i64> {
+    pdf_inherited_page_value(document, page_number, b"Rotate")
+        .and_then(|rotation| rotation.as_i64().ok())
+}
+
+fn pdf_page_media_box(document: &PdfDocument, page_number: u32) -> Option<String> {
+    let media_box = pdf_inherited_page_value(document, page_number, b"MediaBox")
+        .and_then(|value| value.as_array().ok())?;
+    let numbers = media_box
+        .iter()
+        .map(|value| {
+            value
+                .as_float()
+                .map(|number| format!("{number:.0}"))
+                .or_else(|_| value.as_i64().map(|number| number.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some(numbers.join(" "))
+}
+
+/// Extracts trimmed text for one PDF page, returning an empty string on failure.
+fn pdf_page_text(document: &PdfDocument, page_number: u32) -> String {
+    document
+        .extract_text(&[page_number])
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_default()
+}
+
+fn pdf_buffer_lines(
+    display_name: &str,
+    path: Option<&Path>,
+    state: &PdfBufferState,
+) -> Vec<String> {
+    let page_count = state.page_count().max(1);
+    let current_page = state.current_page.min(page_count);
+    let path_label = path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| display_name.to_owned());
+    let page_rotation = pdf_page_rotation(&state.document, current_page).unwrap_or(0);
+    let page_media_box =
+        pdf_page_media_box(&state.document, current_page).unwrap_or_else(|| "unknown".to_owned());
+    let mut lines = vec![
+        format!("{display_name} is a native PDF buffer."),
+        format!("File: {path_label}"),
+        format!(
+            "Page {current_page}/{page_count} · {} · {}% · rotation {}°",
+            pdf_fit_mode_label(state.fit_mode),
+            state.zoom_percent,
+            page_rotation.rem_euclid(PDF_ROTATION_FULL_CIRCLE)
+        ),
+        format!(
+            "Modified: {} · PDF version {}",
+            if state.dirty { "yes" } else { "no" },
+            state.metadata.version
+        ),
+        "Commands: PageUp previous · PageDown next · Ctrl+r rotate · D delete · S save".to_owned(),
+        String::new(),
+        "Document metadata:".to_owned(),
+        format!(
+            "Title: {}",
+            state.metadata.title.as_deref().unwrap_or("(none)")
+        ),
+        format!(
+            "Author: {}",
+            state.metadata.author.as_deref().unwrap_or("(none)")
+        ),
+        format!(
+            "Creator: {}",
+            state.metadata.creator.as_deref().unwrap_or("(none)")
+        ),
+        format!(
+            "Producer: {}",
+            state.metadata.producer.as_deref().unwrap_or("(none)")
+        ),
+        format!("MediaBox: {page_media_box}"),
+        String::new(),
+        "Current page text:".to_owned(),
+    ];
+    let text = pdf_page_text(&state.document, current_page);
+    if text.is_empty() {
+        lines.push("(no extractable text on the current page)".to_owned());
+    } else {
+        lines.extend(text.lines().map(str::to_owned));
+    }
+    lines
+}
+
 fn open_image_workspace_file(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -25639,6 +26063,59 @@ fn open_image_workspace_file(
     Ok(buffer_id)
 }
 
+fn open_pdf_workspace_file(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    display_name: &str,
+    path: &Path,
+) -> Result<BufferId, String> {
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            display_name,
+            BufferKind::Plugin(PDF_BUFFER_KIND.to_owned()),
+            Some(path.to_path_buf()),
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("new pdf buffer `{buffer_id}` is missing"))?;
+    let user_library = shell_user_library(runtime);
+    let mut pdf_state = load_pdf_buffer_state(path)?;
+    let mut text =
+        TextBuffer::from_text(pdf_buffer_lines(display_name, Some(path), &pdf_state).join("\n"));
+    text.set_path(path.to_path_buf());
+    text.mark_clean();
+    let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+    pdf_state.clamp_current_page();
+    shell_buffer.set_pdf_state(pdf_state);
+    shell_buffer.refresh_pdf_preview();
+
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buffer);
+        ui.focus_buffer_in_active_pane(buffer_id);
+    }
+
+    if let Some(detail) = file_open_detail(path) {
+        runtime
+            .emit_hook(
+                builtins::FILE_OPEN,
+                HookEvent::new()
+                    .with_workspace(workspace_id)
+                    .with_buffer(buffer_id)
+                    .with_detail(detail),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(buffer_id)
+}
+
 fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<BufferId, String> {
     let workspace_id = runtime
         .model()
@@ -25663,6 +26140,9 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
             path,
             format,
         );
+    }
+    if is_pdf_path(path) {
+        return open_pdf_workspace_file(runtime, workspace_id, display_name.as_str(), path);
     }
     let text = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
@@ -27012,6 +27492,7 @@ fn buffer_interaction(
             (true, Some(InputField::new("Ask > ")))
         }
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == PDF_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => (true, None),
@@ -27115,6 +27596,11 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => {
                 user_library.browser_buffer_lines(None)
             }
+            BufferKind::Plugin(plugin_kind) if plugin_kind == PDF_BUFFER_KIND => vec![
+                format!("{name} is a native PDF buffer."),
+                "Open a .pdf file to inspect its metadata, page text, and structural state."
+                    .to_owned(),
+            ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => vec![
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),

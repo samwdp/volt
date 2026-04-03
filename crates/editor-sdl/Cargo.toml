@@ -39,6 +39,7 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 async-trait = "0.1.89"
 notify = "8.2.0"
 resvg = "0.47.0"
+lopdf = "0.40.0"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 wry = { version = "0.53", features = ["devtools"] }
