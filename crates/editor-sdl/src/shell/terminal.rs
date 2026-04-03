@@ -292,7 +292,10 @@ pub(super) fn scroll_active_terminal_view(
     Ok(true)
 }
 
-pub(super) fn write_active_terminal_text(runtime: &mut EditorRuntime, text: &str) -> Result<(), String> {
+pub(super) fn write_active_terminal_text(
+    runtime: &mut EditorRuntime,
+    text: &str,
+) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     ensure_terminal_session(runtime, buffer_id)?;
     terminal_buffer_state_mut(runtime)?
@@ -302,7 +305,10 @@ pub(super) fn write_active_terminal_text(runtime: &mut EditorRuntime, text: &str
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn write_active_terminal_key(runtime: &mut EditorRuntime, key: TerminalKey) -> Result<(), String> {
+pub(super) fn write_active_terminal_key(
+    runtime: &mut EditorRuntime,
+    key: TerminalKey,
+) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     ensure_terminal_session(runtime, buffer_id)?;
     terminal_buffer_state_mut(runtime)?
@@ -312,7 +318,10 @@ pub(super) fn write_active_terminal_key(runtime: &mut EditorRuntime, key: Termin
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn close_terminal_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn close_terminal_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
         buffer.clear_terminal_render();
     }
@@ -606,5 +615,3 @@ struct CursorTextOverlay {
     text: String,
     color: Color,
 }
-
-#[allow(clippy::too_many_arguments)]

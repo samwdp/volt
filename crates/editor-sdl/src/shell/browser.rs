@@ -82,7 +82,10 @@ pub(super) fn open_detected_browser_url(runtime: &mut EditorRuntime) -> Result<(
     open_browser_popup_with_url(runtime, &url)
 }
 
-pub(super) fn open_browser_popup_with_url(runtime: &mut EditorRuntime, raw_url: &str) -> Result<(), String> {
+pub(super) fn open_browser_popup_with_url(
+    runtime: &mut EditorRuntime,
+    raw_url: &str,
+) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -397,7 +400,11 @@ pub(super) fn browser_viewport_contains_point(rect: BrowserViewportRect, x: i32,
     x >= rect.x && y >= rect.y && x < right && y < bottom
 }
 
-pub(super) fn browser_surface_buffer_at_point(plan: &BrowserSyncPlan, x: i32, y: i32) -> Option<BufferId> {
+pub(super) fn browser_surface_buffer_at_point(
+    plan: &BrowserSyncPlan,
+    x: i32,
+    y: i32,
+) -> Option<BufferId> {
     plan.visible_surfaces.iter().find_map(|surface| {
         browser_viewport_contains_point(surface.rect, x, y).then_some(surface.buffer_id)
     })

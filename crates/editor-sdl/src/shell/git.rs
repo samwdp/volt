@@ -190,7 +190,10 @@ fn format_section_line(line: &SectionRenderLine) -> String {
     }
 }
 
-pub(super) fn git_status_line_spans(line: &SectionRenderLine, formatted_line: &str) -> Vec<LineSyntaxSpan> {
+pub(super) fn git_status_line_spans(
+    line: &SectionRenderLine,
+    formatted_line: &str,
+) -> Vec<LineSyntaxSpan> {
     let mut spans = Vec::new();
     let indent_bytes = leading_indent_bytes(formatted_line);
     let trimmed = &formatted_line[indent_bytes..];
@@ -882,7 +885,10 @@ pub(super) fn git_commit_message(buffer: &ShellBuffer) -> String {
     lines.join("\n").trim().to_owned()
 }
 
-pub(super) fn commit_git_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn commit_git_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     let message = {
         let buffer = shell_buffer(runtime, buffer_id)?;
@@ -935,7 +941,10 @@ pub(super) fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn unstage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> Result<(), String> {
+pub(super) fn unstage_git_files(
+    runtime: &mut EditorRuntime,
+    paths: &[String],
+) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
@@ -1097,7 +1106,10 @@ pub(super) fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<Strin
     args
 }
 
-pub(super) fn git_view_lines(runtime: &mut EditorRuntime, view: &GitViewState) -> Result<Vec<String>, String> {
+pub(super) fn git_view_lines(
+    runtime: &mut EditorRuntime,
+    view: &GitViewState,
+) -> Result<Vec<String>, String> {
     let root = git_root(runtime)?;
     let args = view.args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = git_command_output_allow_exit_codes(
@@ -1117,7 +1129,10 @@ pub(super) fn git_view_lines(runtime: &mut EditorRuntime, view: &GitViewState) -
     Ok(lines)
 }
 
-pub(super) fn git_view_lines_or_error(runtime: &mut EditorRuntime, view: &GitViewState) -> Vec<String> {
+pub(super) fn git_view_lines_or_error(
+    runtime: &mut EditorRuntime,
+    view: &GitViewState,
+) -> Vec<String> {
     match git_view_lines(runtime, view) {
         Ok(lines) => lines,
         Err(error) => {
@@ -1190,11 +1205,17 @@ pub(super) fn apply_git_view(
     Ok(())
 }
 
-pub(super) fn open_git_diff_buffer(runtime: &mut EditorRuntime, view: GitViewState) -> Result<(), String> {
+pub(super) fn open_git_diff_buffer(
+    runtime: &mut EditorRuntime,
+    view: GitViewState,
+) -> Result<(), String> {
     open_git_view_buffer(runtime, GIT_DIFF_KIND, "*git-diff*", view)
 }
 
-pub(super) fn open_git_log_buffer(runtime: &mut EditorRuntime, view: GitViewState) -> Result<(), String> {
+pub(super) fn open_git_log_buffer(
+    runtime: &mut EditorRuntime,
+    view: GitViewState,
+) -> Result<(), String> {
     open_git_view_buffer(runtime, GIT_LOG_KIND, "*git-log*", view)
 }
 
@@ -1222,28 +1243,40 @@ pub(super) fn open_git_diff_unstaged(runtime: &mut EditorRuntime) -> Result<(), 
     open_git_diff_buffer(runtime, view)
 }
 
-pub(super) fn open_git_diff_staged_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+pub(super) fn open_git_diff_staged_file(
+    runtime: &mut EditorRuntime,
+    path: &str,
+) -> Result<(), String> {
     let mut args = git_args_with_no_pager("diff", &["--no-color", "--cached", "--"]);
     args.push(path.to_owned());
     let view = GitViewState::new("diff", args, "No staged changes.", &[0, 1]);
     open_git_diff_buffer(runtime, view)
 }
 
-pub(super) fn open_git_diff_unstaged_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+pub(super) fn open_git_diff_unstaged_file(
+    runtime: &mut EditorRuntime,
+    path: &str,
+) -> Result<(), String> {
     let mut args = git_args_with_no_pager("diff", &["--no-color", "--"]);
     args.push(path.to_owned());
     let view = GitViewState::new("diff", args, "No unstaged changes.", &[0, 1]);
     open_git_diff_buffer(runtime, view)
 }
 
-pub(super) fn open_git_diff_untracked_file(runtime: &mut EditorRuntime, path: &str) -> Result<(), String> {
+pub(super) fn open_git_diff_untracked_file(
+    runtime: &mut EditorRuntime,
+    path: &str,
+) -> Result<(), String> {
     let mut args = git_args_with_no_pager("diff", &["--no-color", "--no-index", "--", "/dev/null"]);
     args.push(path.to_owned());
     let view = GitViewState::new("diff", args, "No untracked diff.", &[0, 1]);
     open_git_diff_buffer(runtime, view)
 }
 
-pub(super) fn open_git_diff_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+pub(super) fn open_git_diff_commit(
+    runtime: &mut EditorRuntime,
+    commit: &str,
+) -> Result<(), String> {
     let args = git_args_with_no_pager("show", &["--no-color", commit]);
     let view = GitViewState::new("show", args, "No commit diff.", &[0]);
     open_git_diff_buffer(runtime, view)
@@ -1340,7 +1373,10 @@ pub(super) fn open_git_log_head(runtime: &mut EditorRuntime) -> Result<(), Strin
     open_git_log_buffer(runtime, view)
 }
 
-pub(super) fn open_git_log_related(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn open_git_log_related(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     let mut refs = Vec::new();
     if let Some(branch) = snapshot.branch() {
@@ -1499,7 +1535,10 @@ pub(super) fn git_sequence_in_progress(
     Ok(None)
 }
 
-pub(super) fn sequence_git_continue(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+pub(super) fn sequence_git_continue(
+    runtime: &mut EditorRuntime,
+    kind: GitSequenceKind,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     match kind {
         GitSequenceKind::CherryPick => {
@@ -1523,7 +1562,10 @@ pub(super) fn sequence_git_continue(runtime: &mut EditorRuntime, kind: GitSequen
     Ok(())
 }
 
-pub(super) fn sequence_git_skip(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+pub(super) fn sequence_git_skip(
+    runtime: &mut EditorRuntime,
+    kind: GitSequenceKind,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     match kind {
         GitSequenceKind::CherryPick => {
@@ -1542,7 +1584,10 @@ pub(super) fn sequence_git_skip(runtime: &mut EditorRuntime, kind: GitSequenceKi
     Ok(())
 }
 
-pub(super) fn sequence_git_abort(runtime: &mut EditorRuntime, kind: GitSequenceKind) -> Result<(), String> {
+pub(super) fn sequence_git_abort(
+    runtime: &mut EditorRuntime,
+    kind: GitSequenceKind,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     match kind {
         GitSequenceKind::CherryPick => {
@@ -1565,7 +1610,10 @@ pub(super) fn git_commit_at_point(meta: Option<&SectionLineMeta>) -> Option<Stri
     git_action_detail(meta, GIT_ACTION_SHOW_COMMIT)
 }
 
-pub(super) fn cherry_pick_git_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+pub(super) fn cherry_pick_git_commit(
+    runtime: &mut EditorRuntime,
+    commit: &str,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "cherry-pick", &["cherry-pick", commit])?;
     refresh_git_status_buffers(runtime)?;
@@ -1594,7 +1642,10 @@ pub(super) fn revert_git_commit(runtime: &mut EditorRuntime, commit: &str) -> Re
     Ok(())
 }
 
-pub(super) fn revert_git_commit_no_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
+pub(super) fn revert_git_commit_no_commit(
+    runtime: &mut EditorRuntime,
+    commit: &str,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(
         runtime,
@@ -1763,7 +1814,10 @@ pub(super) fn rebase_git_onto(runtime: &mut EditorRuntime, target: &str) -> Resu
     Ok(())
 }
 
-pub(super) fn rebase_git_interactive_onto(runtime: &mut EditorRuntime, target: &str) -> Result<(), String> {
+pub(super) fn rebase_git_interactive_onto(
+    runtime: &mut EditorRuntime,
+    target: &str,
+) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "rebase -i", &["rebase", "-i", target])?;
     refresh_git_status_buffers(runtime)?;
@@ -1830,7 +1884,10 @@ pub(super) fn rebase_git_abort(runtime: &mut EditorRuntime) -> Result<(), String
     Ok(())
 }
 
-pub(super) fn open_git_cherry_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn open_git_cherry_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     let upstream = snapshot
         .upstream()
@@ -1945,7 +2002,10 @@ pub(super) fn fetch_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn fetch_git_pushremote(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn fetch_git_pushremote(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
         fetch_git_remote(runtime, &remote)?;
@@ -1954,7 +2014,10 @@ pub(super) fn fetch_git_pushremote(runtime: &mut EditorRuntime, buffer_id: Buffe
     open_git_fetch_remote_picker(runtime)
 }
 
-pub(super) fn fetch_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn fetch_git_upstream(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     let remote = snapshot
         .upstream()
@@ -1963,7 +2026,10 @@ pub(super) fn fetch_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferI
     fetch_git_remote(runtime, &remote)
 }
 
-pub(super) fn pull_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn pull_git_upstream(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     let (remote, branch) = snapshot
         .upstream()
@@ -1972,7 +2038,10 @@ pub(super) fn pull_git_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId
     pull_git_remote_branch(runtime, &remote, &branch)
 }
 
-pub(super) fn push_git_to_pushremote(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn push_git_to_pushremote(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
         push_git_remote(runtime, &remote)?;
@@ -1981,7 +2050,10 @@ pub(super) fn push_git_to_pushremote(runtime: &mut EditorRuntime, buffer_id: Buf
     open_git_remote_picker(runtime)
 }
 
-pub(super) fn push_git_to_upstream(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn push_git_to_upstream(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
     let (remote, branch) = snapshot
         .upstream()
@@ -2012,7 +2084,10 @@ pub(super) fn pull_git_remote_branch(
     Ok(())
 }
 
-pub(super) fn git_branch_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<String>, String> {
+pub(super) fn git_branch_list(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+) -> Result<Vec<String>, String> {
     let output = git_command_output(
         runtime,
         root,
@@ -2536,7 +2611,10 @@ pub(super) fn ensure_no_rebase_in_progress(runtime: &mut EditorRuntime) -> Resul
     Ok(())
 }
 
-pub(super) fn ensure_rebase_in_progress(runtime: &mut EditorRuntime, message: &str) -> Result<(), String> {
+pub(super) fn ensure_rebase_in_progress(
+    runtime: &mut EditorRuntime,
+    message: &str,
+) -> Result<(), String> {
     if !git_rebase_in_progress(runtime)? {
         return Err(message.to_owned());
     }
@@ -2563,7 +2641,9 @@ pub(super) fn git_status_next_section_command(runtime: &mut EditorRuntime) -> Re
     move_git_section(runtime, true).map(|_| ())
 }
 
-pub(super) fn git_status_previous_section_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_previous_section_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     move_git_section(runtime, false).map(|_| ())
 }
 
@@ -2628,7 +2708,9 @@ pub(super) fn git_status_commit_command(runtime: &mut EditorRuntime) -> Result<(
     open_git_commit_buffer(runtime)
 }
 
-pub(super) fn git_status_push_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_push_pushremote_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let context = active_git_status_command_context(runtime)?;
     push_git_to_pushremote(runtime, context.buffer_id)
 }
@@ -2638,7 +2720,9 @@ pub(super) fn git_status_push_upstream_command(runtime: &mut EditorRuntime) -> R
     push_git_to_upstream(runtime, context.buffer_id)
 }
 
-pub(super) fn git_status_fetch_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_fetch_pushremote_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let context = active_git_status_command_context(runtime)?;
     fetch_git_pushremote(runtime, context.buffer_id)
 }
@@ -2676,7 +2760,9 @@ pub(super) fn git_status_merge_edit_command(runtime: &mut EditorRuntime) -> Resu
     )
 }
 
-pub(super) fn git_status_merge_no_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_merge_no_commit_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     open_git_branch_picker_with_action(
         runtime,
         "Git Merge (No Commit)",
@@ -2704,13 +2790,17 @@ pub(super) fn git_status_merge_abort_command(runtime: &mut EditorRuntime) -> Res
     merge_git_abort(runtime)
 }
 
-pub(super) fn git_status_rebase_pushremote_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_rebase_pushremote_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     ensure_no_rebase_in_progress(runtime)?;
     let context = active_git_status_command_context(runtime)?;
     rebase_git_onto_pushremote(runtime, context.buffer_id)
 }
 
-pub(super) fn git_status_rebase_upstream_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_rebase_upstream_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     ensure_no_rebase_in_progress(runtime)?;
     let context = active_git_status_command_context(runtime)?;
     rebase_git_onto_upstream(runtime, context.buffer_id)
@@ -2723,7 +2813,9 @@ pub(super) fn git_status_rebase_onto_command(runtime: &mut EditorRuntime) -> Res
     open_git_branch_picker_with_action(runtime, "Git Rebase", GitBranchActionKind::RebaseOnto)
 }
 
-pub(super) fn git_status_rebase_interactive_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_rebase_interactive_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     ensure_no_rebase_in_progress(runtime)?;
     open_git_branch_picker_with_action(
         runtime,
@@ -2732,7 +2824,9 @@ pub(super) fn git_status_rebase_interactive_command(runtime: &mut EditorRuntime)
     )
 }
 
-pub(super) fn git_status_rebase_continue_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_rebase_continue_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     ensure_rebase_in_progress(runtime, "no rebase in progress")?;
     rebase_git_continue(runtime)
 }
@@ -2811,7 +2905,9 @@ pub(super) fn git_status_log_branches_command(runtime: &mut EditorRuntime) -> Re
     open_git_log_branches(runtime)
 }
 
-pub(super) fn git_status_log_all_branches_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_log_all_branches_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     open_git_log_all_branches(runtime)
 }
 
@@ -2831,7 +2927,9 @@ pub(super) fn git_status_stash_worktree_command(runtime: &mut EditorRuntime) -> 
     stash_git_worktree(runtime)
 }
 
-pub(super) fn git_status_stash_keep_index_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_stash_keep_index_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     stash_git_keep_index(runtime)
 }
 
@@ -2868,7 +2966,9 @@ pub(super) fn git_status_cherry_pick_command(runtime: &mut EditorRuntime) -> Res
     cherry_pick_commit_at_point_or_picker(runtime, context.meta.as_ref())
 }
 
-pub(super) fn git_status_cherry_pick_apply_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_cherry_pick_apply_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let context = active_git_status_command_context(runtime)?;
     if let Some(kind) = git_sequence_in_progress(runtime)? {
         return sequence_git_abort(runtime, kind);
@@ -2876,7 +2976,9 @@ pub(super) fn git_status_cherry_pick_apply_command(runtime: &mut EditorRuntime) 
     cherry_pick_apply_at_point_or_picker(runtime, context.meta.as_ref())
 }
 
-pub(super) fn git_status_cherry_pick_skip_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_cherry_pick_skip_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let kind =
         git_status_sequence_kind(runtime, "cherry-pick move commands are not supported yet")?;
     sequence_git_skip(runtime, kind)
@@ -2890,7 +2992,9 @@ pub(super) fn git_status_revert_command(runtime: &mut EditorRuntime) -> Result<(
     revert_commit_at_point_or_picker(runtime, context.meta.as_ref())
 }
 
-pub(super) fn git_status_revert_no_commit_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_revert_no_commit_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let context = active_git_status_command_context(runtime)?;
     if let Some(kind) = git_sequence_in_progress(runtime)? {
         return sequence_git_abort(runtime, kind);
@@ -2945,7 +3049,9 @@ pub(super) fn git_status_checkout_file_command(_: &mut EditorRuntime) -> Result<
     unsupported_git_status_command("file checkout is not supported yet")
 }
 
-pub(super) fn git_status_discard_or_reset_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn git_status_discard_or_reset_command(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
     let context = active_git_status_command_context(runtime)?;
     let (targets, is_visual) = git_status_delete_targets(runtime, context.buffer_id)?;
     if !targets.is_empty() {
@@ -2987,7 +3093,9 @@ pub(super) fn set_directory_prefix(runtime: &mut EditorRuntime) -> Result<(), St
     Ok(())
 }
 
-pub(super) fn take_key_sequence(runtime: &mut EditorRuntime) -> Result<Option<Vec<String>>, String> {
+pub(super) fn take_key_sequence(
+    runtime: &mut EditorRuntime,
+) -> Result<Option<Vec<String>>, String> {
     const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
     let ui = shell_ui_mut(runtime)?;
@@ -3000,7 +3108,10 @@ pub(super) fn take_key_sequence(runtime: &mut EditorRuntime) -> Result<Option<Ve
     Ok(tokens)
 }
 
-pub(super) fn set_key_sequence(runtime: &mut EditorRuntime, tokens: Vec<String>) -> Result<(), String> {
+pub(super) fn set_key_sequence(
+    runtime: &mut EditorRuntime,
+    tokens: Vec<String>,
+) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
     ui.pending_key_sequence = Some(KeySequenceState {
         tokens,
@@ -3082,7 +3193,10 @@ pub(super) fn toggle_git_section(runtime: &mut EditorRuntime) -> Result<bool, St
     Ok(true)
 }
 
-pub(super) fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
+pub(super) fn handle_git_status_chord(
+    runtime: &mut EditorRuntime,
+    chord: &str,
+) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     {
         let buffer = shell_buffer(runtime, buffer_id)?;
@@ -3109,7 +3223,10 @@ pub(super) fn handle_git_status_chord(runtime: &mut EditorRuntime, chord: &str) 
     Ok(false)
 }
 
-pub(super) fn handle_git_view_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bool, String> {
+pub(super) fn handle_git_view_chord(
+    runtime: &mut EditorRuntime,
+    chord: &str,
+) -> Result<bool, String> {
     if chord != "g" {
         return Ok(false);
     }
@@ -3175,7 +3292,10 @@ pub(super) fn refresh_pending_git_summary(
     Ok(())
 }
 
-pub(super) fn refresh_git_fringe(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn refresh_git_fringe(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let root = match git_root(runtime) {
         Ok(root) => root,
         Err(_) => {
@@ -3586,7 +3706,10 @@ pub(super) fn git_status_snapshot(
         .with_in_progress(in_progress))
 }
 
-pub(super) fn git_remote_list(runtime: &mut EditorRuntime, root: &Path) -> Result<Vec<String>, String> {
+pub(super) fn git_remote_list(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+) -> Result<Vec<String>, String> {
     let output = git_command_output(runtime, root, "remote", &["remote"])?;
     let mut remotes = output
         .lines()

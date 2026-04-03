@@ -856,7 +856,12 @@ pub(super) fn render_notification_overlay(
     Ok(())
 }
 
-pub(super) fn overlay_width(pane_width: u32, cell_width: i32, min_cells: u32, max_cells: u32) -> u32 {
+pub(super) fn overlay_width(
+    pane_width: u32,
+    cell_width: i32,
+    min_cells: u32,
+    max_cells: u32,
+) -> u32 {
     let available = pane_width.saturating_sub(16);
     let min_width = ((cell_width.max(1) as u32) * min_cells).min(available);
     let max_width = ((cell_width.max(1) as u32) * max_cells)
@@ -959,7 +964,11 @@ pub(super) fn buffer_footer_layout_with_command_line(
     }
 }
 
-pub(super) fn buffer_visible_rows_for_height(buffer: &ShellBuffer, height: u32, line_height: i32) -> usize {
+pub(super) fn buffer_visible_rows_for_height(
+    buffer: &ShellBuffer,
+    height: u32,
+    line_height: i32,
+) -> usize {
     buffer_footer_layout(
         buffer,
         PixelRectToRect::rect(0, 0, 1, height),
@@ -1103,7 +1112,11 @@ pub(super) fn autocomplete_preview_lines(
     lines
 }
 
-pub(super) fn wrap_overlay_lines(lines: &[String], max_columns: usize, max_lines: usize) -> Vec<String> {
+pub(super) fn wrap_overlay_lines(
+    lines: &[String],
+    max_columns: usize,
+    max_lines: usize,
+) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
     }
@@ -1170,7 +1183,10 @@ pub(super) fn wrap_overlay_text(text: &str, max_columns: usize, max_lines: usize
     wrapped
 }
 
-pub(super) fn statusline_icon_segments<'a>(text: &'a str, icons: &[&'a str]) -> Vec<(&'a str, bool)> {
+pub(super) fn statusline_icon_segments<'a>(
+    text: &'a str,
+    icons: &[&'a str],
+) -> Vec<(&'a str, bool)> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -2312,7 +2328,10 @@ pub(super) struct PluginSectionLayout {
     panes: Vec<TextPaneLayout>,
 }
 
-pub(super) fn plugin_section_row_budget(min_rows: &[Option<usize>], total_row_budget: usize) -> Vec<usize> {
+pub(super) fn plugin_section_row_budget(
+    min_rows: &[Option<usize>],
+    total_row_budget: usize,
+) -> Vec<usize> {
     let section_count = min_rows.len().max(1);
     let mut rows = min_rows
         .iter()
@@ -3894,7 +3913,11 @@ pub(super) fn shaped_run_uses_cell_grid(text: &str, shaped: &ShapedRun) -> bool 
     shaped.glyphs.len() == text.chars().count()
 }
 
-pub(super) fn shaped_run_preserves_monospace_layout(text: &str, shaped: &ShapedRun, cell_width: i32) -> bool {
+pub(super) fn shaped_run_preserves_monospace_layout(
+    text: &str,
+    shaped: &ShapedRun,
+    cell_width: i32,
+) -> bool {
     shaped_run_uses_cell_grid(text, shaped)
         || (shaped.total_advance - monospace_text_width(text, cell_width) as f32).abs() <= 1.0
 }
@@ -4452,7 +4475,10 @@ pub(super) struct IconGlyphCellLayout {
     advance: i32,
 }
 
-pub(super) fn icon_glyph_cell_layout(metrics: &fontdue::Metrics, cell_width: i32) -> IconGlyphCellLayout {
+pub(super) fn icon_glyph_cell_layout(
+    metrics: &fontdue::Metrics,
+    cell_width: i32,
+) -> IconGlyphCellLayout {
     let advance = cell_width.max(1);
     IconGlyphCellLayout {
         draw_offset_x: advance.saturating_sub(metrics.width as i32) / 2,
@@ -5050,7 +5076,11 @@ pub(super) fn draw_image(
     Ok(())
 }
 
-pub(super) fn fill_rect(target: &mut DrawTarget<'_>, rect: Rect, color: Color) -> Result<(), ShellError> {
+pub(super) fn fill_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    color: Color,
+) -> Result<(), ShellError> {
     match target {
         DrawTarget::Scene(scene) => scene.push(DrawCommand::FillRect {
             rect: to_pixel_rect(rect),

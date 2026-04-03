@@ -1,6 +1,6 @@
 mod acp;
-mod clipboard;
 mod browser;
+mod clipboard;
 mod command_line;
 mod diagnostics;
 mod directory;
@@ -10454,7 +10454,6 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_theme_runtime<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
@@ -22106,5 +22105,3 @@ fn pixel_rect_contains_point(rect: PixelRect, x: i32, y: i32) -> bool {
     let bottom = rect.y.saturating_add(rect.height as i32);
     x >= rect.x && x < right && y >= rect.y && y < bottom
 }
-
-#[allow(clippy::too_many_arguments)]
