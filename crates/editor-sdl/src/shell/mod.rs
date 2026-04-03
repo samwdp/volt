@@ -1,11 +1,11 @@
 mod acp;
 mod clipboard;
-mod picker;
-mod ui_overlays;
 mod command_line;
 mod diagnostics;
 mod directory;
 mod pdf;
+mod picker;
+mod ui_overlays;
 mod workspace_search;
 
 pub(super) use command_line::*;

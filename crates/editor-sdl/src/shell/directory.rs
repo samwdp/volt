@@ -148,7 +148,10 @@ pub(super) enum DirectoryEditAction {
     Rename { from: PathBuf, to: PathBuf },
 }
 
-pub(super) fn directory_edit_lines(buffer: &ShellBuffer, user_library: &dyn UserLibrary) -> Vec<String> {
+pub(super) fn directory_edit_lines(
+    buffer: &ShellBuffer,
+    user_library: &dyn UserLibrary,
+) -> Vec<String> {
     let mut lines = Vec::new();
     for line_index in 0..buffer.line_count() {
         let raw = buffer.text.line(line_index).unwrap_or_default();
@@ -236,7 +239,10 @@ pub(super) fn parse_directory_lines(
     Ok(parsed)
 }
 
-pub(super) fn diff_directory_lines(before: &[String], after: &[String]) -> (Vec<usize>, Vec<usize>) {
+pub(super) fn diff_directory_lines(
+    before: &[String],
+    after: &[String],
+) -> (Vec<usize>, Vec<usize>) {
     let before_set = before.iter().collect::<BTreeSet<_>>();
     let after_set = after.iter().collect::<BTreeSet<_>>();
     let removed = before

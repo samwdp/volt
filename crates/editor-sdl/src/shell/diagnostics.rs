@@ -31,7 +31,9 @@ pub(super) const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
     }
 }
 
-pub(super) fn statusline_lsp_diagnostics(diagnostics: &[LspDiagnostic]) -> Option<PluginLspDiagnosticsInfo> {
+pub(super) fn statusline_lsp_diagnostics(
+    diagnostics: &[LspDiagnostic],
+) -> Option<PluginLspDiagnosticsInfo> {
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for diagnostic in diagnostics {

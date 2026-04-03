@@ -86,7 +86,11 @@ pub(super) fn workspace_search_grep_output(root: &Path, query: &str) -> Result<S
     run_search_command(root, "grep", &args)
 }
 
-pub(super) fn run_search_command(root: &Path, command: &str, args: &[String]) -> Result<String, String> {
+pub(super) fn run_search_command(
+    root: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<String, String> {
     let mut process = Command::new(command);
     configure_background_command(&mut process);
     let output = process
@@ -110,7 +114,11 @@ pub(super) fn run_search_command(root: &Path, command: &str, args: &[String]) ->
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub(super) fn parse_workspace_search_entries(root: &Path, query: &str, output: &str) -> Vec<PickerEntry> {
+pub(super) fn parse_workspace_search_entries(
+    root: &Path,
+    query: &str,
+    output: &str,
+) -> Vec<PickerEntry> {
     output
         .lines()
         .filter_map(|line| {
@@ -230,7 +238,10 @@ pub(super) fn lsp_locations_picker_overlay(
     PickerOverlay::from_entries(title, entries)
 }
 
-pub(super) fn lsp_location_picker_entry(workspace_root: Option<&Path>, location: &LspLocation) -> PickerEntry {
+pub(super) fn lsp_location_picker_entry(
+    workspace_root: Option<&Path>,
+    location: &LspLocation,
+) -> PickerEntry {
     let path = location.path().to_path_buf();
     let target = location.range().start();
     let relative_path = workspace_relative_path(workspace_root, &path);
@@ -314,7 +325,10 @@ pub(super) fn lsp_code_action_picker_entry(
     }
 }
 
-pub(super) fn lsp_code_action_picker_preview(code_action: &LspCodeAction, path: &Path) -> Option<String> {
+pub(super) fn lsp_code_action_picker_preview(
+    code_action: &LspCodeAction,
+    path: &Path,
+) -> Option<String> {
     match lsp_code_action_supported_edits(code_action, path) {
         Ok(edits) => {
             let suffix = if edits.len() == 1 { "" } else { "s" };
