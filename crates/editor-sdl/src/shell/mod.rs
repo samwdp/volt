@@ -1190,6 +1190,21 @@ fn format_markdown_table_at_cursor(buffer: &mut ShellBuffer) -> Option<bool> {
     Some(apply_markdown_table_update(buffer, &table, &table, target))
 }
 
+fn should_defer_markdown_table_format_after_space_input(
+    buffer: &ShellBuffer,
+    text: &str,
+) -> bool {
+    if text.is_empty() || !text.chars().all(|character| character == ' ') {
+        return false;
+    }
+    let Some(table) = detect_markdown_table(buffer) else {
+        return false;
+    };
+    markdown_table_cursor_target(buffer, &table, buffer.cursor_point())
+        .and_then(|target| table.rows.get(target.row_index))
+        .is_some_and(|row| !row.is_delimiter)
+}
+
 fn insert_markdown_table_row_at_cursor(buffer: &mut ShellBuffer) -> Option<bool> {
     let table = detect_markdown_table(buffer)?;
     let current = markdown_table_cursor_target(buffer, &table, buffer.cursor_point())?;
@@ -9146,10 +9161,10 @@ impl ShellState {
                 if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
                     return Ok(());
                 }
+                let buffer_id =
+                    active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
-                    let buffer_id =
-                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                     let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                     (
@@ -9158,13 +9173,19 @@ impl ShellState {
                     )
                 };
                 let normalized = normalize_tabs(text, indent_size, use_tabs);
+                let defer_markdown_table_format = should_defer_markdown_table_format_after_space_input(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                );
                 {
                     let buffer = self.active_buffer_mut()?;
                     if text == "}" {
                         dedent_block_end(buffer, indent_size);
                     }
                     buffer.insert_text(normalized.as_ref());
-                    let _ = format_markdown_table_at_cursor(buffer);
+                    if !defer_markdown_table_format {
+                        let _ = format_markdown_table_at_cursor(buffer);
+                    }
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
@@ -9211,10 +9232,10 @@ impl ShellState {
                 if active_shell_buffer_read_only(&self.runtime).map_err(ShellError::Runtime)? {
                     return Ok(());
                 }
+                let buffer_id =
+                    active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                 let (indent_size, use_tabs) = {
                     let ui = self.ui()?;
-                    let buffer_id =
-                        active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
                     let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                     let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                     (
@@ -9223,13 +9244,19 @@ impl ShellState {
                     )
                 };
                 let normalized = normalize_tabs(text, indent_size, use_tabs);
+                let defer_markdown_table_format = should_defer_markdown_table_format_after_space_input(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                );
                 {
                     let buffer = self.active_buffer_mut()?;
                     if text == "}" {
                         dedent_block_end(buffer, indent_size);
                     }
                     buffer.replace_mode_text(normalized.as_ref());
-                    let _ = format_markdown_table_at_cursor(buffer);
+                    if !defer_markdown_table_format {
+                        let _ = format_markdown_table_at_cursor(buffer);
+                    }
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
