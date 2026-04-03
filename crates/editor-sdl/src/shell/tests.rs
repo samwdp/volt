@@ -5139,7 +5139,9 @@ fn markdown_table_insert_mode_space_preserves_in_progress_cell_spacing() -> Resu
     shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 11));
     shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
 
-    state.handle_text_input(" ").map_err(|error| error.to_string())?;
+    state
+        .handle_text_input(" ")
+        .map_err(|error| error.to_string())?;
 
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
     assert_eq!(
@@ -5149,7 +5151,9 @@ fn markdown_table_insert_mode_space_preserves_in_progress_cell_spacing() -> Resu
     assert_eq!(buffer.cursor_point(), TextPoint::new(2, 12));
     drop(buffer);
 
-    state.handle_text_input("m").map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("m")
+        .map_err(|error| error.to_string())?;
 
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
     assert_eq!(
