@@ -3527,6 +3527,29 @@ fn acp_section_layout_orders_output_input_footer_and_statusline() -> Result<(), 
     assert!(
         acp_layout.footer.rect.y() + acp_layout.footer.rect.height() as i32 <= layout.pane_bottom
     );
+    assert_eq!(
+        acp_layout.input.rect.height() as i32,
+        18 + input_panel_chrome_height()
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_input_layout_uses_symmetric_vertical_padding() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 18, 8);
+    let browser_layout = browser_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "browser layout missing".to_owned())?;
+
+    assert_eq!(
+        browser_layout.input.rect.height() as i32,
+        18 + input_panel_chrome_height()
+    );
     Ok(())
 }
 

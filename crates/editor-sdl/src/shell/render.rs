@@ -885,6 +885,7 @@ const BUFFER_INPUT_BOX_EXTRA_HEIGHT: i32 = 8;
 const BUFFER_INPUT_HINT_GAP: i32 = 4;
 const BUFFER_INPUT_FOOTER_GAP: i32 = 10;
 const BUFFER_OVERLAY_BOTTOM_GAP: i32 = 8;
+const INPUT_PANEL_VERTICAL_PADDING: i32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct BufferFooterLayout {
@@ -2385,6 +2386,10 @@ pub(super) fn text_panel_chrome_height(title: &str, line_height: i32) -> i32 {
     text_panel_header_height(title, line_height) + 12
 }
 
+pub(super) fn input_panel_chrome_height() -> i32 {
+    INPUT_PANEL_VERTICAL_PADDING * 2
+}
+
 pub(super) fn plugin_section_panel_chrome_height(title: &str, line_height: i32) -> i32 {
     text_panel_chrome_height(title, line_height) + 4
 }
@@ -2773,8 +2778,8 @@ pub(super) fn render_input_panel(
         rect.height().saturating_sub(2),
     );
     fill_rounded_rect(target, inner_rect, 9, panel_background)?;
-    let input_x = rect.x() + 10;
-    let input_y = rect.y() + 10;
+    let input_x = rect.x() + INPUT_PANEL_VERTICAL_PADDING;
+    let input_y = rect.y() + INPUT_PANEL_VERTICAL_PADDING;
     let prompt = input.prompt();
     let prompt_len = prompt.chars().count();
     let prompt_padding = " ".repeat(prompt_len);
@@ -2892,7 +2897,7 @@ pub(super) fn acp_buffer_layout(
         .min_rows
         .unwrap_or(footer_line_count)
         .max(footer_line_count);
-    let input_chrome = text_panel_chrome_height("", line_height);
+    let input_chrome = input_panel_chrome_height();
     let footer_chrome = text_panel_chrome_height("", line_height);
     let plan_chrome = text_panel_chrome_height("Plan", line_height);
     let output_chrome = text_panel_chrome_height("Output", line_height);
