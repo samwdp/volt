@@ -5129,7 +5129,7 @@ fn markdown_table_enter_inserts_a_new_row() -> Result<(), String> {
 }
 
 #[test]
-fn markdown_table_insert_mode_space_preserves_in_progress_cell_spacing() -> Result<(), String> {
+fn markdown_table_preserves_insert_mode_spaces() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_markdown_test_buffer(
         &mut state,

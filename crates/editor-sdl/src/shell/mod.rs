@@ -1190,7 +1190,7 @@ fn format_markdown_table_at_cursor(buffer: &mut ShellBuffer) -> Option<bool> {
     Some(apply_markdown_table_update(buffer, &table, &table, target))
 }
 
-fn should_defer_markdown_table_format_after_space_input(buffer: &ShellBuffer, text: &str) -> bool {
+fn should_defer_table_format(buffer: &ShellBuffer, text: &str) -> bool {
     if text.is_empty() || !text.chars().all(|character| character == ' ') {
         return false;
     }
@@ -9170,11 +9170,10 @@ impl ShellState {
                     )
                 };
                 let normalized = normalize_tabs(text, indent_size, use_tabs);
-                let defer_markdown_table_format =
-                    should_defer_markdown_table_format_after_space_input(
-                        shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
-                        text,
-                    );
+                let defer_markdown_table_format = should_defer_table_format(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                );
                 {
                     let buffer = self.active_buffer_mut()?;
                     if text == "}" {
@@ -9242,11 +9241,10 @@ impl ShellState {
                     )
                 };
                 let normalized = normalize_tabs(text, indent_size, use_tabs);
-                let defer_markdown_table_format =
-                    should_defer_markdown_table_format_after_space_input(
-                        shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
-                        text,
-                    );
+                let defer_markdown_table_format = should_defer_table_format(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                );
                 {
                     let buffer = self.active_buffer_mut()?;
                     if text == "}" {
