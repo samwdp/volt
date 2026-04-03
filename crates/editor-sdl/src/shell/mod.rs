@@ -996,13 +996,13 @@ fn render_markdown_table(table: &MarkdownTable) -> MarkdownTableRender {
         .iter()
         .map(|row| {
             let mut line = row.prefix.clone();
-            for column_index in 0..table.column_count {
+            for (column_index, base_width) in widths.iter().copied().enumerate() {
                 line.push('|');
                 line.push(' ');
                 let width = if row.is_delimiter {
-                    widths[column_index].max(3)
+                    base_width.max(3)
                 } else {
-                    widths[column_index]
+                    base_width
                 };
                 if row.is_delimiter {
                     line.push_str(&render_markdown_table_delimiter(
