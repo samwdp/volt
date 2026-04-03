@@ -240,6 +240,7 @@ const GIT_SECTION_STASHES: &str = git_sections::STASHES;
 const GIT_SECTION_UNPULLED: &str = git_sections::UNPULLED;
 const GIT_SECTION_UNPUSHED: &str = git_sections::UNPUSHED;
 const GIT_SECTION_COMMIT: &str = git_sections::COMMIT;
+const PDF_ROTATION_FULL_CIRCLE: i64 = 360;
 const TOKEN_GIT_STATUS_SECTION_HEADER: &str = "git.status.section.header";
 const TOKEN_GIT_STATUS_SECTION_COUNT: &str = "git.status.section.count";
 const TOKEN_GIT_STATUS_HEADER_LABEL: &str = "git.status.header.label";
@@ -3707,7 +3708,7 @@ impl ShellBuffer {
             .and_then(|rotation| rotation.as_i64().ok())
             .unwrap_or(0)
             + 90;
-        page.set("Rotate", next_rotation.rem_euclid(360));
+        page.set("Rotate", next_rotation.rem_euclid(PDF_ROTATION_FULL_CIRCLE));
         state.dirty = true;
         self.refresh_pdf_preview();
         Ok(true)
@@ -4387,14 +4388,11 @@ impl ShellBuffer {
     }
 
     fn file_reload_request(&mut self) -> Option<FileReloadWorkerRequest> {
-        if (self.kind != BufferKind::File && !self.is_pdf_buffer())
+        if self.kind != BufferKind::File
             || self.text.is_dirty()
             || self.backing_file_check_in_flight
             || !self.backing_file_reload_pending
         {
-            return None;
-        }
-        if self.is_pdf_buffer() {
             return None;
         }
         let path = self.text.path().map(Path::to_path_buf)?;
@@ -25857,6 +25855,7 @@ fn image_format_for_path(path: &Path) -> Option<ImageBufferFormat> {
     }
 }
 
+/// Returns whether a path has a case-insensitive `.pdf` extension.
 fn is_pdf_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -25883,21 +25882,28 @@ fn pdf_fit_mode_label(mode: PdfFitMode) -> &'static str {
     }
 }
 
+fn pdf_inherited_page_value<'a>(
+    document: &'a PdfDocument,
+    page_number: u32,
+    key: &[u8],
+) -> Option<&'a lopdf::Object> {
+    let mut page_id = document.get_pages().get(&page_number).copied()?;
+    loop {
+        let page = document.get_dictionary(page_id).ok()?;
+        if let Ok(value) = page.get(key) {
+            return Some(value);
+        }
+        page_id = page.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+}
+
 fn pdf_page_rotation(document: &PdfDocument, page_number: u32) -> Option<i64> {
-    let page_id = document.get_pages().get(&page_number).copied()?;
-    document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"Rotate").ok())
+    pdf_inherited_page_value(document, page_number, b"Rotate")
         .and_then(|rotation| rotation.as_i64().ok())
 }
 
 fn pdf_page_media_box(document: &PdfDocument, page_number: u32) -> Option<String> {
-    let page_id = document.get_pages().get(&page_number).copied()?;
-    let media_box = document
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|page| page.get(b"MediaBox").ok())
+    let media_box = pdf_inherited_page_value(document, page_number, b"MediaBox")
         .and_then(|value| value.as_array().ok())?;
     let numbers = media_box
         .iter()
@@ -25912,6 +25918,7 @@ fn pdf_page_media_box(document: &PdfDocument, page_number: u32) -> Option<String
     Some(numbers.join(" "))
 }
 
+/// Extracts trimmed text for one PDF page, returning an empty string on failure.
 fn pdf_page_text(document: &PdfDocument, page_number: u32) -> String {
     document
         .extract_text(&[page_number])
@@ -25939,7 +25946,7 @@ fn pdf_buffer_lines(
             "Page {current_page}/{page_count} · {} · {}% · rotation {}°",
             pdf_fit_mode_label(state.fit_mode),
             state.zoom_percent,
-            page_rotation.rem_euclid(360)
+            page_rotation.rem_euclid(PDF_ROTATION_FULL_CIRCLE)
         ),
         format!(
             "Modified: {} · PDF version {}",

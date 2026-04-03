@@ -400,6 +400,90 @@ fn write_test_pdf(path: &Path, page_texts: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn write_test_pdf_creates_extractable_pages() -> Result<(), String> {
+    let root = unique_temp_dir("write-test-pdf");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["alpha", "bravo"])?;
+
+    let document = lopdf::Document::load(&path).map_err(|error| error.to_string())?;
+    assert_eq!(document.get_pages().len(), 2);
+    assert_eq!(
+        document
+            .extract_text(&[1])
+            .map_err(|error| error.to_string())?,
+        "alpha\n"
+    );
+    assert_eq!(
+        document
+            .extract_text(&[2])
+            .map_err(|error| error.to_string())?,
+        "bravo\n"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn pdf_helpers_parse_paths_state_and_render_lines() -> Result<(), String> {
+    let root = unique_temp_dir("pdf-helpers");
+    let path = root.join("sample.PDF");
+    write_test_pdf(&path, &["page one", "page two"])?;
+
+    assert!(is_pdf_path(&path));
+    assert!(!is_pdf_path(Path::new("sample.txt")));
+    assert!(!is_pdf_path(Path::new("sample")));
+    assert_eq!(pdf_fit_mode_label(PdfFitMode::Page), "fit page");
+
+    let mut state = load_pdf_buffer_state(&path)?;
+    assert_eq!(state.page_count(), 2);
+    assert_eq!(state.metadata.page_count, 2);
+    assert_eq!(pdf_page_rotation(&state.document, 1), None);
+    assert_eq!(
+        pdf_page_media_box(&state.document, 1).as_deref(),
+        Some("0 0 595 842")
+    );
+    assert_eq!(pdf_page_text(&state.document, 1), "page one");
+    assert_eq!(pdf_page_text(&state.document, 99), "");
+
+    let second_page_id = state
+        .document
+        .get_pages()
+        .get(&2)
+        .copied()
+        .ok_or_else(|| "second page missing".to_owned())?;
+    state
+        .document
+        .get_dictionary_mut(second_page_id)
+        .map_err(|error| error.to_string())?
+        .set("Rotate", 90);
+    state.current_page = 2;
+    state.dirty = true;
+    let lines = pdf_buffer_lines("sample.pdf", Some(&path), &state);
+    let body = lines.join("\n");
+    assert!(body.contains("Page 2/2"));
+    assert!(body.contains("rotation 90°"));
+    assert!(body.contains("page two"));
+    assert!(body.contains("Modified: yes"));
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn load_pdf_buffer_state_rejects_missing_and_invalid_files() {
+    let root = unique_temp_dir("pdf-invalid");
+    let missing = root.join("missing.pdf");
+    assert!(load_pdf_buffer_state(&missing).is_err());
+
+    let invalid = root.join("invalid.pdf");
+    std::fs::write(&invalid, "not a pdf").expect("write invalid pdf");
+    assert!(load_pdf_buffer_state(&invalid).is_err());
+
+    std::fs::remove_dir_all(&root).expect("remove temp dir");
+}
+
 const MATERIAL_ICONS_FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/font/material-design-icons.ttf"

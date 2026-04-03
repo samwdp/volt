@@ -44,6 +44,8 @@ pub fn package() -> PluginPackage {
         ),
     ])
     .with_buffers(vec![
+        // Native PDF buffers render their live contents in the host, so they do not
+        // need package-defined initial lines here.
         PluginBuffer::new(PDF_BUFFER_KIND, Vec::<String>::new()).with_key_bindings(vec![
             PluginKeyBinding::new("PageDown", "pdf.next-page", PluginKeymapScope::Workspace),
             PluginKeyBinding::new("PageUp", "pdf.previous-page", PluginKeymapScope::Workspace),
