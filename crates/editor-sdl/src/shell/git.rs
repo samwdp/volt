@@ -124,7 +124,7 @@ impl GitSummaryState {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ActiveBufferEventContext {
+pub(super) struct ActiveBufferEventContext {
     buffer_id: BufferId,
     has_input: bool,
     vim_targets_input: bool,
@@ -139,7 +139,7 @@ struct ActiveBufferEventContext {
     is_compilation: bool,
 }
 
-fn default_vim_target(has_input: bool) -> VimTarget {
+pub(super) fn default_vim_target(has_input: bool) -> VimTarget {
     if has_input {
         VimTarget::Input
     } else {
@@ -148,7 +148,7 @@ fn default_vim_target(has_input: bool) -> VimTarget {
 }
 
 #[derive(Debug, Clone)]
-struct ActiveLspBufferContext {
+pub(super) struct ActiveLspBufferContext {
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
     path: PathBuf,
@@ -181,7 +181,7 @@ impl GitViewState {
     }
 }
 
-fn format_section_line(line: &SectionRenderLine) -> String {
+pub(super) fn format_section_line(line: &SectionRenderLine) -> String {
     let indent = "  ".repeat(line.depth);
     match &line.kind {
         SectionRenderLineKind::Header { .. } => format!("{indent}{}", line.text),

@@ -610,7 +610,7 @@ pub(super) fn draw_terminal_cursor(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CursorTextOverlay {
+pub(super) struct CursorTextOverlay {
     draw_x: i32,
     text: String,
     color: Color,
