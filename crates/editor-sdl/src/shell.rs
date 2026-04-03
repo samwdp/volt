@@ -103,7 +103,7 @@ use sdl3::{
     mouse::{MouseButton, MouseWheelDirection},
     pixels::{Color, PixelFormat},
     rect::Rect,
-    render::{Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
+    render::{Canvas, ScaleMode, Texture, TextureCreator},
     surface::Surface,
     ttf::Font,
     video::{Window, WindowContext},
