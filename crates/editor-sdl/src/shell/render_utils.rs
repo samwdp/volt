@@ -108,25 +108,17 @@ pub(super) fn truncate_text_to_width(text: &str, max_width: u32, cell_width: i32
 
     let cell_width = cell_width.max(1) as u32;
     let max_cells = (max_width / cell_width) as usize;
-    if text.chars().count() <= max_cells {
+    let ellipsis = "...";
+    if text.chars().take(max_cells.saturating_add(1)).count() <= max_cells {
         return text.to_owned();
     }
-
-    let ellipsis = "...";
     let ellipsis_cells = ellipsis.chars().count();
     if max_cells <= ellipsis_cells {
-        return "...".to_owned();
+        return ellipsis.to_owned();
     }
 
-    let mut truncated = String::new();
     let available_cells = max_cells.saturating_sub(ellipsis_cells);
-    for character in text.chars() {
-        if truncated.chars().count() >= available_cells {
-            break;
-        }
-        truncated.push(character);
-    }
-
+    let mut truncated: String = text.chars().take(available_cells).collect();
     truncated.push_str(ellipsis);
     truncated
 }
