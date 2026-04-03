@@ -2216,6 +2216,30 @@ fn install_scratch_test_buffer(state: &mut ShellState, name: &str) -> Result<Buf
     Ok(buffer_id)
 }
 
+fn install_markdown_test_buffer(
+    state: &mut ShellState,
+    name: &str,
+    text: &str,
+) -> Result<BufferId, String> {
+    let buffer_id = install_scratch_test_buffer(state, name)?;
+    let lines = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().map(str::to_owned).collect()
+    };
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(lines);
+        buffer.set_language_id(Some("markdown".to_owned()));
+    }
+    sync_active_buffer(&mut state.runtime)?;
+    Ok(buffer_id)
+}
+
+fn markdown_table_event_dimensions() -> (u32, u32, i32, i32) {
+    (640, 240, 8, 16)
+}
+
 fn focus_test_buffer(state: &mut ShellState, buffer_id: BufferId) -> Result<(), String> {
     let workspace_id = state
         .runtime
@@ -5001,6 +5025,212 @@ fn hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle() -> Result<(), 
             .map_err(|error| error.to_string())?,
         Some("Beta".to_owned())
     );
+    Ok(())
+}
+
+#[test]
+fn markdown_table_detection_requires_markdown_and_a_delimiter_row() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let markdown = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-table*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    let malformed = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-malformed*",
+        "| Header 1 | Header 2 |\n| nope | nope |\n| Some text | Some more text |",
+    )?;
+    let scratch = install_scratch_test_buffer(&mut state, "*not-markdown*")?;
+    shell_buffer_mut(&mut state.runtime, scratch)?.replace_with_lines(vec![
+        "| Header 1 | Header 2 |".to_owned(),
+        "| --- | --- |".to_owned(),
+    ]);
+
+    let table =
+        detect_markdown_table(shell_buffer(&state.runtime, markdown)?).ok_or("table missing")?;
+    assert_eq!(table.start_line, 0);
+    assert_eq!(table.column_count, 2);
+    assert_eq!(table.rows.len(), 3);
+    assert!(table.rows[1].is_delimiter);
+    assert!(detect_markdown_table(shell_buffer(&state.runtime, malformed)?).is_none());
+    assert!(detect_markdown_table(shell_buffer(&state.runtime, scratch)?).is_none());
+    Ok(())
+}
+
+#[test]
+fn markdown_table_typing_auto_aligns_and_bootstraps_delimiter_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-align*",
+        "| Header 1 | Header 2 |\n| -- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 3));
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    state
+        .handle_text_input("-")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(0).as_deref(),
+        Some("| Header 1  | Header 2       |")
+    );
+    assert_eq!(
+        buffer.text.line(1).as_deref(),
+        Some("| --------- | -------------- |")
+    );
+    assert_eq!(
+        buffer.text.line(2).as_deref(),
+        Some("| Some text | Some more text |")
+    );
+    Ok(())
+}
+
+#[test]
+fn markdown_table_enter_inserts_a_new_row() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-enter*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 2));
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(3).as_deref(),
+        Some("|           |                |")
+    );
+    assert_eq!(buffer.cursor_point(), TextPoint::new(3, 2));
+    Ok(())
+}
+
+#[test]
+fn markdown_table_insert_tab_adds_a_column_across_the_table() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-tab*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 14));
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Tab),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(0).as_deref(),
+        Some("| Header 1  | Header 2       |   |")
+    );
+    assert_eq!(
+        buffer.text.line(1).as_deref(),
+        Some("| --------- | -------------- | --- |")
+    );
+    assert_eq!(
+        buffer.text.line(2).as_deref(),
+        Some("| Some text | Some more text |   |")
+    );
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 31));
+    Ok(())
+}
+
+#[test]
+fn markdown_table_normal_tab_moves_between_columns() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-normal-tab*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 2));
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::Tab, Mod::NOMOD)
+            .map_err(|error| error.to_string())?
+    );
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(2, 14)
+    );
+    Ok(())
+}
+
+#[test]
+fn non_table_normal_tab_still_cycles_panes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_a = install_scratch_test_buffer(&mut state, "*pane-a*")?;
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    cycle_runtime_pane(&mut state.runtime)?;
+    let buffer_b = install_scratch_test_buffer(&mut state, "*pane-b*")?;
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Tab),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_a));
+    assert_ne!(ui.active_buffer_id(), Some(buffer_b));
     Ok(())
 }
 
