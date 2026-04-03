@@ -5129,6 +5129,42 @@ fn markdown_table_enter_inserts_a_new_row() -> Result<(), String> {
 }
 
 #[test]
+fn markdown_table_preserves_insert_mode_spaces() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*markdown-space*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 11));
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    state
+        .handle_text_input(" ")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(2).as_deref(),
+        Some("| Some text  | Some more text |")
+    );
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 12));
+    drop(buffer);
+
+    state
+        .handle_text_input("m")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(2).as_deref(),
+        Some("| Some text m | Some more text |")
+    );
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 13));
+    Ok(())
+}
+
+#[test]
 fn markdown_table_insert_tab_adds_a_column_across_the_table() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_markdown_test_buffer(
