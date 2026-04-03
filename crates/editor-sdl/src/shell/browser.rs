@@ -436,7 +436,7 @@ pub(super) fn browser_buffer_layout(
         .unwrap_or(footer_line_count)
         .max(footer_line_count);
     let footer_chrome = text_panel_chrome_height("", line_height);
-    let input_chrome = text_panel_chrome_height("", line_height);
+    let input_chrome = input_panel_chrome_height();
     let footer_height = footer_chrome + footer_rows as i32 * line_height;
     let input_height = input_chrome + input_rows as i32 * line_height;
     let footer_y = layout.pane_bottom.saturating_sub(footer_height);
