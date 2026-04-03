@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_shell_state(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
@@ -186,9 +187,9 @@ pub(super) fn render_shell_state(
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CursorScreenAnchor {
-    x: i32,
-    y: i32,
-    pane_bottom: i32,
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) pane_bottom: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1398,12 +1399,12 @@ pub(super) fn fallback_overlay_anchor(
 }
 
 #[derive(Debug)]
-struct WrappedLine {
-    line_index: usize,
-    line: String,
-    char_map: LineCharMap,
-    segments: Vec<LineWrapSegment>,
-    continuation_indent_cols: usize,
+pub(super) struct WrappedLine {
+    pub(super) line_index: usize,
+    pub(super) line: String,
+    pub(super) char_map: LineCharMap,
+    pub(super) segments: Vec<LineWrapSegment>,
+    pub(super) continuation_indent_cols: usize,
 }
 
 pub(super) fn collect_wrapped_lines(
@@ -3489,6 +3490,7 @@ pub(super) fn acp_slice_chars(text: &str, start: usize, end: usize) -> String {
         .to_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn block_cursor_text_overlay(
     x: i32,
     line: &str,
@@ -3577,13 +3579,13 @@ pub(super) fn draw_buffer_text(
 }
 
 pub(super) struct GhostTextSegmentDraw<'a> {
-    x: i32,
-    y: i32,
-    segment: LineWrapSegment,
-    line_len: usize,
-    ghost_text: Option<&'a str>,
-    color: Color,
-    cell_width: i32,
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) segment: LineWrapSegment,
+    pub(super) line_len: usize,
+    pub(super) ghost_text: Option<&'a str>,
+    pub(super) color: Color,
+    pub(super) cell_width: i32,
 }
 
 pub(super) fn draw_line_ghost_text_for_segment(
@@ -3897,16 +3899,16 @@ pub(super) struct FontRun {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ShapedGlyph {
-    glyph_id: u16,
-    x_advance: f32,
-    x_offset: f32,
-    y_offset: f32,
+    pub(super) glyph_id: u16,
+    pub(super) x_advance: f32,
+    pub(super) x_offset: f32,
+    pub(super) y_offset: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ShapedRun {
-    glyphs: Vec<ShapedGlyph>,
-    total_advance: f32,
+    pub(super) glyphs: Vec<ShapedGlyph>,
+    pub(super) total_advance: f32,
 }
 
 pub(super) fn shaped_run_uses_cell_grid(text: &str, shaped: &ShapedRun) -> bool {
@@ -4162,7 +4164,7 @@ impl<'texture> RenderedTextTexture<'texture> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum TextTextureCacheKey {
+pub(super) enum TextTextureCacheKey {
     Primary {
         text: String,
         color: u32,
@@ -4179,33 +4181,33 @@ enum TextTextureCacheKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CachedLigatureGlyphPlacement {
-    glyph_id: u16,
-    draw_x: i32,
-    draw_y: i32,
-    width: u32,
-    height: u32,
-    raster_px_64: u16,
+pub(super) struct CachedLigatureGlyphPlacement {
+    pub(super) glyph_id: u16,
+    pub(super) draw_x: i32,
+    pub(super) draw_y: i32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) raster_px_64: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CachedGlyphRasterPlacement {
-    glyph_id: u16,
-    draw_x: i32,
-    draw_y: i32,
-    width: u32,
-    height: u32,
-    raster_px_64: u16,
+pub(super) struct CachedGlyphRasterPlacement {
+    pub(super) glyph_id: u16,
+    pub(super) draw_x: i32,
+    pub(super) draw_y: i32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) raster_px_64: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CachedLigatureLayout {
-    glyphs: Vec<CachedLigatureGlyphPlacement>,
-    offset_x: i32,
-    offset_y: i32,
-    width: u32,
-    height: u32,
-    advance: i32,
+    pub(super) glyphs: Vec<CachedLigatureGlyphPlacement>,
+    pub(super) offset_x: i32,
+    pub(super) offset_y: i32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) advance: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4232,7 +4234,7 @@ pub(super) struct TextTextureCache<'texture> {
 }
 
 impl<'texture> TextTextureCache<'texture> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             entries: HashMap::new(),
             ligature_shapes: HashMap::new(),
@@ -4241,7 +4243,7 @@ impl<'texture> TextTextureCache<'texture> {
         }
     }
 
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.entries.clear();
         self.ligature_shapes.clear();
         self.access_tick = 0;
@@ -4287,14 +4289,14 @@ impl<'texture> TextTextureCache<'texture> {
             })
     }
 
-    fn get_ligature_shape(&mut self, text: &str) -> Option<LigatureShapeCacheValue> {
+    pub(super) fn get_ligature_shape(&mut self, text: &str) -> Option<LigatureShapeCacheValue> {
         let last_used = self.next_access_tick();
         let entry = self.ligature_shapes.get_mut(text)?;
         entry.last_used = last_used;
         Some(entry.value.clone())
     }
 
-    fn insert_ligature_shape(
+    pub(super) fn insert_ligature_shape(
         &mut self,
         text: String,
         value: LigatureShapeCacheValue,
@@ -4471,8 +4473,8 @@ pub(super) fn rasterize_icon_glyph_for_cell(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct IconGlyphCellLayout {
-    draw_offset_x: i32,
-    advance: i32,
+    pub(super) draw_offset_x: i32,
+    pub(super) advance: i32,
 }
 
 pub(super) fn icon_glyph_cell_layout(

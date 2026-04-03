@@ -10454,6 +10454,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_theme_runtime<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
