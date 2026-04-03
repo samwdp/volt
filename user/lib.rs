@@ -59,6 +59,8 @@ pub mod multicursor;
 pub mod oil;
 /// Pane layout management.
 pub mod pane;
+/// Native PDF buffer commands and keybindings.
+pub mod pdf;
 /// Generic picker UI bindings and popup controls.
 pub mod picker;
 /// User-editable statusline segment composition.
@@ -111,6 +113,7 @@ pub fn packages() -> Vec<PluginPackage> {
         image::package(),
         interactive::package(),
         pane::package(),
+        pdf::package(),
         hover::package(),
         lsp::package(),
         dap::package(),

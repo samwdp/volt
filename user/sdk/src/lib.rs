@@ -94,6 +94,14 @@ pub mod image_hooks {
     pub const TOGGLE_MODE: &str = "ui.image.toggle-mode";
 }
 
+/// Hook name constants for the native PDF buffer.
+pub mod pdf_hooks {
+    pub const NEXT_PAGE: &str = "ui.pdf.next-page";
+    pub const PREVIOUS_PAGE: &str = "ui.pdf.previous-page";
+    pub const ROTATE_CLOCKWISE: &str = "ui.pdf.rotate-clockwise";
+    pub const DELETE_PAGE: &str = "ui.pdf.delete-page";
+}
+
 // ─── Buffer kind string constants ────────────────────────────────────────────
 
 /// Buffer kind strings used when creating or matching plugin buffers.
@@ -106,6 +114,7 @@ pub mod buffer_kinds {
     pub const ACP: &str = "acp";
     pub const BROWSER: &str = "browser";
     pub const CALCULATOR: &str = "calculator";
+    pub const PDF: &str = "pdf";
 }
 
 /// Controls how a plugin section is updated when plugin evaluation writes to it.

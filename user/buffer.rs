@@ -5,7 +5,7 @@ pub fn package() -> PluginPackage {
     PluginPackage::new("buffer", true, "Buffer save and management commands.").with_commands(vec![
         PluginCommand::new(
             "buffer.save",
-            "Saves the active file buffer to disk.",
+            "Saves the active file-backed buffer to disk.",
             vec![PluginAction::emit_hook("buffer.save", None::<&str>)],
         ),
         PluginCommand::new(

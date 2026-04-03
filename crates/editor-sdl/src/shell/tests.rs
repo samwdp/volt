@@ -333,6 +333,73 @@ fn write_test_svg(path: &Path) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+fn write_test_pdf(path: &Path, page_texts: &[&str]) -> Result<(), String> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::dictionary;
+    use lopdf::{Document as PdfDocument, Object as PdfObject, Stream};
+
+    let mut document = PdfDocument::with_version("1.5");
+    let info_id = document.add_object(lopdf::dictionary! {
+        "Title" => PdfObject::string_literal("Volt PDF Test"),
+        "Creator" => PdfObject::string_literal("volt"),
+    });
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(lopdf::dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Courier",
+    });
+    let resources_id = document.add_object(lopdf::dictionary! {
+        "Font" => lopdf::dictionary! {
+            "F1" => font_id,
+        },
+    });
+    let pages = page_texts.iter().map(|text| {
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![72.into(), 720.into()]),
+                Operation::new("Tj", vec![PdfObject::string_literal(*text)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = document.add_object(Stream::new(
+            lopdf::dictionary! {},
+            content.encode().map_err(|error| error.to_string())?,
+        ));
+        Ok::<PdfObject, String>(
+            document
+                .add_object(lopdf::dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "Contents" => content_id,
+                })
+                .into(),
+        )
+    });
+    let kids = pages.collect::<Result<Vec<_>, _>>()?;
+    document.objects.insert(
+        pages_id,
+        PdfObject::Dictionary(lopdf::dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => page_texts.len() as i64,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = document.add_object(lopdf::dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.trailer.set("Info", info_id);
+    document.compress();
+    document.save(path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 const MATERIAL_ICONS_FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../volt/assets/font/material-design-icons.ttf"
@@ -789,6 +856,101 @@ fn open_workspace_file_routes_png_to_image_buffer() -> Result<(), String> {
     assert_eq!(image_state.format, ImageBufferFormat::Raster);
     assert_eq!(image_state.mode, ImageBufferMode::Rendered);
     assert!(buffer.is_read_only());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn open_workspace_file_routes_pdf_to_native_buffer() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("open-pdf");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["hello from page one", "hello from page two"])?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let pdf_state = buffer
+        .pdf_state()
+        .ok_or_else(|| "pdf state missing".to_owned())?;
+
+    assert_eq!(buffer.kind, BufferKind::Plugin(PDF_BUFFER_KIND.to_owned()));
+    assert_eq!(buffer.path(), Some(path.as_path()));
+    assert_eq!(pdf_state.page_count(), 2);
+    assert_eq!(pdf_state.current_page, 1);
+    assert!(buffer.is_read_only());
+    assert!(buffer.text.text().contains("hello from page one"));
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn pdf_buffers_support_navigation_editing_and_save() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("edit-pdf");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["first page", "second page"])?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    pdf_next_page(&mut state.runtime)?;
+    pdf_rotate_clockwise(&mut state.runtime)?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let pdf_state = buffer
+            .pdf_state()
+            .ok_or_else(|| "pdf state missing".to_owned())?;
+        assert_eq!(pdf_state.current_page, 2);
+        assert!(pdf_state.dirty);
+        assert!(buffer.text.text().contains("second page"));
+    }
+
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    save_buffer(&mut state.runtime, workspace_id, buffer_id)?;
+    {
+        let saved = lopdf::Document::load(&path).map_err(|error| error.to_string())?;
+        let rotation = pdf_page_rotation(&saved, 2).unwrap_or_default();
+        assert_eq!(rotation.rem_euclid(360), 90);
+    }
+
+    pdf_delete_page(&mut state.runtime)?;
+    save_buffer(&mut state.runtime, workspace_id, buffer_id)?;
+    {
+        let saved = lopdf::Document::load(&path).map_err(|error| error.to_string())?;
+        assert_eq!(saved.get_pages().len(), 1);
+    }
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn pdf_buffers_reload_when_backing_file_changes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("reload-pdf");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["before reload", "second page"])?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    write_test_pdf(&path, &["after reload"])?;
+
+    let reloaded = {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.mark_backing_file_reload_pending();
+        buffer.reload_from_disk_if_changed(true)?
+    };
+    assert!(reloaded);
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let pdf_state = buffer
+        .pdf_state()
+        .ok_or_else(|| "pdf state missing".to_owned())?;
+    assert_eq!(pdf_state.page_count(), 1);
+    assert!(buffer.text.text().contains("after reload"));
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     Ok(())
