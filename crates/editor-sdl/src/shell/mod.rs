@@ -12,15 +12,15 @@ mod terminal;
 mod ui_overlays;
 mod workspace_search;
 
-pub(super) use browser::*;
-pub(super) use command_line::*;
-pub(super) use diagnostics::*;
-pub(super) use directory::*;
-pub(super) use git::*;
-pub(super) use pdf::*;
-pub(super) use render::*;
-pub(super) use terminal::*;
-pub(super) use workspace_search::*;
+use browser::*;
+use command_line::*;
+use diagnostics::*;
+use directory::*;
+use git::*;
+use pdf::*;
+use render::*;
+use terminal::*;
+use workspace_search::*;
 
 #[cfg(test)]
 mod tests;

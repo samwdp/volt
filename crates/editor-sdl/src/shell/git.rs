@@ -26,7 +26,7 @@ pub(super) struct GitFringeState {
 }
 
 impl GitFringeState {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(GitFringeSnapshot::default())),
             inflight: Arc::new(AtomicBool::new(false)),
@@ -34,38 +34,38 @@ impl GitFringeState {
         }
     }
 
-    fn try_begin_refresh(&self) -> bool {
+    pub(super) fn try_begin_refresh(&self) -> bool {
         self.inflight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    fn finish_refresh(&self) {
+    pub(super) fn finish_refresh(&self) {
         self.inflight.store(false, Ordering::Release);
     }
 
-    fn try_line_kind(&self, line_index: usize) -> Option<GitFringeKind> {
+    pub(super) fn try_line_kind(&self, line_index: usize) -> Option<GitFringeKind> {
         let guard = self.snapshot.try_lock().ok()?;
         guard.line_kind(line_index)
     }
 
-    fn update_snapshot(&self, snapshot: GitFringeSnapshot) {
+    pub(super) fn update_snapshot(&self, snapshot: GitFringeSnapshot) {
         if let Ok(mut guard) = self.snapshot.lock() {
             *guard = snapshot;
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
     }
 
-    fn snapshot_revision(&self) -> u64 {
+    pub(super) fn snapshot_revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct GitSummarySnapshot {
-    branch: Option<String>,
-    added: usize,
-    removed: usize,
+    pub(super) branch: Option<String>,
+    pub(super) added: usize,
+    pub(super) removed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +77,7 @@ pub(super) struct GitSummaryState {
 }
 
 impl GitSummaryState {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(None)),
             inflight: Arc::new(AtomicBool::new(false)),
@@ -86,57 +86,57 @@ impl GitSummaryState {
         }
     }
 
-    fn snapshot(&self) -> Option<GitSummarySnapshot> {
+    pub(super) fn snapshot(&self) -> Option<GitSummarySnapshot> {
         let guard = self.snapshot.lock().ok()?;
         guard.clone()
     }
 
-    fn set_snapshot(&self, snapshot: Option<GitSummarySnapshot>) {
+    pub(super) fn set_snapshot(&self, snapshot: Option<GitSummarySnapshot>) {
         if let Ok(mut guard) = self.snapshot.lock() {
             *guard = snapshot;
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
     }
 
-    fn refresh_due(&self, now: Instant) -> bool {
+    pub(super) fn refresh_due(&self, now: Instant) -> bool {
         self.last_refresh_at
             .map(|last| now.duration_since(last) >= GIT_SUMMARY_REFRESH_INTERVAL)
             .unwrap_or(true)
     }
 
-    fn mark_refreshed(&mut self, now: Instant) {
+    pub(super) fn mark_refreshed(&mut self, now: Instant) {
         self.last_refresh_at = Some(now);
     }
 
-    fn try_begin_refresh(&self) -> bool {
+    pub(super) fn try_begin_refresh(&self) -> bool {
         self.inflight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    fn finish_refresh(&self) {
+    pub(super) fn finish_refresh(&self) {
         self.inflight.store(false, Ordering::Release);
     }
 
-    fn snapshot_revision(&self) -> u64 {
+    pub(super) fn snapshot_revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ActiveBufferEventContext {
-    buffer_id: BufferId,
-    has_input: bool,
-    vim_targets_input: bool,
-    is_read_only: bool,
-    is_git_status: bool,
-    is_git_commit: bool,
-    is_acp: bool,
-    is_directory: bool,
-    is_browser: bool,
-    is_terminal: bool,
-    is_plugin_evaluatable: bool,
-    is_compilation: bool,
+    pub(super) buffer_id: BufferId,
+    pub(super) has_input: bool,
+    pub(super) vim_targets_input: bool,
+    pub(super) is_read_only: bool,
+    pub(super) is_git_status: bool,
+    pub(super) is_git_commit: bool,
+    pub(super) is_acp: bool,
+    pub(super) is_directory: bool,
+    pub(super) is_browser: bool,
+    pub(super) is_terminal: bool,
+    pub(super) is_plugin_evaluatable: bool,
+    pub(super) is_compilation: bool,
 }
 
 pub(super) fn default_vim_target(has_input: bool) -> VimTarget {
@@ -149,12 +149,12 @@ pub(super) fn default_vim_target(has_input: bool) -> VimTarget {
 
 #[derive(Debug, Clone)]
 pub(super) struct ActiveLspBufferContext {
-    workspace_id: WorkspaceId,
-    buffer_id: BufferId,
-    path: PathBuf,
-    text: String,
-    revision: u64,
-    root: Option<PathBuf>,
+    pub(super) workspace_id: WorkspaceId,
+    pub(super) buffer_id: BufferId,
+    pub(super) path: PathBuf,
+    pub(super) text: String,
+    pub(super) revision: u64,
+    pub(super) root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]

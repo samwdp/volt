@@ -887,14 +887,14 @@ const BUFFER_OVERLAY_BOTTOM_GAP: i32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct BufferFooterLayout {
-    body_y: i32,
-    statusline_y: i32,
-    commandline_y: Option<i32>,
-    input_y: i32,
-    input_box_height: i32,
-    input_hint_gap: i32,
-    visible_rows: usize,
-    pane_bottom: i32,
+    pub(super) body_y: i32,
+    pub(super) statusline_y: i32,
+    pub(super) commandline_y: Option<i32>,
+    pub(super) input_y: i32,
+    pub(super) input_box_height: i32,
+    pub(super) input_hint_gap: i32,
+    pub(super) visible_rows: usize,
+    pub(super) pane_bottom: i32,
 }
 
 pub(super) fn buffer_footer_layout(
@@ -2318,14 +2318,14 @@ pub(super) fn render_command_line_overlay(
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TextPaneLayout {
-    rect: Rect,
-    visible_rows: usize,
-    wrap_cols: usize,
+    pub(super) rect: Rect,
+    pub(super) visible_rows: usize,
+    pub(super) wrap_cols: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct PluginSectionLayout {
-    panes: Vec<TextPaneLayout>,
+    pub(super) panes: Vec<TextPaneLayout>,
 }
 
 pub(super) fn plugin_section_row_budget(
@@ -2857,17 +2857,17 @@ pub(super) fn render_input_panel(
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AcpPaneLayout {
-    rect: Rect,
-    visible_rows: usize,
-    wrap_cols: usize,
+    pub(super) rect: Rect,
+    pub(super) visible_rows: usize,
+    pub(super) wrap_cols: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AcpBufferLayout {
-    plan: AcpPaneLayout,
-    output: AcpPaneLayout,
-    input: TextPaneLayout,
-    footer: TextPaneLayout,
+    pub(super) plan: AcpPaneLayout,
+    pub(super) output: AcpPaneLayout,
+    pub(super) input: TextPaneLayout,
+    pub(super) footer: TextPaneLayout,
 }
 
 pub(super) fn acp_buffer_layout(
@@ -5217,11 +5217,11 @@ pub(super) fn truncate_text_to_width(text: &str, max_width: u32, cell_width: i32
 pub(super) struct PixelRectToRect;
 
 impl PixelRectToRect {
-    fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
+    pub(super) fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect::new(x, y, width, height)
     }
 
-    fn from_pixel_rect(rect: PixelRect) -> Rect {
+    pub(super) fn from_pixel_rect(rect: PixelRect) -> Rect {
         Self::rect(rect.x, rect.y, rect.width, rect.height)
     }
 }
