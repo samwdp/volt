@@ -2225,7 +2225,7 @@ fn install_markdown_test_buffer(
     let lines = if text.is_empty() {
         Vec::new()
     } else {
-        text.split('\n').map(str::to_owned).collect()
+        text.lines().map(str::to_owned).collect()
     };
     {
         let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;

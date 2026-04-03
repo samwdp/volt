@@ -933,12 +933,8 @@ fn detect_markdown_table(buffer: &ShellBuffer) -> Option<MarkdownTable> {
 
 fn parse_markdown_table_line(line: &str) -> Option<(String, Vec<String>)> {
     let trimmed_end = line.trim_end();
-    let prefix_len = trimmed_end
-        .char_indices()
-        .find_map(|(index, character)| (!character.is_whitespace()).then_some(index))
-        .unwrap_or(trimmed_end.len());
-    let prefix = trimmed_end[..prefix_len].to_owned();
-    let body = trimmed_end.get(prefix_len..)?;
+    let body = trimmed_end.trim_start();
+    let prefix = trimmed_end[..trimmed_end.len().saturating_sub(body.len())].to_owned();
     if !body.starts_with('|') || !body.ends_with('|') || body.chars().count() < 3 {
         return None;
     }
@@ -969,11 +965,8 @@ fn is_markdown_table_delimiter_row_candidate(cells: &[String]) -> bool {
             continue;
         }
         has_any_content = true;
-        let stripped = trimmed
-            .strip_prefix(':')
-            .unwrap_or(trimmed)
-            .strip_suffix(':')
-            .unwrap_or(trimmed.strip_prefix(':').unwrap_or(trimmed));
+        let without_prefix = trimmed.strip_prefix(':').unwrap_or(trimmed);
+        let stripped = without_prefix.strip_suffix(':').unwrap_or(without_prefix);
         if stripped.is_empty() || !stripped.chars().all(|character| character == '-') {
             return false;
         }
@@ -1073,21 +1066,8 @@ fn markdown_table_cursor_target(
         let raw_len = cell.chars().count();
         let cell_start = column;
         let cell_end = cell_start + raw_len;
-        let trimmed = cell.trim();
-        let (editable_start, editable_len) = if trimmed.is_empty() {
-            let start = if raw_len > 0 {
-                cell_start.saturating_add(1).min(cell_end)
-            } else {
-                cell_start
-            };
-            (start, 0)
-        } else {
-            let leading = cell
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .count();
-            (cell_start + leading, trimmed.chars().count())
-        };
+        let (editable_start, editable_len) =
+            markdown_table_editable_cell_bounds(cell, cell_start, cell_end);
 
         if point.column <= cell_start {
             return Some(MarkdownTableCursorTarget {
@@ -1122,6 +1102,27 @@ fn markdown_table_cursor_target(
         cell_index: table.column_count.saturating_sub(1),
         content_offset: 0,
     })
+}
+
+fn markdown_table_editable_cell_bounds(
+    cell: &str,
+    cell_start: usize,
+    cell_end: usize,
+) -> (usize, usize) {
+    let trimmed = cell.trim();
+    if trimmed.is_empty() {
+        let start = if cell_start < cell_end {
+            cell_start.saturating_add(1).min(cell_end)
+        } else {
+            cell_start
+        };
+        return (start, 0);
+    }
+    let leading = cell
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .count();
+    (cell_start + leading, trimmed.chars().count())
 }
 
 fn markdown_table_point_for_target(
