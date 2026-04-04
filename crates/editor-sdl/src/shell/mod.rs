@@ -20997,11 +20997,7 @@ fn workspace_root_readme_path(root: &Path) -> Result<Option<PathBuf>, String> {
             stem.eq_ignore_ascii_case("readme").then_some(path)
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        readme_path_priority(left)
-            .cmp(&readme_path_priority(right))
-            .then_with(|| left.file_name().cmp(&right.file_name()))
-    });
+    candidates.sort_by_cached_key(|path| readme_path_priority(path));
     Ok(candidates.into_iter().next())
 }
 
@@ -21095,6 +21091,7 @@ pub(crate) fn open_workspace_from_project(
         return Ok(workspace_id);
     }
 
+    let initial_readme_path = workspace_root_readme_path(root)?;
     let window_id = active_window_id(runtime)?;
     let workspace_id = runtime
         .model_mut()
@@ -21144,7 +21141,7 @@ pub(crate) fn open_workspace_from_project(
         ui.switch_workspace(workspace_id);
     }
 
-    if let Some(readme_path) = workspace_root_readme_path(root)? {
+    if let Some(readme_path) = initial_readme_path {
         open_workspace_file(runtime, &readme_path)?;
     }
 
