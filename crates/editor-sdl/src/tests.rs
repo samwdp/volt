@@ -1275,6 +1275,41 @@ fn workspace_helpers_open_switch_and_delete_workspaces() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn workspace_open_prefers_root_readme_as_first_buffer() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = ShellState::new()?;
+    let root = temp_workspace_root("readme-first");
+    fs::create_dir_all(&root)?;
+    fs::write(root.join("README.md"), "# Demo\n")?;
+
+    open_workspace_from_project(&mut state.runtime, "readme-first", &root)?;
+
+    let active = state.active_buffer_mut()?;
+    assert_eq!(active.kind, BufferKind::File);
+    assert_eq!(active.display_name(), "README.md");
+    assert_eq!(active.text.line(0).as_deref(), Some("# Demo"));
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_open_falls_back_to_notes_when_no_root_readme() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut state = ShellState::new()?;
+    let root = temp_workspace_root("no-readme");
+    fs::create_dir_all(&root)?;
+
+    open_workspace_from_project(&mut state.runtime, "no-readme", &root)?;
+
+    let active = state.active_buffer_mut()?;
+    assert_eq!(active.kind, BufferKind::Scratch);
+    assert_eq!(active.display_name(), "*notes*");
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn workspace_delete_picker_hides_default_workspace() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = ShellState::new()?;
     let root = temp_workspace_root("picker");
