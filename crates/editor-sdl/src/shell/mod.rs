@@ -21004,7 +21004,7 @@ fn readme_path_priority(path: &Path) -> (u8, String) {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or_default()
+        .unwrap_or("<invalid-utf8-readme-name>")
         .to_ascii_lowercase();
     let priority = match file_name.as_str() {
         "readme.md" => 0,
