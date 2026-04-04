@@ -12,10 +12,22 @@ use editor_plugin_api::{
 use editor_plugin_host::StatuslineContext;
 use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
-use std::sync::Arc;
+use std::{
+    env, fs,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Default)]
 struct CommandLog(Vec<String>);
+
+fn unique_temp_path(name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    env::temp_dir().join(format!("volt-shell-{name}-{unique}"))
+}
 
 struct HeaderlineTestUserLibrary {
     scrolloff: f64,
@@ -282,6 +294,45 @@ impl UserLibrary for HeaderlineTestUserLibrary {
     fn default_build_command(&self, _language: &str) -> Option<String> {
         None
     }
+}
+
+#[test]
+fn resolve_default_workspace_root_prefers_existing_executable_relative_user_dir() {
+    let temp_root = unique_temp_path("default-workspace-root");
+    let exe_dir = temp_root.join("target").join("debug").join("deps");
+    let bundled_user_dir = temp_root.join("target").join("debug").join("user");
+    fs::create_dir_all(&exe_dir).expect("create fake executable directory");
+    fs::create_dir_all(&bundled_user_dir).expect("create bundled user directory");
+
+    let resolved = resolve_default_workspace_root(Some(&exe_dir.join("volt-tests")), None);
+    assert_eq!(resolved, Some(bundled_user_dir));
+
+    fs::remove_dir_all(&temp_root).expect("remove temp directory");
+}
+
+#[test]
+fn resolve_default_workspace_root_falls_back_to_executable_user_dir() {
+    assert_eq!(
+        resolve_default_workspace_root(
+            Some(Path::new("/tmp/volt/bin/volt")),
+            Some(Path::new("/tmp/cwd"))
+        ),
+        Some(PathBuf::from("/tmp/volt/bin/user"))
+    );
+}
+
+#[test]
+fn shell_state_uses_default_workspace_root() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = state
+        .runtime
+        .model()
+        .active_workspace()
+        .map_err(|error| error.to_string())?
+        .root()
+        .map(Path::to_path_buf);
+    assert_eq!(root, default_workspace_root());
+    Ok(())
 }
 
 fn slice_by_columns(text: &str, start: usize, end: usize) -> String {
