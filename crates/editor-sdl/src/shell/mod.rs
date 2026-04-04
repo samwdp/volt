@@ -11119,6 +11119,8 @@ fn resolve_default_workspace_root(exe_path: Option<&Path>, cwd: Option<&Path>) -
                 return Some(candidate);
             }
         }
+        // Fall back to the executable-relative user directory even before it exists so the
+        // default workspace targets the bundled customization path consistently.
         return Some(exe_dir.join("user"));
     }
     cwd.map(Path::to_path_buf)

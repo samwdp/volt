@@ -21,12 +21,30 @@ use std::{
 #[derive(Debug, Default)]
 struct CommandLog(Vec<String>);
 
-fn unique_temp_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    env::temp_dir().join(format!("volt-shell-{name}-{unique}"))
+struct TempTestDir {
+    path: PathBuf,
+}
+
+impl TempTestDir {
+    fn new(name: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        Self {
+            path: env::temp_dir().join(format!("volt-shell-{name}-{unique}")),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempTestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 struct HeaderlineTestUserLibrary {
@@ -298,26 +316,23 @@ impl UserLibrary for HeaderlineTestUserLibrary {
 
 #[test]
 fn resolve_default_workspace_root_prefers_existing_executable_relative_user_dir() {
-    let temp_root = unique_temp_path("default-workspace-root");
-    let exe_dir = temp_root.join("target").join("debug").join("deps");
-    let bundled_user_dir = temp_root.join("target").join("debug").join("user");
+    let temp_root = TempTestDir::new("default-workspace-root");
+    let exe_dir = temp_root.path().join("target").join("debug").join("deps");
+    let bundled_user_dir = temp_root.path().join("target").join("debug").join("user");
     fs::create_dir_all(&exe_dir).expect("create fake executable directory");
     fs::create_dir_all(&bundled_user_dir).expect("create bundled user directory");
 
     let resolved = resolve_default_workspace_root(Some(&exe_dir.join("volt-tests")), None);
     assert_eq!(resolved, Some(bundled_user_dir));
-
-    fs::remove_dir_all(&temp_root).expect("remove temp directory");
 }
 
 #[test]
 fn resolve_default_workspace_root_falls_back_to_executable_user_dir() {
+    let temp_root = TempTestDir::new("default-workspace-fallback");
+    let exe_dir = temp_root.path().join("bin");
     assert_eq!(
-        resolve_default_workspace_root(
-            Some(Path::new("/tmp/volt/bin/volt")),
-            Some(Path::new("/tmp/cwd"))
-        ),
-        Some(PathBuf::from("/tmp/volt/bin/user"))
+        resolve_default_workspace_root(Some(&exe_dir.join("volt")), Some(temp_root.path())),
+        Some(exe_dir.join("user"))
     );
 }
 
