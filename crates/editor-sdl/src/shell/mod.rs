@@ -17607,17 +17607,16 @@ fn save_buffer(
     if theme_lang_format_on_save(
         runtime.services().get::<ThemeRegistry>(),
         language_id.as_deref(),
-    ) {
-        if let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path) {
-            record_runtime_error(
-                runtime,
-                "buffer.save.format-on-save",
-                format!(
-                    "format-on-save failed for `{}`: {error}; saving without formatting",
-                    path.display()
-                ),
-            );
-        }
+    ) && let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path)
+    {
+        record_runtime_error(
+            runtime,
+            "buffer.save.format-on-save",
+            format!(
+                "format-on-save failed for `{}`: {error}; saving without formatting",
+                path.display()
+            ),
+        );
     }
     save_buffer_inner(runtime, workspace_id, buffer_id, &path)
 }
