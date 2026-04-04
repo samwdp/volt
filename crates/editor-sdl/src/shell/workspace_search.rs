@@ -1,4 +1,9 @@
+use std::io::{BufRead as _, BufReader, Read as _};
+use std::process::Stdio;
+
 use super::*;
+
+const WORKSPACE_SEARCH_OUTPUT_LIMIT: usize = 48;
 
 #[derive(Debug, Clone)]
 pub(super) struct SearchPickerData {
@@ -93,17 +98,50 @@ pub(super) fn run_search_command(
 ) -> Result<String, String> {
     let mut process = Command::new(command);
     configure_background_command(&mut process);
-    let output = process
+    let mut child = process
         .args(args)
         .current_dir(root)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("failed to run `{command}`: {error}"))?;
-    let exit_code = output
-        .status
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("failed to capture `{command}` stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("failed to capture `{command}` stderr"))?;
+    let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut stderr = BufReader::new(stderr);
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+
+    let (stdout, reached_limit) = collect_search_output(stdout, WORKSPACE_SEARCH_OUTPUT_LIMIT)
+        .map_err(|error| format!("failed to read `{command}` output: {error}"))?;
+    if reached_limit {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_reader.join();
+        return Ok(stdout);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("failed to wait for `{command}`: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| format!("failed to read `{command}` stderr"))?
+        .map_err(|error| format!("failed to read `{command}` stderr: {error}"))?;
+    let exit_code = status
         .code()
         .ok_or_else(|| format!("`{command}` terminated unexpectedly"))?;
     if exit_code != 0 && exit_code != 1 {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
         let message = if stderr.is_empty() {
             format!("`{command}` exited with status {exit_code}")
         } else {
@@ -111,7 +149,32 @@ pub(super) fn run_search_command(
         };
         return Err(message);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(stdout)
+}
+
+pub(super) fn collect_search_output(
+    stdout: impl std::io::Read,
+    limit: usize,
+) -> std::io::Result<(String, bool)> {
+    let mut reader = BufReader::new(stdout);
+    let mut output = String::new();
+    let mut line = String::new();
+    let mut count = 0;
+    let limit = limit.max(1);
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            return Ok((output, false));
+        }
+
+        output.push_str(&line);
+        count += 1;
+        if count >= limit {
+            return Ok((output, true));
+        }
+    }
 }
 
 pub(super) fn parse_workspace_search_entries(
@@ -134,7 +197,7 @@ pub(super) fn parse_workspace_search_entries(
                     )
                 })
         })
-        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .take(WORKSPACE_SEARCH_OUTPUT_LIMIT)
         .collect()
 }
 

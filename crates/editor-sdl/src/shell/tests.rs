@@ -3,7 +3,7 @@ use agent_client_protocol::{
     Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallContent, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
-use editor_lsp::LspLogDirection;
+use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLogDirection};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, OilDefaults, OilKeyAction,
@@ -1013,6 +1013,427 @@ fn pdf_buffers_support_navigation_editing_and_save() -> Result<(), String> {
 }
 
 #[test]
+fn buffer_save_command_writes_edited_file_buffer_to_disk() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("buffer-save-command");
+    let path = root.join("sample.txt");
+    std::fs::write(&path, "alpha\n").map_err(|error| error.to_string())?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+        "// local\nalpha\n"
+    );
+    assert!(!shell_buffer(&state.runtime, buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_save_command_writes_all_dirty_workspace_files() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-save-command");
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    std::fs::write(&first, "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(&second, "beta\n").map_err(|error| error.to_string())?;
+
+    let first_buffer_id = open_workspace_file(&mut state.runtime, &first)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, first_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("one\n");
+        assert!(buffer.is_dirty());
+    }
+
+    let second_buffer_id = open_workspace_file(&mut state.runtime, &second)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, second_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("two\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("workspace.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&first).map_err(|error| error.to_string())?,
+        "one\nalpha\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second).map_err(|error| error.to_string())?,
+        "two\nbeta\n"
+    );
+    assert!(!shell_buffer(&state.runtime, first_buffer_id)?.is_dirty());
+    assert!(!shell_buffer(&state.runtime, second_buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn buffer_save_command_uses_shell_focused_buffer_when_runtime_focus_is_stale() -> Result<(), String>
+{
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("buffer-save-stale-focus");
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    std::fs::write(&first, "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(&second, "beta\n").map_err(|error| error.to_string())?;
+
+    let first_buffer_id = open_workspace_file(&mut state.runtime, &first)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, first_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("one\n");
+    }
+
+    let second_buffer_id = open_workspace_file(&mut state.runtime, &second)?;
+    assert_ne!(first_buffer_id, second_buffer_id);
+
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(first_buffer_id);
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_buffer_id(),
+        Some(first_buffer_id)
+    );
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&first).map_err(|error| error.to_string())?,
+        "one\nalpha\n"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn buffer_save_hook_prefers_explicit_event_buffer_over_shell_focus() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("buffer-save-explicit-buffer");
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    std::fs::write(&first, "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(&second, "beta\n").map_err(|error| error.to_string())?;
+
+    let first_buffer_id = open_workspace_file(&mut state.runtime, &first)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, first_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("one\n");
+    }
+
+    let second_buffer_id = open_workspace_file(&mut state.runtime, &second)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, second_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("two\n");
+    }
+
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(second_buffer_id);
+    let workspace_id = shell_ui(&state.runtime)?.active_workspace();
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_BUFFER_SAVE,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_buffer(first_buffer_id),
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&first).map_err(|error| error.to_string())?,
+        "one\nalpha\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second).map_err(|error| error.to_string())?,
+        "beta\n"
+    );
+    assert!(!shell_buffer(&state.runtime, first_buffer_id)?.is_dirty());
+    assert!(shell_buffer(&state.runtime, second_buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_save_command_uses_shell_active_workspace_when_runtime_workspace_is_stale()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-save-stale-a");
+    let second_root = unique_temp_dir("workspace-save-stale-b");
+    let first_workspace = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    let first_path = first_root.join("alpha.txt");
+    std::fs::write(&first_path, "alpha\n").map_err(|error| error.to_string())?;
+    let first_buffer_id = open_workspace_file(&mut state.runtime, &first_path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, first_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("one\n");
+    }
+
+    let second_workspace = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    assert_ne!(first_workspace, second_workspace);
+    shell_ui_mut(&mut state.runtime)?.switch_workspace(first_workspace);
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        first_workspace
+    );
+
+    state
+        .runtime
+        .execute_command("workspace.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&first_path).map_err(|error| error.to_string())?,
+        "one\nalpha\n"
+    );
+
+    std::fs::remove_dir_all(&first_root).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&second_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_save_hook_prefers_explicit_event_workspace_over_shell_focus() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-save-explicit-a");
+    let second_root = unique_temp_dir("workspace-save-explicit-b");
+
+    let first_workspace = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    let first_path = first_root.join("alpha.txt");
+    std::fs::write(&first_path, "alpha\n").map_err(|error| error.to_string())?;
+    let first_buffer_id = open_workspace_file(&mut state.runtime, &first_path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, first_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("one\n");
+    }
+
+    let second_workspace = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    let second_path = second_root.join("beta.txt");
+    std::fs::write(&second_path, "beta\n").map_err(|error| error.to_string())?;
+    let second_buffer_id = open_workspace_file(&mut state.runtime, &second_path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, second_buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("two\n");
+    }
+
+    shell_ui_mut(&mut state.runtime)?.switch_workspace(second_workspace);
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_WORKSPACE_SAVE,
+            HookEvent::new().with_workspace(first_workspace),
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&first_path).map_err(|error| error.to_string())?,
+        "one\nalpha\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second_path).map_err(|error| error.to_string())?,
+        "beta\n"
+    );
+    assert!(!shell_buffer(&state.runtime, first_buffer_id)?.is_dirty());
+    assert!(shell_buffer(&state.runtime, second_buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&first_root).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&second_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn picker_open_file_save_clears_dirty_state_and_closes_cleanly() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("picker-open-file-save");
+    let path = root.join("sample.rs");
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "picker-save", &root)?;
+
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Workspace Files",
+        vec![PickerEntry {
+            item: PickerItem::new(
+                path.display().to_string(),
+                "sample.rs",
+                "workspace root",
+                Some(path.display().to_string()),
+            ),
+            action: PickerAction::OpenFile(path.clone()),
+        }],
+    ));
+
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.path(),
+        Some(path.as_path())
+    );
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+        "// local\nfn main() {}\n"
+    );
+    assert!(!shell_buffer(&state.runtime, buffer_id)?.is_dirty());
+
+    close_buffer_with_prompt(&mut state.runtime, buffer_id)?;
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert!(shell_ui(&state.runtime)?.buffer(buffer_id).is_none());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn picker_open_file_location_save_clears_dirty_state_and_closes_cleanly() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("picker-open-location-save");
+    let path = root.join("mod.rs");
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "picker-location-save", &root)?;
+
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Workspace Search",
+        vec![PickerEntry {
+            item: PickerItem::new(
+                format!("{}:1:1", path.display()),
+                "fn main() {}",
+                "mod.rs | Ln 1, Col 1",
+                Some(path.display().to_string()),
+            ),
+            action: PickerAction::OpenFileLocation {
+                path: path.clone(),
+                target: TextPoint::new(0, 0),
+            },
+        }],
+    ));
+
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.path(),
+        Some(path.as_path())
+    );
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.insert_text("// local\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+        "// local\nfn main() {}\n"
+    );
+    assert!(!shell_buffer(&state.runtime, buffer_id)?.is_dirty());
+
+    close_buffer_with_prompt(&mut state.runtime, buffer_id)?;
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert!(shell_ui(&state.runtime)?.buffer(buffer_id).is_none());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn buffer_save_still_writes_when_format_on_save_fails() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("save-format-failure");
+    let path = root.join("mod.rs");
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "format-failure", &root)?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    state
+        .runtime
+        .services_mut()
+        .insert(Arc::new(LspClientManager::new(
+            LanguageServerRegistry::new(),
+        )));
+    state
+        .runtime
+        .services_mut()
+        .insert(FormatterRegistry::default());
+    formatter_registry_mut(&mut state.runtime)?.register(FormatterSpec {
+        language_id: "rust".to_owned(),
+        program: "definitely-missing-formatter".to_owned(),
+        args: Vec::new(),
+    })?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+        "// local\nfn main() {}\n"
+    );
+    assert!(!shell_buffer(&state.runtime, buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn pdf_buffers_reload_when_backing_file_changes() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let root = unique_temp_dir("reload-pdf");
@@ -1821,6 +2242,19 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
 
     assert!(segments.len() > 1);
     assert!(segments[1].end_col.saturating_sub(segments[1].start_col) > 8);
+}
+
+#[test]
+fn wrap_line_segments_keeps_unbroken_words_together() {
+    let segments = wrap_line_segments(&LineCharMap::new("alpha betagamma delta"), 10, 10);
+
+    assert_eq!(
+        segments
+            .into_iter()
+            .map(|segment| (segment.start_col, segment.end_col))
+            .collect::<Vec<_>>(),
+        vec![(0, 6), (6, 16), (16, 21)]
+    );
 }
 
 #[test]
@@ -2730,6 +3164,15 @@ fn workspace_search_char_column_handles_utf8_offsets() {
     assert_eq!(workspace_search_char_column("aébc", 0), 0);
     assert_eq!(workspace_search_char_column("aébc", 1), 1);
     assert_eq!(workspace_search_char_column("aébc", 3), 2);
+}
+
+#[test]
+fn collect_search_output_stops_after_limit() {
+    let (output, reached_limit) =
+        collect_search_output(std::io::Cursor::new("one\ntwo\nthree\n"), 2)
+            .expect("search output should be collected");
+    assert_eq!(output, "one\ntwo\n");
+    assert!(reached_limit);
 }
 
 #[test]
@@ -5149,7 +5592,7 @@ fn markdown_table_preserves_insert_mode_spaces() -> Result<(), String> {
         Some("| Some text  | Some more text |")
     );
     assert_eq!(buffer.cursor_point(), TextPoint::new(2, 12));
-    drop(buffer);
+    let _ = buffer;
 
     state
         .handle_text_input("m")
@@ -5757,10 +6200,21 @@ fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     sync_active_buffer(&mut state.runtime)?;
+    state
+        .handle_text_input("example.com")
+        .map_err(|error| error.to_string())?;
 
     let ui = shell_ui(&state.runtime)?;
     assert_eq!(ui.active_buffer_id(), Some(buffer_id));
     assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert_eq!(ui.vim().target, VimTarget::Input);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .input_field()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .text(),
+        "example.com"
+    );
     Ok(())
 }
 

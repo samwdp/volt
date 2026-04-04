@@ -1399,6 +1399,14 @@ fn wrap_line_segments(
                 break;
             }
         }
+        if break_at.is_none() {
+            for idx in wrap_limit..len {
+                if map.whitespace.get(idx).copied().unwrap_or(false) {
+                    break_at = Some(idx + 1);
+                    break;
+                }
+            }
+        }
 
         let end = break_at.unwrap_or(wrap_limit);
         segments.push(LineWrapSegment {
@@ -2885,7 +2893,8 @@ impl ShellBuffer {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
-        let vim_target = default_vim_target(input.is_some());
+        let browser_state = browser_state_for_kind(buffer.kind(), user_library);
+        let vim_target = default_vim_target(input.is_some() || browser_state.is_some());
 
         Self {
             id: buffer.id(),
@@ -2903,7 +2912,7 @@ impl ShellBuffer {
             git_fringe: None,
             git_fringe_dirty: false,
             git_fringe_last_edit_at: None,
-            browser_state: browser_state_for_kind(buffer.kind(), user_library),
+            browser_state,
             directory_state: None,
             terminal_render: None,
             text,
@@ -2938,7 +2947,8 @@ impl ShellBuffer {
         let undo_tree = UndoTree::new(&text);
         let (read_only, input) = buffer_interaction(buffer.kind(), user_library);
         let plugin_section_state = plugin_section_state_for_kind(buffer.kind(), user_library);
-        let vim_target = default_vim_target(input.is_some());
+        let browser_state = browser_state_for_kind(buffer.kind(), user_library);
+        let vim_target = default_vim_target(input.is_some() || browser_state.is_some());
         let git_fringe = if matches!(buffer.kind(), BufferKind::File) && text.path().is_some() {
             Some(GitFringeState::new())
         } else {
@@ -2965,7 +2975,7 @@ impl ShellBuffer {
             git_fringe,
             git_fringe_dirty,
             git_fringe_last_edit_at,
-            browser_state: browser_state_for_kind(buffer.kind(), user_library),
+            browser_state,
             directory_state: None,
             terminal_render: None,
             text,
@@ -3012,7 +3022,7 @@ impl ShellBuffer {
         let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind, user_library);
         let plugin_section_state = plugin_section_state_for_kind(&kind, user_library);
-        let vim_target = default_vim_target(input.is_some());
+        let vim_target = default_vim_target(input.is_some() || browser_state.is_some());
 
         Self {
             id: buffer_id,
@@ -12499,9 +12509,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(HOOK_BUFFER_SAVE, "shell.buffer-save", |event, runtime| {
             let workspace_id = event
                 .workspace_id
+                .or_else(|| active_shell_workspace_id(runtime))
                 .or_else(|| runtime.model().active_workspace_id().ok())
                 .ok_or_else(|| "buffer.save hook missing workspace".to_owned())?;
-            let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
+            let buffer_id = event
+                .buffer_id
+                .or_else(|| active_shell_buffer_id(runtime).ok())
+                .ok_or_else(|| "buffer.save hook missing buffer".to_owned())?;
             save_buffer(runtime, workspace_id, buffer_id)?;
             let _ = refresh_git_status_buffers(runtime);
             Ok(())
@@ -12521,6 +12535,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             |event, runtime| {
                 let workspace_id = event
                     .workspace_id
+                    .or_else(|| active_shell_workspace_id(runtime))
                     .or_else(|| runtime.model().active_workspace_id().ok())
                     .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
                 save_workspace(runtime, workspace_id)?;
@@ -13901,6 +13916,10 @@ fn active_shell_buffer_id(runtime: &EditorRuntime) -> Result<BufferId, String> {
     shell_ui(runtime)?
         .active_buffer_id()
         .ok_or_else(|| "active shell buffer is missing".to_owned())
+}
+
+fn active_shell_workspace_id(runtime: &EditorRuntime) -> Option<WorkspaceId> {
+    shell_ui(runtime).ok().map(ShellUiState::active_workspace)
 }
 
 fn active_shell_buffer_mut(runtime: &mut EditorRuntime) -> Result<&mut ShellBuffer, String> {
@@ -15452,7 +15471,7 @@ impl WorkspaceSearchWorkerState {
     }
 
     fn schedule(&mut self, root: PathBuf, query: String) {
-        const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+        const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending = Some(PendingWorkspaceSearchRequest {
             due_at: Instant::now() + SEARCH_REFRESH_DEBOUNCE,
@@ -17563,14 +17582,16 @@ fn save_buffer(
         runtime.services().get::<ThemeRegistry>(),
         language_id.as_deref(),
     ) {
-        let language_id = language_id.ok_or_else(|| {
-            format!(
-                "format-on-save enabled but no language registered for `{}`",
-                path.display()
-            )
-        })?;
-        let _ = language_id;
-        format_buffer_on_save(runtime, workspace_id, buffer_id, &path)?;
+        if let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path) {
+            record_runtime_error(
+                runtime,
+                "buffer.save.format-on-save",
+                format!(
+                    "format-on-save failed for `{}`: {error}; saving without formatting",
+                    path.display()
+                ),
+            );
+        }
     }
     save_buffer_inner(runtime, workspace_id, buffer_id, &path)
 }
@@ -22425,15 +22446,6 @@ fn initial_lsp_log_lines(server_id: &str) -> Vec<String> {
 
 fn initial_scratch_lines() -> Vec<String> {
     vec![
-        "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
-        "NORMAL mode is loaded from user/vim.rs out of the box.".to_owned(),
-        "The shell starts in the default workspace and renders its statusline from user/statusline.rs.".to_owned(),
-        "Use h/j/k/l to move, w to jump forward by word, and : to open the command picker.".to_owned(),
-        "Press i to enter INSERT mode, then type directly into the active buffer.".to_owned(),
-        "F3 opens the command picker and F4 opens the buffer picker through user/picker.rs.".to_owned(),
-        "F5 toggles the docked popup window and F6 opens a searchable keybinding picker.".to_owned(),
-        "Inside a picker use Ctrl-n and Ctrl-p to move, Enter to run, and Escape to close.".to_owned(),
-        "F2 splits the layout, Tab changes panes, Ctrl+` opens the terminal buffer, and Ctrl+q quits.".to_owned(),
         "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
         "NORMAL mode is loaded from user/vim.rs out of the box.".to_owned(),
         "The shell starts in the default workspace and renders its statusline from user/statusline.rs.".to_owned(),
