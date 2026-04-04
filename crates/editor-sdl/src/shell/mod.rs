@@ -11110,7 +11110,10 @@ fn asset_path_from_parts(base: &Path, parts: &[&str]) -> PathBuf {
 
 fn resolve_default_workspace_root(exe_path: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
     if let Some(exe_dir) = exe_path.and_then(Path::parent) {
-        for ancestor in exe_dir.ancestors().take(DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH) {
+        for ancestor in exe_dir
+            .ancestors()
+            .take(DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH)
+        {
             let candidate = ancestor.join("user");
             if candidate.is_dir() {
                 return Some(candidate);
