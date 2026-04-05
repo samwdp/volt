@@ -110,13 +110,20 @@ fn buffer_segment(context: &StatuslineContext<'_>) -> Option<String> {
 fn filetype_segment(context: &StatuslineContext<'_>) -> Option<String> {
     let language_id = context.language_id?;
     let symbol = match language_id {
+        "c" => crate::icon_font::symbols::seti::SETI_C,
+        "cpp" => crate::icon_font::symbols::seti::SETI_CPP,
+        "css" => crate::icon_font::symbols::seti::SETI_CSS,
         "csharp" => crate::icon_font::symbols::seti::SETI_C_SHARP,
+        "go" => crate::icon_font::symbols::seti::SETI_GO,
+        "html" => crate::icon_font::symbols::seti::SETI_HTML,
         "javascript" | "jsx" => crate::icon_font::symbols::seti::SETI_JAVASCRIPT,
         "json" => crate::icon_font::symbols::seti::SETI_JSON,
         "rust" => crate::icon_font::symbols::seti::SETI_RUST,
+        "python" => crate::icon_font::symbols::seti::SETI_PYTHON,
         "markdown" | "markdown-inline" => crate::icon_font::symbols::seti::SETI_MARKDOWN,
         "toml" => crate::icon_font::symbols::seti::CUSTOM_TOML,
         "typescript" | "tsx" => crate::icon_font::symbols::seti::SETI_TYPESCRIPT,
+        "zig" => crate::icon_font::symbols::seti::SETI_ZIG,
         "gitcommit" => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
         _ => crate::icon_font::symbols::cod::COD_FILE,
     };

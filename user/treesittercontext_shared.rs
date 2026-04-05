@@ -101,7 +101,7 @@ pub fn context_icon(kind: &str, summary: &str) -> &'static str {
     } else if is_loop_kind(kind) {
         icon_font::symbols::md::MD_REPEAT
     } else if is_conditional_kind(kind) {
-        icon_font::symbols::md::MD_SOURCE_BRANCH
+        icon_font::symbols::cod::COD_QUESTION
     } else {
         icon_font::symbols::cod::COD_SYMBOL_METHOD
     }
