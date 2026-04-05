@@ -21002,6 +21002,44 @@ fn workspace_root_for_path(
         .map(Path::to_path_buf))
 }
 
+fn workspace_root_readme_path(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut candidates = fs::read_dir(root)
+        .map_err(|error| {
+            format!(
+                "failed to read workspace root `{}`: {error}",
+                root.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                return None;
+            }
+
+            let path = entry.path();
+            let stem = path.file_stem()?.to_str()?;
+            stem.eq_ignore_ascii_case("readme").then_some(path)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_cached_key(|path| readme_path_priority(path));
+    Ok(candidates.into_iter().next())
+}
+
+fn readme_path_priority(path: &Path) -> (u8, String) {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<invalid-utf8-readme-name>")
+        .to_ascii_lowercase();
+    let priority = match file_name.as_str() {
+        "readme.md" => 0,
+        "readme" => 1,
+        _ => 2,
+    };
+    (priority, file_name)
+}
+
 fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     if let Some(root) = active_workspace_root(runtime)? {
         return Ok(root);
@@ -21078,6 +21116,7 @@ pub(crate) fn open_workspace_from_project(
         return Ok(workspace_id);
     }
 
+    let initial_readme_path = workspace_root_readme_path(root)?;
     let window_id = active_window_id(runtime)?;
     let workspace_id = runtime
         .model_mut()
@@ -21125,6 +21164,10 @@ pub(crate) fn open_workspace_from_project(
         let ui = shell_ui_mut(runtime)?;
         ui.add_workspace(workspace_id, primary_pane_id, scratch, notes, notes_id);
         ui.switch_workspace(workspace_id);
+    }
+
+    if let Some(readme_path) = initial_readme_path {
+        open_workspace_file(runtime, &readme_path)?;
     }
 
     runtime
