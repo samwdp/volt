@@ -302,6 +302,7 @@ const OPTION_SCROLL_OFF: &str = "scrolloff";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
+const DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH: usize = 6;
 const BUNDLED_ICON_FONT_SEARCH_DEPTH: usize = 6;
 const BUNDLED_ICON_FONT_DIR_CANDIDATES: &[&[&str]] =
     &[&["crates", "volt", "assets", "font"], &["assets", "font"]];
@@ -7471,7 +7472,7 @@ impl ShellState {
         let window_id = runtime.model_mut().create_window("volt");
         let workspace_id = runtime
             .model_mut()
-            .open_workspace(window_id, "default", None)
+            .open_workspace(window_id, "default", default_workspace_root())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
 
         register_shell_hooks(&mut runtime).map_err(ShellError::Runtime)?;
@@ -11105,6 +11106,31 @@ fn asset_path_from_parts(base: &Path, parts: &[&str]) -> PathBuf {
     parts
         .iter()
         .fold(base.to_path_buf(), |candidate, part| candidate.join(part))
+}
+
+fn resolve_default_workspace_root(exe_path: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
+    if let Some(exe_dir) = exe_path.and_then(Path::parent) {
+        for ancestor in exe_dir
+            .ancestors()
+            .take(DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH)
+        {
+            let candidate = ancestor.join("user");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        // Fall back to the executable-relative user directory even before it exists so the
+        // default workspace targets the bundled customization path consistently.
+        return Some(exe_dir.join("user"));
+    }
+    cwd.map(Path::to_path_buf)
+}
+
+fn default_workspace_root() -> Option<PathBuf> {
+    resolve_default_workspace_root(
+        env::current_exe().ok().as_deref(),
+        env::current_dir().ok().as_deref(),
+    )
 }
 
 fn resolve_bundled_icon_font_dir() -> Result<PathBuf, ShellError> {
@@ -17581,17 +17607,16 @@ fn save_buffer(
     if theme_lang_format_on_save(
         runtime.services().get::<ThemeRegistry>(),
         language_id.as_deref(),
-    ) {
-        if let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path) {
-            record_runtime_error(
-                runtime,
-                "buffer.save.format-on-save",
-                format!(
-                    "format-on-save failed for `{}`: {error}; saving without formatting",
-                    path.display()
-                ),
-            );
-        }
+    ) && let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path)
+    {
+        record_runtime_error(
+            runtime,
+            "buffer.save.format-on-save",
+            format!(
+                "format-on-save failed for `{}`: {error}; saving without formatting",
+                path.display()
+            ),
+        );
     }
     save_buffer_inner(runtime, workspace_id, buffer_id, &path)
 }
