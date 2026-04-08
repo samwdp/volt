@@ -18,6 +18,7 @@ pub(super) fn render_shell_state(
     line_height: i32,
     ascent: i32,
     now: Instant,
+    typing_active: bool,
 ) -> Result<(), ShellError> {
     let content_height = height;
     let popup_height = runtime_popup
@@ -90,6 +91,7 @@ pub(super) fn render_shell_state(
                 acp_connected,
                 git_summary.as_ref(),
                 theme_registry,
+                typing_active,
                 cell_width,
                 line_height,
                 ascent,
@@ -114,6 +116,7 @@ pub(super) fn render_shell_state(
             line_height,
             ascent,
             now,
+            typing_active,
         )?;
     }
 
@@ -209,6 +212,7 @@ pub(super) fn render_runtime_popup_overlay(
     line_height: i32,
     ascent: i32,
     now: Instant,
+    typing_active: bool,
 ) -> Result<(), ShellError> {
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
@@ -250,6 +254,7 @@ pub(super) fn render_runtime_popup_overlay(
             acp_connected,
             git_summary.as_ref(),
             theme_registry,
+            typing_active,
             cell_width,
             line_height,
             ascent,
@@ -1260,6 +1265,7 @@ pub(super) fn buffer_cursor_screen_anchor(
     let headerline_rows = buffer_headerline_rows(
         buffer,
         true,
+        false,
         user_library,
         theme_registry,
         layout.visible_rows,
@@ -1330,6 +1336,7 @@ pub(super) fn buffer_point_at_screen(
     let headerline_rows = buffer_headerline_rows(
         buffer,
         true,
+        false,
         user_library,
         theme_registry,
         layout.visible_rows,
@@ -1465,6 +1472,7 @@ pub(super) fn render_buffer(
     acp_connected: bool,
     git_summary: Option<&GitSummarySnapshot>,
     theme_registry: Option<&ThemeRegistry>,
+    typing_active: bool,
     cell_width: i32,
     line_height: i32,
     ascent: i32,
@@ -1706,8 +1714,13 @@ pub(super) fn render_buffer(
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let cursor_row = buffer.cursor_row();
         let cursor_col = buffer.cursor_col();
-        let context_overlay =
-            buffer_context_overlay_snapshot(buffer, active, user_library, theme_registry);
+        let context_overlay = buffer_context_overlay_snapshot(
+            buffer,
+            active,
+            typing_active,
+            user_library,
+            theme_registry,
+        );
         let headerline_lines = context_overlay
             .as_ref()
             .map(|snapshot| {

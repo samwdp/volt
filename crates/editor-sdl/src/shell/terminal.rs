@@ -1,8 +1,47 @@
 use super::*;
 
+const VISIBLE_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(33);
+const HIDDEN_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalPollPriority {
+    Active,
+    Visible,
+    Hidden,
+}
+
+impl TerminalPollPriority {
+    fn poll_due(self, last_poll_at: Option<Instant>, now: Instant) -> bool {
+        let interval = match self {
+            Self::Active => return true,
+            Self::Visible => VISIBLE_TERMINAL_POLL_INTERVAL,
+            Self::Hidden => HIDDEN_TERMINAL_POLL_INTERVAL,
+        };
+        last_poll_at
+            .map(|last_poll_at| now.duration_since(last_poll_at) >= interval)
+            .unwrap_or(true)
+    }
+}
+
+struct TrackedTerminalSession {
+    session: LiveTerminalSession,
+    last_poll_at: Option<Instant>,
+    buffer_dirty: bool,
+}
+
+impl TrackedTerminalSession {
+    fn new(session: LiveTerminalSession) -> Self {
+        Self {
+            session,
+            last_poll_at: None,
+            buffer_dirty: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct TerminalBufferState {
-    sessions: BTreeMap<BufferId, LiveTerminalSession>,
+    sessions: BTreeMap<BufferId, TrackedTerminalSession>,
 }
 
 impl TerminalBufferState {
@@ -11,15 +50,24 @@ impl TerminalBufferState {
     }
 
     pub(super) fn session_mut(&mut self, buffer_id: BufferId) -> Option<&mut LiveTerminalSession> {
+        self.sessions
+            .get_mut(&buffer_id)
+            .map(|tracked| &mut tracked.session)
+    }
+
+    fn tracked_session_mut(&mut self, buffer_id: BufferId) -> Option<&mut TrackedTerminalSession> {
         self.sessions.get_mut(&buffer_id)
     }
 
     pub(super) fn insert(&mut self, buffer_id: BufferId, session: LiveTerminalSession) {
-        self.sessions.insert(buffer_id, session);
+        self.sessions
+            .insert(buffer_id, TrackedTerminalSession::new(session));
     }
 
     pub(super) fn remove(&mut self, buffer_id: BufferId) -> Option<LiveTerminalSession> {
-        self.sessions.remove(&buffer_id)
+        self.sessions
+            .remove(&buffer_id)
+            .map(|tracked| tracked.session)
     }
 
     pub(super) fn buffer_ids(&self) -> Vec<BufferId> {
@@ -99,25 +147,39 @@ pub(super) fn refresh_pending_terminal(
         line_height,
     )?;
     let active_buffer_id = active_shell_buffer_id(runtime).ok();
+    let visible_buffer_ids = visible_terminal_buffer_ids(runtime)?;
     let terminal_buffer_ids = terminal_buffer_state(runtime)?.buffer_ids();
     if terminal_buffer_ids.is_empty() {
         return Ok(false);
     }
+    let now = Instant::now();
     let mut updates = Vec::new();
     {
         let state = terminal_buffer_state_mut(runtime)?;
         for buffer_id in terminal_buffer_ids {
-            let Some(session) = state.session_mut(buffer_id) else {
+            let priority = terminal_poll_priority(buffer_id, active_buffer_id, &visible_buffer_ids);
+            let Some(session) = state.tracked_session_mut(buffer_id) else {
                 continue;
             };
-            let changed = session.poll().map_err(|error| error.to_string())?;
-            if changed || resized_buffer == Some(buffer_id) {
-                updates.push((
-                    buffer_id,
-                    session.snapshot().lines().to_vec(),
-                    session.render_snapshot(),
-                ));
+            if priority.poll_due(session.last_poll_at, now) {
+                let changed = session.session.poll().map_err(|error| error.to_string())?;
+                session.last_poll_at = Some(now);
+                if changed {
+                    session.buffer_dirty = true;
+                }
             }
+            if resized_buffer == Some(buffer_id) {
+                session.buffer_dirty = true;
+            }
+            if priority == TerminalPollPriority::Hidden || !session.buffer_dirty {
+                continue;
+            }
+            updates.push((
+                buffer_id,
+                session.session.snapshot().lines().to_vec(),
+                session.session.render_snapshot(),
+            ));
+            session.buffer_dirty = false;
         }
     }
     let changed = !updates.is_empty();
@@ -131,6 +193,32 @@ pub(super) fn refresh_pending_terminal(
         }
     }
     Ok(changed)
+}
+
+fn visible_terminal_buffer_ids(runtime: &EditorRuntime) -> Result<BTreeSet<BufferId>, String> {
+    let mut visible = BTreeSet::new();
+    let ui = shell_ui(runtime)?;
+    if let Some(panes) = ui.panes() {
+        visible.extend(panes.iter().map(|pane| pane.buffer_id));
+    }
+    if let Some(popup) = active_runtime_popup(runtime)? {
+        visible.insert(popup.active_buffer);
+    }
+    Ok(visible)
+}
+
+fn terminal_poll_priority(
+    buffer_id: BufferId,
+    active_buffer_id: Option<BufferId>,
+    visible_buffer_ids: &BTreeSet<BufferId>,
+) -> TerminalPollPriority {
+    if active_buffer_id == Some(buffer_id) {
+        TerminalPollPriority::Active
+    } else if visible_buffer_ids.contains(&buffer_id) {
+        TerminalPollPriority::Visible
+    } else {
+        TerminalPollPriority::Hidden
+    }
 }
 
 pub(super) fn ensure_terminal_session(
@@ -272,11 +360,14 @@ pub(super) fn scroll_active_terminal_view(
     let (changed, lines, render) = {
         let state = terminal_buffer_state_mut(runtime)?;
         let session = state
-            .session_mut(buffer_id)
+            .tracked_session_mut(buffer_id)
             .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?;
-        let changed = session.scroll_viewport(scroll);
-        let lines = changed.then(|| session.snapshot().lines().to_vec());
-        let render = changed.then(|| session.render_snapshot());
+        let changed = session.session.scroll_viewport(scroll);
+        let lines = changed.then(|| session.session.snapshot().lines().to_vec());
+        let render = changed.then(|| session.session.render_snapshot());
+        if changed {
+            session.buffer_dirty = false;
+        }
         (changed, lines, render)
     };
     if !changed {

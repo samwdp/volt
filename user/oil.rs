@@ -98,8 +98,8 @@ pub fn defaults() -> OilDefaults {
 pub fn keybindings() -> OilKeybindings {
     OilKeybindings {
         open_entry: "Enter",
-        open_vertical_split: "Ctrl+s",
-        open_horizontal_split: "Ctrl+h",
+        open_vertical_split: "Ctrl+\\",
+        open_horizontal_split: "Ctrl+|",
         open_new_pane: "Ctrl+t",
         preview_entry: "Ctrl+p",
         refresh: "Ctrl+l",

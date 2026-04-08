@@ -1,5 +1,5 @@
 use super::*;
-use editor_fs::{ProjectSearchRoot, discover_projects};
+use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
 
 pub(super) fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(), String> {
     let bindings = [
@@ -173,14 +173,11 @@ fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOve
         .into_iter()
         .map(|project| {
             let existing_workspace = find_workspace_by_root(runtime, project.root())?;
-            let detail = if existing_workspace.is_some() {
-                format!("{} | open workspace", project.kind().label())
-            } else {
-                project.kind().label().to_owned()
-            };
+            let workspace_name = project.display_name();
+            let detail = workspace_project_picker_detail(&project, existing_workspace.is_some());
             let action = existing_workspace.map_or(
                 PickerAction::CreateWorkspace {
-                    name: project.name().to_owned(),
+                    name: workspace_name.clone(),
                     root: project.root().to_path_buf(),
                 },
                 PickerAction::SwitchWorkspace,
@@ -188,9 +185,9 @@ fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOve
             Ok(PickerEntry {
                 item: PickerItem::new(
                     project.root().display().to_string(),
-                    project.name(),
+                    workspace_name,
                     detail,
-                    Some(project.root().display().to_string()),
+                    Some(workspace_project_picker_preview(&project)),
                 ),
                 action,
             })
@@ -198,6 +195,31 @@ fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOve
         .collect::<Result<Vec<_>, String>>()?;
 
     Ok(PickerOverlay::from_entries("Projects", entries))
+}
+
+fn workspace_project_picker_detail(project: &ProjectCandidate, is_open: bool) -> String {
+    let mut parts = vec![project.kind().label().to_owned()];
+    if project.kind() == ProjectKind::GitWorktree && project.repository_root() != project.root() {
+        let context = project
+            .worktree_parent_name()
+            .unwrap_or_else(|| project.repository_display_name());
+        parts.push(format!("project {context}"));
+    }
+    if is_open {
+        parts.push("open workspace".to_owned());
+    }
+    parts.join(" | ")
+}
+
+fn workspace_project_picker_preview(project: &ProjectCandidate) -> String {
+    if project.kind() == ProjectKind::GitWorktree && project.repository_root() != project.root() {
+        return format!(
+            "worktree {} | repo {}",
+            project.root().display(),
+            project.repository_root().display(),
+        );
+    }
+    project.root().display().to_string()
 }
 
 pub(crate) fn workspace_switch_picker_overlay(
@@ -1187,4 +1209,57 @@ fn picker_scroll_top(match_count: usize, selected_index: usize, visible_rows: us
     selected_index
         .saturating_sub(visible_rows.saturating_sub(1))
         .min(match_count - visible_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        env::temp_dir().join(format!("volt-picker-{label}-{unique}"))
+    }
+
+    #[test]
+    fn workspace_project_picker_shows_repo_context_for_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir("worktree-context");
+        let repo = root.join("repo-store");
+        let gitdir = repo.join(".git").join("worktrees").join("feature");
+        let worktree = root.join("project").join("feature");
+        fs::create_dir_all(&gitdir)?;
+        fs::create_dir_all(&worktree)?;
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../repo-store/.git/worktrees/feature\n",
+        )?;
+        fs::write(gitdir.join("commondir"), "../../\n")?;
+
+        let projects = discover_projects(&[ProjectSearchRoot::new(&root, 3)])?;
+        let worktree_project = projects
+            .iter()
+            .find(|project| project.root() == worktree)
+            .expect("worktree should be discovered");
+        assert_eq!(worktree_project.display_name(), "project [feature]");
+        assert_eq!(
+            workspace_project_picker_detail(worktree_project, false),
+            "git worktree | project project",
+        );
+        assert_eq!(
+            workspace_project_picker_preview(worktree_project),
+            format!("worktree {} | repo {}", worktree.display(), repo.display()),
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

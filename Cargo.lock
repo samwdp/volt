@@ -889,6 +889,7 @@ dependencies = [
  "sdl3-ttf-sys",
  "tokio",
  "tokio-util",
+ "tree-sitter-rust",
  "volt-user",
  "wry",
 ]

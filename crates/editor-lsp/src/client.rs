@@ -800,24 +800,24 @@ impl LspClientManager {
     pub fn sync_buffer(
         &self,
         path: &Path,
-        text: &str,
+        text: impl Into<String>,
         revision: u64,
         root: Option<&Path>,
     ) -> Result<Vec<String>, LspClientError> {
         let sessions = self.ensure_sessions_for_path(path, root, None, false)?;
-        self.sync_buffer_to_sessions(path, text, revision, sessions)
+        self.sync_buffer_to_sessions(path, text.into(), revision, sessions)
     }
 
     pub fn start_buffer_server(
         &self,
         path: &Path,
-        text: &str,
+        text: impl Into<String>,
         revision: u64,
         root: Option<&Path>,
         server_id: &str,
     ) -> Result<Vec<String>, LspClientError> {
         let sessions = self.ensure_sessions_for_path(path, root, Some(server_id), true)?;
-        self.sync_buffer_to_sessions(path, text, revision, sessions)
+        self.sync_buffer_to_sessions(path, text.into(), revision, sessions)
     }
 
     pub fn save_buffer(&self, path: &Path) -> Result<(), LspClientError> {
@@ -858,11 +858,12 @@ impl LspClientManager {
     pub fn restart_buffer(
         &self,
         path: &Path,
-        text: &str,
+        text: impl Into<String>,
         revision: u64,
         root: Option<&Path>,
         preferred_server_id: Option<&str>,
     ) -> Result<Vec<String>, LspClientError> {
+        let text = text.into();
         self.close_buffer(path)?;
         if let Some(server_id) = preferred_server_id {
             return self.start_buffer_server(path, text, revision, root, server_id);
@@ -1060,7 +1061,7 @@ impl LspClientManager {
     fn sync_buffer_to_sessions(
         &self,
         path: &Path,
-        text: &str,
+        text: String,
         revision: u64,
         sessions: Vec<Arc<LspSessionHandle>>,
     ) -> Result<Vec<String>, LspClientError> {
@@ -1091,7 +1092,14 @@ impl LspClientManager {
             (tracked.version, previously_open)
         };
 
-        for session in &sessions {
+        let session_count = sessions.len();
+        let mut text = Some(text);
+        for (index, session) in sessions.iter().enumerate() {
+            let text = if index + 1 == session_count {
+                text.take().unwrap_or_default()
+            } else {
+                text.as_ref().cloned().unwrap_or_default()
+            };
             if previously_open.contains(&session.key) {
                 session.did_change(path, version, text)?;
             } else {
@@ -1394,24 +1402,24 @@ impl LspSessionHandle {
         Ok(())
     }
 
-    fn did_open(&self, path: &Path, version: i32, text: &str) -> Result<(), LspClientError> {
+    fn did_open(&self, path: &Path, version: i32, text: String) -> Result<(), LspClientError> {
         self.notify_typed::<DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem::new(
                 path_to_uri(path)?,
                 self.session.document_language_id_for_path(path).to_owned(),
                 version,
-                text.to_owned(),
+                text,
             ),
         })
     }
 
-    fn did_change(&self, path: &Path, version: i32, text: &str) -> Result<(), LspClientError> {
+    fn did_change(&self, path: &Path, version: i32, text: String) -> Result<(), LspClientError> {
         self.notify_typed::<DidChangeTextDocument>(DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path)?, version),
             content_changes: vec![TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
-                text: text.to_owned(),
+                text,
             }],
         })
     }

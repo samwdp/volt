@@ -7,7 +7,7 @@ const LEADER_KEY: &str = "Space";
 
 /// Returns the metadata for the Vim bindings package.
 pub fn package() -> PluginPackage {
-    let commands = vec![
+    let mut commands = vec![
         hook_command(
             "vim.move-left",
             "Moves the cursor left in Vim normal mode.",
@@ -267,6 +267,18 @@ pub fn package() -> PluginPackage {
             "visual-format",
         ),
         hook_command(
+            "vim.toggle-line-comment",
+            "Toggles a line comment on the current line.",
+            "editor.vim.edit",
+            "toggle-line-comment",
+        ),
+        hook_command(
+            "vim.visual-toggle-comment",
+            "Toggles line comments across the current visual selection.",
+            "editor.vim.edit",
+            "visual-toggle-comment",
+        ),
+        hook_command(
             "vim.append-after-cursor",
             "Appends after the cursor and enters insert mode.",
             "editor.vim.edit",
@@ -471,6 +483,18 @@ pub fn package() -> PluginPackage {
             "put-before",
         ),
         hook_command(
+            "vim.visual-put-after",
+            "Replaces the current visual selection with the most recent Vim yank.",
+            "editor.vim.edit",
+            "visual-put-after",
+        ),
+        hook_command(
+            "vim.visual-put-before",
+            "Replaces the current visual selection with the most recent Vim yank before the cursor.",
+            "editor.vim.edit",
+            "visual-put-before",
+        ),
+        hook_command(
             "vim.visual-delete",
             "Deletes the current visual selection.",
             "editor.vim.edit",
@@ -481,6 +505,12 @@ pub fn package() -> PluginPackage {
             "Changes the current visual selection.",
             "editor.vim.edit",
             "visual-change",
+        ),
+        hook_command(
+            "vim.visual-replace-char",
+            "Replaces each character in the current visual selection with the next typed character.",
+            "editor.vim.edit",
+            "visual-replace-char",
         ),
         hook_command(
             "vim.visual-block-insert",
@@ -519,6 +549,24 @@ pub fn package() -> PluginPackage {
             "visual-uppercase",
         ),
         hook_command(
+            "vim.visual-indent",
+            "Indents each selected line in visual mode.",
+            "editor.vim.edit",
+            "visual-indent",
+        ),
+        hook_command(
+            "vim.visual-outdent",
+            "Outdents each selected line in visual mode.",
+            "editor.vim.edit",
+            "visual-outdent",
+        ),
+        hook_command(
+            "vim.visual-join",
+            "Joins the selected visual lines into a single line.",
+            "editor.vim.edit",
+            "visual-join",
+        ),
+        hook_command(
             "vim.visual-swap-anchor",
             "Swaps the active and anchor ends of the current visual selection.",
             "editor.vim.edit",
@@ -545,6 +593,7 @@ pub fn package() -> PluginPackage {
             )],
         ),
     ];
+    commands.extend(crate::commandline::commands());
 
     let key_bindings = vec![
         // Left-right motions
@@ -602,8 +651,14 @@ pub fn package() -> PluginPackage {
         normal_binding("k", "vim.move-up", PluginKeymapScope::Workspace),
         normal_binding("g", "vim.start-g-prefix", PluginKeymapScope::Workspace),
         normal_binding("g d", "lsp.definition", PluginKeymapScope::Workspace),
+        normal_binding("g r", "lsp.references", PluginKeymapScope::Workspace),
         normal_binding("g r r", "lsp.references", PluginKeymapScope::Workspace),
         normal_binding("g i", "lsp.implementation", PluginKeymapScope::Workspace),
+        normal_binding(
+            "g q",
+            "vim.start-format-operator",
+            PluginKeymapScope::Workspace,
+        ),
         normal_binding("G", "vim.goto-last-line", PluginKeymapScope::Workspace),
         // Text object motions
         normal_binding("w", "vim.move-word-forward", PluginKeymapScope::Workspace),
@@ -726,7 +781,12 @@ pub fn package() -> PluginPackage {
             "vim.scroll-line-down",
             PluginKeymapScope::Workspace,
         ),
-        normal_binding("Ctrl+f", "workspace.new", PluginKeymapScope::Workspace),
+        normal_binding(
+            "Ctrl+f",
+            "vim.scroll-page-down",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
         // Window navigation
         normal_binding(
@@ -831,6 +891,11 @@ pub fn package() -> PluginPackage {
         visual_binding("j", "vim.move-down", PluginKeymapScope::Workspace),
         visual_binding("k", "vim.move-up", PluginKeymapScope::Workspace),
         visual_binding("g", "vim.start-g-prefix", PluginKeymapScope::Workspace),
+        visual_binding(
+            "g c",
+            "vim.visual-toggle-comment",
+            PluginKeymapScope::Workspace,
+        ),
         visual_binding("G", "vim.goto-last-line", PluginKeymapScope::Workspace),
         // Text object motions
         visual_binding("w", "vim.move-word-forward", PluginKeymapScope::Workspace),
@@ -886,20 +951,36 @@ pub fn package() -> PluginPackage {
             "vim.scroll-page-down",
             PluginKeymapScope::Workspace,
         ),
+        visual_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         visual_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
         // Deleting text
         visual_binding("d", "vim.visual-delete", PluginKeymapScope::Workspace),
         visual_binding("x", "vim.visual-delete", PluginKeymapScope::Workspace),
         // Copying and moving text
         visual_binding("y", "vim.visual-yank", PluginKeymapScope::Workspace),
+        visual_binding("p", "vim.visual-put-after", PluginKeymapScope::Workspace),
+        visual_binding("P", "vim.visual-put-before", PluginKeymapScope::Workspace),
         // Changing text
         visual_binding("c", "vim.visual-change", PluginKeymapScope::Workspace),
+        visual_binding("s", "vim.visual-change", PluginKeymapScope::Workspace),
+        visual_binding("r", "vim.visual-replace-char", PluginKeymapScope::Workspace),
         visual_binding("I", "vim.visual-block-insert", PluginKeymapScope::Workspace),
         visual_binding("A", "vim.visual-block-append", PluginKeymapScope::Workspace),
+        visual_binding(">", "vim.visual-indent", PluginKeymapScope::Workspace),
+        visual_binding("<", "vim.visual-outdent", PluginKeymapScope::Workspace),
+        visual_binding("J", "vim.visual-join", PluginKeymapScope::Workspace),
         visual_binding("=", "vim.visual-format", PluginKeymapScope::Workspace),
+        visual_binding("g q", "vim.visual-format", PluginKeymapScope::Workspace),
         visual_binding("u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
+        visual_binding("g u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
         visual_binding("U", "vim.visual-uppercase", PluginKeymapScope::Workspace),
+        visual_binding("g U", "vim.visual-uppercase", PluginKeymapScope::Workspace),
         visual_binding("~", "vim.visual-toggle-case", PluginKeymapScope::Workspace),
+        visual_binding(
+            "g ~",
+            "vim.visual-toggle-case",
+            PluginKeymapScope::Workspace,
+        ),
         // Text objects (only in Visual mode or after an operator)
         visual_binding(
             "i",
@@ -932,6 +1013,7 @@ pub fn package() -> PluginPackage {
         ),
         leader_binding("s g", "workspace.search", PluginKeymapScope::Workspace),
         // Workspace
+        leader_binding("p n", "workspace.new", PluginKeymapScope::Workspace),
         leader_binding("p s", "workspace.switch", PluginKeymapScope::Workspace),
         leader_binding("p d", "workspace.delete", PluginKeymapScope::Workspace),
         // Open
@@ -989,6 +1071,13 @@ mod tests {
                 .any(|binding| binding.chord() == "g d"
                     && binding.command_name() == "lsp.definition")
         );
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.chord() == "g r"
+                    && binding.command_name() == "lsp.references")
+        );
         assert!(package.key_bindings().iter().any(
             |binding| binding.chord() == "g r r" && binding.command_name() == "lsp.references"
         ));
@@ -1007,5 +1096,81 @@ mod tests {
         assert!(package.key_bindings().iter().any(|binding| {
             binding.chord() == "Alt+x" && binding.command_name() == "picker.open-commands"
         }));
+    }
+
+    #[test]
+    fn package_exports_canonical_paging_bindings() {
+        let package = package();
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+f"
+                && binding.command_name() == "vim.scroll-page-down"
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+b"
+                && binding.command_name() == "vim.scroll-page-up"
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+f"
+                && binding.command_name() == "vim.scroll-page-down"
+                && binding.vim_mode() == PluginVimMode::Visual
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+b"
+                && binding.command_name() == "vim.scroll-page-up"
+                && binding.vim_mode() == PluginVimMode::Visual
+        }));
+    }
+
+    #[test]
+    fn package_exports_g_prefix_aliases_for_format_and_case() {
+        let package = package();
+        for (chord, command_name, vim_mode) in [
+            ("g c", "vim.visual-toggle-comment", PluginVimMode::Visual),
+            ("g q", "vim.start-format-operator", PluginVimMode::Normal),
+            ("g q", "vim.visual-format", PluginVimMode::Visual),
+            ("g u", "vim.visual-lowercase", PluginVimMode::Visual),
+            ("g U", "vim.visual-uppercase", PluginVimMode::Visual),
+            ("g ~", "vim.visual-toggle-case", PluginVimMode::Visual),
+        ] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command_name
+                    && binding.vim_mode() == vim_mode
+            }));
+        }
+    }
+
+    #[test]
+    fn package_exports_visual_put_bindings() {
+        let package = package();
+        for (chord, command_name) in [
+            ("p", "vim.visual-put-after"),
+            ("P", "vim.visual-put-before"),
+            ("r", "vim.visual-replace-char"),
+            (">", "vim.visual-indent"),
+            ("<", "vim.visual-outdent"),
+            ("J", "vim.visual-join"),
+        ] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command_name
+                    && binding.vim_mode() == PluginVimMode::Visual
+            }));
+        }
+    }
+
+    #[test]
+    fn package_exports_command_line_alias_commands() {
+        let package = package();
+        let names = package
+            .commands()
+            .iter()
+            .map(|command| command.name())
+            .collect::<Vec<_>>();
+        for name in ["q", "write", "wq", "split", "vsplit", "commands", "term"] {
+            assert!(names.contains(&name), "missing command-line alias `{name}`");
+        }
     }
 }

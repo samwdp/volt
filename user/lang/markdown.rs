@@ -45,8 +45,8 @@ pub fn syntax_language() -> LanguageConfiguration {
         ["md", "markdown"],
         GrammarSource::new(
             "https://github.com/tree-sitter-grammars/tree-sitter-markdown.git",
-            "tree-sitter-markdown",
-            "src",
+            ".",
+            "tree-sitter-markdown/src",
             "tree-sitter-markdown",
             "tree_sitter_markdown",
         ),
@@ -70,8 +70,8 @@ pub fn inline_syntax_language() -> LanguageConfiguration {
         [] as [&str; 0],
         GrammarSource::new(
             "https://github.com/tree-sitter-grammars/tree-sitter-markdown.git",
-            "tree-sitter-markdown-inline",
-            "src",
+            ".",
+            "tree-sitter-markdown-inline/src",
             "tree-sitter-markdown-inline",
             "tree_sitter_markdown_inline",
         ),

@@ -13,6 +13,7 @@ use editor_plugin_host::StatuslineContext;
 use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
 use std::{
+    collections::BTreeMap,
     env, fs,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,6 +21,10 @@ use std::{
 
 #[derive(Debug, Default)]
 struct CommandLog(Vec<String>);
+
+fn rust_test_language() -> editor_syntax::Language {
+    tree_sitter_rust::LANGUAGE.into()
+}
 
 struct TempTestDir {
     path: PathBuf,
@@ -2118,6 +2123,7 @@ fn render_buffer_headerline_scrolloff_reserves_rows_for_text() -> Result<(), Str
         false,
         None,
         state.runtime.services().get::<ThemeRegistry>(),
+        false,
         8,
         16,
         12,
@@ -2170,6 +2176,7 @@ fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(),
         false,
         None,
         None,
+        false,
         8,
         16,
         12,
@@ -2266,6 +2273,7 @@ fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> 
     let headerline_rows = buffer_headerline_rows(
         buffer,
         true,
+        false,
         &*user_library,
         state.runtime.services().get::<ThemeRegistry>(),
         layout.visible_rows,
@@ -3268,6 +3276,21 @@ fn git_refresh_is_deferred_while_typing() {
 }
 
 #[test]
+fn secondary_refresh_is_deferred_while_typing() {
+    let now = Instant::now();
+    assert!(secondary_refresh_deferred_for_typing(Some(now), now));
+    assert!(secondary_refresh_deferred_for_typing(
+        Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD + Duration::from_millis(1)),
+        now
+    ));
+    assert!(!secondary_refresh_deferred_for_typing(
+        Some(now - GIT_REFRESH_TYPING_IDLE_THRESHOLD),
+        now
+    ));
+    assert!(!secondary_refresh_deferred_for_typing(None, now));
+}
+
+#[test]
 fn frame_pacing_is_deferred_while_typing() {
     let now = Instant::now();
     assert!(frame_pacing_deferred_for_typing(Some(now), now));
@@ -3280,6 +3303,63 @@ fn frame_pacing_is_deferred_while_typing() {
         now
     ));
     assert!(!frame_pacing_deferred_for_typing(None, now));
+}
+
+#[test]
+fn context_overlay_cache_reuses_stale_snapshot_while_typing() {
+    let cached = BufferContextOverlaySnapshot {
+        key: BufferContextOverlayCacheKey {
+            buffer_revision: 41,
+            buffer_name: "demo.rs".to_owned(),
+            language_id: Some("rust".to_owned()),
+            viewport_top_line: 10,
+            cursor_line: 20,
+            cursor_column: 4,
+        },
+        headerline_lines: vec!["fn demo".to_owned()],
+        ghost_text_by_line: BTreeMap::new(),
+    };
+    let key = BufferContextOverlayCacheKey {
+        buffer_revision: 42,
+        buffer_name: "demo.rs".to_owned(),
+        language_id: Some("rust".to_owned()),
+        viewport_top_line: 11,
+        cursor_line: 21,
+        cursor_column: 5,
+    };
+
+    let snapshot =
+        cached_context_overlay_snapshot(Some(&cached), &key, true).expect("stale snapshot");
+
+    assert_eq!(snapshot.key.buffer_revision, 41);
+    assert_eq!(snapshot.headerline_lines, vec!["fn demo".to_owned()]);
+}
+
+#[test]
+fn context_overlay_cache_requires_matching_buffer_identity() {
+    let cached = BufferContextOverlaySnapshot {
+        key: BufferContextOverlayCacheKey {
+            buffer_revision: 1,
+            buffer_name: "demo.rs".to_owned(),
+            language_id: Some("rust".to_owned()),
+            viewport_top_line: 0,
+            cursor_line: 0,
+            cursor_column: 0,
+        },
+        headerline_lines: vec!["fn demo".to_owned()],
+        ghost_text_by_line: BTreeMap::new(),
+    };
+    let key = BufferContextOverlayCacheKey {
+        buffer_revision: 2,
+        buffer_name: "demo.py".to_owned(),
+        language_id: Some("python".to_owned()),
+        viewport_top_line: 0,
+        cursor_line: 0,
+        cursor_column: 0,
+    };
+
+    assert!(cached_context_overlay_snapshot(Some(&cached), &key, false).is_none());
+    assert!(cached_context_overlay_snapshot(Some(&cached), &key, true).is_none());
 }
 
 #[test]
@@ -5638,6 +5718,99 @@ fn markdown_table_enter_inserts_a_new_row() -> Result<(), String> {
 }
 
 #[test]
+fn format_current_line_indent_uses_syntax_queries_for_blank_lines() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    syntax_registry_mut(&mut state.runtime)?
+        .register(
+            editor_syntax::LanguageConfiguration::new(
+                "rust-test-indent",
+                ["rs"],
+                rust_test_language,
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                [editor_syntax::CaptureThemeMapping::new(
+                    "keyword",
+                    "syntax.keyword",
+                )],
+            )
+            .with_extra_indent_query(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../volt/assets/grammars/queries/rust/indents.scm"
+            ))),
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer_id = install_scratch_test_buffer(&mut state, "*rust-indent*")?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec![
+            "fn main() {".to_owned(),
+            "    if true {".to_owned(),
+            String::new(),
+            "    }".to_owned(),
+            "}".to_owned(),
+        ]);
+        buffer.set_language_id(Some("rust-test-indent".to_owned()));
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+
+    format_current_line_indent(&mut state.runtime, buffer_id, 4, false)?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(2)
+            .as_deref(),
+        Some("        ")
+    );
+    Ok(())
+}
+
+#[test]
+fn format_current_line_indent_uses_syntax_queries_for_closing_braces() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    syntax_registry_mut(&mut state.runtime)?
+        .register(
+            editor_syntax::LanguageConfiguration::new(
+                "rust-test-dedent",
+                ["rs"],
+                rust_test_language,
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                [editor_syntax::CaptureThemeMapping::new(
+                    "keyword",
+                    "syntax.keyword",
+                )],
+            )
+            .with_extra_indent_query(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../volt/assets/grammars/queries/rust/indents.scm"
+            ))),
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer_id = install_scratch_test_buffer(&mut state, "*rust-dedent*")?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec![
+            "fn main() {".to_owned(),
+            "    if true {".to_owned(),
+            "        }".to_owned(),
+            "}".to_owned(),
+        ]);
+        buffer.set_language_id(Some("rust-test-dedent".to_owned()));
+        buffer.set_cursor(TextPoint::new(2, 8));
+    }
+
+    format_current_line_indent(&mut state.runtime, buffer_id, 4, false)?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(2)
+            .as_deref(),
+        Some("    }")
+    );
+    Ok(())
+}
+
+#[test]
 fn markdown_table_preserves_insert_mode_spaces() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_markdown_test_buffer(
@@ -6065,6 +6238,354 @@ fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
     let ui = state.ui().map_err(|error| error.to_string())?;
     assert_eq!(ui.vim().pending, None);
     assert_eq!(ui.vim().pending_change_prefix, None);
+    Ok(())
+}
+
+#[test]
+fn vim_command_line_completion_includes_user_aliases() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+
+    let write_matches = vim_command_line_completion_matches(&state.runtime, "wr");
+    assert!(write_matches.contains(&"write".to_owned()));
+
+    let buffer_matches = vim_command_line_completion_matches(&state.runtime, "bd");
+    assert!(buffer_matches.contains(&"bd".to_owned()));
+    assert!(buffer_matches.contains(&"bdelete".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn execute_vim_command_line_split_alias_splits_workspace() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 1);
+    execute_vim_command_line(&mut state.runtime, "split")?;
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn execute_vim_command_line_commands_alias_opens_picker() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+
+    execute_vim_command_line(&mut state.runtime, "commands")?;
+    assert!(shell_ui(&state.runtime)?.picker().is_some());
+    Ok(())
+}
+
+#[test]
+fn execute_vim_command_line_substitute_defaults_to_current_line() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*substitute-current-line*",
+        vec!["alpha one".to_owned(), "alpha two".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+
+    execute_vim_command_line(&mut state.runtime, "s/alpha/omega/")?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("omega one"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("alpha two"));
+    Ok(())
+}
+
+#[test]
+fn execute_vim_command_line_substitute_supports_numeric_ranges() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*substitute-range*",
+        vec![
+            "alpha one".to_owned(),
+            "alpha two".to_owned(),
+            "alpha three".to_owned(),
+        ],
+    )?;
+
+    execute_vim_command_line(&mut state.runtime, "2,3s/alpha/beta/")?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha one"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("beta two"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("beta three"));
+    Ok(())
+}
+
+#[test]
+fn gcc_toggles_current_line_comments() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(user::UserLibraryImpl);
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*comment-line*",
+        vec![
+            "fn main() {".to_owned(),
+            "    println!(\"hi\");".to_owned(),
+            "}".to_owned(),
+        ],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_language_id(Some("rust".to_owned()));
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 4));
+
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().pending,
+        Some(VimPending::CommentToggle { count: 1 })
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().pending_change_prefix,
+        Some(VimRecordedInput::Chord("g c".to_owned()))
+    );
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(1)
+            .as_deref(),
+        Some("    // println!(\"hi\");")
+    );
+
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.text.line(1).as_deref(),
+        Some("    println!(\"hi\");")
+    );
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_gc_toggles_region_comments() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(user::UserLibraryImpl);
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*comment-region*",
+        vec![
+            "let alpha = 1;".to_owned(),
+            "let beta = 2;".to_owned(),
+            "let gamma = 3;".to_owned(),
+        ],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_language_id(Some("rust".to_owned()));
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+
+    state
+        .handle_text_input("V")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("// let alpha = 1;"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("// let beta = 2;"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("let gamma = 3;"));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+    state
+        .handle_text_input("V")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("let alpha = 1;"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("let beta = 2;"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("let gamma = 3;"));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_put_replaces_selection_and_updates_yank() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-put*",
+        vec!["alpha beta gamma".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 6));
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 6), VisualSelectionKind::Character);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 9));
+    shell_ui_mut(&mut state.runtime)?.vim_mut().yank =
+        Some(YankRegister::Character("delta".to_owned()));
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("visual-put-after"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha delta gamma"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 11));
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(
+        ui.vim().yank,
+        Some(YankRegister::Character("beta".to_owned()))
+    );
+    Ok(())
+}
+
+#[test]
+fn visual_indent_shifts_selected_lines_right() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-indent*",
+        vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 0), VisualSelectionKind::Line);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
+
+    state
+        .runtime
+        .emit_hook(HOOK_VIM_EDIT, HookEvent::new().with_detail("visual-indent"))
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("    alpha"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    beta"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("gamma"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 4));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_outdent_shifts_selected_lines_left() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-outdent*",
+        vec![
+            "    alpha".to_owned(),
+            "        beta".to_owned(),
+            "gamma".to_owned(),
+        ],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 0), VisualSelectionKind::Line);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("visual-outdent"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    beta"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("gamma"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 0));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_join_merges_selected_lines() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-join*",
+        vec!["alpha".to_owned(), "  beta".to_owned(), "gamma".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 0), VisualSelectionKind::Line);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
+
+    state
+        .runtime
+        .emit_hook(HOOK_VIM_EDIT, HookEvent::new().with_detail("visual-join"))
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.line_count(), 2);
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha beta"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("gamma"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 5));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_replace_char_replaces_selected_text() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-replace-char*",
+        vec!["alpha".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 1));
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 1), VisualSelectionKind::Character);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 3));
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("visual-replace-char"),
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("x")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("axxxa"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 1));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
     Ok(())
 }
 
@@ -7105,6 +7626,7 @@ fn render_buffer_multicursor_draws_one_cursor_per_range() -> Result<(), String> 
         false,
         None,
         None,
+        false,
         8,
         16,
         12,

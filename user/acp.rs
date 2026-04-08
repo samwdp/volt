@@ -43,6 +43,7 @@ pub fn clients() -> Vec<AcpClientConfig> {
             &["--acp", "--stdio", "--yolo"],
         ),
         AcpClientConfig::new("opencode", "OpenCode (ACP)", "opencode", &["acp"]),
+        AcpClientConfig::new("pi", "Pi (ACP)", "npx", &["pi-acp"]),
     ]
 }
 

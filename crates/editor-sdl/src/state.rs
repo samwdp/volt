@@ -129,9 +129,13 @@ pub(crate) enum VimPending {
         around: bool,
         count: usize,
     },
+    CommentToggle {
+        count: usize,
+    },
     ReplaceChar {
         count: usize,
     },
+    ReplaceVisualSelection,
     Register,
     MarkSet,
     MarkJump {

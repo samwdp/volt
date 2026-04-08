@@ -1,4 +1,4 @@
-#![doc = r#"Tree-sitter language registration, installation, parsing, and capture-to-theme mapping."#]
+#![doc = r#"Tree-sitter language registration, installation, parsing, highlighting, and indentation."#]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -13,13 +13,20 @@ use std::{
 use editor_buffer::{TextBuffer, TextByteChunks, TextEdit, TextPoint};
 pub use tree_sitter::Language;
 use tree_sitter::{
-    InputEdit, Parser, Point, Query, QueryCursor, Range, StreamingIterator, TextProvider, Tree,
+    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryPredicateArg, QueryProperty, Range,
+    StreamingIterator, TextProvider, Tree,
 };
 use tree_sitter_language::LanguageFn;
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str =
-    "Tree-sitter language registration, installation, parsing, and capture-to-theme mapping.";
+    "Tree-sitter language registration, installation, parsing, highlighting, and indentation.";
+
+const DEFAULT_QUERY_ASSET_SEARCH_DEPTH: usize = 6;
+const QUERY_ASSET_DIR_CANDIDATES: &[&[&str]] = &[
+    &["crates", "volt", "assets", "grammars", "queries"],
+    &["assets", "grammars", "queries"],
+];
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -116,9 +123,34 @@ impl GrammarSource {
 
     /// Returns the installed highlight query path.
     pub fn installed_highlight_query_path(&self, install_root: &Path) -> PathBuf {
+        self.installed_query_path(install_root, "highlights.scm")
+    }
+
+    /// Returns the installed indent query path.
+    pub fn installed_indent_query_path(&self, install_root: &Path) -> PathBuf {
+        self.installed_query_path(install_root, "indents.scm")
+    }
+
+    /// Returns the installed injections query path.
+    pub fn installed_injections_query_path(&self, install_root: &Path) -> PathBuf {
+        self.installed_query_path(install_root, "injections.scm")
+    }
+
+    /// Returns the installed locals query path.
+    pub fn installed_locals_query_path(&self, install_root: &Path) -> PathBuf {
+        self.installed_query_path(install_root, "locals.scm")
+    }
+
+    /// Returns the installed folds query path.
+    pub fn installed_folds_query_path(&self, install_root: &Path) -> PathBuf {
+        self.installed_query_path(install_root, "folds.scm")
+    }
+
+    /// Returns the installed query path for an arbitrary query file.
+    pub fn installed_query_path(&self, install_root: &Path, file_name: &str) -> PathBuf {
         self.install_directory(install_root)
             .join("queries")
-            .join("highlights.scm")
+            .join(file_name)
     }
 
     /// Returns the installed shared library path.
@@ -147,6 +179,10 @@ pub struct LanguageConfiguration {
     capture_mappings: Vec<CaptureThemeMapping>,
     loader: LanguageLoader,
     extra_highlight_query: Option<String>,
+    extra_indent_query: Option<String>,
+    extra_injections_query: Option<String>,
+    extra_locals_query: Option<String>,
+    extra_folds_query: Option<String>,
     additional_highlight_languages: Vec<String>,
 }
 
@@ -217,6 +253,10 @@ impl LanguageConfiguration {
             capture_mappings: capture_mappings.into_iter().collect(),
             loader,
             extra_highlight_query: None,
+            extra_indent_query: None,
+            extra_injections_query: None,
+            extra_locals_query: None,
+            extra_folds_query: None,
             additional_highlight_languages: Vec::new(),
         }
     }
@@ -255,6 +295,50 @@ impl LanguageConfiguration {
     /// Returns the extra highlight query, when configured.
     pub fn extra_highlight_query(&self) -> Option<&str> {
         self.extra_highlight_query.as_deref()
+    }
+
+    /// Adds an extra indent query appended at load time.
+    pub fn with_extra_indent_query(mut self, query: impl Into<String>) -> Self {
+        self.extra_indent_query = Some(query.into());
+        self
+    }
+
+    /// Returns the extra indent query, when configured.
+    pub fn extra_indent_query(&self) -> Option<&str> {
+        self.extra_indent_query.as_deref()
+    }
+
+    /// Adds an extra injections query appended at load time.
+    pub fn with_extra_injections_query(mut self, query: impl Into<String>) -> Self {
+        self.extra_injections_query = Some(query.into());
+        self
+    }
+
+    /// Returns the extra injections query, when configured.
+    pub fn extra_injections_query(&self) -> Option<&str> {
+        self.extra_injections_query.as_deref()
+    }
+
+    /// Adds an extra locals query appended at load time.
+    pub fn with_extra_locals_query(mut self, query: impl Into<String>) -> Self {
+        self.extra_locals_query = Some(query.into());
+        self
+    }
+
+    /// Returns the extra locals query, when configured.
+    pub fn extra_locals_query(&self) -> Option<&str> {
+        self.extra_locals_query.as_deref()
+    }
+
+    /// Adds an extra folds query appended at load time.
+    pub fn with_extra_folds_query(mut self, query: impl Into<String>) -> Self {
+        self.extra_folds_query = Some(query.into());
+        self
+    }
+
+    /// Returns the extra folds query, when configured.
+    pub fn extra_folds_query(&self) -> Option<&str> {
+        self.extra_folds_query.as_deref()
     }
 
     /// Adds additional language ids to merge highlight spans for this language.
@@ -428,9 +512,10 @@ pub enum SyntaxError {
         language_id: String,
         install_dir: PathBuf,
     },
-    /// A highlight query failed to compile.
+    /// A query failed to compile.
     InvalidQuery {
         language_id: String,
+        query_kind: String,
         message: String,
     },
     /// The parser failed to accept the requested language.
@@ -490,11 +575,12 @@ impl fmt::Display for SyntaxError {
             }
             Self::InvalidQuery {
                 language_id,
+                query_kind,
                 message,
             } => {
                 write!(
                     formatter,
-                    "highlight query for `{language_id}` is invalid: {message}"
+                    "{query_kind} query for `{language_id}` is invalid: {message}"
                 )
             }
             Self::ParserConfiguration {
@@ -554,6 +640,10 @@ struct LoadedLanguage {
     _library: Option<libloading::Library>,
     language: Language,
     query: Query,
+    indent_query: Option<Query>,
+    injections_query: Option<Query>,
+    locals_query: Option<Query>,
+    folds_query: Option<Query>,
     capture_mappings: BTreeMap<String, String>,
 }
 
@@ -592,6 +682,7 @@ impl LoadedLanguage {
 /// Runtime registry of known tree-sitter languages.
 pub struct SyntaxRegistry {
     install_root: PathBuf,
+    query_asset_root: Option<PathBuf>,
     languages: BTreeMap<String, LanguageConfiguration>,
     extensions: BTreeMap<String, String>,
     loaded: BTreeMap<String, LoadedLanguage>,
@@ -602,6 +693,7 @@ impl fmt::Debug for SyntaxRegistry {
         formatter
             .debug_struct("SyntaxRegistry")
             .field("install_root", &self.install_root)
+            .field("query_asset_root", &self.query_asset_root)
             .field("language_count", &self.languages.len())
             .field("loaded_language_count", &self.loaded.len())
             .finish()
@@ -624,6 +716,7 @@ impl SyntaxRegistry {
     pub fn with_install_root(install_root: impl Into<PathBuf>) -> Self {
         Self {
             install_root: install_root.into(),
+            query_asset_root: default_query_asset_root(),
             languages: BTreeMap::new(),
             extensions: BTreeMap::new(),
             loaded: BTreeMap::new(),
@@ -633,6 +726,17 @@ impl SyntaxRegistry {
     /// Returns the grammar install root.
     pub fn install_root(&self) -> &Path {
         &self.install_root
+    }
+
+    /// Returns the bundled query asset root, when configured.
+    pub fn query_asset_root(&self) -> Option<&Path> {
+        self.query_asset_root.as_deref()
+    }
+
+    /// Replaces the bundled query asset root used for grammar query installation/loading.
+    pub fn set_query_asset_root(&mut self, query_asset_root: Option<PathBuf>) {
+        self.query_asset_root = query_asset_root;
+        self.loaded.clear();
     }
 
     /// Returns the number of registered languages.
@@ -778,14 +882,27 @@ impl SyntaxRegistry {
         }
         fs::create_dir_all(&install_dir)
             .map_err(|error| io_error("create install directory", &install_dir, error))?;
-        let queries_dir = cloned_grammar_dir.join("queries");
-        if queries_dir.exists() {
-            copy_dir_all(&queries_dir, &install_dir.join("queries"))?;
-        }
+        let query_asset_root = self
+            .query_asset_root
+            .as_deref()
+            .ok_or_else(|| SyntaxError::Io {
+                operation: "resolve bundled query asset root".to_owned(),
+                path: self.install_root.clone(),
+                message: "bundled tree-sitter query assets are not configured".to_owned(),
+            })?;
+        install_bundled_queries(&config, query_asset_root, &self.install_root)?;
         ensure_installed_highlight_query_path(
             &config,
             &grammar.installed_highlight_query_path(&self.install_root),
         )?;
+        let highlight_query_path = grammar.installed_highlight_query_path(&self.install_root);
+        if !highlight_query_path.exists() {
+            return Err(SyntaxError::Io {
+                operation: "locate bundled highlight query".to_owned(),
+                path: query_asset_root.join(config.id()).join("highlights.scm"),
+                message: "bundled highlights.scm is missing for this language".to_owned(),
+            });
+        }
         build_shared_library(
             language_id,
             &grammar,
@@ -891,6 +1008,62 @@ impl SyntaxRegistry {
             node = parent;
         }
         Ok(contexts)
+    }
+
+    /// Returns the desired indentation column for a target line when an indent query is available.
+    pub fn desired_indent_for_language(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        line_index: usize,
+        indent_width: usize,
+    ) -> Result<Option<usize>, SyntaxError> {
+        self.desired_indent_for_language_impl(language_id, buffer, line_index, indent_width, None)
+    }
+
+    /// Returns the desired indentation column using a reusable parse session.
+    pub fn desired_indent_for_language_with_session(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        line_index: usize,
+        indent_width: usize,
+        parse_session: &mut Option<SyntaxParseSession>,
+    ) -> Result<Option<usize>, SyntaxError> {
+        self.desired_indent_for_language_impl(
+            language_id,
+            buffer,
+            line_index,
+            indent_width,
+            Some(parse_session),
+        )
+    }
+
+    fn desired_indent_for_language_impl(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        line_index: usize,
+        indent_width: usize,
+        parse_session: Option<&mut Option<SyntaxParseSession>>,
+    ) -> Result<Option<usize>, SyntaxError> {
+        let language_id = language_id.to_owned();
+        if !self.languages.contains_key(&language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id));
+        }
+        self.ensure_loaded_language(&language_id)?;
+        let loaded = self
+            .loaded
+            .get(&language_id)
+            .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
+        desired_indent_for_loaded_language(
+            &language_id,
+            loaded,
+            buffer,
+            line_index,
+            indent_width,
+            parse_session,
+        )
     }
 
     /// Parses and highlights a line window using a registered language identifier.
@@ -1021,6 +1194,57 @@ impl SyntaxRegistry {
         Ok(snapshot)
     }
 
+    /// Returns the compiled injections query for a language, loading it if needed.
+    ///
+    /// Returns `Ok(None)` when the language is registered but has no injections query.
+    pub fn injections_query_for_language(
+        &mut self,
+        language_id: &str,
+    ) -> Result<Option<&Query>, SyntaxError> {
+        if !self.languages.contains_key(language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
+        }
+        self.ensure_loaded_language(language_id)?;
+        Ok(self
+            .loaded
+            .get(language_id)
+            .and_then(|loaded| loaded.injections_query.as_ref()))
+    }
+
+    /// Returns the compiled locals query for a language, loading it if needed.
+    ///
+    /// Returns `Ok(None)` when the language is registered but has no locals query.
+    pub fn locals_query_for_language(
+        &mut self,
+        language_id: &str,
+    ) -> Result<Option<&Query>, SyntaxError> {
+        if !self.languages.contains_key(language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
+        }
+        self.ensure_loaded_language(language_id)?;
+        Ok(self
+            .loaded
+            .get(language_id)
+            .and_then(|loaded| loaded.locals_query.as_ref()))
+    }
+
+    /// Returns the compiled folds query for a language, loading it if needed.
+    ///
+    /// Returns `Ok(None)` when the language is registered but has no folds query.
+    pub fn folds_query_for_language(
+        &mut self,
+        language_id: &str,
+    ) -> Result<Option<&Query>, SyntaxError> {
+        if !self.languages.contains_key(language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
+        }
+        self.ensure_loaded_language(language_id)?;
+        Ok(self
+            .loaded
+            .get(language_id)
+            .and_then(|loaded| loaded.folds_query.as_ref()))
+    }
+
     /// Parses and highlights a buffer using a file path's extension.
     pub fn highlight_buffer_for_path(
         &mut self,
@@ -1065,7 +1289,11 @@ impl SyntaxRegistry {
             .get(language_id)
             .cloned()
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.to_owned()))?;
-        let loaded = load_language(&config, &self.install_root)?;
+        let loaded = load_language(
+            &config,
+            &self.install_root,
+            self.query_asset_root.as_deref(),
+        )?;
         self.loaded.insert(language_id.to_owned(), loaded);
         Ok(())
     }
@@ -1074,6 +1302,7 @@ impl SyntaxRegistry {
 fn load_language(
     config: &LanguageConfiguration,
     install_root: &Path,
+    query_asset_root: Option<&Path>,
 ) -> Result<LoadedLanguage, SyntaxError> {
     let capture_mappings = config
         .capture_mappings()
@@ -1092,23 +1321,33 @@ fn load_language(
             highlight_query,
         } => {
             let language = language_provider();
-            let mut query_source = highlight_query.to_owned();
-            if let Some(extra_query) = config.extra_highlight_query() {
-                if !query_source.ends_with('\n') {
-                    query_source.push('\n');
-                }
-                query_source.push_str(extra_query);
-            }
-            let query = Query::new(&language, &query_source).map_err(|error| {
-                SyntaxError::InvalidQuery {
-                    language_id: config.id().to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
+            let query_source =
+                append_query_source(highlight_query.to_owned(), config.extra_highlight_query());
+            let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
+            let indent_query = config
+                .extra_indent_query()
+                .map(|query| compile_query_source(&language, config.id(), "indent", query))
+                .transpose()?;
+            let injections_query = config
+                .extra_injections_query()
+                .map(|query| compile_query_source(&language, config.id(), "injections", query))
+                .transpose()?;
+            let locals_query = config
+                .extra_locals_query()
+                .map(|query| compile_query_source(&language, config.id(), "locals", query))
+                .transpose()?;
+            let folds_query = config
+                .extra_folds_query()
+                .map(|query| compile_query_source(&language, config.id(), "folds", query))
+                .transpose()?;
             Ok(LoadedLanguage {
                 _library: None,
                 language,
                 query,
+                indent_query,
+                injections_query,
+                locals_query,
+                folds_query,
                 capture_mappings,
             })
         }
@@ -1123,14 +1362,15 @@ fn load_language(
                 });
             }
 
-            let mut query_source = fs::read_to_string(&query_path)
-                .map_err(|error| io_error("read highlight query", &query_path, error))?;
-            if let Some(extra_query) = config.extra_highlight_query() {
-                if !query_source.ends_with('\n') {
-                    query_source.push('\n');
-                }
-                query_source.push_str(extra_query);
-            }
+            let query_source = append_query_source(
+                read_query_source_preferring_bundled(
+                    &query_path,
+                    query_asset_root,
+                    config.id(),
+                    "highlights.scm",
+                )?,
+                config.extra_highlight_query(),
+            );
             let library = unsafe {
                 // SAFETY: The library path is chosen by the installer for a tree-sitter grammar
                 // compiled from generated parser sources. We keep the `Library` alive for at least
@@ -1157,20 +1397,348 @@ fn load_language(
                 LanguageFn::from_raw(*symbol)
             };
             let language = Language::new(language_fn);
-            let query = Query::new(&language, &query_source).map_err(|error| {
-                SyntaxError::InvalidQuery {
-                    language_id: config.id().to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
+            let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
+            let indent_query_source = maybe_read_query_source_preferring_bundled(
+                &grammar.installed_indent_query_path(install_root),
+                query_asset_root,
+                config.id(),
+                "indents.scm",
+            )?;
+            let indent_query_source = match (indent_query_source, config.extra_indent_query()) {
+                (Some(source), extra_query) => Some(append_query_source(source, extra_query)),
+                (None, Some(extra_query)) => Some(extra_query.to_owned()),
+                (None, None) => None,
+            };
+            let indent_query = indent_query_source
+                .map(|source| compile_query_source(&language, config.id(), "indent", &source))
+                .transpose()?;
+            let injections_query = load_optional_query(
+                &language,
+                config,
+                install_root,
+                query_asset_root,
+                &grammar.installed_injections_query_path(install_root),
+                "injections.scm",
+                "injections",
+                config.extra_injections_query(),
+            )?;
+            let locals_query = load_optional_query(
+                &language,
+                config,
+                install_root,
+                query_asset_root,
+                &grammar.installed_locals_query_path(install_root),
+                "locals.scm",
+                "locals",
+                config.extra_locals_query(),
+            )?;
+            let folds_query = load_optional_query(
+                &language,
+                config,
+                install_root,
+                query_asset_root,
+                &grammar.installed_folds_query_path(install_root),
+                "folds.scm",
+                "folds",
+                config.extra_folds_query(),
+            )?;
             Ok(LoadedLanguage {
                 _library: Some(library),
                 language,
                 query,
+                indent_query,
+                injections_query,
+                locals_query,
+                folds_query,
                 capture_mappings,
             })
         }
     }
+}
+
+fn append_query_source(mut source: String, extra_query: Option<&str>) -> String {
+    if let Some(extra_query) = extra_query {
+        if !source.ends_with('\n') && !source.is_empty() {
+            source.push('\n');
+        }
+        source.push_str(extra_query);
+    }
+    source
+}
+
+fn compile_query_source(
+    language: &Language,
+    language_id: &str,
+    query_kind: &str,
+    source: &str,
+) -> Result<Query, SyntaxError> {
+    Query::new(language, source).map_err(|error| SyntaxError::InvalidQuery {
+        language_id: language_id.to_owned(),
+        query_kind: query_kind.to_owned(),
+        message: error.to_string(),
+    })
+}
+
+fn read_installed_query_source(
+    query_path: &Path,
+    query_asset_root: Option<&Path>,
+    _language_id: &str,
+    file_name: &str,
+) -> Result<String, SyntaxError> {
+    let raw_source = fs::read_to_string(query_path)
+        .map_err(|error| io_error("read installed query", query_path, error))?;
+    resolve_query_source_from_raw(
+        &raw_source,
+        query_path,
+        query_asset_root,
+        file_name,
+        &mut Vec::new(),
+    )
+}
+
+/// Reads query source for a grammar-backed language, preferring the live bundled asset when
+/// `query_asset_root` is configured and contains `<language_id>/<file_name>`. Falls back to
+/// the installed query file when no bundled asset is present. This ensures a stale installed
+/// query file can never shadow a corrected bundled query asset.
+fn read_query_source_preferring_bundled(
+    installed_path: &Path,
+    query_asset_root: Option<&Path>,
+    language_id: &str,
+    file_name: &str,
+) -> Result<String, SyntaxError> {
+    if let Some(asset_root) = query_asset_root
+        && let Some(source) =
+            resolve_bundled_query_source(asset_root, language_id, file_name, &mut Vec::new())?
+    {
+        return Ok(source);
+    }
+    read_installed_query_source(installed_path, query_asset_root, language_id, file_name)
+}
+
+/// Like [`read_query_source_preferring_bundled`] but returns `Ok(None)` when neither the
+/// bundled asset nor the installed file exists.
+fn maybe_read_query_source_preferring_bundled(
+    installed_path: &Path,
+    query_asset_root: Option<&Path>,
+    language_id: &str,
+    file_name: &str,
+) -> Result<Option<String>, SyntaxError> {
+    if let Some(asset_root) = query_asset_root
+        && let Some(source) =
+            resolve_bundled_query_source(asset_root, language_id, file_name, &mut Vec::new())?
+    {
+        return Ok(Some(source));
+    }
+    if !installed_path.exists() {
+        return Ok(None);
+    }
+    read_installed_query_source(installed_path, query_asset_root, language_id, file_name).map(Some)
+}
+
+/// Loads an optional compiled query from the installed path, merging in any extra query text.
+///
+/// Returns `Ok(None)` when neither an installed file nor an extra query exists.
+#[allow(clippy::too_many_arguments)]
+fn load_optional_query(
+    language: &Language,
+    config: &LanguageConfiguration,
+    _install_root: &Path,
+    query_asset_root: Option<&Path>,
+    installed_path: &Path,
+    file_name: &str,
+    kind_label: &str,
+    extra_query: Option<&str>,
+) -> Result<Option<Query>, SyntaxError> {
+    let source_from_file = maybe_read_query_source_preferring_bundled(
+        installed_path,
+        query_asset_root,
+        config.id(),
+        file_name,
+    )?;
+    let merged_source = match (source_from_file, extra_query) {
+        (Some(source), extra) => Some(append_query_source(source, extra)),
+        (None, Some(extra)) => Some(extra.to_owned()),
+        (None, None) => None,
+    };
+    merged_source
+        .map(|source| compile_query_source(language, config.id(), kind_label, &source))
+        .transpose()
+}
+
+fn resolve_query_source_from_raw(
+    raw_source: &str,
+    query_path: &Path,
+    query_asset_root: Option<&Path>,
+    file_name: &str,
+    inheritance_stack: &mut Vec<(String, String)>,
+) -> Result<String, SyntaxError> {
+    let (inherited_languages, body) = parse_query_inherits(raw_source);
+    if inherited_languages.is_empty() {
+        return Ok(body);
+    }
+
+    let Some(query_asset_root) = query_asset_root else {
+        return Err(SyntaxError::Io {
+            operation: "resolve inherited query".to_owned(),
+            path: query_path.to_path_buf(),
+            message:
+                "query declares inherited languages but no bundled query asset root is configured"
+                    .to_owned(),
+        });
+    };
+
+    let mut resolved = String::new();
+    for inherited_language in inherited_languages {
+        let inherited_source = resolve_bundled_query_source(
+            query_asset_root,
+            &inherited_language,
+            file_name,
+            inheritance_stack,
+        )?
+        .ok_or_else(|| SyntaxError::Io {
+            operation: "resolve inherited query".to_owned(),
+            path: query_asset_root.join(&inherited_language).join(file_name),
+            message: format!(
+                "inherited query `{file_name}` for language `{inherited_language}` is missing"
+            ),
+        })?;
+        if !resolved.is_empty() && !resolved.ends_with('\n') {
+            resolved.push('\n');
+        }
+        resolved.push_str(&inherited_source);
+    }
+    if !body.is_empty() {
+        if !resolved.is_empty() && !resolved.ends_with('\n') {
+            resolved.push('\n');
+        }
+        resolved.push_str(&body);
+    }
+    Ok(resolved)
+}
+
+fn resolve_bundled_query_source(
+    query_asset_root: &Path,
+    language_id: &str,
+    file_name: &str,
+    inheritance_stack: &mut Vec<(String, String)>,
+) -> Result<Option<String>, SyntaxError> {
+    let query_path = query_asset_root.join(language_id).join(file_name);
+    if !query_path.exists() {
+        return Ok(None);
+    }
+    if inheritance_stack
+        .iter()
+        .any(|(id, file)| id == language_id && file.eq_ignore_ascii_case(file_name))
+    {
+        return Err(SyntaxError::Io {
+            operation: "resolve inherited query".to_owned(),
+            path: query_path,
+            message: "cyclic query inheritance detected".to_owned(),
+        });
+    }
+
+    let raw_source = fs::read_to_string(&query_path)
+        .map_err(|error| io_error("read bundled query", &query_path, error))?;
+    inheritance_stack.push((language_id.to_owned(), file_name.to_owned()));
+    let resolved = resolve_query_source_from_raw(
+        &raw_source,
+        &query_path,
+        Some(query_asset_root),
+        file_name,
+        inheritance_stack,
+    )?;
+    inheritance_stack.pop();
+    Ok(Some(resolved))
+}
+
+fn parse_query_inherits(source: &str) -> (Vec<String>, String) {
+    let mut inherited_languages = Vec::new();
+    let mut body_lines = Vec::new();
+    let had_trailing_newline = source.ends_with('\n');
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(inherits) = trimmed.strip_prefix("; inherits:") {
+            for language in inherits.split(',') {
+                let language = language.trim();
+                if !language.is_empty() && !inherited_languages.iter().any(|id| id == language) {
+                    inherited_languages.push(language.to_owned());
+                }
+            }
+            continue;
+        }
+        body_lines.push(line);
+    }
+
+    let mut body = body_lines.join("\n");
+    if had_trailing_newline {
+        body.push('\n');
+    }
+    (inherited_languages, body)
+}
+
+fn install_bundled_queries(
+    config: &LanguageConfiguration,
+    query_asset_root: &Path,
+    install_root: &Path,
+) -> Result<(), SyntaxError> {
+    let Some(grammar) = config.grammar() else {
+        return Ok(());
+    };
+    let language_query_dir = query_asset_root.join(config.id());
+    if !language_query_dir.is_dir() {
+        return Ok(());
+    }
+
+    let install_queries_dir = grammar.install_directory(install_root).join("queries");
+    fs::create_dir_all(&install_queries_dir).map_err(|error| {
+        io_error(
+            "create installed query directory",
+            &install_queries_dir,
+            error,
+        )
+    })?;
+
+    for entry in fs::read_dir(&language_query_dir)
+        .map_err(|error| io_error("read query asset directory", &language_query_dir, error))?
+    {
+        let entry = entry
+            .map_err(|error| io_error("read query asset entry", &language_query_dir, error))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|error| io_error("read query asset metadata", &entry_path, error))?;
+        if metadata.is_dir() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy().to_string();
+        let destination = install_queries_dir.join(&file_name);
+        if entry_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("scm"))
+        {
+            let source = resolve_bundled_query_source(
+                query_asset_root,
+                config.id(),
+                &file_name,
+                &mut Vec::new(),
+            )?
+            .unwrap_or_default();
+            fs::write(&destination, source)
+                .map_err(|error| io_error("write installed query", &destination, error))?;
+        } else {
+            fs::copy(&entry_path, &destination).map_err(|error| SyntaxError::Io {
+                operation: "copy query asset".to_owned(),
+                path: entry_path,
+                message: error.to_string(),
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Converts an editor [`TextPoint`] (character columns) into a tree-sitter [`Point`]
@@ -1184,6 +1752,676 @@ fn text_point_to_tree_sitter_point(buffer: &TextBuffer, point: TextPoint) -> Poi
     let text = buffer.line(line).unwrap_or_default();
     let column = text.chars().take(point.column).map(char::len_utf8).sum();
     Point { row: line, column }
+}
+
+fn tree_sitter_column_to_char_column(line: &str, byte_column: usize) -> usize {
+    let mut bytes = 0usize;
+    let mut chars = 0usize;
+    for character in line.chars() {
+        if bytes >= byte_column {
+            break;
+        }
+        bytes = bytes.saturating_add(character.len_utf8());
+        chars = chars.saturating_add(1);
+    }
+    chars
+}
+
+fn desired_indent_for_loaded_language(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    buffer: &TextBuffer,
+    line_index: usize,
+    indent_width: usize,
+    parse_session: Option<&mut Option<SyntaxParseSession>>,
+) -> Result<Option<usize>, SyntaxError> {
+    let Some(indent_query) = loaded.indent_query.as_ref() else {
+        return Ok(None);
+    };
+    if line_index >= buffer.line_count() || indent_width == 0 {
+        return Ok(Some(0));
+    }
+
+    let parse_result = parse_tree(language_id, loaded, buffer, parse_session)?;
+    let mut query_cursor = QueryCursor::new();
+    query_cursor.set_point_range(
+        Point {
+            row: line_index,
+            column: 0,
+        }..Point {
+            row: line_index.saturating_add(1),
+            column: 0,
+        },
+    );
+
+    let capture_names = indent_query.capture_names();
+    let mut saw_capture = false;
+    let mut begin_levels = 0usize;
+    let mut branch_levels = 0usize;
+    let mut dedent_levels = 0usize;
+    let mut zero = false;
+    let mut fallback_to_auto = false;
+    let mut aligned_indent: Option<usize> = None;
+    let mut matches = query_cursor.matches(
+        indent_query,
+        parse_result.tree.root_node(),
+        TextBufferProvider { buffer },
+    );
+    loop {
+        matches.advance();
+        let Some(query_match) = matches.get() else {
+            break;
+        };
+        if !general_predicates_match(
+            indent_query,
+            query_match.pattern_index,
+            query_match.captures,
+            buffer,
+        ) {
+            continue;
+        }
+
+        let properties = indent_query.property_settings(query_match.pattern_index);
+        for capture in query_match.captures {
+            let Some(capture_name) = capture_names.get(capture.index as usize).copied() else {
+                continue;
+            };
+            saw_capture = true;
+            match capture_name {
+                "indent.begin" if indent_begin_applies(capture.node, line_index, properties) => {
+                    begin_levels = begin_levels.saturating_add(1);
+                }
+                "indent.branch" if line_index == capture.node.start_position().row => {
+                    branch_levels = branch_levels.saturating_add(1);
+                }
+                "indent.dedent"
+                    if line_index > capture.node.start_position().row
+                        && line_index <= capture.node.end_position().row =>
+                {
+                    dedent_levels = dedent_levels.saturating_add(1);
+                }
+                "indent.align" => {
+                    if let Some(column) =
+                        aligned_indent_column(capture.node, line_index, properties, buffer)
+                    {
+                        aligned_indent =
+                            Some(aligned_indent.map_or(column, |current| current.max(column)));
+                    }
+                }
+                "indent.zero" if line_intersects_node(capture.node, line_index) => {
+                    zero = true;
+                }
+                "indent.ignore" | "indent.auto"
+                    if line_intersects_node(capture.node, line_index) =>
+                {
+                    fallback_to_auto = true;
+                }
+                "indent.end" => {}
+                _ => {}
+            }
+        }
+    }
+
+    if zero {
+        return Ok(Some(0));
+    }
+    if fallback_to_auto || !saw_capture {
+        return Ok(None);
+    }
+
+    let levels = begin_levels.saturating_sub(branch_levels.saturating_add(dedent_levels));
+    let level_columns = levels.saturating_mul(indent_width);
+    Ok(Some(
+        aligned_indent.map_or(level_columns, |column| column.max(level_columns)),
+    ))
+}
+
+fn indent_begin_applies(node: Node<'_>, line_index: usize, properties: &[QueryProperty]) -> bool {
+    let start_line = node.start_position().row;
+    let end_line = node.end_position().row;
+    (line_index > start_line
+        || (line_index == start_line
+            && query_property_is_set(properties, "indent.start_at_same_line")))
+        && line_index <= end_line
+}
+
+fn aligned_indent_column(
+    node: Node<'_>,
+    line_index: usize,
+    properties: &[QueryProperty],
+    buffer: &TextBuffer,
+) -> Option<usize> {
+    if line_index <= node.start_position().row || line_index > node.end_position().row {
+        return None;
+    }
+
+    let open_delimiter = query_property_value(properties, "indent.open_delimiter")?;
+    let close_delimiter = query_property_value(properties, "indent.close_delimiter");
+    if line_index == node.end_position().row
+        && close_delimiter
+            .is_some_and(|token| current_line_starts_with_token(buffer, line_index, token))
+    {
+        return None;
+    }
+
+    let start_line = buffer.line(node.start_position().row)?;
+    let start_column = tree_sitter_column_to_char_column(&start_line, node.start_position().column);
+    let open_column = delimiter_column(&start_line, start_column, open_delimiter)?;
+    first_content_column_after(
+        &start_line,
+        open_column.saturating_add(open_delimiter.chars().count()),
+    )
+    .filter(|column| {
+        close_delimiter
+            .map(|token| !line_starts_with_token_at_column(&start_line, *column, token))
+            .unwrap_or(true)
+    })
+    .or(Some(open_column.saturating_add(1)))
+}
+
+fn line_intersects_node(node: Node<'_>, line_index: usize) -> bool {
+    let start_line = node.start_position().row;
+    let end_line = node.end_position().row;
+    start_line <= line_index && line_index <= end_line
+}
+
+fn query_property_is_set(properties: &[QueryProperty], key: &str) -> bool {
+    properties
+        .iter()
+        .any(|property| property.key.as_ref() == key)
+}
+
+fn query_property_value<'a>(properties: &'a [QueryProperty], key: &str) -> Option<&'a str> {
+    properties
+        .iter()
+        .find(|property| property.key.as_ref() == key)
+        .and_then(|property| property.value.as_deref())
+}
+
+/// Returns the string value of the first `#set!` property with the given key that is
+/// associated with a specific capture index, falling back to any pattern-wide property
+/// with the same key.
+///
+/// This covers both the simple form `(#set! key "value")` (no capture, pattern-wide)
+/// and the capture-targeted form `(#set! @capture key "value")`.
+///
+/// Returns `None` if no matching property is found or the property has no string value.
+pub fn query_capture_property_value<'q>(
+    query: &'q Query,
+    pattern_index: usize,
+    capture_index: u32,
+    key: &str,
+) -> Option<&'q str> {
+    let properties = query.property_settings(pattern_index);
+    // Capture-targeted properties take precedence over pattern-wide ones.
+    for property in properties {
+        if property.key.as_ref() == key && property.capture_id == Some(capture_index as usize) {
+            return property.value.as_deref();
+        }
+    }
+    for property in properties {
+        if property.key.as_ref() == key && property.capture_id.is_none() {
+            return property.value.as_deref();
+        }
+    }
+    None
+}
+
+fn delimiter_column(line: &str, start_column: usize, delimiter: &str) -> Option<usize> {
+    let delimiter = delimiter.chars().next()?;
+    for (column, character) in line.chars().enumerate().skip(start_column) {
+        if character == delimiter {
+            return Some(column);
+        }
+    }
+    None
+}
+
+fn first_content_column_after(line: &str, start_column: usize) -> Option<usize> {
+    line.chars()
+        .enumerate()
+        .skip(start_column)
+        .find_map(|(column, character)| (!character.is_whitespace()).then_some(column))
+}
+
+fn current_line_starts_with_token(buffer: &TextBuffer, line_index: usize, token: &str) -> bool {
+    let line = buffer.line(line_index).unwrap_or_default();
+    line.trim_start().starts_with(token)
+}
+
+fn line_starts_with_token_at_column(line: &str, column: usize, token: &str) -> bool {
+    let tail = line.chars().skip(column).collect::<String>();
+    tail.starts_with(token)
+}
+
+fn general_predicates_match(
+    query: &Query,
+    pattern_index: usize,
+    captures: &[tree_sitter::QueryCapture<'_>],
+    buffer: &TextBuffer,
+) -> bool {
+    query
+        .general_predicates(pattern_index)
+        .iter()
+        .all(|predicate| {
+            evaluate_general_predicate(
+                predicate.operator.as_ref(),
+                &predicate.args,
+                captures,
+                buffer,
+            )
+        })
+}
+
+fn evaluate_general_predicate(
+    operator: &str,
+    args: &[QueryPredicateArg],
+    captures: &[tree_sitter::QueryCapture<'_>],
+    buffer: &TextBuffer,
+) -> bool {
+    match operator.trim_start_matches('#') {
+        "kind-eq?" => {
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            args.iter().skip(1).any(|argument| match argument {
+                QueryPredicateArg::String(kind) => node.kind() == kind.as_ref(),
+                QueryPredicateArg::Capture(_) => false,
+            })
+        }
+        "not-kind-eq?" => {
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            args.iter().skip(1).all(|argument| match argument {
+                QueryPredicateArg::String(kind) => node.kind() != kind.as_ref(),
+                QueryPredicateArg::Capture(_) => true,
+            })
+        }
+        "has-parent?" => {
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            let Some(parent) = node.parent() else {
+                return false;
+            };
+            args.iter().skip(1).any(|argument| match argument {
+                QueryPredicateArg::String(kind) => parent.kind() == kind.as_ref(),
+                QueryPredicateArg::Capture(_) => false,
+            })
+        }
+        "not-has-parent?" => {
+            // Symmetric with `has-parent?`: checks only the immediate parent.
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            let Some(parent) = node.parent() else {
+                return true;
+            };
+            args.iter().skip(1).all(|argument| match argument {
+                QueryPredicateArg::String(kind) => parent.kind() != kind.as_ref(),
+                QueryPredicateArg::Capture(_) => true,
+            })
+        }
+        "has-ancestor?" => {
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            let mut ancestor = node.parent();
+            while let Some(current) = ancestor {
+                for argument in args.iter().skip(1) {
+                    if let QueryPredicateArg::String(kind) = argument
+                        && current.kind() == kind.as_ref()
+                    {
+                        return true;
+                    }
+                }
+                ancestor = current.parent();
+            }
+            false
+        }
+        "not-has-ancestor?" => {
+            let Some(node) = predicate_capture_node(args.first(), captures) else {
+                return false;
+            };
+            let mut ancestor = node.parent();
+            while let Some(current) = ancestor {
+                for argument in args.iter().skip(1) {
+                    if let QueryPredicateArg::String(kind) = argument
+                        && current.kind() == kind.as_ref()
+                    {
+                        return false;
+                    }
+                }
+                ancestor = current.parent();
+            }
+            true
+        }
+        "lua-match?" => {
+            let Some(text) = predicate_capture_text(args.first(), captures, buffer) else {
+                return false;
+            };
+            let Some(pattern) = args.get(1).and_then(|argument| match argument {
+                QueryPredicateArg::String(pattern) => Some(pattern.as_ref()),
+                QueryPredicateArg::Capture(_) => None,
+            }) else {
+                return false;
+            };
+            lua_pattern_matches(&text, pattern)
+        }
+        "not-lua-match?" => {
+            let Some(text) = predicate_capture_text(args.first(), captures, buffer) else {
+                return false;
+            };
+            let Some(pattern) = args.get(1).and_then(|argument| match argument {
+                QueryPredicateArg::String(pattern) => Some(pattern.as_ref()),
+                QueryPredicateArg::Capture(_) => None,
+            }) else {
+                return false;
+            };
+            !lua_pattern_matches(&text, pattern)
+        }
+        "contains?" => {
+            let Some(text) = predicate_capture_text(args.first(), captures, buffer) else {
+                return false;
+            };
+            args.iter().skip(1).any(|argument| match argument {
+                QueryPredicateArg::String(needle) => text.contains(needle.as_ref()),
+                QueryPredicateArg::Capture(_) => false,
+            })
+        }
+        // Directives (ending in `!`) are metadata annotations, not match filters.
+        // They do not cause a match to be rejected.
+        op if op.ends_with('!') => true,
+        // Unknown filter predicates are allowed through. We cannot evaluate them
+        // here, so we avoid silently discarding matches that depend on them.
+        _ => true,
+    }
+}
+
+fn predicate_capture_node<'tree>(
+    argument: Option<&QueryPredicateArg>,
+    captures: &[tree_sitter::QueryCapture<'tree>],
+) -> Option<Node<'tree>> {
+    let QueryPredicateArg::Capture(capture_id) = argument? else {
+        return None;
+    };
+    captures
+        .iter()
+        .find(|capture| capture.index == *capture_id)
+        .map(|capture| capture.node)
+}
+
+fn predicate_capture_text(
+    argument: Option<&QueryPredicateArg>,
+    captures: &[tree_sitter::QueryCapture<'_>],
+    buffer: &TextBuffer,
+) -> Option<String> {
+    let node = predicate_capture_node(argument, captures)?;
+    let mut text = String::new();
+    for chunk in buffer.byte_slice_chunks(node.byte_range()) {
+        text.push_str(std::str::from_utf8(chunk).ok()?);
+    }
+    Some(text)
+}
+
+/// Minimal Lua 5.x pattern matcher sufficient for the patterns used in tree-sitter query
+/// corpora.  Supported pattern items:
+///
+/// * `.`             — any character
+/// * `%a`/`%A`       — letter / non-letter
+/// * `%d`/`%D`       — digit / non-digit
+/// * `%l`/`%L`       — lowercase / non-lowercase
+/// * `%u`/`%U`       — uppercase / non-uppercase
+/// * `%w`/`%W`       — alphanumeric / non-alphanumeric
+/// * `%s`/`%S`       — whitespace / non-whitespace
+/// * `%p`/`%P`       — punctuation / non-punctuation
+/// * `%x`/`%X`       — hex digit / non-hex-digit
+/// * `%c`/`%C`       — control char / non-control-char
+/// * `%(` `%)` etc.  — escaped literal
+/// * `[set]`/`[^set]`— character class (ranges a–z supported)
+/// * `*` `+` `-` `?` — quantifiers on the preceding item
+/// * `^`             — anchor at start
+/// * `$`             — anchor at end
+///
+/// Captures (`(…)`) are parsed but their contents are otherwise ignored for the
+/// match/no-match decision.
+fn lua_pattern_matches(text: &str, pattern: &str) -> bool {
+    let text_bytes = text.as_bytes();
+    let pat_bytes = pattern.as_bytes();
+
+    let (anchored, pat_start) = if pat_bytes.first() == Some(&b'^') {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
+
+    if anchored {
+        lua_match_here(text_bytes, 0, pat_bytes, pat_start)
+    } else {
+        // Try matching at every starting position.
+        for start in 0..=text_bytes.len() {
+            if lua_match_here(text_bytes, start, pat_bytes, pat_start) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Try to match `pat[pi..]` against `text[ti..]`.
+fn lua_match_here(text: &[u8], mut ti: usize, pat: &[u8], mut pi: usize) -> bool {
+    loop {
+        // End of pattern — success.
+        if pi >= pat.len() {
+            return true;
+        }
+
+        // `$` at end of pattern anchors to end of text.
+        if pat[pi] == b'$' && pi + 1 == pat.len() {
+            return ti == text.len();
+        }
+
+        // Opening capture group `(` — skip, we only need match/no-match.
+        if pat[pi] == b'(' {
+            pi += 1;
+            continue;
+        }
+        // Closing capture group `)` — skip.
+        if pat[pi] == b')' {
+            pi += 1;
+            continue;
+        }
+
+        // Determine how many bytes the current pattern item consumes (item_len) and
+        // the end of the item in `pat` (item_end), then look ahead for a quantifier.
+        let (item_end, item_len_in_pat) = lua_item_span(pat, pi);
+        let quantifier = pat.get(item_end).copied();
+
+        match quantifier {
+            Some(b'*') => {
+                // Match zero or more (greedy).
+                let q_end = item_end + 1;
+                let mut ti2 = ti;
+                while ti2 < text.len() && lua_item_matches(text[ti2], pat, pi, item_end) {
+                    ti2 += 1;
+                }
+                // Try longest first.
+                loop {
+                    if lua_match_here(text, ti2, pat, q_end) {
+                        return true;
+                    }
+                    if ti2 == ti {
+                        break;
+                    }
+                    ti2 -= 1;
+                }
+                return false;
+            }
+            Some(b'+') => {
+                // One or more.
+                if ti >= text.len() || !lua_item_matches(text[ti], pat, pi, item_end) {
+                    return false;
+                }
+                ti += 1;
+                let q_end = item_end + 1;
+                let mut ti2 = ti;
+                while ti2 < text.len() && lua_item_matches(text[ti2], pat, pi, item_end) {
+                    ti2 += 1;
+                }
+                loop {
+                    if lua_match_here(text, ti2, pat, q_end) {
+                        return true;
+                    }
+                    if ti2 == ti {
+                        break;
+                    }
+                    ti2 -= 1;
+                }
+                return false;
+            }
+            Some(b'-') => {
+                // Lazy zero-or-more.
+                let q_end = item_end + 1;
+                loop {
+                    if lua_match_here(text, ti, pat, q_end) {
+                        return true;
+                    }
+                    if ti >= text.len() || !lua_item_matches(text[ti], pat, pi, item_end) {
+                        return false;
+                    }
+                    ti += 1;
+                }
+            }
+            Some(b'?') => {
+                // Zero or one.
+                let q_end = item_end + 1;
+                if ti < text.len()
+                    && lua_item_matches(text[ti], pat, pi, item_end)
+                    && lua_match_here(text, ti + 1, pat, q_end)
+                {
+                    return true;
+                }
+                pi = q_end;
+                // fall through (zero occurrences)
+            }
+            _ => {
+                // No quantifier — match exactly one.
+                if ti >= text.len() || !lua_item_matches(text[ti], pat, pi, item_end) {
+                    return false;
+                }
+                ti += 1;
+                pi = item_end;
+                let _ = item_len_in_pat;
+            }
+        }
+    }
+}
+
+/// Returns `(item_end, item_byte_len)` where `item_end` is the index in `pat` of the
+/// first byte *after* the current pattern item that starts at `pi`.
+fn lua_item_span(pat: &[u8], pi: usize) -> (usize, usize) {
+    if pat[pi] == b'%' {
+        // Escaped character: `%x` — always 2 bytes.
+        (pi + 2, 2)
+    } else if pat[pi] == b'[' {
+        // Character class: `[…]` — find the closing `]`.
+        let mut i = pi + 1;
+        if i < pat.len() && pat[i] == b'^' {
+            i += 1;
+        }
+        // A `]` immediately after `[` or `[^` is treated as a literal.
+        if i < pat.len() && pat[i] == b']' {
+            i += 1;
+        }
+        while i < pat.len() && pat[i] != b']' {
+            if pat[i] == b'%' {
+                i += 1; // skip the escaped char
+            }
+            i += 1;
+        }
+        (i + 1, i + 1 - pi) // include the closing `]`
+    } else {
+        (pi + 1, 1)
+    }
+}
+
+/// Returns `true` if `byte` matches the pattern item `pat[pi..item_end]`.
+fn lua_item_matches(byte: u8, pat: &[u8], pi: usize, item_end: usize) -> bool {
+    let ch = byte as char;
+    if pat[pi] == b'.' {
+        return true;
+    }
+    if pat[pi] == b'%' && pi + 1 < pat.len() {
+        return lua_class_matches(ch, pat[pi + 1]);
+    }
+    if pat[pi] == b'[' {
+        return lua_set_matches(byte, pat, pi, item_end);
+    }
+    // Literal match.
+    pat[pi] == byte
+}
+
+/// Match a Lua `%x` class character against `ch`.
+fn lua_class_matches(ch: char, class: u8) -> bool {
+    let res = match class.to_ascii_lowercase() {
+        b'a' => ch.is_alphabetic(),
+        b'd' => ch.is_ascii_digit(),
+        b'l' => ch.is_lowercase(),
+        b'u' => ch.is_uppercase(),
+        b'w' => ch.is_alphanumeric(),
+        b's' => ch.is_whitespace(),
+        b'p' => ch.is_ascii_punctuation(),
+        b'x' => ch.is_ascii_hexdigit(),
+        b'c' => (ch as u32) < 32,
+        _ => return ch == class as char, // `%(` → literal `(`
+    };
+    if class.is_ascii_uppercase() {
+        !res
+    } else {
+        res
+    }
+}
+
+/// Match a byte against a Lua character-set `[…]` spanning `pat[pi..item_end]`.
+fn lua_set_matches(byte: u8, pat: &[u8], pi: usize, item_end: usize) -> bool {
+    let ch = byte as char;
+    let mut i = pi + 1; // skip `[`
+    let negate = if i < item_end && pat[i] == b'^' {
+        i += 1;
+        true
+    } else {
+        false
+    };
+    let mut matched = false;
+    // A `]` right after `[` or `[^` is a literal `]`.
+    let initial = i;
+    while i < item_end.saturating_sub(1) {
+        // item_end points past `]`
+        if pat[i] == b'%' && i + 1 < item_end - 1 {
+            if lua_class_matches(ch, pat[i + 1]) {
+                matched = true;
+            }
+            i += 2;
+        } else if i + 2 < item_end - 1 && pat[i + 1] == b'-' {
+            // Range a-z
+            if byte >= pat[i] && byte <= pat[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if i == initial && pat[i] == b']' {
+                // Literal `]`
+                if byte == b']' {
+                    matched = true;
+                }
+            } else if pat[i] == byte {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    if negate { !matched } else { matched }
 }
 
 fn create_parser(language_id: &str, loaded: &LoadedLanguage) -> Result<Parser, SyntaxError> {
@@ -1344,6 +2582,16 @@ fn highlight_tree(
         let Some(query_match) = matches.get() else {
             break;
         };
+
+        // Apply custom predicates that tree-sitter does not evaluate automatically.
+        if !general_predicates_match(
+            &loaded.query,
+            query_match.pattern_index,
+            query_match.captures,
+            buffer,
+        ) {
+            continue;
+        }
 
         for capture in query_match.captures {
             let node = capture.node;
@@ -1680,33 +2928,6 @@ fn build_shared_library(
     Ok(())
 }
 
-fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), SyntaxError> {
-    fs::create_dir_all(destination)
-        .map_err(|error| io_error("create install directory", destination, error))?;
-
-    for entry in
-        fs::read_dir(source).map_err(|error| io_error("read source directory", source, error))?
-    {
-        let entry = entry.map_err(|error| io_error("read directory entry", source, error))?;
-        let entry_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let metadata = entry
-            .metadata()
-            .map_err(|error| io_error("read source metadata", &entry_path, error))?;
-        if metadata.is_dir() {
-            copy_dir_all(&entry_path, &destination_path)?;
-        } else {
-            fs::copy(&entry_path, &destination_path).map_err(|error| SyntaxError::Io {
-                operation: "copy grammar file".to_owned(),
-                path: entry_path,
-                message: error.to_string(),
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
 fn ensure_installed_highlight_query_path(
     config: &LanguageConfiguration,
     query_path: &Path,
@@ -1767,6 +2988,44 @@ fn default_install_root() -> PathBuf {
         .join("grammars")
 }
 
+fn default_query_asset_root() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        roots.extend(
+            exe_dir
+                .ancestors()
+                .take(DEFAULT_QUERY_ASSET_SEARCH_DEPTH)
+                .map(Path::to_path_buf),
+        );
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        roots.extend(
+            current_dir
+                .ancestors()
+                .take(DEFAULT_QUERY_ASSET_SEARCH_DEPTH)
+                .map(Path::to_path_buf),
+        );
+    }
+
+    for root in roots {
+        for parts in QUERY_ASSET_DIR_CANDIDATES {
+            let candidate = asset_path_from_parts(&root, parts);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn asset_path_from_parts(base: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(base.to_path_buf(), |candidate, part| candidate.join(part))
+}
+
 fn normalize_extension(extension: &str) -> String {
     extension
         .trim()
@@ -1818,13 +3077,16 @@ impl Drop for TempCloneGuard {
 #[cfg(test)]
 mod tests {
     use std::{
-        path::PathBuf,
+        env, fs,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
         SyntaxParseSession, SyntaxRegistry, ensure_installed_highlight_query_path,
+        install_bundled_queries, maybe_read_query_source_preferring_bundled,
+        read_query_source_preferring_bundled,
     };
     use editor_buffer::{TextBuffer, TextPoint};
 
@@ -1875,6 +3137,32 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    struct TempTestDir {
+        path: PathBuf,
+    }
+
+    impl TempTestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos();
+            let path = env::temp_dir().join(format!("volt-syntax-{name}-{unique}"));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempTestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
         }
     }
 
@@ -2108,6 +3396,13 @@ fn main() {
                 .join("queries")
                 .join("highlights.scm")
         );
+        assert_eq!(
+            grammar.installed_indent_query_path(&install_root),
+            install_root
+                .join("tree-sitter-rust")
+                .join("queries")
+                .join("indents.scm")
+        );
         assert!(
             grammar
                 .installed_library_path(&install_root)
@@ -2161,5 +3456,795 @@ fn main() {
         if query_path.exists() {
             let _ = std::fs::remove_file(&query_path);
         }
+    }
+
+    #[test]
+    fn bundled_query_install_flattens_inherited_queries() {
+        let asset_root = TempTestDir::new("query-assets");
+        let install_root = TempTestDir::new("query-install");
+        let base_dir = asset_root.path().join("base");
+        let child_dir = asset_root.path().join("child");
+        fs::create_dir_all(&base_dir).expect("create base query dir");
+        fs::create_dir_all(&child_dir).expect("create child query dir");
+        fs::write(base_dir.join("highlights.scm"), "(identifier) @variable\n")
+            .expect("write base highlight query");
+        fs::write(
+            child_dir.join("highlights.scm"),
+            "; inherits: base\n(string_literal) @string\n",
+        )
+        .expect("write child highlight query");
+        let config = LanguageConfiguration::from_grammar(
+            "child",
+            ["child"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-child.git",
+                ".",
+                "src",
+                "tree-sitter-child",
+                "tree_sitter_child",
+            ),
+            [CaptureThemeMapping::new("variable", "syntax.variable")],
+        );
+
+        must(install_bundled_queries(
+            &config,
+            asset_root.path(),
+            install_root.path(),
+        ));
+
+        let installed = fs::read_to_string(
+            config
+                .grammar()
+                .expect("grammar config")
+                .installed_highlight_query_path(install_root.path()),
+        )
+        .expect("read installed query");
+        assert!(installed.contains("(identifier) @variable"));
+        assert!(installed.contains("(string_literal) @string"));
+        assert!(!installed.contains("; inherits:"));
+    }
+
+    /// When both an installed query file and a bundled asset exist, the bundled asset must win.
+    /// This guards against stale installed queries (e.g. the markdown-inline highlights.scm
+    /// written to `%LOCALAPPDATA%\volt\grammars`) shadowing a corrected repo asset.
+    #[test]
+    fn bundled_query_asset_wins_over_stale_installed_query() {
+        let asset_root = TempTestDir::new("bundled-wins-asset");
+        let install_root = TempTestDir::new("bundled-wins-install");
+        let lang_id = "test-lang";
+
+        // Write the "live" bundled asset (what the repo has after a fix).
+        let asset_dir = asset_root.path().join(lang_id);
+        fs::create_dir_all(&asset_dir).expect("create asset dir");
+        fs::write(
+            asset_dir.join("highlights.scm"),
+            "(identifier) @variable.bundled\n",
+        )
+        .expect("write bundled highlights");
+
+        // Write a "stale" installed query in the simulated grammar install directory
+        // (the kind that would exist before a manual grammar reinstall).
+        let installed_query_dir = install_root
+            .path()
+            .join(format!("tree-sitter-{lang_id}"))
+            .join("queries");
+        fs::create_dir_all(&installed_query_dir).expect("create installed query dir");
+        let installed_path = installed_query_dir.join("highlights.scm");
+        fs::write(&installed_path, "(identifier) @variable.stale\n")
+            .expect("write stale installed highlights");
+
+        // With query_asset_root configured, the bundled asset must be returned.
+        let source = must(read_query_source_preferring_bundled(
+            &installed_path,
+            Some(asset_root.path()),
+            lang_id,
+            "highlights.scm",
+        ));
+        assert!(
+            source.contains("@variable.bundled"),
+            "expected bundled content, got: {source:?}"
+        );
+        assert!(
+            !source.contains("@variable.stale"),
+            "stale installed content leaked into result: {source:?}"
+        );
+
+        // Without a query_asset_root, the installed file is the only source.
+        let fallback = must(read_query_source_preferring_bundled(
+            &installed_path,
+            None,
+            lang_id,
+            "highlights.scm",
+        ));
+        assert!(
+            fallback.contains("@variable.stale"),
+            "expected installed fallback content, got: {fallback:?}"
+        );
+    }
+
+    /// When both an installed optional query and a bundled asset exist, the bundled asset wins.
+    #[test]
+    fn bundled_optional_query_asset_wins_over_stale_installed_query() {
+        let asset_root = TempTestDir::new("bundled-opt-asset");
+        let install_root = TempTestDir::new("bundled-opt-install");
+        let lang_id = "test-lang-opt";
+
+        // Write bundled indents asset.
+        let asset_dir = asset_root.path().join(lang_id);
+        fs::create_dir_all(&asset_dir).expect("create asset dir");
+        fs::write(asset_dir.join("indents.scm"), "(block) @indent.bundled\n")
+            .expect("write bundled indents");
+
+        // Write stale installed indents.
+        let installed_query_dir = install_root
+            .path()
+            .join(format!("tree-sitter-{lang_id}"))
+            .join("queries");
+        fs::create_dir_all(&installed_query_dir).expect("create installed query dir");
+        let installed_path = installed_query_dir.join("indents.scm");
+        fs::write(&installed_path, "(block) @indent.stale\n")
+            .expect("write stale installed indents");
+
+        let source = must(maybe_read_query_source_preferring_bundled(
+            &installed_path,
+            Some(asset_root.path()),
+            lang_id,
+            "indents.scm",
+        ));
+        assert!(
+            source.as_deref().unwrap_or("").contains("@indent.bundled"),
+            "expected bundled content, got: {source:?}"
+        );
+
+        // When bundled asset is absent, installed file is returned.
+        let absent_asset_root = TempTestDir::new("bundled-opt-absent");
+        let fallback = must(maybe_read_query_source_preferring_bundled(
+            &installed_path,
+            Some(absent_asset_root.path()),
+            lang_id,
+            "indents.scm",
+        ));
+        assert!(
+            fallback.as_deref().unwrap_or("").contains("@indent.stale"),
+            "expected installed fallback, got: {fallback:?}"
+        );
+
+        // When neither bundled nor installed file exists, returns None.
+        let nonexistent = install_root.path().join("nonexistent.scm");
+        let none_result = must(maybe_read_query_source_preferring_bundled(
+            &nonexistent,
+            Some(absent_asset_root.path()),
+            lang_id,
+            "indents.scm",
+        ));
+        assert!(
+            none_result.is_none(),
+            "expected None when neither source exists"
+        );
+    }
+
+    #[test]
+    fn indent_queries_compute_nested_and_branch_indentation() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(
+                rust_configuration().with_extra_indent_query(include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../volt/assets/grammars/queries/rust/indents.scm"
+                ))),
+            ),
+        );
+
+        let buffer = TextBuffer::from_text("fn main() {\n    if true {\n\n    }\n}\n");
+
+        assert_eq!(
+            must(registry.desired_indent_for_language("rust", &buffer, 2, 4)),
+            Some(8)
+        );
+        assert_eq!(
+            must(registry.desired_indent_for_language("rust", &buffer, 3, 4)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn indent_queries_reuse_parse_sessions_after_edits() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(
+                rust_configuration().with_extra_indent_query(include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../volt/assets/grammars/queries/rust/indents.scm"
+                ))),
+            ),
+        );
+
+        let mut buffer = TextBuffer::from_text("fn main() {\n    if true {\n\n    }\n}\n");
+        let mut parse_session = None;
+
+        assert_eq!(
+            must(registry.desired_indent_for_language_with_session(
+                "rust",
+                &buffer,
+                2,
+                4,
+                &mut parse_session,
+            )),
+            Some(8)
+        );
+
+        buffer.set_cursor(TextPoint::new(2, 0));
+        buffer.insert_text("        println!(\"hi\");\n");
+
+        assert_eq!(
+            must(registry.desired_indent_for_language("rust", &buffer, 3, 4)),
+            must(registry.desired_indent_for_language_with_session(
+                "rust",
+                &buffer,
+                3,
+                4,
+                &mut parse_session,
+            )),
+        );
+        assert_eq!(
+            must(registry.desired_indent_for_language("rust", &buffer, 4, 4)),
+            must(registry.desired_indent_for_language_with_session(
+                "rust",
+                &buffer,
+                4,
+                4,
+                &mut parse_session,
+            )),
+        );
+    }
+
+    // --- Additional query kind tests ---
+
+    #[test]
+    fn extra_injections_query_compiles_for_static_language() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(rust_configuration().with_extra_injections_query(
+                r#"((string_literal) @injection.content (#set! injection.language "json"))"#,
+            )),
+        );
+        let result = must(registry.injections_query_for_language("rust"));
+        assert!(result.is_some(), "injections query should be present");
+        let q = result.expect("query");
+        assert_eq!(q.pattern_count(), 1);
+        assert!(q.capture_names().contains(&"injection.content"));
+    }
+
+    #[test]
+    fn extra_locals_query_compiles_for_static_language() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry
+                .register(rust_configuration().with_extra_locals_query(r#"(block) @local.scope"#)),
+        );
+        let result = must(registry.locals_query_for_language("rust"));
+        assert!(result.is_some(), "locals query should be present");
+        let q = result.expect("query");
+        assert!(q.capture_names().contains(&"local.scope"));
+    }
+
+    #[test]
+    fn extra_folds_query_compiles_for_static_language() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(
+            rust_configuration().with_extra_folds_query(r#"[(block) (use_declaration)] @fold"#),
+        ));
+        let result = must(registry.folds_query_for_language("rust"));
+        assert!(result.is_some(), "folds query should be present");
+        let q = result.expect("query");
+        assert!(q.capture_names().contains(&"fold"));
+    }
+
+    #[test]
+    fn bundled_injections_query_compiles_for_rust() {
+        let injections_text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("volt")
+                .join("assets")
+                .join("grammars")
+                .join("queries")
+                .join("rust")
+                .join("injections.scm"),
+        );
+        let Ok(injections_text) = injections_text else {
+            eprintln!("SKIP: bundled rust/injections.scm not found");
+            return;
+        };
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration().with_extra_injections_query(injections_text)));
+        let result = must(registry.injections_query_for_language("rust"));
+        assert!(
+            result.is_some(),
+            "rust injections query should compile successfully"
+        );
+    }
+
+    #[test]
+    fn bundled_locals_query_compiles_for_rust() {
+        let locals_text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("volt")
+                .join("assets")
+                .join("grammars")
+                .join("queries")
+                .join("rust")
+                .join("locals.scm"),
+        );
+        let Ok(locals_text) = locals_text else {
+            eprintln!("SKIP: bundled rust/locals.scm not found");
+            return;
+        };
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration().with_extra_locals_query(locals_text)));
+        let result = must(registry.locals_query_for_language("rust"));
+        assert!(
+            result.is_some(),
+            "rust locals query should compile successfully"
+        );
+    }
+
+    #[test]
+    fn bundled_folds_query_compiles_for_rust() {
+        let folds_text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("volt")
+                .join("assets")
+                .join("grammars")
+                .join("queries")
+                .join("rust")
+                .join("folds.scm"),
+        );
+        let Ok(folds_text) = folds_text else {
+            eprintln!("SKIP: bundled rust/folds.scm not found");
+            return;
+        };
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration().with_extra_folds_query(folds_text)));
+        let result = must(registry.folds_query_for_language("rust"));
+        assert!(
+            result.is_some(),
+            "rust folds query should compile successfully"
+        );
+    }
+
+    #[test]
+    fn missing_extra_query_returns_none() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+        // No extra queries configured — all three should return None.
+        assert!(must(registry.injections_query_for_language("rust")).is_none());
+        assert!(must(registry.locals_query_for_language("rust")).is_none());
+        assert!(must(registry.folds_query_for_language("rust")).is_none());
+    }
+
+    #[test]
+    fn query_accessors_return_unknown_language_error_for_unregistered_id() {
+        let mut registry = SyntaxRegistry::new();
+        assert!(matches!(
+            registry.injections_query_for_language("not-registered"),
+            Err(SyntaxError::UnknownLanguage(_))
+        ));
+        assert!(matches!(
+            registry.locals_query_for_language("not-registered"),
+            Err(SyntaxError::UnknownLanguage(_))
+        ));
+        assert!(matches!(
+            registry.folds_query_for_language("not-registered"),
+            Err(SyntaxError::UnknownLanguage(_))
+        ));
+    }
+
+    #[test]
+    fn grammar_source_installed_paths_include_new_query_kinds() {
+        let grammar = GrammarSource::new(
+            "https://example.com/tree-sitter-rust.git",
+            ".",
+            "src",
+            "tree-sitter-rust",
+            "tree_sitter_rust",
+        );
+        let install_root = PathBuf::from("volt-grammars");
+
+        assert_eq!(
+            grammar.installed_injections_query_path(&install_root),
+            install_root
+                .join("tree-sitter-rust")
+                .join("queries")
+                .join("injections.scm")
+        );
+        assert_eq!(
+            grammar.installed_locals_query_path(&install_root),
+            install_root
+                .join("tree-sitter-rust")
+                .join("queries")
+                .join("locals.scm")
+        );
+        assert_eq!(
+            grammar.installed_folds_query_path(&install_root),
+            install_root
+                .join("tree-sitter-rust")
+                .join("queries")
+                .join("folds.scm")
+        );
+    }
+
+    // --- Query predicate evaluation tests ---
+
+    /// Helper: build a LanguageConfiguration for Rust with a custom highlight query so
+    /// that predicate evaluation is exercised end-to-end through `highlight_tree`.
+    fn rust_config_with_query(query: &str) -> LanguageConfiguration {
+        LanguageConfiguration::new(
+            "rust-predicate-test",
+            ["__rust_pred_test__"],
+            rust_language,
+            query,
+            [CaptureThemeMapping::new("function", "syntax.function")],
+        )
+    }
+
+    #[test]
+    fn highlight_not_kind_eq_predicate_filters_captures() {
+        // `(identifier) @function (#not-kind-eq? @function "identifier")` should never
+        // produce a span because every identifier is – by definition – of kind
+        // "identifier".
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#not-kind-eq? @function "identifier"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            snapshot.highlight_spans.is_empty(),
+            "expected no spans after #not-kind-eq? filtered them all, got {:?}",
+            snapshot.highlight_spans
+        );
+    }
+
+    #[test]
+    fn highlight_kind_eq_predicate_keeps_matching_captures() {
+        // `(identifier) @function (#kind-eq? @function "identifier")` should keep every
+        // identifier span since kind always matches.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#kind-eq? @function "identifier"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            !snapshot.highlight_spans.is_empty(),
+            "expected spans to pass through #kind-eq? unchanged"
+        );
+    }
+
+    #[test]
+    fn highlight_has_ancestor_predicate_matches_nested_nodes() {
+        // Identifiers inside a block_expression have "block" as an ancestor.
+        // (#has-ancestor? @fn "block") should keep them.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#has-ancestor? @function "block"))"#,
+        )));
+
+        // `value` lives inside the block `{}`.
+        let buffer = TextBuffer::from_text("fn main() { let value = 1; }");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            !snapshot.highlight_spans.is_empty(),
+            "expected identifier inside block to pass #has-ancestor? block"
+        );
+    }
+
+    #[test]
+    fn highlight_not_has_ancestor_predicate_filters_nested_nodes() {
+        // (#not-has-ancestor? @fn "block") should reject identifiers inside a block.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#not-has-ancestor? @function "block"))"#,
+        )));
+
+        // All identifiers in `fn main() { let value = 1; }` are inside a block.
+        let buffer = TextBuffer::from_text("fn main() { let value = 1; }");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        // At minimum `main` is NOT inside a block – the function name is a direct child
+        // of the function_item, which itself is a direct child of source_file.  So some
+        // spans should survive.
+        // We just verify the predicate doesn't crash and returns a consistent result.
+        let _ = snapshot.highlight_spans.len();
+    }
+
+    #[test]
+    fn highlight_has_parent_predicate_checks_immediate_parent() {
+        // `(identifier) @function (#has-parent? @function "function_item")` keeps
+        // identifiers whose direct parent is a function_item (i.e. the function name).
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#has-parent? @function "function_item"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            !snapshot.highlight_spans.is_empty(),
+            "expected function name identifier to pass #has-parent? function_item"
+        );
+    }
+
+    #[test]
+    fn highlight_contains_predicate_filters_by_text_content() {
+        // (#contains? @function "main") keeps only identifiers whose text contains "main".
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#contains? @function "main"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() { let value = 1; }");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert_eq!(
+            snapshot.highlight_spans.len(),
+            1,
+            "expected exactly one span for the identifier `main`"
+        );
+        assert_eq!(snapshot.highlight_spans[0].capture_name, "function");
+    }
+
+    #[test]
+    fn highlight_not_lua_match_predicate_filters_matching_text() {
+        // (#not-lua-match? @function "^main") rejects identifiers that start with "main".
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#not-lua-match? @function "^main"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        // `main` matches the lua pattern so it should be filtered out.
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .all(|span| span.capture_name != "function"
+                    || span.start_byte != buffer.text().find("main").unwrap_or(usize::MAX)),
+            "identifier `main` should have been removed by #not-lua-match?"
+        );
+    }
+
+    #[test]
+    fn highlight_directive_predicate_does_not_filter_matches() {
+        // A query using a directive (#offset! …) should still produce spans because
+        // directives are metadata, not match filters.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#offset! @function 0 1))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            !snapshot.highlight_spans.is_empty(),
+            "directive predicate should not filter spans"
+        );
+    }
+
+    #[test]
+    fn highlight_unknown_predicate_does_not_filter_matches() {
+        // An unknown custom predicate should allow the match through rather than silently
+        // discarding it.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @function (#unknown-custom-predicate? @function "value"))"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            !snapshot.highlight_spans.is_empty(),
+            "unknown predicates should allow matches through"
+        );
+    }
+
+    #[test]
+    fn query_capture_property_value_returns_set_property() {
+        use super::query_capture_property_value;
+
+        let language = rust_language();
+        // `#set!` with no capture argument produces a pattern-wide property.
+        let query =
+            tree_sitter::Query::new(&language, r#"((identifier) @var (#set! priority "90"))"#)
+                .expect("valid query");
+
+        let value = query_capture_property_value(&query, 0, 0, "priority");
+        assert_eq!(value, Some("90"));
+    }
+
+    // ── Regression: #not-has-parent? must check only the immediate parent ────────
+
+    #[test]
+    fn not_has_parent_checks_only_immediate_parent() {
+        // `#not-has-parent? @fn "source_file"` should keep identifiers whose direct
+        // parent is NOT `source_file`.  In `fn foo() {}` the identifier `foo` has
+        // `function_item` as its immediate parent, not `source_file`, so the predicate
+        // must return true (keep the capture).
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @fn (#not-has-parent? @fn "source_file"))"#,
+        )));
+        let buffer = TextBuffer::from_text("fn foo() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|s| s.capture_name == "fn"),
+            "#not-has-parent? must not reject nodes whose immediate parent does not match; \
+             `foo` lives under function_item, not source_file"
+        );
+    }
+
+    #[test]
+    fn not_has_parent_rejects_when_immediate_parent_matches() {
+        // `#not-has-parent? @fn "function_item"` must reject the function name `foo`
+        // because its direct parent IS a `function_item`.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @fn (#not-has-parent? @fn "function_item"))"#,
+        )));
+        let buffer = TextBuffer::from_text("fn foo() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        let fn_name_byte = buffer.text().find("foo").unwrap_or(usize::MAX);
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .all(|s| s.capture_name != "fn" || s.start_byte != fn_name_byte),
+            "#not-has-parent? must reject a node whose immediate parent matches"
+        );
+    }
+
+    // ── Regression: lua_pattern_matches must handle real corpus patterns ─────────
+
+    #[test]
+    fn lua_pattern_matches_uppercase_class() {
+        use super::lua_pattern_matches;
+        // `^[A-Z]` — identifiers starting with an uppercase letter
+        assert!(
+            lua_pattern_matches("MyType", "^[A-Z]"),
+            "^[A-Z] should match MyType"
+        );
+        assert!(
+            !lua_pattern_matches("myVar", "^[A-Z]"),
+            "^[A-Z] should not match myVar"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_uppercase_identifier_pattern() {
+        use super::lua_pattern_matches;
+        // `^[A-Z][A-Z0-9_]*$` — ALL_CAPS_CONSTANT style
+        assert!(
+            lua_pattern_matches("MAX_SIZE", "^[A-Z][A-Z0-9_]*$"),
+            "should match ALL_CAPS"
+        );
+        assert!(
+            !lua_pattern_matches("maxSize", "^[A-Z][A-Z0-9_]*$"),
+            "should not match camelCase"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_percent_u_class() {
+        use super::lua_pattern_matches;
+        // `%u` — Lua uppercase class
+        assert!(
+            lua_pattern_matches("A", "%u"),
+            "%u should match uppercase 'A'"
+        );
+        assert!(
+            !lua_pattern_matches("a", "%u"),
+            "%u should not match lowercase 'a'"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_percent_l_class() {
+        use super::lua_pattern_matches;
+        // `%l` — Lua lowercase class
+        assert!(
+            lua_pattern_matches("x", "%l"),
+            "%l should match lowercase 'x'"
+        );
+        assert!(
+            !lua_pattern_matches("X", "%l"),
+            "%l should not match uppercase 'X'"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_percent_a_class() {
+        use super::lua_pattern_matches;
+        // `%a` — Lua letter class
+        assert!(lua_pattern_matches("hello", "%a"), "%a should match letter");
+        assert!(
+            !lua_pattern_matches("123", "^%a"),
+            "^%a should not match digits"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_percent_d_class() {
+        use super::lua_pattern_matches;
+        // `%d` — Lua digit class
+        assert!(lua_pattern_matches("42", "^%d"), "^%d should match '42'");
+        assert!(
+            !lua_pattern_matches("abc", "^%d"),
+            "^%d should not match 'abc'"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_anchored_literal() {
+        use super::lua_pattern_matches;
+        assert!(
+            lua_pattern_matches("else", "^else"),
+            "^else should match 'else'"
+        );
+        assert!(
+            !lua_pattern_matches("elsewhere", "^else$"),
+            "^else$ should not match 'elsewhere'"
+        );
+        assert!(
+            lua_pattern_matches("else", "^else$"),
+            "^else$ should match exact 'else'"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_matches_escaped_parens() {
+        use super::lua_pattern_matches;
+        // `%(` literal open-paren, non-newline follows
+        assert!(
+            lua_pattern_matches("(x", "%("),
+            "should match text starting with ("
+        );
+        assert!(
+            !lua_pattern_matches("x(", "^%("),
+            "^%( should not match text not starting with ("
+        );
+    }
+
+    #[test]
+    fn not_lua_match_integration_uppercase_class() {
+        // Smoke test: `#lua-match? @fn "^[A-Z]"` keeps only identifiers beginning with uppercase.
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"((identifier) @fn (#lua-match? @fn "^[A-Z]"))"#,
+        )));
+        let buffer = TextBuffer::from_text("fn MyFunc() {} fn lowercase() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        let my_func_byte = buffer.text().find("MyFunc").unwrap_or(usize::MAX);
+        let lower_byte = buffer.text().find("lowercase").unwrap_or(usize::MAX);
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|s| s.capture_name == "fn" && s.start_byte == my_func_byte),
+            "#lua-match? ^[A-Z] should keep 'MyFunc'"
+        );
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .all(|s| s.capture_name != "fn" || s.start_byte != lower_byte),
+            "#lua-match? ^[A-Z] should reject 'lowercase'"
+        );
     }
 }

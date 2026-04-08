@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 /// Human-readable summary of this crate's responsibility.
@@ -66,11 +66,20 @@ pub struct ProjectCandidate {
     name: String,
     root: PathBuf,
     kind: ProjectKind,
+    repository_name: String,
+    repository_root: PathBuf,
 }
 
 impl ProjectCandidate {
     fn new(name: String, root: PathBuf, kind: ProjectKind) -> Self {
-        Self { name, root, kind }
+        let (repository_name, repository_root) = project_repository_details(&root, &name, kind);
+        Self {
+            name,
+            root,
+            kind,
+            repository_name,
+            repository_root,
+        }
     }
 
     /// Returns the project display name.
@@ -86,6 +95,39 @@ impl ProjectCandidate {
     /// Returns the discovered project kind.
     pub const fn kind(&self) -> ProjectKind {
         self.kind
+    }
+
+    /// Returns the repository name that owns this project candidate.
+    pub fn repository_name(&self) -> &str {
+        &self.repository_name
+    }
+
+    /// Returns a compact repository label using the repo name and its parent directory.
+    pub fn repository_display_name(&self) -> String {
+        compact_project_path(&self.repository_root, 2)
+    }
+
+    /// Returns the repository root that owns this project candidate.
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    /// Returns the parent directory name for a worktree, when available.
+    pub fn worktree_parent_name(&self) -> Option<String> {
+        (self.kind == ProjectKind::GitWorktree)
+            .then(|| worktree_parent_name(&self.root))
+            .flatten()
+    }
+
+    /// Returns a picker-friendly display name.
+    pub fn display_name(&self) -> String {
+        if self.kind == ProjectKind::GitWorktree && self.repository_root != self.root {
+            let project_name = self
+                .worktree_parent_name()
+                .unwrap_or_else(|| self.repository_display_name());
+            return format!("{project_name} [{}]", self.name);
+        }
+        self.name.clone()
     }
 }
 
@@ -298,6 +340,149 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn project_repository_details(path: &Path, name: &str, kind: ProjectKind) -> (String, PathBuf) {
+    match kind {
+        ProjectKind::Git => (name.to_owned(), path.to_path_buf()),
+        ProjectKind::GitWorktree => resolve_worktree_repository_root(path)
+            .ok()
+            .flatten()
+            .map(|repository_root| (project_name(&repository_root), repository_root))
+            .unwrap_or_else(|| (name.to_owned(), path.to_path_buf())),
+    }
+}
+
+fn resolve_worktree_repository_root(path: &Path) -> io::Result<Option<PathBuf>> {
+    let gitdir = worktree_gitdir(path)?;
+    let common_dir = worktree_common_dir(&gitdir)?;
+    Ok(common_dir.parent().map(Path::to_path_buf))
+}
+
+fn worktree_gitdir(path: &Path) -> io::Result<PathBuf> {
+    let marker = path.join(".git");
+    let contents = fs::read_to_string(&marker)?;
+    let gitdir = parse_gitdir_reference(&contents)
+        .map(|reference| resolve_git_path(path, reference))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "`{}` does not contain a `gitdir:` reference",
+                    marker.display()
+                ),
+            )
+        })?;
+    if !gitdir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("resolved gitdir `{}` does not exist", gitdir.display()),
+        ));
+    }
+    Ok(gitdir)
+}
+
+fn worktree_common_dir(gitdir: &Path) -> io::Result<PathBuf> {
+    let commondir_path = gitdir.join("commondir");
+    let common_dir = match fs::read_to_string(&commondir_path) {
+        Ok(contents) => parse_relative_git_path(gitdir, &contents)
+            .unwrap_or_else(|| default_worktree_common_dir(gitdir)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            default_worktree_common_dir(gitdir)
+        }
+        Err(error) => return Err(error),
+    };
+    if !common_dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "resolved common dir `{}` does not exist",
+                common_dir.display()
+            ),
+        ));
+    }
+    Ok(common_dir)
+}
+
+fn default_worktree_common_dir(gitdir: &Path) -> PathBuf {
+    gitdir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| gitdir.to_path_buf())
+}
+
+fn parse_gitdir_reference(contents: &str) -> Option<&str> {
+    contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:").map(str::trim))
+        .filter(|reference| !reference.is_empty())
+}
+
+fn parse_relative_git_path(base: &Path, contents: &str) -> Option<PathBuf> {
+    contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|reference| resolve_git_path(base, reference))
+}
+
+fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
+    let reference = Path::new(reference);
+    if reference.is_absolute() {
+        normalize_path(reference)
+    } else {
+        normalize_path(&base.join(reference))
+    }
+}
+
+fn compact_project_path(path: &Path, component_count: usize) -> String {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return path.display().to_string();
+    }
+
+    let keep = component_count.max(1).min(components.len());
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    components[components.len() - keep..].join(&separator)
+}
+
+fn worktree_parent_name(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(Path::file_name)
+        .map(|segment| segment.to_string_lossy().into_owned())
+        .filter(|segment| !segment.is_empty())
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let mut anchored = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                normalized.push(prefix.as_os_str());
+                anchored = true;
+            }
+            Component::RootDir => {
+                normalized.push(component.as_os_str());
+                anchored = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !anchored {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -307,7 +492,8 @@ mod tests {
     };
 
     use super::{
-        DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, discover_projects,
+        DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, compact_project_path,
+        discover_projects,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -361,6 +547,42 @@ mod tests {
         assert!(projects.iter().any(|project| {
             project.root() == worktree && project.kind() == ProjectKind::GitWorktree
         }));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discover_projects_resolves_worktree_repository_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir("discover-worktree-repo");
+        let repo = root.join("repo-store");
+        let gitdir = repo.join(".git").join("worktrees").join("feature");
+        let worktree = root.join("project").join("feature");
+        fs::create_dir_all(&gitdir)?;
+        fs::create_dir_all(&worktree)?;
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../repo-store/.git/worktrees/feature\n",
+        )?;
+        fs::write(gitdir.join("commondir"), "../../\n")?;
+
+        let projects = discover_projects(&[ProjectSearchRoot::new(&root, 3)])?;
+        let worktree_project = projects
+            .iter()
+            .find(|project| project.root() == worktree)
+            .expect("worktree should be discovered");
+        assert_eq!(worktree_project.repository_name(), "repo-store");
+        assert_eq!(worktree_project.repository_root(), repo);
+        assert_eq!(
+            worktree_project.worktree_parent_name().as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            worktree_project.repository_display_name(),
+            compact_project_path(&repo, 2),
+        );
+        assert_eq!(worktree_project.display_name(), "project [feature]");
 
         fs::remove_dir_all(root)?;
         Ok(())

@@ -342,6 +342,7 @@ const TYPING_PROFILE_SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(8);
 const FRAME_PACING_TARGET_120FPS: Duration = Duration::from_nanos(8_333_333);
 const FRAME_PACING_YIELD_THRESHOLD: Duration = Duration::from_millis(1);
 const FRAME_PACING_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
+const LSP_SYNC_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const TYPING_EVENT_BATCH_LIMIT: usize = 24;
 const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
 const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -628,23 +629,46 @@ fn theme_scrolloff(theme_registry: Option<&ThemeRegistry>) -> usize {
         .unwrap_or(0)
 }
 
+fn cached_context_overlay_snapshot(
+    snapshot: Option<&BufferContextOverlaySnapshot>,
+    key: &BufferContextOverlayCacheKey,
+    typing_active: bool,
+) -> Option<BufferContextOverlaySnapshot> {
+    snapshot
+        .filter(|snapshot| {
+            snapshot.key == *key
+                || (typing_active
+                    && snapshot.key.buffer_name == key.buffer_name
+                    && snapshot.key.language_id == key.language_id)
+        })
+        .cloned()
+}
+
 fn buffer_context_overlay_snapshot(
     buffer: &ShellBuffer,
     active: bool,
+    typing_active: bool,
     user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
 ) -> Option<BufferContextOverlaySnapshot> {
-    active.then(|| buffer.context_overlay_snapshot(user_library, theme_scrolloff(theme_registry)))
+    active.then(|| {
+        buffer.context_overlay_snapshot(
+            user_library,
+            theme_scrolloff(theme_registry),
+            typing_active,
+        )
+    })
 }
 
 fn buffer_headerline_rows(
     buffer: &ShellBuffer,
     active: bool,
+    typing_active: bool,
     user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     visible_rows: usize,
 ) -> usize {
-    buffer_context_overlay_snapshot(buffer, active, user_library, theme_registry)
+    buffer_context_overlay_snapshot(buffer, active, typing_active, user_library, theme_registry)
         .map(|snapshot| count_visible_headerline_lines(&snapshot.headerline_lines, visible_rows))
         .unwrap_or(0)
 }
@@ -726,40 +750,28 @@ fn leading_indent_string(line: &str, indent_size: usize) -> String {
     line[..end].to_owned()
 }
 
-fn trim_indent_unit(indent: &str, indent_size: usize) -> String {
-    if indent.is_empty() || indent_size == 0 {
-        return indent.to_owned();
+fn indent_string_from_columns(columns: usize, indent_size: usize, use_tabs: bool) -> String {
+    if columns == 0 {
+        return String::new();
     }
-    let tab_width = indent_size.max(1);
-    let mut total_cols = 0usize;
-    for character in indent.chars() {
-        total_cols = total_cols.saturating_add(if character == '\t' { tab_width } else { 1 });
+    if !use_tabs || indent_size == 0 {
+        return " ".repeat(columns);
     }
-    let target_cols = total_cols.saturating_sub(indent_size);
-    let mut cols = 0usize;
-    let mut cut = 0usize;
-    for (index, character) in indent.char_indices() {
-        let width = if character == '\t' { tab_width } else { 1 };
-        if cols.saturating_add(width) > target_cols {
-            break;
-        }
-        cols = cols.saturating_add(width);
-        cut = index + character.len_utf8();
-    }
-    indent[..cut].to_owned()
+    let tabs = columns / indent_size;
+    let spaces = columns % indent_size;
+    format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces))
 }
 
-fn desired_indent_for_line(
-    buffer: &ShellBuffer,
+fn desired_indent_columns_for_text(
+    buffer: &TextBuffer,
     line_index: usize,
     indent_size: usize,
-    use_tabs: bool,
-) -> String {
-    let mut base_line = buffer.text.line(line_index).unwrap_or_default();
+) -> usize {
+    let mut base_line = buffer.line(line_index).unwrap_or_default();
     let mut search_index = line_index;
     while search_index > 0 && base_line.trim().is_empty() {
         search_index = search_index.saturating_sub(1);
-        let Some(line) = buffer.text.line(search_index) else {
+        let Some(line) = buffer.line(search_index) else {
             continue;
         };
         if !line.trim().is_empty() {
@@ -767,19 +779,93 @@ fn desired_indent_for_line(
             break;
         }
     }
-    let mut indent = leading_indent_string(&base_line, indent_size);
+    let (mut indent_columns, _) = leading_whitespace_info(&base_line, indent_size);
     if indent_size > 0 && base_line.trim_end().ends_with('{') {
-        if use_tabs {
-            indent.push('\t');
-        } else {
-            indent.push_str(&" ".repeat(indent_size));
-        }
+        indent_columns = indent_columns.saturating_add(indent_size);
     }
-    let current_line = buffer.text.line(line_index).unwrap_or_default();
+    let current_line = buffer.line(line_index).unwrap_or_default();
     if current_line.trim_start().starts_with('}') {
-        indent = trim_indent_unit(&indent, indent_size);
+        indent_columns = indent_columns.saturating_sub(indent_size);
     }
-    indent
+    indent_columns
+}
+
+fn desired_indent_for_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    line_index: usize,
+    indent_size: usize,
+    use_tabs: bool,
+) -> Result<String, String> {
+    let syntax_indent =
+        syntax_indent_for_buffer(runtime, buffer_id, line_index, indent_size, use_tabs)?;
+    let text = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer.text.clone()
+    };
+    Ok(syntax_indent.unwrap_or_else(|| {
+        indent_string_from_columns(
+            desired_indent_columns_for_text(&text, line_index, indent_size),
+            indent_size,
+            use_tabs,
+        )
+    }))
+}
+
+fn syntax_indent_for_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    line_index: usize,
+    indent_size: usize,
+    use_tabs: bool,
+) -> Result<Option<String>, String> {
+    let (text, language_id) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        (buffer.text.clone(), buffer.language_id().map(str::to_owned))
+    };
+    let Some(language_id) = language_id else {
+        return Ok(None);
+    };
+    let mut parse_session = {
+        let ui = shell_ui_mut(runtime)?;
+        ui.take_indent_parse_session(buffer_id)
+    };
+    let columns = syntax_registry_mut(runtime)
+        .ok()
+        .and_then(|registry| {
+            registry
+                .desired_indent_for_language_with_session(
+                    &language_id,
+                    &text,
+                    line_index,
+                    indent_size,
+                    &mut parse_session,
+                )
+                .ok()
+        })
+        .flatten();
+    shell_ui_mut(runtime)?.store_indent_parse_session(buffer_id, parse_session);
+    let Some(columns) = columns else {
+        return Ok(None);
+    };
+    Ok(Some(indent_string_from_columns(
+        columns,
+        indent_size,
+        use_tabs,
+    )))
+}
+
+fn format_buffer_line_indent(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    line_index: usize,
+    indent_size: usize,
+    use_tabs: bool,
+) -> Result<(), String> {
+    let indent = desired_indent_for_buffer(runtime, buffer_id, line_index, indent_size, use_tabs)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    apply_line_indent(buffer, line_index, indent_size, &indent);
+    Ok(())
 }
 
 fn apply_line_indent(
@@ -820,10 +906,14 @@ fn apply_line_indent(
     }
 }
 
-fn format_current_line_indent(buffer: &mut ShellBuffer, indent_size: usize, use_tabs: bool) {
-    let line_index = buffer.cursor_row();
-    let indent = desired_indent_for_line(buffer, line_index, indent_size, use_tabs);
-    apply_line_indent(buffer, line_index, indent_size, &indent);
+fn format_current_line_indent(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    indent_size: usize,
+    use_tabs: bool,
+) -> Result<(), String> {
+    let line_index = shell_buffer(runtime, buffer_id)?.cursor_row();
+    format_buffer_line_indent(runtime, buffer_id, line_index, indent_size, use_tabs)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1304,56 +1394,6 @@ fn advance_markdown_table_normal_tab(buffer: &mut ShellBuffer) -> Option<bool> {
     Some(apply_markdown_table_update(buffer, &table, &table, target))
 }
 
-fn dedent_block_end(buffer: &mut ShellBuffer, indent_size: usize) -> bool {
-    if indent_size == 0 {
-        return false;
-    }
-    let cursor = buffer.cursor_point();
-    let line = buffer.text.line(cursor.line).unwrap_or_default();
-    if !line
-        .chars()
-        .take(cursor.column)
-        .all(|character| character.is_whitespace())
-    {
-        return false;
-    }
-    let (leading_cols, leading_end) = leading_whitespace_info(&line, indent_size);
-    if leading_cols == 0 {
-        return false;
-    }
-    let target_remove_cols = indent_size.min(leading_cols);
-    let mut removed_cols = 0usize;
-    let mut remove_end = 0usize;
-    for (index, character) in line[..leading_end].char_indices() {
-        let width = if character == '\t' {
-            indent_size.max(1)
-        } else {
-            1
-        };
-        if removed_cols + width > target_remove_cols {
-            break;
-        }
-        removed_cols += width;
-        remove_end = index + character.len_utf8();
-        if removed_cols >= target_remove_cols {
-            break;
-        }
-    }
-    if remove_end == 0 {
-        return false;
-    }
-    let removed_chars = line[..remove_end].chars().count();
-    buffer.delete_range(TextRange::new(
-        TextPoint::new(cursor.line, 0),
-        TextPoint::new(cursor.line, removed_chars),
-    ));
-    buffer.set_cursor(TextPoint::new(
-        cursor.line,
-        cursor.column.saturating_sub(removed_chars),
-    ));
-    true
-}
-
 fn wrap_columns_for_width(width: u32, cell_width: i32) -> usize {
     let cell_width = cell_width.max(1) as u32;
     let line_number_width = cell_width.saturating_mul(5);
@@ -1460,20 +1500,18 @@ fn segment_index_for_column(segments: &[LineWrapSegment], column: usize) -> usiz
 
 #[derive(Debug, Clone)]
 struct UndoSnapshot {
-    text: String,
-    cursor: TextPoint,
+    text: TextSnapshot,
 }
 
 impl UndoSnapshot {
     fn from_buffer(buffer: &TextBuffer) -> Self {
         Self {
-            text: buffer.text(),
-            cursor: buffer.cursor(),
+            text: buffer.snapshot(),
         }
     }
 
     fn preview_line(&self) -> Option<String> {
-        let line = self.text.lines().next().unwrap_or("");
+        let line = self.text.line(0).unwrap_or_default();
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             None
@@ -1616,7 +1654,7 @@ impl UndoTree {
         }
         let indent = "  ".repeat(depth);
         let prefix = if is_current { "* " } else { "  " };
-        let cursor = node.snapshot.cursor;
+        let cursor = node.snapshot.text.cursor();
         let label = if node.parent.is_none() {
             format!(
                 "{indent}{prefix}root line {}, col {}",
@@ -3084,6 +3122,7 @@ impl ShellBuffer {
         &self,
         user_library: &dyn UserLibrary,
         scrolloff: usize,
+        typing_active: bool,
     ) -> BufferContextOverlaySnapshot {
         let key = BufferContextOverlayCacheKey {
             buffer_revision: self.text.revision(),
@@ -3094,10 +3133,8 @@ impl ShellBuffer {
             cursor_column: self.cursor_col(),
         };
         if let Ok(cache) = self.context_overlay_cache.lock()
-            && let Some(snapshot) = cache
-                .as_ref()
-                .filter(|snapshot| snapshot.key == key)
-                .cloned()
+            && let Some(snapshot) =
+                cached_context_overlay_snapshot(cache.as_ref(), &key, typing_active)
         {
             return snapshot;
         }
@@ -4885,8 +4922,8 @@ impl ShellBuffer {
 
     fn apply_undo_snapshot(&mut self, snapshot: &UndoSnapshot) {
         let range = self.full_range();
-        self.replace_range(range, &snapshot.text);
-        self.set_cursor(snapshot.cursor);
+        self.replace_range(range, &snapshot.text.text());
+        self.set_cursor(snapshot.text.cursor());
         self.undo_tree.update_revision(self.text.revision());
     }
 
@@ -6053,6 +6090,8 @@ pub(crate) struct ShellUiState {
     workspace_search_worker: WorkspaceSearchWorkerState,
     file_reload_worker: FileReloadWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
+    lsp_sync_worker: LspSyncWorkerState,
+    indent_parse_sessions: BTreeMap<BufferId, SyntaxParseSession>,
     /// Per-workspace last-used build command.  Set when the user runs
     /// `workspace.compile`; reused by `workspace.recompile`.
     compile_commands: BTreeMap<WorkspaceId, String>,
@@ -6106,6 +6145,8 @@ impl ShellUiState {
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
             file_reload_worker: FileReloadWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
+            lsp_sync_worker: LspSyncWorkerState::new(),
+            indent_parse_sessions: BTreeMap::new(),
             compile_commands: BTreeMap::new(),
         }
     }
@@ -6537,7 +6578,9 @@ impl ShellUiState {
         self.buffers.retain(|buffer| buffer.id() != buffer_id);
         if let Some(path) = removed_watch_path.as_deref() {
             self.file_reload_worker.unwatch_path(path);
+            self.lsp_sync_worker.cancel_path(path);
         }
+        self.indent_parse_sessions.remove(&buffer_id);
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.retain(|id| *id != buffer_id);
@@ -6558,6 +6601,22 @@ impl ShellUiState {
         }
         if removed_active_buffer {
             self.restore_active_buffer_vim_state();
+        }
+    }
+
+    fn take_indent_parse_session(&mut self, buffer_id: BufferId) -> Option<SyntaxParseSession> {
+        self.indent_parse_sessions.remove(&buffer_id)
+    }
+
+    fn store_indent_parse_session(
+        &mut self,
+        buffer_id: BufferId,
+        parse_session: Option<SyntaxParseSession>,
+    ) {
+        if let Some(parse_session) = parse_session {
+            self.indent_parse_sessions.insert(buffer_id, parse_session);
+        } else {
+            self.indent_parse_sessions.remove(&buffer_id);
         }
     }
 
@@ -6679,8 +6738,10 @@ impl ShellUiState {
         &mut self,
         configs: Vec<LanguageConfiguration>,
         install_root: PathBuf,
+        query_asset_root: Option<PathBuf>,
     ) {
-        self.syntax_refresh_worker.configure(configs, install_root);
+        self.syntax_refresh_worker
+            .configure(configs, install_root, query_asset_root);
     }
 
     fn set_yank_flash(&mut self, buffer_id: BufferId, selection: VisualSelection) {
@@ -6989,6 +7050,10 @@ struct LspLogBufferState {
 }
 
 impl LspLogBufferState {
+    fn has_buffers(&self) -> bool {
+        self.buffer_ids.values().any(|buffers| !buffers.is_empty())
+    }
+
     fn buffer_id(&self, workspace_id: WorkspaceId, server_id: &str) -> Option<BufferId> {
         self.buffer_ids
             .get(&workspace_id)
@@ -7030,7 +7095,13 @@ struct TypingFrameProfile {
     keydown_handle_total: Duration,
     text_input_handle_total: Duration,
     text_input_inner_total: Duration,
-    picker_refresh: Duration,
+    layout_sync: Duration,
+    picker_search_refresh: Duration,
+    lsp_refresh: Duration,
+    notification_refresh: Duration,
+    autocomplete_refresh: Duration,
+    hover_refresh: Duration,
+    terminal_refresh: Duration,
     syntax_refresh: Duration,
     syntax_worker_compute: Duration,
     syntax_result_count: usize,
@@ -7057,7 +7128,13 @@ struct ActiveTypingFrameProfile {
     keydown_handle_total: Duration,
     text_input_handle_total: Duration,
     text_input_inner_total: Duration,
-    picker_refresh: Duration,
+    layout_sync: Duration,
+    picker_search_refresh: Duration,
+    lsp_refresh: Duration,
+    notification_refresh: Duration,
+    autocomplete_refresh: Duration,
+    hover_refresh: Duration,
+    terminal_refresh: Duration,
     syntax_refresh: Duration,
     syntax_worker_compute: Duration,
     syntax_result_count: usize,
@@ -7084,7 +7161,13 @@ impl ActiveTypingFrameProfile {
             keydown_handle_total: Duration::from_secs(0),
             text_input_handle_total: Duration::from_secs(0),
             text_input_inner_total: Duration::from_secs(0),
-            picker_refresh: Duration::from_secs(0),
+            layout_sync: Duration::from_secs(0),
+            picker_search_refresh: Duration::from_secs(0),
+            lsp_refresh: Duration::from_secs(0),
+            notification_refresh: Duration::from_secs(0),
+            autocomplete_refresh: Duration::from_secs(0),
+            hover_refresh: Duration::from_secs(0),
+            terminal_refresh: Duration::from_secs(0),
             syntax_refresh: Duration::from_secs(0),
             syntax_worker_compute: Duration::from_secs(0),
             syntax_result_count: 0,
@@ -7157,7 +7240,13 @@ impl ActiveTypingFrameProfile {
             keydown_handle_total: self.keydown_handle_total,
             text_input_handle_total: self.text_input_handle_total,
             text_input_inner_total: self.text_input_inner_total,
-            picker_refresh: self.picker_refresh,
+            layout_sync: self.layout_sync,
+            picker_search_refresh: self.picker_search_refresh,
+            lsp_refresh: self.lsp_refresh,
+            notification_refresh: self.notification_refresh,
+            autocomplete_refresh: self.autocomplete_refresh,
+            hover_refresh: self.hover_refresh,
+            terminal_refresh: self.terminal_refresh,
             syntax_refresh: self.syntax_refresh,
             syntax_worker_compute: self.syntax_worker_compute,
             syntax_result_count: self.syntax_result_count,
@@ -7248,6 +7337,18 @@ impl TypingProfiler {
             .iter()
             .map(|frame| frame.frame_total)
             .collect::<Vec<_>>();
+        let layout_sync_times = non_zero_frame_durations(&self.frames, |frame| frame.layout_sync);
+        let picker_search_times =
+            non_zero_frame_durations(&self.frames, |frame| frame.picker_search_refresh);
+        let lsp_refresh_times = non_zero_frame_durations(&self.frames, |frame| frame.lsp_refresh);
+        let notification_refresh_times =
+            non_zero_frame_durations(&self.frames, |frame| frame.notification_refresh);
+        let autocomplete_refresh_times =
+            non_zero_frame_durations(&self.frames, |frame| frame.autocomplete_refresh);
+        let hover_refresh_times =
+            non_zero_frame_durations(&self.frames, |frame| frame.hover_refresh);
+        let terminal_refresh_times =
+            non_zero_frame_durations(&self.frames, |frame| frame.terminal_refresh);
         let syntax_result_frames = self
             .frames
             .iter()
@@ -7312,6 +7413,33 @@ impl TypingProfiler {
                     self.log_path.display()
                 )
             })?;
+            write_duration_summary(&mut file, &self.log_path, "Layout sync", &layout_sync_times)?;
+            write_duration_summary(
+                &mut file,
+                &self.log_path,
+                "Picker search",
+                &picker_search_times,
+            )?;
+            write_duration_summary(&mut file, &self.log_path, "LSP refresh", &lsp_refresh_times)?;
+            write_duration_summary(
+                &mut file,
+                &self.log_path,
+                "Notifications",
+                &notification_refresh_times,
+            )?;
+            write_duration_summary(
+                &mut file,
+                &self.log_path,
+                "Autocomplete",
+                &autocomplete_refresh_times,
+            )?;
+            write_duration_summary(&mut file, &self.log_path, "Hover", &hover_refresh_times)?;
+            write_duration_summary(
+                &mut file,
+                &self.log_path,
+                "Terminal",
+                &terminal_refresh_times,
+            )?;
         }
         if !syntax_result_frames.is_empty() {
             let syntax_result_total = syntax_result_frames
@@ -7618,11 +7746,23 @@ impl ShellState {
     }
 
     fn secondary_refresh_deferred_for_typing(&self, now: Instant) -> bool {
-        git_refresh_deferred_for_typing(self.last_text_input_at, now)
+        secondary_refresh_deferred_for_typing(self.last_text_input_at, now)
+    }
+
+    fn typing_refresh_budget_active(&self, now: Instant) -> bool {
+        frame_pacing_deferred_for_typing(self.last_text_input_at, now)
     }
 
     fn frame_pacing_deferred_for_typing(&self, now: Instant) -> bool {
         frame_pacing_deferred_for_typing(self.last_text_input_at, now)
+    }
+
+    fn active_buffer_is_terminal(&self) -> bool {
+        active_shell_buffer_id(&self.runtime)
+            .ok()
+            .and_then(|buffer_id| shell_buffer(&self.runtime, buffer_id).ok())
+            .map(|buffer| buffer_is_terminal(&buffer.kind))
+            .unwrap_or(false)
     }
 
     fn finish_typing_profile(&mut self) -> Result<Option<TypingProfileSummary>, String> {
@@ -8140,7 +8280,7 @@ impl ShellState {
                                 }
                                 close_autocomplete = true;
                             } else {
-                                let (indent_size, use_tabs) = {
+                                let (buffer_id, indent_size, use_tabs) = {
                                     let ui = self.ui()?;
                                     let buffer_id = active_shell_buffer_id(&self.runtime)
                                         .map_err(ShellError::Runtime)?;
@@ -8150,6 +8290,7 @@ impl ShellState {
                                     let theme_registry =
                                         self.runtime.services().get::<ThemeRegistry>();
                                     (
+                                        buffer_id,
                                         theme_lang_indent(theme_registry, language_id),
                                         theme_lang_use_tabs(theme_registry, language_id),
                                     )
@@ -8157,8 +8298,14 @@ impl ShellState {
                                 {
                                     let buffer = self.active_buffer_mut()?;
                                     buffer.insert_text("\n");
-                                    format_current_line_indent(buffer, indent_size, use_tabs);
                                 }
+                                format_current_line_indent(
+                                    &mut self.runtime,
+                                    buffer_id,
+                                    indent_size,
+                                    use_tabs,
+                                )
+                                .map_err(ShellError::Runtime)?;
                                 self.mark_active_buffer_syntax_dirty()?;
                                 close_autocomplete = true;
                             }
@@ -8515,6 +8662,8 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?
             .name()
             .to_owned();
+        let now = Instant::now();
+        let typing_active = self.typing_refresh_budget_active(now);
         render_shell_state(
             target,
             fonts,
@@ -8531,7 +8680,8 @@ impl ShellState {
             cell_width,
             line_height,
             ascent,
-            Instant::now(),
+            now,
+            typing_active,
         )
     }
 
@@ -8725,6 +8875,13 @@ impl ShellState {
                         self.ui_mut()?.vim_mut().pending =
                             Some(VimPending::Operator { operator, count });
                     }
+                    "c" if operator.is_none() && self.input_mode()? == InputMode::Normal => {
+                        self.ui_mut()?.vim_mut().pending_change_prefix =
+                            Some(VimRecordedInput::Chord("g c".to_owned()));
+                        self.ui_mut()?.vim_mut().pending = Some(VimPending::CommentToggle {
+                            count: line_target.unwrap_or(1),
+                        });
+                    }
                     _ => {
                         if self.handle_pending_g_sequence(operator, line_target, chord)? {
                             return Ok(true);
@@ -8759,6 +8916,19 @@ impl ShellState {
                 }
                 Ok(true)
             }
+            VimPending::CommentToggle { count } => {
+                if chord == "c" {
+                    let prefix = self.ui_mut()?.vim_mut().pending_change_prefix.take();
+                    start_change_recording_with_prefix(&mut self.runtime, prefix)
+                        .map_err(ShellError::Runtime)?;
+                    toggle_current_line_comment(&mut self.runtime, count)
+                        .map_err(ShellError::Runtime)?;
+                } else {
+                    self.ui_mut()?.vim_mut().pending_change_prefix = None;
+                    self.ui_mut()?.vim_mut().clear_transient();
+                }
+                Ok(true)
+            }
             VimPending::ReplaceChar { count } => {
                 let Some(character) = chord.chars().next() else {
                     self.ui_mut()?.vim_mut().clear_transient();
@@ -8773,6 +8943,20 @@ impl ShellState {
                     }
                 }
                 self.ui_mut()?.enter_normal_mode();
+                schedule_finish_change(&mut self.runtime).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            VimPending::ReplaceVisualSelection => {
+                let Some(character) = chord.chars().next() else {
+                    self.ui_mut()?.vim_mut().clear_transient();
+                    return Ok(true);
+                };
+                if character != '\n' {
+                    replace_visual_selection_chars(&mut self.runtime, character)
+                        .map_err(ShellError::Runtime)?;
+                } else {
+                    self.ui_mut()?.enter_normal_mode();
+                }
                 schedule_finish_change(&mut self.runtime).map_err(ShellError::Runtime)?;
                 Ok(true)
             }
@@ -9187,13 +9371,14 @@ impl ShellState {
                 );
                 {
                     let buffer = self.active_buffer_mut()?;
-                    if text == "}" {
-                        dedent_block_end(buffer, indent_size);
-                    }
                     buffer.insert_text(normalized.as_ref());
                     if !defer_markdown_table_format {
                         let _ = format_markdown_table_at_cursor(buffer);
                     }
+                }
+                if text == "}" {
+                    format_current_line_indent(&mut self.runtime, buffer_id, indent_size, use_tabs)
+                        .map_err(ShellError::Runtime)?;
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
@@ -9258,13 +9443,14 @@ impl ShellState {
                 );
                 {
                     let buffer = self.active_buffer_mut()?;
-                    if text == "}" {
-                        dedent_block_end(buffer, indent_size);
-                    }
                     buffer.replace_mode_text(normalized.as_ref());
                     if !defer_markdown_table_format {
                         let _ = format_markdown_table_at_cursor(buffer);
                     }
+                }
+                if text == "}" {
+                    format_current_line_indent(&mut self.runtime, buffer_id, indent_size, use_tabs)
+                        .map_err(ShellError::Runtime)?;
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
@@ -10328,6 +10514,7 @@ impl ShellState {
         cell_width: i32,
         line_height: i32,
     ) -> Result<(), ShellError> {
+        let typing_active = self.typing_refresh_budget_active(Instant::now());
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
         let popup_height = runtime_popup
@@ -10397,6 +10584,7 @@ impl ShellState {
                         buffer_headerline_rows(
                             buffer,
                             active,
+                            typing_active,
                             &*shell_user_library(&self.runtime),
                             theme_registry,
                             visible_rows,
@@ -10492,11 +10680,18 @@ impl ShellState {
         .map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_lsp(&mut self) -> Result<bool, ShellError> {
-        refresh_pending_lsp(&mut self.runtime).map_err(ShellError::Runtime)
+    fn refresh_pending_lsp(&mut self, typing_active: bool) -> Result<bool, ShellError> {
+        refresh_pending_lsp(&mut self.runtime, typing_active).map_err(ShellError::Runtime)
     }
 
-    fn refresh_notifications(&mut self, now: Instant) -> Result<bool, ShellError> {
+    fn refresh_notifications(
+        &mut self,
+        now: Instant,
+        typing_active: bool,
+    ) -> Result<bool, ShellError> {
+        if typing_active {
+            return Ok(false);
+        }
         Ok(self.ui_mut()?.prune_notifications(now))
     }
 
@@ -10615,6 +10810,13 @@ fn git_refresh_deferred_for_typing(last_text_input_at: Option<Instant>, now: Ins
         .unwrap_or(false)
 }
 
+fn secondary_refresh_deferred_for_typing(
+    last_text_input_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    git_refresh_deferred_for_typing(last_text_input_at, now)
+}
+
 fn frame_pacing_deferred_for_typing(last_text_input_at: Option<Instant>, now: Instant) -> bool {
     last_text_input_at
         .map(|last| {
@@ -10728,6 +10930,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         return FrameOutcome::Continue;
                     }
                 };
+                let layout_sync_started = Instant::now();
                 if let Err(error) = state.sync_visible_buffer_layouts(
                     render_width,
                     render_height,
@@ -10735,6 +10938,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     line_height as i32,
                 ) {
                     state.record_shell_error("shell.sync-visible-buffer-layouts", error);
+                }
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.layout_sync += layout_sync_started.elapsed();
                 }
                 let mut had_events = false;
                 let event_batch_started = Instant::now();
@@ -10780,20 +10986,26 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         break;
                     }
                 }
-                if had_events
-                    && let Err(error) = state.sync_visible_buffer_layouts(
+                if had_events {
+                    let layout_sync_started = Instant::now();
+                    if let Err(error) = state.sync_visible_buffer_layouts(
                         render_width,
                         render_height,
                         cell_width,
                         line_height as i32,
-                    )
-                {
-                    state.record_shell_error("shell.sync-visible-buffer-layouts", error);
+                    ) {
+                        state.record_shell_error("shell.sync-visible-buffer-layouts", error);
+                    }
+                    if let Some(frame) = typing_frame.as_mut() {
+                        frame.layout_sync += layout_sync_started.elapsed();
+                    }
                 }
 
                 let refresh_now = Instant::now();
-                let typing_active = state.secondary_refresh_deferred_for_typing(refresh_now);
-                let text_texture_cache_mode = if typing_active {
+                let secondary_refresh_deferred =
+                    state.secondary_refresh_deferred_for_typing(refresh_now);
+                let typing_refresh_budget_active = state.typing_refresh_budget_active(refresh_now);
+                let text_texture_cache_mode = if secondary_refresh_deferred {
                     TextTextureCacheMode::ReuseOnly
                 } else {
                     TextTextureCacheMode::ReadWrite
@@ -10813,20 +11025,33 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
-                let lsp_changed = match state.refresh_pending_lsp() {
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.picker_search_refresh = picker_refresh_started.elapsed();
+                }
+                let lsp_refresh_started = Instant::now();
+                let lsp_changed = match state.refresh_pending_lsp(typing_refresh_budget_active) {
                     Ok(changed) => changed,
                     Err(error) => {
                         state.record_shell_error("shell.lsp-refresh", error);
                         false
                     }
                 };
-                let notification_changed = match state.refresh_notifications(refresh_now) {
-                    Ok(changed) => changed,
-                    Err(error) => {
-                        state.record_shell_error("shell.notification-refresh", error);
-                        false
-                    }
-                };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.lsp_refresh = lsp_refresh_started.elapsed();
+                }
+                let notification_refresh_started = Instant::now();
+                let notification_changed =
+                    match state.refresh_notifications(refresh_now, typing_refresh_budget_active) {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            state.record_shell_error("shell.notification-refresh", error);
+                            false
+                        }
+                    };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.notification_refresh = notification_refresh_started.elapsed();
+                }
+                let autocomplete_refresh_started = Instant::now();
                 let autocomplete_changed = match state.refresh_pending_autocomplete() {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -10834,6 +11059,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.autocomplete_refresh = autocomplete_refresh_started.elapsed();
+                }
+                let hover_refresh_started = Instant::now();
                 let hover_changed = match state.refresh_hover_state() {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -10841,20 +11070,29 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
-                let terminal_changed = match state.refresh_pending_terminal(
-                    render_width,
-                    render_height,
-                    cell_width,
-                    line_height as i32,
-                ) {
-                    Ok(changed) => changed,
-                    Err(error) => {
-                        state.record_shell_error("shell.terminal-refresh", error);
-                        false
-                    }
-                };
                 if let Some(frame) = typing_frame.as_mut() {
-                    frame.picker_refresh = picker_refresh_started.elapsed();
+                    frame.hover_refresh = hover_refresh_started.elapsed();
+                }
+                let terminal_refresh_started = Instant::now();
+                let terminal_changed =
+                    if typing_refresh_budget_active && !state.active_buffer_is_terminal() {
+                        false
+                    } else {
+                        match state.refresh_pending_terminal(
+                            render_width,
+                            render_height,
+                            cell_width,
+                            line_height as i32,
+                        ) {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                state.record_shell_error("shell.terminal-refresh", error);
+                                false
+                            }
+                        }
+                    };
+                if let Some(frame) = typing_frame.as_mut() {
+                    frame.terminal_refresh = terminal_refresh_started.elapsed();
                 }
                 let syntax_refresh_started = Instant::now();
                 let syntax_stats = match state.refresh_pending_syntax() {
@@ -10872,7 +11110,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 }
                 let syntax_changed = syntax_stats.changed;
                 let git_refresh_started = Instant::now();
-                if let Err(error) = state.refresh_pending_git(refresh_now, typing_active) {
+                if let Err(error) =
+                    state.refresh_pending_git(refresh_now, secondary_refresh_deferred)
+                {
                     state.record_shell_error("shell.git-refresh", error);
                 }
                 if let Some(frame) = typing_frame.as_mut() {
@@ -12209,6 +12449,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "toggle-case" => {
                     toggle_case_chars(runtime)?;
                 }
+                "toggle-line-comment" => {
+                    start_change_recording(runtime)?;
+                    let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+                    toggle_current_line_comment(runtime, count)?;
+                }
                 "append" => {
                     if shell_ui(runtime)?.vim().multicursor.is_some() {
                         let offset = {
@@ -12293,27 +12538,27 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "open-line-below" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
-                    let (indent_size, use_tabs) = {
+                    let (buffer_id, indent_size, use_tabs) = {
                         let ui = shell_ui(runtime)?;
                         let buffer_id = active_shell_buffer_id(runtime)?;
                         let language_id =
                             ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
                         let theme_registry = runtime.services().get::<ThemeRegistry>();
                         (
+                            buffer_id,
                             theme_lang_indent(theme_registry, language_id),
                             theme_lang_use_tabs(theme_registry, language_id),
                         )
                     };
-                    let buffer = active_shell_buffer_mut(runtime)?;
-                    buffer.open_line_below();
-                    format_current_line_indent(buffer, indent_size, use_tabs);
-                    buffer.mark_syntax_dirty();
+                    active_shell_buffer_mut(runtime)?.open_line_below();
+                    format_current_line_indent(runtime, buffer_id, indent_size, use_tabs)?;
+                    shell_buffer_mut(runtime, buffer_id)?.mark_syntax_dirty();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "open-line-above" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
-                    let (indent_size, reference_indent) = {
+                    let (buffer_id, indent_size, use_tabs, reference_indent) = {
                         let ui = shell_ui(runtime)?;
                         let buffer_id = active_shell_buffer_id(runtime)?;
                         let buffer = ui
@@ -12322,13 +12567,30 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         let language_id = buffer.language_id();
                         let theme_registry = runtime.services().get::<ThemeRegistry>();
                         let indent_size = theme_lang_indent(theme_registry, language_id);
+                        let use_tabs = theme_lang_use_tabs(theme_registry, language_id);
                         let line = buffer.text.line(buffer.cursor_row()).unwrap_or_default();
-                        (indent_size, leading_indent_string(&line, indent_size))
+                        (
+                            buffer_id,
+                            indent_size,
+                            use_tabs,
+                            leading_indent_string(&line, indent_size),
+                        )
                     };
-                    let buffer = active_shell_buffer_mut(runtime)?;
-                    buffer.open_line_above();
-                    apply_line_indent(buffer, buffer.cursor_row(), indent_size, &reference_indent);
-                    buffer.mark_syntax_dirty();
+                    active_shell_buffer_mut(runtime)?.open_line_above();
+                    let line_index = shell_buffer(runtime, buffer_id)?.cursor_row();
+                    let indent = syntax_indent_for_buffer(
+                        runtime,
+                        buffer_id,
+                        line_index,
+                        indent_size,
+                        use_tabs,
+                    )?
+                    .unwrap_or(reference_indent);
+                    {
+                        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+                        apply_line_indent(buffer, line_index, indent_size, &indent);
+                        buffer.mark_syntax_dirty();
+                    }
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
                 "undo" => {
@@ -12455,6 +12717,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "put-before" => {
                     put_yank(runtime, false)?;
                 }
+                "visual-put-after" => {
+                    put_yank_over_visual_selection(runtime, true)?;
+                }
+                "visual-put-before" => {
+                    put_yank_over_visual_selection(runtime, false)?;
+                }
                 "visual-swap-anchor" => {
                     swap_visual_anchor(runtime)?;
                 }
@@ -12472,6 +12740,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Change)?;
                 }
+                "visual-replace-char" => {
+                    start_change_recording(runtime)?;
+                    shell_ui_mut(runtime)?.vim_mut().pending =
+                        Some(VimPending::ReplaceVisualSelection);
+                }
                 "visual-block-insert" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
@@ -12485,6 +12758,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "visual-format" => {
                     start_change_recording(runtime)?;
                     emit_workspace_format(runtime)?;
+                }
+                "visual-toggle-comment" => {
+                    start_change_recording(runtime)?;
+                    toggle_visual_selection_comments(runtime)?;
                 }
                 "visual-yank" => {
                     apply_visual_operator(runtime, VimOperator::Yank)?;
@@ -12500,6 +12777,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "visual-uppercase" => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Uppercase)?;
+                }
+                "visual-indent" => {
+                    start_change_recording(runtime)?;
+                    shift_visual_selection(runtime, true)?;
+                }
+                "visual-outdent" => {
+                    start_change_recording(runtime)?;
+                    shift_visual_selection(runtime, false)?;
+                }
+                "visual-join" => {
+                    start_change_recording(runtime)?;
+                    join_visual_selection_lines(runtime)?;
                 }
                 _ => {}
             }
@@ -13395,6 +13684,7 @@ fn start_lsp_for_active_buffer(
             context.path.display()
         ));
     }
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let labels = if let Some(server_id) = preferred_server_id {
         manager.start_buffer_server(
             &context.path,
@@ -13427,6 +13717,7 @@ fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String>
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     lsp_client
         .stop_buffer(&context.path)
         .map_err(|error| error.to_string())?;
@@ -13467,6 +13758,7 @@ fn restart_lsp_for_active_buffer(
             context.path.display()
         ));
     }
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let labels = manager
         .restart_buffer(
             &context.path,
@@ -13530,6 +13822,7 @@ fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, code_actions) = {
         let labels = lsp_client
             .sync_buffer(
@@ -13590,6 +13883,7 @@ fn navigate_to_lsp_locations(
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, locations) = {
         let labels = lsp_client
             .sync_buffer(
@@ -14089,6 +14383,11 @@ fn lsp_buffer_context(
     })
 }
 
+fn cancel_lsp_sync_for_path(runtime: &mut EditorRuntime, path: &Path) -> Result<(), String> {
+    shell_ui_mut(runtime)?.lsp_sync_worker.cancel_path(path);
+    Ok(())
+}
+
 fn buffer_is_git_status(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND)
 }
@@ -14155,6 +14454,7 @@ fn vim_edit_requires_write(detail: &str) -> bool {
             | "replace-char"
             | "enter-replace-mode"
             | "toggle-case"
+            | "toggle-line-comment"
             | "append"
             | "append-line-end"
             | "insert-line-start"
@@ -14169,10 +14469,15 @@ fn vim_edit_requires_write(detail: &str) -> bool {
             | "put-before"
             | "visual-delete"
             | "visual-change"
+            | "visual-replace-char"
             | "visual-format"
+            | "visual-toggle-comment"
             | "visual-toggle-case"
             | "visual-lowercase"
             | "visual-uppercase"
+            | "visual-indent"
+            | "visual-outdent"
+            | "visual-join"
             | "visual-block-insert"
             | "visual-block-append"
     )
@@ -14571,6 +14876,162 @@ struct PendingAutocompleteRequest {
     request: AutocompleteWorkerRequest,
 }
 
+#[derive(Debug, Clone)]
+struct LspSyncWorkerRequest {
+    path: PathBuf,
+    revision: u64,
+    text: TextSnapshot,
+    root: Option<PathBuf>,
+    lsp_client: Arc<LspClientManager>,
+}
+
+struct PendingLspSyncRequest {
+    due_at: Instant,
+    request: LspSyncWorkerRequest,
+}
+
+#[derive(Debug)]
+struct LspSyncWorkerResult {
+    path: PathBuf,
+    revision: u64,
+    error: Option<String>,
+}
+
+struct LspSyncWorkerState {
+    pending: BTreeMap<PathBuf, PendingLspSyncRequest>,
+    requested_revisions: BTreeMap<PathBuf, u64>,
+    request_tx: Sender<LspSyncWorkerRequest>,
+    results: Arc<Mutex<Vec<LspSyncWorkerResult>>>,
+}
+
+impl LspSyncWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<LspSyncWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let mut latest_by_path = BTreeMap::new();
+                latest_by_path.insert(request.path.clone(), request);
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    latest_by_path.insert(newer_request.path.clone(), newer_request);
+                }
+                for request in latest_by_path.into_values() {
+                    let error = request
+                        .lsp_client
+                        .sync_buffer(
+                            &request.path,
+                            request.text.text(),
+                            request.revision,
+                            request.root.as_deref(),
+                        )
+                        .err()
+                        .map(|error| error.to_string());
+                    if let Ok(mut results) = worker_results.lock() {
+                        results.push(LspSyncWorkerResult {
+                            path: request.path,
+                            revision: request.revision,
+                            error,
+                        });
+                    } else {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Self {
+            pending: BTreeMap::new(),
+            requested_revisions: BTreeMap::new(),
+            request_tx,
+            results,
+        }
+    }
+
+    fn has_request(&self, path: &Path, revision: u64) -> bool {
+        self.pending
+            .get(path)
+            .map(|pending| pending.request.revision >= revision)
+            .unwrap_or(false)
+            || self
+                .requested_revisions
+                .get(path)
+                .map(|requested_revision| *requested_revision >= revision)
+                .unwrap_or(false)
+    }
+
+    fn schedule(&mut self, request: LspSyncWorkerRequest, typing_active: bool) {
+        if self
+            .requested_revisions
+            .get(request.path.as_path())
+            .map(|requested_revision| *requested_revision >= request.revision)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let due_at = if typing_active {
+            Instant::now() + LSP_SYNC_TYPING_IDLE_THRESHOLD
+        } else {
+            Instant::now()
+        };
+        self.pending.insert(
+            request.path.clone(),
+            PendingLspSyncRequest { due_at, request },
+        );
+    }
+
+    fn cancel_path(&mut self, path: &Path) {
+        self.pending.remove(path);
+        self.requested_revisions.remove(path);
+    }
+
+    fn dispatch_due(&mut self, now: Instant) -> Result<(), String> {
+        let due_paths = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.due_at <= now)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in due_paths {
+            let Some(pending) = self.pending.remove(path.as_path()) else {
+                continue;
+            };
+            if self
+                .requested_revisions
+                .get(path.as_path())
+                .map(|requested_revision| *requested_revision >= pending.request.revision)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            self.requested_revisions
+                .insert(path.clone(), pending.request.revision);
+            if self.request_tx.send(pending.request).is_err() {
+                self.requested_revisions.remove(path.as_path());
+                return Err(format!(
+                    "failed to send LSP sync request for `{}`: worker disconnected",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn take_results(&mut self) -> Vec<LspSyncWorkerResult> {
+        let Ok(mut results) = self.results.lock() else {
+            return Vec::new();
+        };
+        let drained = results.drain(..).collect::<Vec<_>>();
+        for result in &drained {
+            if self.requested_revisions.get(result.path.as_path()).copied() == Some(result.revision)
+            {
+                self.requested_revisions.remove(result.path.as_path());
+            }
+        }
+        drained
+    }
+}
+
 struct AutocompleteWorkerRequest {
     request_id: u64,
     buffer_id: BufferId,
@@ -14828,12 +15289,7 @@ fn lsp_autocomplete_entries(
     };
     let text = request.text.text();
     let completions = lsp_client
-        .sync_buffer(
-            path,
-            &text,
-            request.buffer_revision,
-            request.root.as_deref(),
-        )
+        .sync_buffer(path, text, request.buffer_revision, request.root.as_deref())
         .ok()
         .and_then(|_| lsp_client.completions(path, request.cursor).ok())
         .unwrap_or_default();
@@ -15799,12 +16255,18 @@ impl SyntaxRefreshWorkerState {
         }
     }
 
-    fn configure(&mut self, configs: Vec<LanguageConfiguration>, install_root: PathBuf) {
+    fn configure(
+        &mut self,
+        configs: Vec<LanguageConfiguration>,
+        install_root: PathBuf,
+        query_asset_root: Option<PathBuf>,
+    ) {
         let (request_tx, request_rx) = mpsc::channel::<SyntaxRefreshWorkerRequest>();
         let results = Arc::new(Mutex::new(Vec::new()));
         let worker_results = Arc::clone(&results);
         std::thread::spawn(move || {
             let mut registry = SyntaxRegistry::with_install_root(install_root);
+            registry.set_query_asset_root(query_asset_root);
             let mut parse_sessions: BTreeMap<BufferId, Option<SyntaxParseSession>> =
                 BTreeMap::new();
             if registry.register_all(configs).is_err() {
@@ -16972,6 +17434,61 @@ fn line_text_without_newline(buffer: &ShellBuffer, line_index: usize) -> Option<
     )))
 }
 
+fn current_visual_state(
+    runtime: &EditorRuntime,
+) -> Result<(TextPoint, TextPoint, VisualSelectionKind), String> {
+    let ui = shell_ui(runtime)?;
+    let anchor = ui
+        .vim()
+        .visual_anchor
+        .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+    let buffer = ui
+        .buffer(active_shell_buffer_id(runtime)?)
+        .ok_or_else(|| "active visual buffer is missing".to_owned())?;
+    Ok((anchor, buffer.cursor_point(), ui.vim().visual_kind))
+}
+
+fn current_visual_line_span(
+    runtime: &EditorRuntime,
+) -> Result<(usize, usize, TextPoint, TextPoint, VisualSelectionKind), String> {
+    let (anchor, cursor, kind) = current_visual_state(runtime)?;
+    Ok((
+        anchor.line.min(cursor.line),
+        anchor.line.max(cursor.line),
+        cursor,
+        anchor,
+        kind,
+    ))
+}
+
+fn join_vim_lines_text(text: &str) -> (String, usize) {
+    let trailing_newline = text.ends_with('\n');
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    if trailing_newline {
+        let _ = lines.pop();
+    }
+    let Some((first, rest)) = lines.split_first() else {
+        return (String::new(), 0);
+    };
+    let first_segment = first.trim_end_matches([' ', '\t']);
+    let cursor_column = first_segment.chars().count();
+    let mut joined = first_segment.to_owned();
+    for line in rest {
+        let segment = line.trim_start_matches([' ', '\t']);
+        let needs_space = !joined.is_empty()
+            && !joined.chars().last().is_some_and(char::is_whitespace)
+            && !segment.is_empty();
+        if needs_space {
+            joined.push(' ');
+        }
+        joined.push_str(segment);
+    }
+    if trailing_newline {
+        joined.push('\n');
+    }
+    (joined, cursor_column)
+}
+
 fn resolve_block_insert_text(original: &str, current: &str, insert_col: usize) -> String {
     let original_chars: Vec<char> = original.chars().collect();
     let current_chars: Vec<char> = current.chars().collect();
@@ -17102,6 +17619,404 @@ fn transform_case_text(text: &str, operator: VimOperator) -> String {
             _ => character.to_string(),
         })
         .collect()
+}
+
+fn replace_visual_text(text: &str, character: char) -> String {
+    let replacement = character.to_string();
+    text.chars()
+        .map(|current| {
+            if current == '\n' {
+                "\n".to_owned()
+            } else {
+                replacement.clone()
+            }
+        })
+        .collect()
+}
+
+fn shift_visual_selection(runtime: &mut EditorRuntime, indent: bool) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    let (start_line, end_line, cursor, anchor, kind) = current_visual_line_span(runtime)?;
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
+    let (indent_size, use_tabs) = {
+        let ui = shell_ui(runtime)?;
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+        let theme_registry = runtime.services().get::<ThemeRegistry>();
+        let indent_size = theme_lang_indent(theme_registry, language_id);
+        (
+            if indent_size == 0 { 4 } else { indent_size },
+            theme_lang_use_tabs(theme_registry, language_id),
+        )
+    };
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        for line_index in start_line..=end_line {
+            let line = buffer.text.line(line_index).unwrap_or_default();
+            let (columns, _) = leading_whitespace_info(&line, indent_size);
+            let target_columns = if indent {
+                columns.saturating_add(indent_size)
+            } else {
+                columns.saturating_sub(indent_size)
+            };
+            let target_indent = indent_string_from_columns(target_columns, indent_size, use_tabs);
+            apply_line_indent(buffer, line_index, indent_size, &target_indent);
+        }
+        let target = buffer
+            .text
+            .first_non_blank_in_line(start_line)
+            .unwrap_or(TextPoint::new(start_line, 0));
+        buffer.set_cursor(target);
+        buffer.mark_syntax_dirty();
+    }
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn join_visual_selection_lines(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    let (start_line, end_line, cursor, anchor, kind) = current_visual_line_span(runtime)?;
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
+    if start_line == end_line {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let range = buffer
+            .line_span_range(
+                start_line,
+                end_line.saturating_sub(start_line).saturating_add(1),
+            )
+            .ok_or_else(|| "visual join range is unavailable".to_owned())?;
+        let original = buffer.slice(range);
+        let (joined, cursor_column) = join_vim_lines_text(&original);
+        buffer.replace_range(range, &joined);
+        buffer.set_cursor(TextPoint::new(start_line, cursor_column));
+        buffer.mark_syntax_dirty();
+    }
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn replace_visual_selection_chars(
+    runtime: &mut EditorRuntime,
+    character: char,
+) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        return Ok(());
+    }
+    let (selection, cursor, kind, anchor) = {
+        let ui = shell_ui(runtime)?;
+        let anchor = ui
+            .vim()
+            .visual_anchor
+            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+        let kind = ui.vim().visual_kind;
+        let buffer = ui
+            .buffer(active_shell_buffer_id(runtime)?)
+            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
+        (
+            visual_selection(buffer, anchor, kind)
+                .ok_or_else(|| "visual selection is empty".to_owned())?,
+            buffer.cursor_point(),
+            kind,
+            anchor,
+        )
+    };
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
+    match selection {
+        VisualSelection::Range(range) => {
+            let buffer = active_shell_buffer_mut(runtime)?;
+            let replaced = replace_visual_text(&buffer.slice(range), character);
+            buffer.replace_range(range, &replaced);
+            buffer.set_cursor(range.start());
+            buffer.mark_syntax_dirty();
+        }
+        VisualSelection::Block(block) => {
+            let ranges = {
+                let buffer = active_shell_buffer_mut(runtime)?;
+                block_selection_ranges(buffer, block)
+            };
+            if ranges.is_empty() {
+                shell_ui_mut(runtime)?.enter_normal_mode();
+                return Ok(());
+            }
+            let buffer = active_shell_buffer_mut(runtime)?;
+            for range in ranges.iter().rev().copied() {
+                let replaced = replace_visual_text(&buffer.slice(range), character);
+                buffer.replace_range(range, &replaced);
+            }
+            buffer.set_cursor(TextPoint::new(block.start_line, block.start_col));
+            buffer.mark_syntax_dirty();
+        }
+    }
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    Ok(())
+}
+
+fn matches_comment_id(id: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| id == *candidate || id.starts_with(&format!("{candidate}-")))
+}
+
+fn line_comment_prefix_for_buffer(buffer: &ShellBuffer) -> Option<&'static str> {
+    let language_id = buffer.language_id().map(|value| value.to_ascii_lowercase());
+    let extension = buffer
+        .path()
+        .and_then(Path::extension)
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let file_name = buffer
+        .path()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    if language_id.as_deref().is_some_and(|id| {
+        matches_comment_id(
+            id,
+            &[
+                "rust",
+                "c",
+                "cpp",
+                "csharp",
+                "java",
+                "javascript",
+                "typescript",
+                "jsx",
+                "tsx",
+                "go",
+                "zig",
+                "swift",
+                "kotlin",
+                "scala",
+                "dart",
+                "php",
+            ],
+        )
+    }) || extension.as_deref().is_some_and(|ext| {
+        matches!(
+            ext,
+            "rs" | "c"
+                | "h"
+                | "cc"
+                | "cpp"
+                | "cs"
+                | "java"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "go"
+                | "zig"
+                | "swift"
+                | "kt"
+                | "kts"
+                | "scala"
+                | "dart"
+                | "php"
+        )
+    }) {
+        return Some("//");
+    }
+
+    if language_id
+        .as_deref()
+        .is_some_and(|id| matches_comment_id(id, &["lua", "sql", "haskell"]))
+        || extension
+            .as_deref()
+            .is_some_and(|ext| matches!(ext, "lua" | "sql" | "hs"))
+    {
+        return Some("--");
+    }
+
+    if language_id.as_deref().is_some_and(|id| {
+        matches_comment_id(
+            id,
+            &[
+                "python",
+                "bash",
+                "shell",
+                "sh",
+                "zsh",
+                "fish",
+                "yaml",
+                "toml",
+                "ruby",
+                "perl",
+                "r",
+                "make",
+                "gitcommit",
+                "dockerfile",
+                "nix",
+                "nu",
+                "powershell",
+            ],
+        )
+    }) || extension.as_deref().is_some_and(|ext| {
+        matches!(
+            ext,
+            "py" | "sh"
+                | "bash"
+                | "zsh"
+                | "fish"
+                | "yml"
+                | "yaml"
+                | "toml"
+                | "rb"
+                | "pl"
+                | "r"
+                | "mk"
+                | "nix"
+                | "nu"
+                | "ps1"
+        )
+    }) || file_name
+        .as_deref()
+        .is_some_and(|name| matches!(name, "makefile" | "dockerfile" | ".gitignore"))
+    {
+        return Some("#");
+    }
+
+    None
+}
+
+fn comment_toggle_removal_len(content: &str, prefix: &str) -> Option<usize> {
+    let rest = content.strip_prefix(prefix)?;
+    Some(prefix.chars().count() + usize::from(rest.starts_with(' ')))
+}
+
+fn toggle_line_comments_in_range(
+    runtime: &mut EditorRuntime,
+    start_line: usize,
+    end_line: usize,
+    cursor: TextPoint,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (prefix, end_line) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let prefix = line_comment_prefix_for_buffer(buffer).ok_or_else(|| {
+            let language = buffer.language_id().unwrap_or("this buffer");
+            format!("comment toggling is unavailable for `{language}`")
+        })?;
+        let end_line = end_line.min(buffer.line_count().saturating_sub(1));
+        (prefix, end_line)
+    };
+    let uncomment = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let mut saw_non_blank = false;
+        let mut uncomment = true;
+        for line_index in start_line..=end_line {
+            let line = buffer.text.line(line_index).unwrap_or_default();
+            if line.trim().is_empty() {
+                continue;
+            }
+            saw_non_blank = true;
+            let (_, indent_end) = leading_whitespace_info(&line, 1);
+            uncomment &= comment_toggle_removal_len(&line[indent_end..], prefix).is_some();
+        }
+        if !saw_non_blank {
+            return Ok(());
+        }
+        uncomment
+    };
+    let insert = format!("{prefix} ");
+    let buffer = active_shell_buffer_mut(runtime)?;
+    let cursor_line = cursor.line.min(buffer.line_count().saturating_sub(1));
+    let mut cursor_column = cursor.column.min(buffer.line_len_chars(cursor_line));
+    for line_index in start_line..=end_line {
+        let line = buffer.text.line(line_index).unwrap_or_default();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (indent_chars, indent_end) = leading_whitespace_info(&line, 1);
+        let content = &line[indent_end..];
+        if uncomment {
+            let Some(remove_chars) = comment_toggle_removal_len(content, prefix) else {
+                continue;
+            };
+            buffer.replace_range(
+                TextRange::new(
+                    TextPoint::new(line_index, indent_chars),
+                    TextPoint::new(line_index, indent_chars.saturating_add(remove_chars)),
+                ),
+                "",
+            );
+            if line_index == cursor_line && cursor_column > indent_chars {
+                cursor_column = cursor_column.saturating_sub(remove_chars);
+            }
+        } else {
+            buffer.replace_range(
+                TextRange::new(
+                    TextPoint::new(line_index, indent_chars),
+                    TextPoint::new(line_index, indent_chars),
+                ),
+                &insert,
+            );
+            if line_index == cursor_line && cursor_column >= indent_chars {
+                cursor_column = cursor_column.saturating_add(insert.chars().count());
+            }
+        }
+    }
+    buffer.set_cursor(TextPoint::new(
+        cursor_line,
+        cursor_column.min(buffer.line_len_chars(cursor_line)),
+    ));
+    buffer.mark_syntax_dirty();
+    Ok(())
+}
+
+fn toggle_current_line_comment(runtime: &mut EditorRuntime, count: usize) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    let cursor = active_shell_buffer_mut(runtime)?.cursor_point();
+    let end_line = cursor.line.saturating_add(count.saturating_sub(1)).min(
+        active_shell_buffer_mut(runtime)?
+            .line_count()
+            .saturating_sub(1),
+    );
+    toggle_line_comments_in_range(runtime, cursor.line, end_line, cursor)?;
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn toggle_visual_selection_comments(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    let (start_line, end_line, cursor, anchor, kind) = current_visual_line_span(runtime)?;
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
+    let target = {
+        let buffer = shell_buffer(runtime, active_shell_buffer_id(runtime)?)?;
+        buffer
+            .text
+            .first_non_blank_in_line(start_line)
+            .unwrap_or(TextPoint::new(start_line, 0))
+    };
+    toggle_line_comments_in_range(runtime, start_line, end_line, target)?;
+    shell_ui_mut(runtime)?.enter_normal_mode();
+    schedule_finish_change(runtime)?;
+    Ok(())
 }
 
 fn store_yank_register(
@@ -17700,11 +18615,12 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    if let Some(path) = shell_ui(runtime)?
+    let path = shell_ui(runtime)?
         .buffer(buffer_id)
-        .and_then(|buffer| buffer.path().map(Path::to_path_buf))
-        && let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>()
-    {
+        .and_then(|buffer| buffer.path().map(Path::to_path_buf));
+    let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
+    if let (Some(path), Some(lsp_client)) = (path, lsp_client) {
+        cancel_lsp_sync_for_path(runtime, &path)?;
         lsp_client
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
@@ -17724,7 +18640,8 @@ fn close_lsp_buffers_for_workspace(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
 ) -> Result<(), String> {
-    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>() else {
+    let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
+    let Some(lsp_client) = lsp_client else {
         return Ok(());
     };
     let paths = {
@@ -17743,6 +18660,7 @@ fn close_lsp_buffers_for_workspace(
             .unwrap_or_default()
     };
     for path in paths {
+        cancel_lsp_sync_for_path(runtime, &path)?;
         lsp_client
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
@@ -18026,6 +18944,7 @@ fn try_format_buffer_entire_with_lsp(
     let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, edits) = {
         if !lsp_client.supports_path(&context.path) {
             return Ok(false);
@@ -18070,6 +18989,7 @@ fn try_format_visual_selection_with_lsp(
     let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
+    cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, edits) = {
         if !lsp_client.supports_path(&context.path) {
             return Ok(false);
@@ -18789,6 +19709,13 @@ fn submit_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
     execute_vim_command_line(runtime, &text)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimSubstituteScope {
+    CurrentLine,
+    FullBuffer,
+    LineRange { start_line: usize, end_line: usize },
+}
+
 fn execute_vim_command_line(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
     let command = command.trim();
     if command.is_empty() {
@@ -18797,8 +19724,8 @@ fn execute_vim_command_line(runtime: &mut EditorRuntime, command: &str) -> Resul
     if let Some(shell_command) = command.strip_prefix('!') {
         return run_shell_command_from_vim_command_line(runtime, shell_command.trim());
     }
-    if command.starts_with("%s") {
-        return apply_vim_substitute_command(runtime, command);
+    if let Some((scope, pattern, replacement, flags)) = parse_vim_substitute_command(command)? {
+        return apply_vim_substitute_command(runtime, scope, &pattern, &replacement, &flags);
     }
     if runtime.commands().contains(command) {
         runtime
@@ -18827,54 +19754,137 @@ fn execute_vim_command_line(runtime: &mut EditorRuntime, command: &str) -> Resul
     }
 }
 
-fn apply_vim_substitute_command(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
-    let (pattern, replacement, flags) = parse_vim_substitute_command(command)?;
+fn apply_vim_substitute_command(
+    runtime: &mut EditorRuntime,
+    scope: VimSubstituteScope,
+    pattern: &str,
+    replacement: &str,
+    flags: &str,
+) -> Result<(), String> {
     if pattern.is_empty() {
-        return Err(":%s requires a search pattern".to_owned());
+        return Err(":s requires a search pattern".to_owned());
     }
     let replace_all = flags.contains('g');
     if flags.chars().any(|flag| flag != 'g') {
-        return Err(format!("unsupported :%s flags `{flags}`"));
+        return Err(format!("unsupported :s flags `{flags}`"));
     }
-    let (original_cursor, end, replaced, replacements) = {
+    let (original_cursor, range, replaced, replacements) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         if buffer.is_read_only() {
-            return Err(":%s is blocked for read-only buffers".to_owned());
+            return Err(":s is blocked for read-only buffers".to_owned());
         }
         let original_cursor = buffer.cursor_point();
-        let end = if buffer.line_count() == 0 {
-            TextPoint::default()
-        } else {
-            let last_line = buffer.line_count().saturating_sub(1);
-            TextPoint::new(last_line, buffer.line_len_chars(last_line))
+        let range = match scope {
+            VimSubstituteScope::CurrentLine => buffer
+                .line_range(buffer.cursor_row())
+                .ok_or_else(|| "current line is unavailable for :s".to_owned())?,
+            VimSubstituteScope::FullBuffer => buffer.full_range(),
+            VimSubstituteScope::LineRange {
+                start_line,
+                end_line,
+            } => buffer
+                .line_span_range(
+                    start_line,
+                    end_line.saturating_sub(start_line).saturating_add(1),
+                )
+                .ok_or_else(|| "line range is unavailable for :s".to_owned())?,
         };
         let (replaced, replacements) =
-            substitute_buffer_text(&buffer.text.text(), &pattern, &replacement, replace_all);
-        (original_cursor, end, replaced, replacements)
+            substitute_buffer_text(&buffer.slice(range), pattern, replacement, replace_all);
+        (original_cursor, range, replaced, replacements)
     };
     if replacements == 0 {
         return Err(format!("no matches found for `{pattern}`"));
     }
     let buffer = active_shell_buffer_mut(runtime)?;
-    buffer.replace_range(TextRange::new(TextPoint::default(), end), &replaced);
+    buffer.replace_range(range, &replaced);
     buffer.set_cursor(original_cursor);
     buffer.mark_syntax_dirty();
     Ok(())
 }
 
-fn parse_vim_substitute_command(command: &str) -> Result<(String, String, String), String> {
-    let rest = command
-        .strip_prefix("%s")
-        .ok_or_else(|| ":%s command must start with `%s`".to_owned())?;
+fn parse_vim_substitute_command(
+    command: &str,
+) -> Result<Option<(VimSubstituteScope, String, String, String)>, String> {
+    let Some((scope, rest)) = parse_vim_substitute_scope(command)? else {
+        return Ok(None);
+    };
     let Some(delimiter) = rest.chars().next() else {
-        return Err(":%s requires a delimiter".to_owned());
+        return Err(":s requires a delimiter".to_owned());
     };
     let mut remaining = &rest[delimiter.len_utf8()..];
     let (pattern, next) = split_vim_substitute_segment(remaining, delimiter)?;
     remaining = next;
     let (replacement, next) = split_vim_substitute_segment(remaining, delimiter)?;
     remaining = next;
-    Ok((pattern, replacement, remaining.trim().to_owned()))
+    Ok(Some((
+        scope,
+        pattern,
+        replacement,
+        remaining.trim().to_owned(),
+    )))
+}
+
+fn parse_vim_substitute_scope(command: &str) -> Result<Option<(VimSubstituteScope, &str)>, String> {
+    if let Some(rest) = command.strip_prefix("%s") {
+        return Ok(Some((VimSubstituteScope::FullBuffer, rest)));
+    }
+    if let Some(rest) = command.strip_prefix('s') {
+        if starts_with_vim_substitute_delimiter(rest) {
+            return Ok(Some((VimSubstituteScope::CurrentLine, rest)));
+        }
+        return Ok(None);
+    }
+    let Some(s_index) = command.find('s') else {
+        return Ok(None);
+    };
+    let (range_text, tail) = command.split_at(s_index);
+    if range_text.is_empty()
+        || !range_text
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == ',')
+    {
+        return Ok(None);
+    }
+    let rest = &tail['s'.len_utf8()..];
+    if !starts_with_vim_substitute_delimiter(rest) {
+        return Ok(None);
+    }
+    let (start_line, end_line) = parse_vim_substitute_line_range(range_text)?;
+    Ok(Some((
+        VimSubstituteScope::LineRange {
+            start_line,
+            end_line,
+        },
+        rest,
+    )))
+}
+
+fn starts_with_vim_substitute_delimiter(rest: &str) -> bool {
+    rest.chars()
+        .next()
+        .is_some_and(|character| !character.is_ascii_alphanumeric() && !character.is_whitespace())
+}
+
+fn parse_vim_substitute_line_range(range_text: &str) -> Result<(usize, usize), String> {
+    let mut parts = range_text.split(',');
+    let start_line = parts
+        .next()
+        .ok_or_else(|| "missing :s range start".to_owned())?
+        .parse::<usize>()
+        .map_err(|_| format!("invalid :s range `{range_text}`"))?;
+    let end_line = parts
+        .next()
+        .map(|part| {
+            part.parse::<usize>()
+                .map_err(|_| format!("invalid :s range `{range_text}`"))
+        })
+        .transpose()?
+        .unwrap_or(start_line);
+    if parts.next().is_some() || start_line == 0 || end_line == 0 || start_line > end_line {
+        return Err(format!("invalid :s range `{range_text}`"));
+    }
+    Ok((start_line.saturating_sub(1), end_line.saturating_sub(1)))
 }
 
 fn split_vim_substitute_segment(input: &str, delimiter: char) -> Result<(String, &str), String> {
@@ -19341,9 +20351,9 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
     }
 
     start_change_recording(runtime)?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
     let (indent_size, use_tabs) = {
         let ui = shell_ui(runtime)?;
-        let buffer_id = active_shell_buffer_id(runtime)?;
         let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
         let theme_registry = runtime.services().get::<ThemeRegistry>();
         (
@@ -19351,8 +20361,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
             theme_lang_use_tabs(theme_registry, language_id),
         )
     };
-
-    {
+    let should_format_indent = {
         let buffer = active_shell_buffer_mut(runtime)?;
         match yank {
             YankRegister::Character(text) => {
@@ -19413,13 +20422,139 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
                 buffer.set_cursor(TextPoint::new(origin.line, target_col));
             }
         }
-        if buffer.supports_text_file_actions() {
-            format_current_line_indent(buffer, indent_size, use_tabs);
-        }
-        buffer.mark_syntax_dirty();
+        buffer.supports_text_file_actions()
+    };
+
+    if should_format_indent {
+        format_current_line_indent(runtime, buffer_id, indent_size, use_tabs)?;
     }
+    shell_buffer_mut(runtime, buffer_id)?.mark_syntax_dirty();
 
     shell_ui_mut(runtime)?.vim_mut().clear_transient();
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn put_yank_over_visual_selection(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
+    let Some(yank) = resolve_put_yank(runtime)? else {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        return Ok(());
+    };
+    if active_shell_buffer_is_terminal(runtime)? {
+        return put_yank(runtime, after);
+    }
+
+    start_change_recording(runtime)?;
+
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        let kind = shell_ui(runtime)?.vim().visual_kind;
+        let Some(replaced) = active_shell_buffer_mut(runtime)?
+            .input_field_mut()
+            .and_then(|input| input.selected_text(kind))
+        else {
+            shell_ui_mut(runtime)?.enter_normal_mode();
+            return Ok(());
+        };
+        let inserted = yank_to_clipboard_text(&yank).into_owned();
+        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+            input.delete_selection();
+            input.insert_text(&inserted);
+        }
+        let replaced_yank = match kind {
+            VisualSelectionKind::Line => YankRegister::Line(replaced),
+            VisualSelectionKind::Character | VisualSelectionKind::Block => {
+                YankRegister::Character(replaced)
+            }
+        };
+        store_yank_register(runtime, replaced_yank, true)?;
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+
+    let (selection, cursor, kind, anchor) = {
+        let ui = shell_ui(runtime)?;
+        let anchor = ui
+            .vim()
+            .visual_anchor
+            .ok_or_else(|| "visual selection anchor is missing".to_owned())?;
+        let kind = ui.vim().visual_kind;
+        let buffer = ui
+            .buffer(active_shell_buffer_id(runtime)?)
+            .ok_or_else(|| "active visual buffer is missing".to_owned())?;
+        (
+            visual_selection(buffer, anchor, kind)
+                .ok_or_else(|| "visual selection is empty".to_owned())?,
+            buffer.cursor_point(),
+            kind,
+            anchor,
+        )
+    };
+    store_last_visual_selection(runtime, anchor, cursor, kind)?;
+
+    let replaced_yank = match selection {
+        VisualSelection::Range(range) => {
+            let inserted = yank_to_clipboard_text(&yank).into_owned();
+            let target_cursor = if after {
+                advance_point_by_text(range.start(), &inserted)
+            } else {
+                range.start()
+            };
+            let removed = {
+                let buffer = active_shell_buffer_mut(runtime)?;
+                let removed = buffer.slice(range);
+                if !removed.is_empty() {
+                    buffer.replace_range(range, &inserted);
+                    buffer.set_cursor(target_cursor);
+                    buffer.mark_syntax_dirty();
+                }
+                removed
+            };
+            if removed.is_empty() {
+                shell_ui_mut(runtime)?.enter_normal_mode();
+                return Ok(());
+            }
+            if kind == VisualSelectionKind::Line {
+                YankRegister::Line(removed)
+            } else {
+                YankRegister::Character(removed)
+            }
+        }
+        VisualSelection::Block(block) => {
+            let removed = {
+                let buffer = active_shell_buffer_mut(runtime)?;
+                let ranges = block_selection_ranges(buffer, block);
+                let removed = ranges
+                    .iter()
+                    .copied()
+                    .map(|range| buffer.slice(range))
+                    .collect::<Vec<_>>();
+                match &yank {
+                    YankRegister::Block(lines) => {
+                        for index in (0..ranges.len()).rev() {
+                            let replacement = lines.get(index).map(String::as_str).unwrap_or("");
+                            buffer.replace_range(ranges[index], replacement);
+                        }
+                    }
+                    _ => {
+                        let inserted = yank_to_clipboard_text(&yank).into_owned();
+                        for range in ranges.iter().rev().copied() {
+                            buffer.replace_range(range, &inserted);
+                        }
+                    }
+                }
+                if let Some(first) = ranges.first().copied() {
+                    buffer.set_cursor(first.start());
+                }
+                buffer.mark_syntax_dirty();
+                removed
+            };
+            YankRegister::Block(removed)
+        }
+    };
+
+    store_yank_register(runtime, replaced_yank, true)?;
+    shell_ui_mut(runtime)?.enter_normal_mode();
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -20738,18 +21873,34 @@ fn refresh_pending_git(
     Ok(())
 }
 
-#[derive(Debug)]
-struct LspBufferRefreshRequest {
-    path: PathBuf,
-    revision: u64,
-    text: String,
-    root: Option<PathBuf>,
+fn refresh_pending_lsp(runtime: &mut EditorRuntime, typing_active: bool) -> Result<bool, String> {
+    schedule_pending_lsp_syncs(runtime, typing_active)?;
+    let sync_results = {
+        let ui = shell_ui_mut(runtime)?;
+        ui.lsp_sync_worker.take_results()
+    };
+    for result in sync_results {
+        if let Some(error) = result.error {
+            record_runtime_error(
+                runtime,
+                "lsp.sync-worker",
+                format!(
+                    "failed to sync `{}` at revision {}: {error}",
+                    result.path.display(),
+                    result.revision
+                ),
+            );
+        }
+    }
+    apply_pending_lsp_state(runtime)
 }
 
-fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
-    let now = Instant::now();
+fn schedule_pending_lsp_syncs(
+    runtime: &mut EditorRuntime,
+    typing_active: bool,
+) -> Result<(), String> {
     let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
-        return Ok(false);
+        return Ok(());
     };
 
     let requests = {
@@ -20770,14 +21921,18 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
                 {
                     return Ok(None);
                 }
-                if !lsp_client.needs_sync(&path, buffer.text.revision()) {
+                let revision = buffer.text.revision();
+                if !lsp_client.needs_sync(&path, revision)
+                    || ui.lsp_sync_worker.has_request(&path, revision)
+                {
                     return Ok(None);
                 }
-                Ok(Some(LspBufferRefreshRequest {
+                Ok(Some(LspSyncWorkerRequest {
                     path: path.clone(),
-                    revision: buffer.text.revision(),
-                    text: buffer.text.text(),
+                    revision,
+                    text: buffer.text.snapshot(),
                     root: workspace_root_for_path(runtime, &path)?,
+                    lsp_client: lsp_client.clone(),
                 }))
             })
             .collect::<Result<Vec<_>, String>>()?
@@ -20785,17 +21940,25 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
             .flatten()
             .collect::<Vec<_>>()
     };
-
+    let now = Instant::now();
+    let ui = shell_ui_mut(runtime)?;
     for request in requests {
-        lsp_client
-            .sync_buffer(
-                &request.path,
-                &request.text,
-                request.revision,
-                request.root.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
+        ui.lsp_sync_worker.schedule(request, typing_active);
     }
+    ui.lsp_sync_worker.dispatch_due(now)?;
+    Ok(())
+}
+
+fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let now = Instant::now();
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
+        return Ok(false);
+    };
+    let has_log_buffers = runtime
+        .services()
+        .get::<LspLogBufferState>()
+        .map(LspLogBufferState::has_buffers)
+        .unwrap_or(false);
 
     let (
         diagnostic_updates,
@@ -20825,7 +21988,7 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
             updates,
             ui.active_workspace(),
             active_server_label,
-            lsp_client.log_snapshot(),
+            has_log_buffers.then(|| lsp_client.log_snapshot()),
             lsp_client.notification_snapshot(),
         )
     };
@@ -20841,7 +22004,9 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime) -> Result<bool, String> {
         changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
         changed |= apply_lsp_notifications(ui, &notification_snapshot, now);
     }
-    changed |= refresh_lsp_log_buffers(runtime, &log_snapshot)?;
+    if let Some(log_snapshot) = log_snapshot.as_ref() {
+        changed |= refresh_lsp_log_buffers(runtime, log_snapshot)?;
+    }
     Ok(changed)
 }
 
@@ -20918,16 +22083,11 @@ fn refresh_lsp_log_buffers(
     if snapshot.revision() == applied_revision {
         return Ok(false);
     }
-    let active_workspace = runtime.model().active_workspace_id().ok();
-    let server_ids = snapshot
-        .entries()
-        .iter()
-        .map(LspLogEntry::server_id)
-        .collect::<BTreeSet<_>>();
-    if let Some(workspace_id) = active_workspace {
-        for server_id in server_ids {
-            let _ = ensure_lsp_log_buffer(runtime, workspace_id, server_id)?;
+    if workspace_buffers.is_empty() {
+        if let Some(state) = runtime.services_mut().get_mut::<LspLogBufferState>() {
+            state.applied_revision = snapshot.revision();
         }
+        return Ok(false);
     }
     let had_buffers = !workspace_buffers.is_empty();
     {
@@ -21701,17 +22861,18 @@ fn compute_buffer_syntax(
 }
 
 fn configure_syntax_refresh_worker(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let (install_root, configs) = {
+    let (install_root, query_asset_root, configs) = {
         let registry = runtime
             .services()
             .get::<SyntaxRegistry>()
             .ok_or_else(|| "syntax registry service missing".to_owned())?;
         (
             registry.install_root().to_path_buf(),
+            registry.query_asset_root().map(Path::to_path_buf),
             registry.languages().cloned().collect::<Vec<_>>(),
         )
     };
-    shell_ui_mut(runtime)?.configure_syntax_refresh_worker(configs, install_root);
+    shell_ui_mut(runtime)?.configure_syntax_refresh_worker(configs, install_root, query_asset_root);
     Ok(())
 }
 
@@ -22266,6 +23427,43 @@ fn percentile_duration(durations: &[Duration], percentile: usize) -> Duration {
     sorted[index]
 }
 
+fn non_zero_frame_durations(
+    frames: &[TypingFrameProfile],
+    extract: impl Fn(&TypingFrameProfile) -> Duration,
+) -> Vec<Duration> {
+    frames
+        .iter()
+        .map(extract)
+        .filter(|duration| !duration.is_zero())
+        .collect()
+}
+
+fn write_duration_summary(
+    file: &mut fs::File,
+    log_path: &Path,
+    label: &str,
+    durations: &[Duration],
+) -> Result<(), String> {
+    if durations.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        file,
+        "{label}: avg={}, p50={}, p95={}, max={} (frames={})",
+        format_duration_ms(average_duration(durations)),
+        format_duration_ms(percentile_duration(durations, 50)),
+        format_duration_ms(percentile_duration(durations, 95)),
+        format_duration_ms(*durations.iter().max().unwrap_or(&Duration::from_secs(0))),
+        durations.len(),
+    )
+    .map_err(|error| {
+        format!(
+            "failed to write typing profile `{}`: {error}",
+            log_path.display()
+        )
+    })
+}
+
 fn format_typing_frame_profile(frame: &TypingFrameProfile) -> String {
     let timestamp = format_timestamp(frame.timestamp);
     let preview = if frame.text_preview.is_empty() {
@@ -22282,7 +23480,7 @@ fn format_typing_frame_profile(frame: &TypingFrameProfile) -> String {
         .map(format_duration_ms)
         .unwrap_or_else(|| "-".to_owned());
     format!(
-        "[{timestamp}] frame={} pacing_sleep={} events={} keydowns={} text_inputs={} preview=\"{}\" handle={} keydown_handle={} text_handle={} text_inner={} picker={} syntax_apply={} syntax_worker={} syntax_results={} syntax_spans={} git={} acp={} render={} present={} total={} first_text_to_present={} last_text_to_present={}",
+        "[{timestamp}] frame={} pacing_sleep={} events={} keydowns={} text_inputs={} preview=\"{}\" handle={} keydown_handle={} text_handle={} text_inner={} layout_sync={} picker_search={} lsp={} notifications={} autocomplete={} hover={} terminal={} syntax_apply={} syntax_worker={} syntax_results={} syntax_spans={} git={} acp={} render={} present={} total={} first_text_to_present={} last_text_to_present={}",
         frame.frame_index,
         format_duration_ms(frame.frame_pacing_sleep),
         frame.polled_events,
@@ -22293,7 +23491,13 @@ fn format_typing_frame_profile(frame: &TypingFrameProfile) -> String {
         format_duration_ms(frame.keydown_handle_total),
         format_duration_ms(frame.text_input_handle_total),
         format_duration_ms(frame.text_input_inner_total),
-        format_duration_ms(frame.picker_refresh),
+        format_duration_ms(frame.layout_sync),
+        format_duration_ms(frame.picker_search_refresh),
+        format_duration_ms(frame.lsp_refresh),
+        format_duration_ms(frame.notification_refresh),
+        format_duration_ms(frame.autocomplete_refresh),
+        format_duration_ms(frame.hover_refresh),
+        format_duration_ms(frame.terminal_refresh),
         format_duration_ms(frame.syntax_refresh),
         format_duration_ms(frame.syntax_worker_compute),
         frame.syntax_result_count,

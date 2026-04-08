@@ -89,10 +89,12 @@ fn rewrite_standalone_user_manifests(
             ("../crates/editor-theme", "vendor/editor-theme"),
             ("../crates/editor-buffer", "vendor/editor-buffer"),
         ],
+        true,
     )?;
     rewrite_manifest(
         &user_destination.join("sdk").join("Cargo.toml"),
         &[
+            ("../../crates/editor-buffer", "../vendor/editor-buffer"),
             ("../../crates/editor-core", "../vendor/editor-core"),
             ("../../crates/editor-dap", "../vendor/editor-dap"),
             ("../../crates/editor-fs", "../vendor/editor-fs"),
@@ -102,6 +104,7 @@ fn rewrite_standalone_user_manifests(
             ("../../crates/editor-syntax", "../vendor/editor-syntax"),
             ("../../crates/editor-theme", "../vendor/editor-theme"),
         ],
+        false,
     )?;
     for crate_name in STANDALONE_USER_VENDOR_CRATES {
         rewrite_manifest(
@@ -110,6 +113,7 @@ fn rewrite_standalone_user_manifests(
                 .join(crate_name)
                 .join("Cargo.toml"),
             &[],
+            false,
         )?;
     }
 
@@ -119,11 +123,15 @@ fn rewrite_standalone_user_manifests(
 fn rewrite_manifest(
     manifest_path: &Path,
     path_replacements: &[(&str, &str)],
+    add_workspace_root: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut manifest = fs::read_to_string(manifest_path)?;
+    let mut manifest = fs::read_to_string(manifest_path)?.replace("\r\n", "\n");
     manifest = inline_workspace_package_fields(manifest);
     for (from, to) in path_replacements {
         manifest = manifest.replace(from, to);
+    }
+    if add_workspace_root {
+        manifest = add_standalone_workspace_root(manifest);
     }
     fs::write(manifest_path, manifest)?;
     Ok(())
@@ -141,6 +149,17 @@ fn inline_workspace_package_fields(mut manifest: String) -> String {
         "[lints]\nworkspace = true\n",
         "[lints.rust]\nunsafe_code = \"forbid\"\nunused_crate_dependencies = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunwrap_used = \"deny\"\n",
     );
+    manifest
+}
+
+fn add_standalone_workspace_root(mut manifest: String) -> String {
+    if manifest.contains("\n[workspace]\n") || manifest.starts_with("[workspace]\n") {
+        return manifest;
+    }
+    if !manifest.ends_with('\n') {
+        manifest.push('\n');
+    }
+    manifest.push_str("\n[workspace]\nresolver = \"3\"\n");
     manifest
 }
 
