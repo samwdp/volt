@@ -32,6 +32,7 @@ pub(super) fn render_shell_state(
         PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
         PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
     };
+    let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
     let pane_active_background = base_background;
@@ -43,7 +44,7 @@ pub(super) fn render_shell_state(
         .unwrap_or(false);
     let command_line_row_visible = user_library.commandline_enabled();
 
-    target.clear(base_background);
+    clear_window_surface(target, base_background, window_effects);
 
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
@@ -54,15 +55,17 @@ pub(super) fn render_shell_state(
         } else {
             pane_inactive_background
         };
-        fill_rect(
+        fill_window_surface_rect(
             target,
             PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
             background,
+            window_effects,
         )?;
-        fill_rect(
+        fill_window_surface_rect(
             target,
             PixelRectToRect::rect(rect.x, rect.y, rect.width, 1),
             border_color,
+            window_effects,
         )?;
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
@@ -216,16 +219,18 @@ pub(super) fn render_runtime_popup_overlay(
     now: Instant,
     typing_active: bool,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
     let popup_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
-    fill_rect(target, popup_rect, popup_background)?;
-    fill_rect(
+    fill_window_surface_rect(target, popup_rect, popup_background, window_effects)?;
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(popup_rect.x(), popup_rect.y(), popup_rect.width(), 1),
         border_color,
+        window_effects,
     )?;
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
@@ -291,6 +296,7 @@ pub(super) fn render_autocomplete_overlay(
     ) else {
         return Ok(());
     };
+    let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
         theme_registry,
@@ -375,14 +381,15 @@ pub(super) fn render_autocomplete_overlay(
         width.saturating_sub(2),
         height.saturating_sub(2),
     );
-    fill_rounded_rect(target, outer_rect, 8, border)?;
-    fill_rounded_rect(target, inner_rect, 7, panel_background)?;
-    fill_rect(
+    fill_window_surface_rounded_rect(target, outer_rect, 8, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, inner_rect, 7, panel_background, window_effects)?;
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
         border,
+        window_effects,
     )?;
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             x + list_width as i32 + 1,
@@ -391,6 +398,7 @@ pub(super) fn render_autocomplete_overlay(
             height.saturating_sub(2),
         ),
         docs_background,
+        window_effects,
     )?;
     if autocomplete.entries().is_empty() {
         return Ok(());
@@ -399,7 +407,7 @@ pub(super) fn render_autocomplete_overlay(
     for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
         let row_y = y + 8 + index as i32 * row_height;
         if index == autocomplete.selected_index {
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     x + 6,
@@ -408,6 +416,7 @@ pub(super) fn render_autocomplete_overlay(
                     row_height as u32,
                 ),
                 selected_background,
+                window_effects,
             )?;
         }
         let label = truncate_text_to_width(
@@ -459,6 +468,7 @@ pub(super) fn render_hover_overlay(
             user_library.commandline_enabled(),
         )
     });
+    let window_effects = current_window_effect_settings(theme_registry);
 
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
@@ -550,17 +560,19 @@ pub(super) fn render_hover_overlay(
         width.saturating_sub(2),
         height.saturating_sub(2),
     );
-    fill_rounded_rect(target, outer_rect, 8, focus_border)?;
-    fill_rounded_rect(target, inner_rect, 7, background)?;
-    fill_rect(
+    fill_window_surface_rounded_rect(target, outer_rect, 8, focus_border, window_effects)?;
+    fill_window_surface_rounded_rect(target, inner_rect, 7, background, window_effects)?;
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(x + 1, y + 1, width.saturating_sub(2), tabs_height),
         header_background,
+        window_effects,
     )?;
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(x + 1, y + tabs_height as i32, width.saturating_sub(2), 1),
         border,
+        window_effects,
     )?;
 
     let mut tab_x = x + 10;
@@ -569,11 +581,12 @@ pub(super) fn render_hover_overlay(
         let label = format!("{} {}", tab.provider_icon, tab.provider_label);
         let tab_width = monospace_text_width(&label, cell_width).saturating_add(16);
         if index == hover.provider_index {
-            fill_rounded_rect(
+            fill_window_surface_rounded_rect(
                 target,
                 PixelRectToRect::rect(tab_x - 4, tab_y - 2, tab_width, row_height as u32 + 4),
                 5,
                 selected_tab,
+                window_effects,
             )?;
         }
         draw_text(
@@ -795,6 +808,7 @@ pub(super) fn render_notification_overlay(
         return Ok(());
     }
 
+    let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
         theme_registry,
@@ -843,9 +857,9 @@ pub(super) fn render_notification_overlay(
             layout.rect.width().saturating_sub(2),
             layout.rect.height().saturating_sub(2),
         );
-        fill_rounded_rect(target, outer_rect, 10, border)?;
-        fill_rounded_rect(target, inner_rect, 9, background)?;
-        fill_rounded_rect(
+        fill_window_surface_rounded_rect(target, outer_rect, 10, border, window_effects)?;
+        fill_window_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
+        fill_window_surface_rounded_rect(
             target,
             PixelRectToRect::rect(
                 layout.rect.x() + 1,
@@ -855,6 +869,7 @@ pub(super) fn render_notification_overlay(
             ),
             4,
             accent,
+            window_effects,
         )?;
 
         let title_y = layout.rect.y() + 10;
@@ -896,11 +911,12 @@ pub(super) fn render_notification_overlay(
             let bar_width = layout.rect.width().saturating_sub(28);
             let bar_x = layout.rect.x() + 14;
             let bar_y = layout.rect.y() + layout.rect.height() as i32 - 10;
-            fill_rounded_rect(
+            fill_window_surface_rounded_rect(
                 target,
                 PixelRectToRect::rect(bar_x, bar_y, bar_width, 4),
                 2,
                 progress_background,
+                window_effects,
             )?;
             let fill_width = if layout.active {
                 progress
@@ -1087,6 +1103,7 @@ pub(super) fn render_image_buffer_body(
     theme_registry: Option<&ThemeRegistry>,
     base_background: Color,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let Some(state) = buffer.image_state() else {
         return Ok(());
     };
@@ -1108,7 +1125,7 @@ pub(super) fn render_image_buffer_body(
             },
         ),
     );
-    fill_rect(target, viewport, viewport_background)?;
+    fill_window_surface_rect(target, viewport, viewport_background, window_effects)?;
     let Some(draw_rect) = centered_image_draw_rect(
         viewport,
         state.decoded.width,
@@ -1552,6 +1569,7 @@ pub(super) fn render_buffer(
     line_height: i32,
     ascent: i32,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let foreground = theme_color(
         theme_registry,
@@ -1698,6 +1716,7 @@ pub(super) fn render_buffer(
             layout,
             active,
             input_mode,
+            window_effects,
             border_color,
             text_color,
             muted,
@@ -2093,7 +2112,7 @@ pub(super) fn render_buffer(
         if headerline_rows > 0 {
             for (index, headerline) in headerline_lines.iter().enumerate() {
                 let y = layout.body_y + index as i32 * line_height;
-                fill_rect(
+                fill_window_surface_rect(
                     target,
                     PixelRectToRect::rect(
                         rect.x() + 8,
@@ -2102,6 +2121,7 @@ pub(super) fn render_buffer(
                         line_height.max(1) as u32,
                     ),
                     base_background,
+                    window_effects,
                 )?;
                 draw_text(
                     target,
@@ -2111,7 +2131,7 @@ pub(super) fn render_buffer(
                     statusline_active,
                 )?;
             }
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
@@ -2120,6 +2140,7 @@ pub(super) fn render_buffer(
                     1,
                 ),
                 border_color,
+                window_effects,
             )?;
         }
     }
@@ -2132,7 +2153,7 @@ pub(super) fn render_buffer(
         );
         let input_foreground = theme_color(theme_registry, "ui.input.foreground", foreground);
         let placeholder_color = theme_color(theme_registry, "ui.input.placeholder", muted);
-        fill_rect(
+        fill_window_surface_rect(
             target,
             PixelRectToRect::rect(
                 rect.x() + 8,
@@ -2141,6 +2162,7 @@ pub(super) fn render_buffer(
                 layout.input_box_height as u32,
             ),
             input_background,
+            window_effects,
         )?;
         if buffer_is_acp(&buffer.kind) {
             let border = if acp_connected {
@@ -2148,7 +2170,7 @@ pub(super) fn render_buffer(
             } else {
                 border_color
             };
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
@@ -2157,8 +2179,9 @@ pub(super) fn render_buffer(
                     1,
                 ),
                 border,
+                window_effects,
             )?;
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
@@ -2167,6 +2190,7 @@ pub(super) fn render_buffer(
                     1,
                 ),
                 border,
+                window_effects,
             )?;
         }
         let input_x = text_x;
@@ -2279,7 +2303,7 @@ pub(super) fn render_buffer(
         }
     }
 
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
@@ -2288,6 +2312,7 @@ pub(super) fn render_buffer(
             1,
         ),
         border_color,
+        window_effects,
     )?;
     let statusline_x = rect.x() + 12;
     let statusline_icon_colors = statusline_icon_colors(
@@ -2324,6 +2349,7 @@ pub(super) fn render_buffer(
         layout,
         active,
         input_mode,
+        window_effects,
         border_color,
         foreground,
         muted,
@@ -2333,7 +2359,7 @@ pub(super) fn render_buffer(
     )?;
 
     let _ = ascent;
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             rect.x(),
@@ -2342,6 +2368,7 @@ pub(super) fn render_buffer(
             1,
         ),
         border_color,
+        window_effects,
     )?;
 
     Ok(())
@@ -2355,6 +2382,7 @@ pub(super) fn render_command_line_overlay(
     layout: BufferFooterLayout,
     active: bool,
     input_mode: InputMode,
+    window_effects: WindowEffects,
     border_color: Color,
     foreground: Color,
     muted: Color,
@@ -2365,7 +2393,7 @@ pub(super) fn render_command_line_overlay(
     let Some(commandline_y) = layout.commandline_y else {
         return Ok(());
     };
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
@@ -2374,6 +2402,7 @@ pub(super) fn render_command_line_overlay(
             line_height.max(1) as u32,
         ),
         border_color,
+        window_effects,
     )?;
     let Some(command_line) = command_line else {
         return Ok(());
@@ -2688,7 +2717,7 @@ pub(super) fn render_text_panel(
     visual_selection: Option<VisualSelection>,
     yank_flash: Option<VisualSelection>,
     input_mode: InputMode,
-    _theme_registry: Option<&ThemeRegistry>,
+    theme_registry: Option<&ThemeRegistry>,
     panel_background: Color,
     header_background: Color,
     foreground: Color,
@@ -2702,20 +2731,21 @@ pub(super) fn render_text_panel(
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_rounded_rect(target, rect, 10, border)?;
+    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
+    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
     let header_height = text_panel_header_height(title, line_height.max(1));
     if header_height > 0 {
         let header_rect = PixelRectToRect::rect(
@@ -2726,9 +2756,15 @@ pub(super) fn render_text_panel(
         );
         let header_color = header_background;
         let header_radius = 9.min(header_rect.height() / 2);
-        fill_rounded_rect(target, header_rect, header_radius, header_color)?;
+        fill_window_surface_rounded_rect(
+            target,
+            header_rect,
+            header_radius,
+            header_color,
+            window_effects,
+        )?;
         if header_rect.height() > header_radius {
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     header_rect.x(),
@@ -2737,6 +2773,7 @@ pub(super) fn render_text_panel(
                     header_rect.height().saturating_sub(header_radius),
                 ),
                 header_color,
+                window_effects,
             )?;
         }
         draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
@@ -2852,6 +2889,7 @@ pub(super) fn render_input_panel(
     pane_active: bool,
     pane_layout: TextPaneLayout,
     input_mode: InputMode,
+    window_effects: WindowEffects,
     panel_background: Color,
     foreground: Color,
     muted: Color,
@@ -2869,14 +2907,14 @@ pub(super) fn render_input_panel(
     } else {
         border_color
     };
-    fill_rounded_rect(target, rect, 10, border)?;
+    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
+    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
     let input_x = rect.x() + INPUT_PANEL_VERTICAL_PADDING;
     let input_y = rect.y() + INPUT_PANEL_VERTICAL_PADDING;
     let prompt = input.prompt();
@@ -3075,6 +3113,7 @@ pub(super) fn render_acp_buffer_body(
     let Some(state) = buffer.acp_state.as_ref() else {
         return Ok(());
     };
+    let window_effects = current_window_effect_settings(theme_registry);
     let Some(acp_layout) = acp_buffer_layout(buffer, rect, layout, cell_width, line_height) else {
         return Ok(());
     };
@@ -3175,6 +3214,7 @@ pub(super) fn render_acp_buffer_body(
         active && active_pane == AcpPane::Input,
         acp_layout.input,
         input_mode,
+        window_effects,
         panel_background,
         foreground,
         muted,
@@ -3247,20 +3287,21 @@ pub(super) fn render_acp_pane(
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_rounded_rect(target, rect, 10, border)?;
+    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_rounded_rect(target, inner_rect, 9, panel_background)?;
+    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
     let header_height = (line_height + 10).max(line_height);
     let header_rect = PixelRectToRect::rect(
         rect.x() + 1,
@@ -3274,9 +3315,15 @@ pub(super) fn render_acp_pane(
         header_background
     };
     let header_radius = 9.min(header_rect.height() / 2);
-    fill_rounded_rect(target, header_rect, header_radius, header_color)?;
+    fill_window_surface_rounded_rect(
+        target,
+        header_rect,
+        header_radius,
+        header_color,
+        window_effects,
+    )?;
     if header_rect.height() > header_radius {
-        fill_rect(
+        fill_window_surface_rect(
             target,
             PixelRectToRect::rect(
                 header_rect.x(),
@@ -3285,6 +3332,7 @@ pub(super) fn render_acp_pane(
                 header_rect.height().saturating_sub(header_radius),
             ),
             header_color,
+            window_effects,
         )?;
     }
     draw_text(target, rect.x() + 12, rect.y() + 6, title, foreground)?;
@@ -3418,7 +3466,7 @@ pub(super) fn render_acp_pane(
                     body_width,
                     (image_rows as i32 * line_height).max(line_height) as u32,
                 );
-                fill_rounded_rect(
+                fill_window_surface_rounded_rect(
                     target,
                     image_rect,
                     8,
@@ -3430,6 +3478,7 @@ pub(super) fn render_acp_pane(
                             -10
                         },
                     ),
+                    window_effects,
                 )?;
                 draw_text(target, body_x + 8, y + 6, &image.label, muted)?;
                 if let Some(decoded) = image.image.as_ref() {
@@ -4619,6 +4668,42 @@ pub(super) fn alpha_bitmap_surface(
     Ok(surface)
 }
 
+fn unpremultiply_color_channel(channel: u8, alpha: u8) -> u8 {
+    (((u16::from(channel) * 255) + (u16::from(alpha) / 2)) / u16::from(alpha)).min(255) as u8
+}
+
+pub(super) fn normalize_premultiplied_rgba_surface<'surface>(
+    mut surface: Surface<'surface>,
+) -> Result<Surface<'surface>, ShellError> {
+    if surface.pixel_format_enum() != PixelFormat::RGBA32 {
+        surface = surface
+            .convert_format(PixelFormat::RGBA32)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    }
+
+    let width = surface.width() as usize;
+    let height = surface.height() as usize;
+    let pitch = surface.pitch() as usize;
+    surface.with_lock_mut(|pixels| {
+        for row in pixels.chunks_mut(pitch).take(height) {
+            let row_pixels = &mut row[..width.saturating_mul(4)];
+            for rgba in row_pixels.chunks_exact_mut(4) {
+                let alpha = rgba[3];
+                match alpha {
+                    0 => rgba[..3].fill(0),
+                    u8::MAX => {}
+                    _ => {
+                        for channel in &mut rgba[..3] {
+                            *channel = unpremultiply_color_channel(*channel, alpha);
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Ok(surface)
+}
+
 pub(super) fn composite_alpha_bitmap(
     surface: &mut Surface<'_>,
     dest_x: i32,
@@ -4723,6 +4808,10 @@ pub(super) fn render_primary_text_texture<'texture>(
         .render(text)
         .blended(from_render_color(color))
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    // CONTEXT: SDL_ttf blended glyphs arrive with premultiplied RGB. Uploading
+    // them directly to an SDL texture causes the renderer to multiply alpha
+    // again when the window background itself is translucent.
+    let surface = normalize_premultiplied_rgba_surface(surface)?;
     let advance = surface.width() as i32;
     let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
     Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance))
@@ -5197,6 +5286,30 @@ pub(super) fn fill_rect(
     Ok(())
 }
 
+pub(super) fn window_surface_color(color: Color, window_effects: WindowEffects) -> Color {
+    let alpha = (f32::from(color.a) * window_effects.opacity)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    Color::RGBA(color.r, color.g, color.b, alpha)
+}
+
+pub(super) fn clear_window_surface(
+    target: &mut DrawTarget<'_>,
+    color: Color,
+    window_effects: WindowEffects,
+) {
+    target.clear(window_surface_color(color, window_effects));
+}
+
+pub(super) fn fill_window_surface_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_rect(target, rect, window_surface_color(color, window_effects))
+}
+
 pub(super) fn fill_rounded_rect(
     target: &mut DrawTarget<'_>,
     rect: Rect,
@@ -5211,6 +5324,21 @@ pub(super) fn fill_rounded_rect(
         }),
     }
     Ok(())
+}
+
+pub(super) fn fill_window_surface_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_rounded_rect(
+        target,
+        rect,
+        radius,
+        window_surface_color(color, window_effects),
+    )
 }
 
 pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(

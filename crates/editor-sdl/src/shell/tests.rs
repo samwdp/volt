@@ -16,7 +16,8 @@ use std::{
     collections::BTreeMap,
     env, fs,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Default)]
@@ -913,6 +914,36 @@ fn composite_alpha_bitmap_preserves_straight_alpha_for_overlaps() {
 
     surface.with_lock(|pixels| {
         assert_eq!(&pixels[..4], &[10, 20, 30, 191]);
+    });
+}
+
+#[test]
+fn normalize_premultiplied_rgba_surface_restores_rgb_for_partially_transparent_pixels() {
+    let mut surface = Surface::new(1, 1, PixelFormat::RGBA32)
+        .unwrap_or_else(|error| panic!("failed to create surface: {error}"));
+    surface.with_lock_mut(|pixels| {
+        pixels[..4].copy_from_slice(&[64, 32, 16, 64]);
+    });
+
+    let surface = normalize_premultiplied_rgba_surface(surface)
+        .unwrap_or_else(|error| panic!("failed to normalize surface: {error}"));
+    surface.with_lock(|pixels| {
+        assert_eq!(&pixels[..4], &[255, 128, 64, 64]);
+    });
+}
+
+#[test]
+fn normalize_premultiplied_rgba_surface_clears_rgb_for_fully_transparent_pixels() {
+    let mut surface = Surface::new(1, 1, PixelFormat::RGBA32)
+        .unwrap_or_else(|error| panic!("failed to create surface: {error}"));
+    surface.with_lock_mut(|pixels| {
+        pixels[..4].copy_from_slice(&[15, 25, 35, 0]);
+    });
+
+    let surface = normalize_premultiplied_rgba_surface(surface)
+        .unwrap_or_else(|error| panic!("failed to normalize surface: {error}"));
+    surface.with_lock(|pixels| {
+        assert_eq!(&pixels[..4], &[0, 0, 0, 0]);
     });
 }
 
@@ -4528,6 +4559,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         &ThemeRuntimeSettings {
             font_request: None,
             font_size: 16,
+            window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
     )
@@ -4566,6 +4598,298 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
                 && rect.height == 180
                 && *color == to_render_color(base_background)
     )));
+    Ok(())
+}
+
+#[test]
+fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        Some(&registry),
+        320,
+        180,
+        8,
+        16,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Clear { color } if color.a == 128
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == 0
+                && rect.y == 0
+                && rect.width == 320
+                && rect.height == 180
+                && color.a == 128
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { color, .. } if color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.65)
+                .with_option(crate::window_effects::OPTION_WINDOW_BLUR, 18.0),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    let settings = theme_runtime_settings(Some(&registry), &ShellConfig::default());
+
+    assert_eq!(
+        settings.window_effects,
+        crate::window_effects::WindowEffects {
+            opacity: 0.65,
+            blur: 18.0,
+        }
+    );
+}
+
+#[test]
+fn render_picker_overlay_keeps_picker_background_opaque_with_window_opacity() -> Result<(), String>
+{
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let picker = PickerOverlay::from_entries(
+        "Projects",
+        vec![PickerEntry {
+            item: PickerItem::new(
+                ".config",
+                ".config",
+                "git",
+                Some("C:\\Users\\sam\\.config".to_owned()),
+            ),
+            action: PickerAction::NoOp,
+        }],
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    picker::render_picker_overlay(&mut target, &fonts, &picker, 320, 180, 16, Some(&registry))
+        .map_err(|error| error.to_string())?;
+
+    let popup_rect = centered_rect(320, 180, 320 * 2 / 3, 180 * 3 / 5);
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == popup_rect.x + 2
+                && rect.y == popup_rect.y + 2
+                && rect.width == popup_rect.width.saturating_sub(4)
+                && rect.height == popup_rect.height.saturating_sub(4)
+                && color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let picker = PickerOverlay::from_entries(
+        "Projects",
+        vec![
+            PickerEntry {
+                item: PickerItem::new(
+                    ".config",
+                    ".config",
+                    "git",
+                    Some("C:\\Users\\sam\\.config".to_owned()),
+                ),
+                action: PickerAction::NoOp,
+            },
+            PickerEntry {
+                item: PickerItem::new("4coder", "4coder", "git", Some("P:\\4ed".to_owned())),
+                action: PickerAction::NoOp,
+            },
+        ],
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    picker::render_picker_overlay(&mut target, &fonts, &picker, 320, 180, 16, None)
+        .map_err(|error| error.to_string())?;
+
+    let base_background = Color::RGB(29, 32, 40);
+    let popup_background = adjust_color(base_background, 8);
+    let foreground = Color::RGBA(215, 221, 232, 255);
+    let expected_muted = blend_color(foreground, popup_background, 0.25);
+
+    let text_commands = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, color, .. } => Some((text.clone(), *color)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        text_commands.iter().any(|(text, color)| {
+            text == "Query > " && *color == to_render_color(expected_muted)
+        }),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn preferred_primary_font_hinting_matches_transparent_window_policy() {
+    if cfg!(target_os = "windows") {
+        assert!(matches!(
+            preferred_primary_font_hinting(),
+            Some(Hinting::NORMAL)
+        ));
+    } else {
+        assert!(preferred_primary_font_hinting().is_none());
+    }
+}
+
+#[test]
+fn rebuild_theme_registry_preserves_active_theme_when_still_present() {
+    let registry = rebuild_theme_registry(
+        vec![
+            editor_theme::Theme::new("default", "Default"),
+            editor_theme::Theme::new("night", "Night")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.55),
+        ],
+        Some("night"),
+    )
+    .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    assert_eq!(
+        registry.active_theme().map(|theme| theme.id()),
+        Some("night")
+    );
+    assert_eq!(
+        registry.resolve_number(crate::window_effects::OPTION_WINDOW_OPACITY),
+        Some(0.55)
+    );
+}
+
+#[test]
+fn theme_source_fingerprint_from_dir_changes_when_global_toml_changes() -> Result<(), String> {
+    let temp = TempTestDir::new("theme-source-fingerprint");
+    let themes_dir = temp.path().join("user").join("themes");
+    fs::create_dir_all(&themes_dir).map_err(|error| error.to_string())?;
+    let global = themes_dir.join("global.toml");
+    fs::write(&global, "[options]\n\"window.opacity\" = 1.0\n")
+        .map_err(|error| error.to_string())?;
+
+    let before = theme_source_fingerprint_from_dir(&themes_dir)
+        .ok_or_else(|| "missing initial theme fingerprint".to_owned())?;
+
+    thread::sleep(Duration::from_millis(20));
+    fs::write(
+        &global,
+        "[options]\n\"window.opacity\" = 0.35\n\"window.blur\" = 12.0\n",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let after = theme_source_fingerprint_from_dir(&themes_dir)
+        .ok_or_else(|| "missing updated theme fingerprint".to_owned())?;
+
+    assert_ne!(before, after);
+    Ok(())
+}
+
+#[test]
+fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let video = sdl_context.video().map_err(|error| error.to_string())?;
+    let window_effects = crate::window_effects::WindowEffects {
+        opacity: 0.35,
+        blur: 0.0,
+    };
+
+    let mut window_builder = video.window("Volt Smoke", 320, 180);
+    window_builder.hidden();
+    window_builder.set_flags(
+        window_builder.flags() | crate::window_effects::window_creation_flags(window_effects),
+    );
+    let mut window = window_builder.build().map_err(|error| error.to_string())?;
+    apply_window_effects(&mut window, window_effects).map_err(|error| error.to_string())?;
+
+    let mut canvas = window.into_canvas();
+    canvas.set_draw_color(Color::RGBA(29, 32, 40, 128));
+    canvas.clear();
+    canvas.present();
+
+    let size = canvas.output_size().map_err(|error| error.to_string())?;
+    assert_eq!(size, (320, 180));
     Ok(())
 }
 
@@ -4802,6 +5126,84 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
                 && rect.width == header_rect.width()
                 && rect.height == header_rect.height()
                 && *color == to_render_color(header_background)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_plugin_sections_header_applies_window_opacity() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_plugin_sections_test_buffer(&mut state, &["alpha"], &["beta"])?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let pane_layout = plugin_section_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "plugin section layout missing".to_owned())?;
+    let header_height = (16 + 10) as u32;
+    let header_rect = PixelRectToRect::rect(
+        pane_layout.panes[0].rect.x() + 1,
+        pane_layout.panes[0].rect.y() + 1,
+        pane_layout.panes[0].rect.width().saturating_sub(2),
+        header_height,
+    );
+    let base_background = Color::RGB(15, 16, 20);
+    let panel_background = theme_color(
+        Some(&registry),
+        "ui.panel.background",
+        adjust_color(base_background, 8),
+    );
+    let header_background = theme_color(
+        Some(&registry),
+        "ui.panel.header.background",
+        adjust_color(panel_background, 12),
+    );
+    let expected = to_render_color(window_surface_color(
+        header_background,
+        current_window_effect_settings(Some(&registry)),
+    ));
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_plugin_section_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        Some(&registry),
+        base_background,
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == header_rect.x()
+                && rect.y == header_rect.y()
+                && rect.width == header_rect.width()
+                && rect.height == header_rect.height()
+                && *color == expected
     )));
     Ok(())
 }
@@ -8235,6 +8637,109 @@ fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), Strin
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity() -> Result<(), String>
+{
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    let terminal_background = editor_terminal::TerminalRgb {
+        r: 24,
+        g: 36,
+        b: 48,
+    };
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.replace_with_lines_follow_output(vec!["echo hello".to_owned()]);
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            1,
+            12,
+            vec![editor_terminal::TerminalRenderLine::new(vec![
+                editor_terminal::TerminalRenderRun::new(
+                    0,
+                    10,
+                    "echo hello",
+                    editor_terminal::TerminalRgb {
+                        r: 215,
+                        g: 221,
+                        b: 232,
+                    },
+                    Some(terminal_background),
+                    None,
+                ),
+            ])],
+            None,
+            None,
+        ));
+    }
+
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_terminal_buffer(
+        &mut target,
+        buffer,
+        buffer
+            .terminal_render()
+            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+        rect,
+        layout,
+        true,
+        InputMode::Insert,
+        None,
+        None,
+        Some(&registry),
+        Color::RGB(15, 16, 20),
+        Color::RGB(110, 170, 255),
+        Color::RGB(215, 221, 232),
+        Color::RGB(40, 44, 52),
+        "status".to_owned(),
+        Color::RGB(110, 170, 255),
+        Color::RGB(140, 144, 152),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == 12
+                && rect.y == layout.body_y
+                && rect.width == 80
+                && rect.height == 16
+                && *color == to_render_color(Color::RGB(24, 36, 48))
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.y == layout.statusline_y - 6
+                && rect.height == 1
+                && color.a == 128
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { text, color, .. }
+            if text == "echo hello" && color.a == 255
     )));
     Ok(())
 }

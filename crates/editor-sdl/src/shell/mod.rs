@@ -66,6 +66,10 @@ use crate::state::{
     VimTextObjectKind, VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash,
     YankRegister,
 };
+use crate::window_effects::{
+    WindowEffects, apply_window_effects, current_window_effect_settings, update_window_effects,
+    window_creation_flags,
+};
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
@@ -382,6 +386,10 @@ fn shell_user_library(runtime: &EditorRuntime) -> Arc<dyn UserLibrary> {
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
+const THEME_FILE_EXTENSION: &str = "toml";
+const THEME_SOURCE_SEARCH_DEPTH: usize = 6;
+const THEME_SOURCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 enum DrawTarget<'a> {
     Scene(&'a mut Vec<DrawCommand>),
@@ -397,10 +405,49 @@ impl DrawTarget<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
+    window_effects: WindowEffects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThemeSourceFingerprint {
+    files: Vec<ThemeSourceFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ThemeSourceFile {
+    path: PathBuf,
+    size: u64,
+    modified_at: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone)]
+struct ThemeReloadState {
+    last_checked_at: Instant,
+    fingerprint: Option<ThemeSourceFingerprint>,
+}
+
+impl ThemeReloadState {
+    fn new() -> Self {
+        Self {
+            last_checked_at: Instant::now(),
+            fingerprint: current_theme_source_fingerprint(),
+        }
+    }
+}
+
+fn preferred_primary_font_hinting() -> Option<Hinting> {
+    if cfg!(target_os = "windows") {
+        // Transparent compositor surfaces do not preserve ClearType-style
+        // subpixel assumptions, so use grayscale hinting without the harsher
+        // stem snapping that LIGHT introduced in picker text.
+        Some(Hinting::NORMAL)
+    } else {
+        None
+    }
 }
 
 struct IconFont<'ttf> {
@@ -7640,7 +7687,7 @@ impl TypingProfiler {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ShellVisualRefreshKey {
     render_width: u32,
     render_height: u32,
@@ -10963,17 +11010,22 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         config.profile_input_latency,
         Arc::clone(&user_library),
     )?;
-    let mut theme_settings =
-        theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), &config);
+    let theme_registry = state.runtime.services().get::<ThemeRegistry>();
+    let window_effect_settings = current_window_effect_settings(theme_registry);
+    let mut theme_settings = theme_runtime_settings(theme_registry, &config);
+    let mut theme_reload_state = ThemeReloadState::new();
     let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder.position_centered().resizable();
     if config.hidden {
         window_builder.hidden();
     }
+    window_builder
+        .set_flags(window_builder.flags() | window_creation_flags(window_effect_settings));
     let mut window = window_builder
         .build()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    apply_window_effects(&mut window, window_effect_settings)?;
     let icon = load_window_icon()?;
     if !window.set_icon(icon) {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
@@ -11006,6 +11058,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> FrameOutcome {
                 let mut typing_frame =
                     state.begin_typing_frame(frames_rendered, frame_pacing_sleep);
+                let theme_reload_changed = match refresh_theme_registry_if_needed(
+                    &mut state.runtime,
+                    &mut theme_reload_state,
+                    Instant::now(),
+                ) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.theme-reload", ShellError::Runtime(error));
+                        false
+                    }
+                };
+                let previous_window_effects = theme_settings.window_effects;
                 let fonts_changed = match update_theme_runtime(
                     &ttf,
                     &state,
@@ -11024,6 +11088,15 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                if theme_settings.window_effects != previous_window_effects
+                    && let Err(error) = update_window_effects(
+                        canvas.window_mut(),
+                        previous_window_effects,
+                        theme_settings.window_effects,
+                    )
+                {
+                    state.record_shell_error("shell.update-window-effects", error);
+                }
 
                 let (render_width, render_height) = match canvas.output_size() {
                     Ok(size) => size,
@@ -11254,6 +11327,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 };
                 let should_render = last_scene.is_none()
                     || had_events
+                    || theme_reload_changed
                     || fonts_changed
                     || file_reload_changed
                     || picker_changed
@@ -11393,6 +11467,109 @@ fn update_theme_runtime<'ttf>(
     Ok(fonts_changed)
 }
 
+fn refresh_theme_registry_if_needed(
+    runtime: &mut EditorRuntime,
+    reload_state: &mut ThemeReloadState,
+    now: Instant,
+) -> Result<bool, String> {
+    if now
+        .checked_duration_since(reload_state.last_checked_at)
+        .unwrap_or_else(|| Duration::from_secs(0))
+        < THEME_SOURCE_POLL_INTERVAL
+    {
+        return Ok(false);
+    }
+    reload_state.last_checked_at = now;
+
+    let next_fingerprint = current_theme_source_fingerprint();
+    if next_fingerprint == reload_state.fingerprint {
+        return Ok(false);
+    }
+    reload_state.fingerprint = next_fingerprint;
+
+    let active_theme_id = runtime
+        .services()
+        .get::<ThemeRegistry>()
+        .and_then(|registry| registry.active_theme().map(|theme| theme.id().to_owned()));
+    let reloaded = rebuild_theme_registry(
+        shell_user_library(runtime).themes(),
+        active_theme_id.as_deref(),
+    )?;
+    runtime.services_mut().insert(reloaded);
+    Ok(true)
+}
+
+fn rebuild_theme_registry<I>(
+    themes: I,
+    active_theme_id: Option<&str>,
+) -> Result<ThemeRegistry, String>
+where
+    I: IntoIterator<Item = editor_theme::Theme>,
+{
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register_all(themes)
+        .map_err(|error| error.to_string())?;
+    if let Some(theme_id) = active_theme_id {
+        let _ = registry.activate(theme_id);
+    }
+    Ok(registry)
+}
+
+fn current_theme_source_fingerprint() -> Option<ThemeSourceFingerprint> {
+    let exe_path = env::current_exe().ok()?;
+    let exe_dir = exe_path.parent()?;
+    let themes_dir = theme_sources_dir_from_exe_dir(exe_dir)?;
+    theme_source_fingerprint_from_dir(&themes_dir)
+}
+
+fn theme_sources_dir_from_exe_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let mut fallback = None;
+    for ancestor in exe_dir.ancestors().take(THEME_SOURCE_SEARCH_DEPTH) {
+        let mut candidate = PathBuf::from(ancestor);
+        for part in THEME_DIRECTORY_PARTS {
+            candidate = candidate.join(part);
+        }
+        if !candidate.is_dir() {
+            continue;
+        }
+        if ancestor.join("Cargo.toml").is_file() {
+            return Some(candidate);
+        }
+        fallback.get_or_insert(candidate);
+    }
+    fallback
+}
+
+fn theme_source_fingerprint_from_dir(themes_dir: &Path) -> Option<ThemeSourceFingerprint> {
+    if !themes_dir.is_dir() {
+        return None;
+    }
+
+    let mut files = fs::read_dir(themes_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(THEME_FILE_EXTENSION))
+        })
+        .map(|path| {
+            let metadata = fs::metadata(&path).ok();
+            ThemeSourceFile {
+                path,
+                size: metadata.as_ref().map_or(0, |metadata| metadata.len()),
+                modified_at: metadata.and_then(|metadata| metadata.modified().ok()),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Some(ThemeSourceFingerprint { files })
+}
+
 fn theme_runtime_settings(
     theme_registry: Option<&ThemeRegistry>,
     config: &ShellConfig,
@@ -11409,6 +11586,7 @@ fn theme_runtime_settings(
     ThemeRuntimeSettings {
         font_request,
         font_size,
+        window_effects: current_window_effect_settings(theme_registry),
     }
 }
 
@@ -11624,10 +11802,8 @@ fn load_font_set<'ttf>(
     let mut primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    if cfg!(target_os = "windows") {
-        // Prefer lighter subpixel hinting so SDL_ttf text lands closer to the
-        // softer DirectWrite/ClearType appearance users expect on Windows.
-        primary.set_hinting(Hinting::LIGHT_SUBPIXEL);
+    if let Some(hinting) = preferred_primary_font_hinting() {
+        primary.set_hinting(hinting);
     }
     let primary_pixel_size = primary_raster_font
         .horizontal_line_metrics(settings.font_size.max(1) as f32)

@@ -447,7 +447,7 @@ mod tests {
         GLOBAL_THEME_FILE_NAME, SharedThemeConfig, list_theme_files, parse_shared_theme_config,
         parse_theme, themes_dir_from_exe_dir,
     };
-    use editor_theme::Color;
+    use editor_theme::{Color, Theme};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -644,6 +644,23 @@ blue = "#83a598"
     }
 
     #[test]
+    fn bundled_shared_theme_config_includes_window_effect_defaults() {
+        let shared = bundled_shared_theme_config();
+        let theme = shared.apply_to_theme(Theme::new("test-theme", "Test Theme"));
+        let opacity = theme
+            .option_number("window.opacity")
+            .unwrap_or_else(|| panic!("shared config missing window.opacity"));
+        let blur = theme
+            .option_number("window.blur")
+            .unwrap_or_else(|| panic!("shared config missing window.blur"));
+
+        assert!((0.0..=1.0).contains(&opacity));
+        assert!(blur >= 0.0);
+        assert_eq!(opacity, 1.0);
+        assert_eq!(blur, 0.0);
+    }
+
+    #[test]
     fn parse_theme_applies_shared_options_and_languages() {
         let shared = parse_shared_theme_config(
             Path::new(GLOBAL_THEME_FILE_NAME),
@@ -651,6 +668,8 @@ blue = "#83a598"
 [options]
 font = "Example Mono"
 font_size = 14
+"window.opacity" = 0.75
+"window.blur" = 12.0
 
 [langs.rust]
 indent = 4
@@ -676,6 +695,8 @@ background = "#112233"
 
         assert_eq!(theme.option_string("font"), Some("Example Mono"));
         assert_eq!(theme.option_number("font_size"), Some(14.0));
+        assert_eq!(theme.option_number("window.opacity"), Some(0.75));
+        assert_eq!(theme.option_number("window.blur"), Some(12.0));
         assert_eq!(theme.option_number("langs.rust.indent"), Some(4.0));
         assert_eq!(theme.option_bool("langs.rust.format_on_save"), Some(true));
         assert_eq!(theme.option_bool("langs.rust.use_tabs"), Some(false));

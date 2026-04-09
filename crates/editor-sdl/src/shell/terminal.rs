@@ -466,7 +466,7 @@ pub(super) fn render_terminal_buffer(
     input_mode: InputMode,
     visual_selection: Option<VisualSelection>,
     yank_flash: Option<VisualSelection>,
-    _theme_registry: Option<&ThemeRegistry>,
+    theme_registry: Option<&ThemeRegistry>,
     base_background: Color,
     cursor_color: Color,
     text_color: Color,
@@ -479,6 +479,7 @@ pub(super) fn render_terminal_buffer(
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
     let text_x = rect.x() + 12;
     for (row_index, line) in terminal_render
         .lines()
@@ -598,7 +599,7 @@ pub(super) fn render_terminal_buffer(
         )?;
     }
 
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
@@ -607,6 +608,7 @@ pub(super) fn render_terminal_buffer(
             1,
         ),
         border_color,
+        window_effects,
     )?;
     draw_text(
         target,
@@ -620,7 +622,7 @@ pub(super) fn render_terminal_buffer(
         },
     )?;
     let _ = text_color;
-    fill_rect(
+    fill_window_surface_rect(
         target,
         PixelRectToRect::rect(
             rect.x(),
@@ -629,6 +631,7 @@ pub(super) fn render_terminal_buffer(
             1,
         ),
         border_color,
+        window_effects,
     )?;
     Ok(())
 }

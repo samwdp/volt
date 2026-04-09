@@ -1064,8 +1064,8 @@ pub(super) fn render_picker_overlay(
             Color::RGB(110, 170, 255),
         ),
     );
-    let muted = blend_color(foreground, base_background, 0.5);
-    let subtle = blend_color(foreground, base_background, 0.7);
+    let muted = blend_color(foreground, popup_background, 0.25);
+    let subtle = blend_color(foreground, popup_background, 0.4);
     // Border using two rounded rectangles (outer border color, inner background)
     fill_rounded_rect(
         target,

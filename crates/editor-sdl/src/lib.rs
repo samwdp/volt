@@ -4,6 +4,7 @@ mod browser_host;
 mod config;
 mod shell;
 mod state;
+mod window_effects;
 
 #[cfg(test)]
 mod tests;

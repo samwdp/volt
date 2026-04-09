@@ -497,6 +497,7 @@ pub(super) fn render_browser_buffer_body(
     let Some(state) = buffer.browser_state.as_ref() else {
         return Ok(());
     };
+    let window_effects = current_window_effect_settings(theme_registry);
     let Some(browser_layout) = browser_buffer_layout(buffer, rect, layout, cell_width, line_height)
     else {
         return Ok(());
@@ -514,13 +515,19 @@ pub(super) fn render_browser_buffer_body(
         ),
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
-    fill_rect(target, browser_layout.viewport, panel_background)?;
+    fill_window_surface_rect(
+        target,
+        browser_layout.viewport,
+        panel_background,
+        window_effects,
+    )?;
     render_input_panel(
         target,
         &state.input,
         active && state.active_pane == BrowserPane::Input,
         browser_layout.input,
         input_mode,
+        window_effects,
         panel_background,
         foreground,
         muted,

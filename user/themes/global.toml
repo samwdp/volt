@@ -2,9 +2,11 @@
 "ui.line-number.relative" = true
 scrolloff = 5
 font = "Liga Berkeley Mono"
-font_size = 18
+font_size = 20
 cursor_roundness = 2
 picker_roundness = 16
+"window.opacity" = 0.1
+"window.blur" = 1.0
 
 [langs.rust]
 indent = 4
