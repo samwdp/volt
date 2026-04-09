@@ -11485,6 +11485,7 @@ fn update_theme_runtime<'ttf>(
     let mut fonts_changed = false;
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
+        || updated.display_scale != theme_settings.display_scale
     {
         let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
         *font_path = next_font_path;
