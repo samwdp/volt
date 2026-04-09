@@ -15,6 +15,10 @@ pub fn package() -> PluginPackage {
         "Attaches Markdown language defaults to the active workspace.",
         vec![
             PluginAction::log_message("Markdown language package attached."),
+            PluginAction::emit_hook(
+                "workspace.formatter.register",
+                Some("markdown|prettier|--write"),
+            ),
             PluginAction::emit_hook("lang.markdown.attached", Some("markdown")),
         ],
     )])
@@ -85,4 +89,58 @@ pub fn inline_syntax_language() -> LanguageConfiguration {
             CaptureThemeMapping::new("string.escape", "syntax.string.escape"),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_auto_attaches_markdown_extensions_and_formatter() {
+        let package = package();
+        let formatter_details = package
+            .commands()
+            .iter()
+            .flat_map(|command| command.actions())
+            .filter_map(|action| action.hook())
+            .filter(|hook| hook.hook_name() == "workspace.formatter.register")
+            .filter_map(|hook| hook.detail())
+            .collect::<Vec<_>>();
+
+        assert!(
+            package
+                .hook_bindings()
+                .iter()
+                .any(|binding| binding.detail_filter() == Some(".md"))
+        );
+        assert!(
+            package
+                .hook_bindings()
+                .iter()
+                .any(|binding| binding.detail_filter() == Some(".markdown"))
+        );
+        assert_eq!(formatter_details, vec!["markdown|prettier|--write"]);
+    }
+
+    #[test]
+    fn syntax_languages_register_markdown_grammars() {
+        let markdown = syntax_language();
+        let markdown_grammar = markdown.grammar().expect("markdown grammar missing");
+        let inline = inline_syntax_language();
+        let inline_grammar = inline.grammar().expect("markdown inline grammar missing");
+
+        assert_eq!(markdown.id(), "markdown");
+        assert_eq!(markdown.file_extensions(), ["md", "markdown"]);
+        assert_eq!(markdown_grammar.install_dir_name(), "tree-sitter-markdown");
+        assert_eq!(inline.id(), "markdown-inline");
+        assert!(inline.file_extensions().is_empty());
+        assert_eq!(
+            inline_grammar.install_dir_name(),
+            "tree-sitter-markdown-inline"
+        );
+        assert_eq!(
+            markdown.additional_highlight_languages(),
+            ["markdown-inline"]
+        );
+    }
 }

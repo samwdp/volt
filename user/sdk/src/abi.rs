@@ -230,6 +230,8 @@ impl From<AbiGrammarSource> for GrammarSource {
 pub struct AbiLanguageConfiguration {
     id: RString,
     file_extensions: RVec<RString>,
+    file_names: RVec<RString>,
+    file_globs: RVec<RString>,
     capture_mappings: RVec<AbiCaptureThemeMapping>,
     grammar: ROption<AbiGrammarSource>,
     extra_highlight_query: ROption<RString>,
@@ -242,6 +244,20 @@ impl From<LanguageConfiguration> for AbiLanguageConfiguration {
             id: value.id().to_owned().into(),
             file_extensions: value
                 .file_extensions()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
+            file_names: value
+                .file_names()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
+            file_globs: value
+                .file_globs()
                 .iter()
                 .cloned()
                 .map(Into::into)
@@ -293,6 +309,22 @@ impl From<AbiLanguageConfiguration> for LanguageConfiguration {
                 .map(Into::into)
                 .collect::<Vec<_>>(),
         );
+        let file_names = value
+            .file_names
+            .into_iter()
+            .map(RString::into_string)
+            .collect::<Vec<_>>();
+        if !file_names.is_empty() {
+            language = language.with_file_names(file_names);
+        }
+        let file_globs = value
+            .file_globs
+            .into_iter()
+            .map(RString::into_string)
+            .collect::<Vec<_>>();
+        if !file_globs.is_empty() {
+            language = language.with_file_globs(file_globs);
+        }
         if let Some(query) = value.extra_highlight_query.into_option() {
             language = language.with_extra_highlight_query(query.into_string());
         }
@@ -339,6 +371,8 @@ pub struct AbiLanguageServerSpec {
     id: RString,
     language_id: RString,
     file_extensions: RVec<RString>,
+    file_names: RVec<RString>,
+    file_globs: RVec<RString>,
     document_language_ids: RVec<AbiStringPair>,
     program: RString,
     args: RVec<RString>,
@@ -366,6 +400,20 @@ impl From<LanguageServerSpec> for AbiLanguageServerSpec {
             language_id: value.language_id().to_owned().into(),
             file_extensions: value
                 .file_extensions()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
+            file_names: value
+                .file_names()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
+            file_globs: value
+                .file_globs()
                 .iter()
                 .cloned()
                 .map(Into::into)
@@ -402,6 +450,8 @@ impl From<AbiLanguageServerSpec> for LanguageServerSpec {
             value.program.into_string(),
             value.args.into_iter().map(RString::into_string),
         )
+        .with_file_names(value.file_names.into_iter().map(RString::into_string))
+        .with_file_globs(value.file_globs.into_iter().map(RString::into_string))
         .with_root_markers(value.root_markers.into_iter().map(RString::into_string))
         .with_root_strategy(value.root_strategy.into());
         let mappings = value
@@ -1653,4 +1703,63 @@ impl RootModule for UserLibraryModuleRef {
     const BASE_NAME: &'static str = "user";
     const NAME: &'static str = "user";
     const VERSION_STRINGS: VersionStrings = abi_stable::package_version_strings!();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use editor_lsp::LanguageServerSpec;
+    use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+
+    use super::{AbiLanguageConfiguration, AbiLanguageServerSpec};
+
+    #[test]
+    fn abi_language_configuration_round_trips_path_matchers() {
+        let config = LanguageConfiguration::from_grammar(
+            "dockerfile",
+            [] as [&str; 0],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-dockerfile.git",
+                ".",
+                "src",
+                "tree-sitter-dockerfile",
+                "tree_sitter_dockerfile",
+            ),
+            [] as [CaptureThemeMapping; 0],
+        )
+        .with_file_names(["Dockerfile"])
+        .with_file_globs(["Dockerfile.*"]);
+
+        let round_trip = LanguageConfiguration::from(AbiLanguageConfiguration::from(config));
+
+        assert_eq!(round_trip.file_extensions(), [] as [&str; 0]);
+        assert_eq!(round_trip.file_names(), ["Dockerfile"]);
+        assert_eq!(round_trip.file_globs(), ["Dockerfile.*"]);
+    }
+
+    #[test]
+    fn abi_language_server_spec_round_trips_path_matchers() {
+        let spec = LanguageServerSpec::new(
+            "dockerfile-language-server",
+            "dockerfile",
+            [] as [&str; 0],
+            "dockerfile-language-server",
+            ["--stdio"],
+        )
+        .with_file_names(["Dockerfile"])
+        .with_file_globs(["Dockerfile.*"])
+        .with_document_language_ids([("Dockerfile", "dockerfile"), ("Dockerfile.*", "dockerfile")]);
+
+        let round_trip = LanguageServerSpec::from(AbiLanguageServerSpec::from(spec));
+
+        assert_eq!(round_trip.file_extensions(), [] as [&str; 0]);
+        assert_eq!(round_trip.file_names(), ["Dockerfile"]);
+        assert_eq!(round_trip.file_globs(), ["Dockerfile.*"]);
+        assert!(round_trip.matches_path(Path::new("Dockerfile.dev")));
+        assert_eq!(
+            round_trip.document_language_ids().get("Dockerfile.*"),
+            Some(&"dockerfile".to_owned())
+        );
+    }
 }

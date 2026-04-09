@@ -535,6 +535,15 @@ pub fn parse_status(text: &str) -> Result<RepositoryStatus, GitStatusError> {
 }
 
 fn parse_header(header: &str, status: &mut RepositoryStatus) {
+    if let Some(branch) = header.strip_prefix("No commits yet on ") {
+        status.branch = Some(branch.to_owned());
+        return;
+    }
+    if let Some(branch) = header.strip_prefix("Initial commit on ") {
+        status.branch = Some(branch.to_owned());
+        return;
+    }
+
     let mut parts = header.split("...");
     status.branch = parts.next().map(str::to_owned);
 
@@ -597,6 +606,17 @@ mod tests {
         assert_eq!(status.staged().len(), 1);
         assert_eq!(status.unstaged().len(), 1);
         assert_eq!(status.untracked(), ["notes.txt"]);
+    }
+
+    #[test]
+    fn parser_extracts_unborn_branch_name() {
+        let status =
+            parse_status("## No commits yet on master\n?? notes.txt\n").expect("unborn status");
+
+        assert_eq!(status.branch(), Some("master"));
+        assert_eq!(status.untracked(), ["notes.txt"]);
+        assert!(status.staged().is_empty());
+        assert!(status.unstaged().is_empty());
     }
 
     #[test]

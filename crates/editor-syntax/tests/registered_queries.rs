@@ -197,6 +197,44 @@ fn markdown_inline_grammar_available() -> bool {
     dll.exists() && query.exists()
 }
 
+fn markdown_grammar_available() -> bool {
+    let install_root = user_grammars_root();
+    install_root
+        .join("tree-sitter-markdown")
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-markdown.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-markdown.dylib"
+        } else {
+            "libtree-sitter-markdown.so"
+        })
+        .exists()
+        && install_root
+            .join("tree-sitter-markdown")
+            .join("queries")
+            .join("highlights.scm")
+            .exists()
+}
+
+fn markdown_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "markdown",
+        ["md", "markdown"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter-grammars/tree-sitter-markdown.git",
+            ".",
+            "tree-sitter-markdown/src",
+            "tree-sitter-markdown",
+            "tree_sitter_markdown",
+        ),
+        [
+            CaptureThemeMapping::new("text.title", "syntax.text.title"),
+            CaptureThemeMapping::new("text.literal", "syntax.text.literal"),
+        ],
+    )
+    .with_additional_highlight_languages(["markdown-inline"])
+}
+
 /// The bundled `markdown-inline/highlights.scm` must compile against the
 /// pre-built grammar DLL and not return a query compilation error.
 ///
@@ -247,23 +285,7 @@ fn markdown_and_inline_merged_highlight_compiles() {
 
     // Both grammars live in the same install root.
     let install_root = user_grammars_root();
-    let markdown_available = install_root
-        .join("tree-sitter-markdown")
-        .join(if cfg!(target_os = "windows") {
-            "libtree-sitter-markdown.dll"
-        } else if cfg!(target_os = "macos") {
-            "libtree-sitter-markdown.dylib"
-        } else {
-            "libtree-sitter-markdown.so"
-        })
-        .exists()
-        && install_root
-            .join("tree-sitter-markdown")
-            .join("queries")
-            .join("highlights.scm")
-            .exists();
-
-    if !markdown_available {
+    if !markdown_grammar_available() {
         eprintln!(
             "SKIP: markdown grammar not found at {}",
             install_root.display()
@@ -271,29 +293,109 @@ fn markdown_and_inline_merged_highlight_compiles() {
         return;
     }
 
-    let markdown_config = LanguageConfiguration::from_grammar(
-        "markdown",
-        ["md", "markdown"],
-        GrammarSource::new(
-            "https://github.com/tree-sitter-grammars/tree-sitter-markdown.git",
-            ".",
-            "tree-sitter-markdown/src",
-            "tree-sitter-markdown",
-            "tree_sitter_markdown",
-        ),
-        [
-            CaptureThemeMapping::new("text.title", "syntax.text.title"),
-            CaptureThemeMapping::new("text.literal", "syntax.text.literal"),
-        ],
-    )
-    .with_additional_highlight_languages(["markdown-inline"]);
-
     let mut registry = SyntaxRegistry::with_install_root(install_root);
-    must(registry.register(markdown_config));
+    must(registry.register(markdown_config()));
     must(registry.register(markdown_inline_config()));
 
     let buffer = TextBuffer::from_text("# Heading\n\nParagraph with **bold** and `code`.\n");
     let snapshot = must(registry.highlight_buffer_for_language("markdown", &buffer));
     assert_eq!(snapshot.language_id, "markdown");
     assert!(!snapshot.has_errors);
+}
+
+#[test]
+fn markdown_fenced_code_blocks_use_injected_language_highlighting() {
+    if !markdown_inline_grammar_available() {
+        eprintln!(
+            "SKIP: markdown-inline grammar not found at {}",
+            user_grammars_root().display()
+        );
+        return;
+    }
+
+    let install_root = user_grammars_root();
+    if !markdown_grammar_available() {
+        eprintln!(
+            "SKIP: markdown grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let rust_highlights =
+        std::fs::read_to_string(query_asset_root().join("rust").join("highlights.scm"))
+            .expect("failed to read bundled rust highlights.scm");
+    let rust_config = LanguageConfiguration::new(
+        "rust",
+        ["rs"],
+        rust_language,
+        rust_highlights,
+        [
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("string", "syntax.string"),
+        ],
+    )
+    .with_additional_highlight_languages(["rust-inline"]);
+    let rust_inline_config = LanguageConfiguration::new(
+        "rust-inline",
+        [] as [&str; 0],
+        rust_language,
+        tree_sitter_rust::HIGHLIGHTS_QUERY,
+        [CaptureThemeMapping::new("string", "syntax.string.inline")],
+    );
+
+    let mut registry = SyntaxRegistry::with_install_root(install_root);
+    must(registry.register_all([
+        markdown_config(),
+        markdown_inline_config(),
+        rust_config,
+        rust_inline_config,
+    ]));
+
+    let buffer = TextBuffer::from_text(
+        "Paragraph with **bold**.\n\n```rs\nfn injected() { let value = \"volt\"; }\n```\n",
+    );
+    let source = buffer.text();
+    let Some(bold_byte) = source.find("bold") else {
+        panic!("expected bold text in markdown fixture");
+    };
+    let Some(injected_fn_byte) = source.find("injected") else {
+        panic!("expected injected Rust function name in markdown fixture");
+    };
+    let Some(injected_string_byte) = source.find("volt") else {
+        panic!("expected injected Rust string literal in markdown fixture");
+    };
+
+    let snapshot = must(registry.highlight_buffer_for_language("markdown", &buffer));
+    assert!(
+        snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.capture_name == "markup.strong"
+                && span.start_byte <= bold_byte
+                && bold_byte < span.end_byte),
+        "expected markdown-inline strong emphasis span covering byte {bold_byte}, got {:?}",
+        snapshot.highlight_spans
+    );
+    assert!(
+        snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.theme_token == "syntax.function"
+                && span.start_byte <= injected_fn_byte
+                && injected_fn_byte < span.end_byte),
+        "expected injected Rust function span covering byte {injected_fn_byte}, got {:?}",
+        snapshot.highlight_spans
+    );
+    assert!(
+        snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.theme_token == "syntax.string.inline"
+                && span.start_byte <= injected_string_byte
+                && injected_string_byte < span.end_byte),
+        "expected injected Rust inline string span covering byte {injected_string_byte}, got {:?}",
+        snapshot.highlight_spans
+    );
 }

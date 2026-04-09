@@ -90,25 +90,31 @@ transparent = "#00000000"
 "git.fringe.modified" = "pallet.orange"
 "git.fringe.removed" = "pallet.red"
 "syntax.attribute" = "pallet.blue"
+"syntax.attribute.builtin" = "pallet.blue"
 "syntax.comment" = "pallet.foreground-subtle"
+"syntax.comment.documentation" = "pallet.foreground-subtle"
 "syntax.constant" = "pallet.purple"
 "syntax.constant.builtin" = "pallet.purple"
 "syntax.constructor" = "pallet.aqua"
 "syntax.function" = "pallet.blue"
 "syntax.function.macro" = "pallet.orange"
 "syntax.keyword" = "pallet.yellow"
+"syntax.keyword.coroutine" = "pallet.yellow"
+"syntax.keyword.modifier" = "pallet.yellow"
 "syntax.label" = "pallet.red"
 "syntax.module" = "pallet.green"
+"syntax.module.builtin" = "pallet.green"
 "syntax.operator" = "pallet.orange"
 "syntax.property" = "pallet.purple"
 "syntax.punctuation.bracket" = "pallet.foreground"
 "syntax.punctuation.delimiter" = "pallet.foreground"
 "syntax.string" = "pallet.green-dark"
+"syntax.string.documentation" = "pallet.green-dark"
 "syntax.type" = "pallet.aqua"
 "syntax.type.builtin" = "pallet.aqua"
 "syntax.variable" = "pallet.foreground"
 "syntax.variable.builtin" = "pallet.purple"
-"syntax.none" = "pallet.transparent"
+"syntax.none" = "pallet.foreground"
 "syntax.preproc" = "pallet.blue"
 "syntax.define" = "pallet.blue"
 "syntax.punctuation.special" = "pallet.foreground"
@@ -128,10 +134,12 @@ transparent = "#00000000"
 "syntax.function.builtin" = "pallet.yellow"
 "syntax.function.call" = "pallet.yellow"
 "syntax.function.method" = "pallet.blue"
+"syntax.function.method.call" = "pallet.yellow"
 "syntax.method" = "pallet.yellow"
 "syntax.method.call" = "pallet.yellow"
 "syntax.parameter" = "pallet.purple"
 "syntax.keyword.conditional" = "pallet.red"
+"syntax.keyword.conditional.ternary" = "pallet.red"
 "syntax.keyword.debug" = "pallet.red"
 "syntax.keyword.directive" = "pallet.blue"
 "syntax.keyword.directive.define" = "pallet.blue"
@@ -142,6 +150,7 @@ transparent = "#00000000"
 "syntax.keyword.repeat" = "pallet.red"
 "syntax.keyword.return" = "pallet.red"
 "syntax.keyword.storage" = "pallet.aqua"
+"syntax.keyword.type" = "pallet.aqua"
 "syntax.conditional" = "pallet.red"
 "syntax.repeat" = "pallet.red"
 "syntax.debug" = "pallet.red"
@@ -153,6 +162,7 @@ transparent = "#00000000"
 "syntax.field" = "pallet.aqua"
 "syntax.variable.member" = "pallet.aqua"
 "syntax.variable.parameter" = "pallet.purple"
+"syntax.variable.parameter.builtin" = "pallet.purple"
 "syntax.constant.macro" = "pallet.orange"
 "syntax.markup" = "pallet.foreground"
 "syntax.markup.strong" = "pallet.aqua"
@@ -160,15 +170,24 @@ transparent = "#00000000"
 "syntax.markup.underline" = "pallet.green"
 "syntax.markup.strikethrough" = "pallet.foreground-subtle"
 "syntax.markup.heading" = "pallet.red"
+"syntax.markup.heading.1" = "pallet.red"
+"syntax.markup.heading.2" = "pallet.red"
+"syntax.markup.heading.3" = "pallet.red"
+"syntax.markup.heading.4" = "pallet.red"
+"syntax.markup.heading.5" = "pallet.red"
+"syntax.markup.heading.6" = "pallet.red"
 "syntax.markup.raw" = "pallet.green"
+"syntax.markup.raw.block" = "pallet.green"
 "syntax.markup.math" = "pallet.orange"
 "syntax.markup.environment" = "pallet.orange"
 "syntax.markup.environment.name" = "pallet.aqua"
 "syntax.markup.link" = "pallet.green"
+"syntax.markup.link.url" = "pallet.green"
 "syntax.markup.link.label" = "pallet.foreground"
 "syntax.markup.list" = "pallet.foreground"
 "syntax.markup.list.checked" = "pallet.green"
 "syntax.markup.list.unchecked" = "pallet.foreground-subtle"
+"syntax.markup.quote" = "pallet.foreground-subtle"
 "syntax.comment.todo" = "pallet.yellow"
 "syntax.comment.note" = "pallet.red"
 "syntax.comment.warning" = "pallet.orange"
@@ -201,6 +220,7 @@ transparent = "#00000000"
 "syntax.text.diff.add" = "pallet.green"
 "syntax.text.diff.delete" = "pallet.red"
 "syntax.tag" = "pallet.red"
+"syntax.tag.builtin" = "pallet.red"
 "syntax.tag.attribute" = "pallet.blue"
 "syntax.tag.delimiter" = "pallet.foreground"
 "syntax.punctuation" = "pallet.foreground"
@@ -223,121 +243,3 @@ transparent = "#00000000"
 "syntax.lsp.type.type" = "pallet.aqua"
 "syntax.lsp.type.typeParameter" = "pallet.aqua"
 "syntax.lsp.type.variable" = "pallet.foreground"
-
-[options]
-"ui.line-number.relative" = true
-scrolloff = 1
-font = "Liga Berkeley Mono"
-font_size = 18
-cursor_roundness = 2
-picker_roundness = 16
-
-[langs.rust]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.c]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.cpp]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.csharp]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.css]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.gitcommit]
-indent = 4
-format_on_save = false
-use_tabs = false
-
-[langs.go]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.html]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.javascript]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.jsx]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.json]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.make]
-indent = 4
-format_on_save = false
-use_tabs = true
-
-[langs.markdown]
-indent = 0
-format_on_save = false
-use_tabs = false
-
-[langs.odin]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.python]
-indent = 4
-format_on_save = true
-use_tabs = false
-
-[langs.scss]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.sql]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.typescript]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.tsx]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.toml]
-indent = 4
-format_on_save = false
-use_tabs = false
-
-[langs.yaml]
-indent = 2
-format_on_save = false
-use_tabs = false
-
-[langs.zig]
-indent = 4
-format_on_save = true
-use_tabs = false

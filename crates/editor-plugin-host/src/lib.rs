@@ -1,9 +1,11 @@
 #![doc = r#"Core services responsible for discovering and orchestrating user packages."#]
 
+use editor_core::builtins;
 use editor_core::{
     BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope, KeymapVimMode, ModelError,
     SectionTree,
 };
+use editor_path::PathPattern;
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilKeyAction,
     PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
@@ -384,6 +386,7 @@ fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Res
     }
 
     for binding in package.hook_bindings() {
+        let is_file_open_hook = binding.hook_name() == builtins::FILE_OPEN;
         let subscriber = binding.subscriber().to_owned();
         let command_name = binding.command_name().to_owned();
         let detail_filter = binding.detail_filter().map(str::to_owned);
@@ -392,9 +395,11 @@ fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Res
             binding.hook_name(),
             binding.subscriber(),
             move |event, runtime| {
-                if let Some(filter) = detail_filter.as_deref()
-                    && event.detail.as_deref() != Some(filter)
-                {
+                if !detail_filter_matches(
+                    event.detail.as_deref(),
+                    detail_filter.as_deref(),
+                    is_file_open_hook,
+                ) {
                     return Ok(());
                 }
 
@@ -409,6 +414,26 @@ fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Res
     }
 
     Ok(())
+}
+
+fn detail_filter_matches(
+    detail: Option<&str>,
+    filter: Option<&str>,
+    is_file_open_hook: bool,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Some(detail) = detail else {
+        return false;
+    };
+    if detail == filter {
+        return true;
+    }
+    if !is_file_open_hook {
+        return false;
+    }
+    PathPattern::from_filter(filter).is_some_and(|pattern| pattern.matches_file_name(detail))
 }
 
 fn register_package_commands(
@@ -584,6 +609,25 @@ mod tests {
     #[derive(Debug, Default, Clone, PartialEq, Eq)]
     struct HookContextLog(Option<HookContext>);
 
+    fn file_open_package(filter: &str, buffer_name: &str) -> PluginPackage {
+        PluginPackage::new("tests", true, "File-open hook test package.")
+            .with_commands(vec![PluginCommand::new(
+                "tests.attach",
+                "Attaches test behavior.",
+                vec![PluginAction::open_buffer(
+                    buffer_name,
+                    "scratch",
+                    None::<&str>,
+                )],
+            )])
+            .with_hook_bindings(vec![PluginHookBinding::new(
+                builtins::FILE_OPEN,
+                format!("tests.auto-attach-{}", filter.replace('*', "star")),
+                "tests.attach",
+                Some(filter),
+            )])
+    }
+
     #[test]
     fn bootstrap_uses_the_selected_abi_strategy() {
         assert_eq!(bootstrap().plugin_abi, "abi_stable");
@@ -661,12 +705,85 @@ mod tests {
             builtins::FILE_OPEN,
             HookEvent::new()
                 .with_workspace(workspace_id)
-                .with_detail(".rs"),
+                .with_detail("main.rs"),
         )?;
 
         let workspace = runtime.model().workspace(workspace_id)?;
         assert_eq!(workspace.buffer_count(), 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn file_open_hook_filters_still_match_legacy_extension_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "scratch", None)?;
+        let baseline_buffers = runtime.model().workspace(workspace_id)?.buffer_count();
+
+        let packages = vec![file_open_package(".rs", "*legacy-extension*")];
+        load_auto_loaded_packages(&mut runtime, &packages)?;
+
+        runtime.emit_hook(
+            builtins::FILE_OPEN,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_detail(".rs"),
+        )?;
+
+        let workspace = runtime.model().workspace(workspace_id)?;
+        assert_eq!(workspace.buffer_count(), baseline_buffers + 1);
+        Ok(())
+    }
+
+    #[test]
+    fn file_open_hook_filters_match_exact_basenames() -> Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "scratch", None)?;
+        let baseline_buffers = runtime.model().workspace(workspace_id)?.buffer_count();
+
+        let packages = vec![file_open_package("Makefile", "*makefile*")];
+        load_auto_loaded_packages(&mut runtime, &packages)?;
+
+        runtime.emit_hook(
+            builtins::FILE_OPEN,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_detail("Makefile"),
+        )?;
+
+        let workspace = runtime.model().workspace(workspace_id)?;
+        assert_eq!(workspace.buffer_count(), baseline_buffers + 1);
+        Ok(())
+    }
+
+    #[test]
+    fn file_open_hook_filters_match_globs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = EditorRuntime::new();
+        let window_id = runtime.model_mut().create_window("main");
+        let workspace_id = runtime
+            .model_mut()
+            .open_workspace(window_id, "scratch", None)?;
+        let baseline_buffers = runtime.model().workspace(workspace_id)?.buffer_count();
+
+        let packages = vec![file_open_package("Dockerfile.*", "*dockerfile*")];
+        load_auto_loaded_packages(&mut runtime, &packages)?;
+
+        runtime.emit_hook(
+            builtins::FILE_OPEN,
+            HookEvent::new()
+                .with_workspace(workspace_id)
+                .with_detail("Dockerfile.dev"),
+        )?;
+
+        let workspace = runtime.model().workspace(workspace_id)?;
+        assert_eq!(workspace.buffer_count(), baseline_buffers + 1);
         Ok(())
     }
 

@@ -810,10 +810,15 @@ version = "0.1.0"
 dependencies = [
  "editor-buffer",
  "editor-jobs",
+ "editor-path",
  "lsp-types",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "editor-path"
+version = "0.1.0"
 
 [[package]]
 name = "editor-picker"
@@ -845,6 +850,7 @@ dependencies = [
  "editor-git",
  "editor-icons",
  "editor-lsp",
+ "editor-path",
  "editor-plugin-api",
  "editor-syntax",
  "editor-theme",
@@ -899,6 +905,7 @@ name = "editor-syntax"
 version = "0.1.0"
 dependencies = [
  "editor-buffer",
+ "editor-path",
  "libloading 0.8.9",
  "tree-sitter",
  "tree-sitter-language",

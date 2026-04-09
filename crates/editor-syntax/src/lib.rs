@@ -11,6 +11,7 @@ use std::{
 };
 
 use editor_buffer::{TextBuffer, TextByteChunks, TextEdit, TextPoint};
+use editor_path::PathMatcher;
 pub use tree_sitter::Language;
 use tree_sitter::{
     InputEdit, Node, Parser, Point, Query, QueryCursor, QueryPredicateArg, QueryProperty, Range,
@@ -23,6 +24,7 @@ pub const ROLE: &str =
     "Tree-sitter language registration, installation, parsing, highlighting, and indentation.";
 
 const DEFAULT_QUERY_ASSET_SEARCH_DEPTH: usize = 6;
+const MAX_INJECTION_DEPTH: usize = 8;
 const QUERY_ASSET_DIR_CANDIDATES: &[&[&str]] = &[
     &["crates", "volt", "assets", "grammars", "queries"],
     &["assets", "grammars", "queries"],
@@ -176,6 +178,8 @@ enum LanguageLoader {
 pub struct LanguageConfiguration {
     id: String,
     file_extensions: Vec<String>,
+    file_names: Vec<String>,
+    file_globs: Vec<String>,
     capture_mappings: Vec<CaptureThemeMapping>,
     loader: LanguageLoader,
     extra_highlight_query: Option<String>,
@@ -184,6 +188,7 @@ pub struct LanguageConfiguration {
     extra_locals_query: Option<String>,
     extra_folds_query: Option<String>,
     additional_highlight_languages: Vec<String>,
+    path_matcher: PathMatcher,
 }
 
 impl LanguageConfiguration {
@@ -246,10 +251,14 @@ impl LanguageConfiguration {
                 normalized_extensions.push(extension);
             }
         }
+        let path_matcher =
+            PathMatcher::from_parts(&normalized_extensions, [] as [&str; 0], [] as [&str; 0]);
 
         Self {
             id: id.into(),
             file_extensions: normalized_extensions,
+            file_names: Vec::new(),
+            file_globs: Vec::new(),
             capture_mappings: capture_mappings.into_iter().collect(),
             loader,
             extra_highlight_query: None,
@@ -258,6 +267,7 @@ impl LanguageConfiguration {
             extra_locals_query: None,
             extra_folds_query: None,
             additional_highlight_languages: Vec::new(),
+            path_matcher,
         }
     }
 
@@ -269,6 +279,38 @@ impl LanguageConfiguration {
     /// Returns the registered file extensions without leading dots.
     pub fn file_extensions(&self) -> &[String] {
         &self.file_extensions
+    }
+
+    /// Adds exact basenames that should resolve to this language.
+    pub fn with_file_names<I, S>(mut self, file_names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.file_names = normalize_unique_entries(file_names);
+        self.rebuild_path_matcher();
+        self
+    }
+
+    /// Returns the registered exact basenames.
+    pub fn file_names(&self) -> &[String] {
+        &self.file_names
+    }
+
+    /// Adds glob patterns that should resolve to this language.
+    pub fn with_file_globs<I, S>(mut self, file_globs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.file_globs = normalize_unique_entries(file_globs);
+        self.rebuild_path_matcher();
+        self
+    }
+
+    /// Returns the registered basename globs.
+    pub fn file_globs(&self) -> &[String] {
+        &self.file_globs
     }
 
     /// Returns the capture-to-theme mappings.
@@ -361,6 +403,15 @@ impl LanguageConfiguration {
     /// Returns additional language ids used to merge highlight spans.
     pub fn additional_highlight_languages(&self) -> &[String] {
         &self.additional_highlight_languages
+    }
+
+    fn path_match_score(&self, path: &Path) -> Option<usize> {
+        self.path_matcher.best_match_score(path)
+    }
+
+    fn rebuild_path_matcher(&mut self) {
+        self.path_matcher =
+            PathMatcher::from_parts(&self.file_extensions, &self.file_names, &self.file_globs);
     }
 
     /// Returns the installable grammar metadata, when present.
@@ -658,6 +709,20 @@ struct ParseTreeResult {
     applied_edits: Option<Vec<TextEdit>>,
 }
 
+#[derive(Default)]
+struct InjectionHighlights {
+    highlight_spans: Vec<HighlightSpan>,
+    has_errors: bool,
+}
+
+struct InjectionRegion {
+    language_name: String,
+    start_byte: usize,
+    end_byte: usize,
+    start_position: SyntaxPoint,
+    end_position: SyntaxPoint,
+}
+
 struct TextBufferProvider<'a> {
     buffer: &'a TextBuffer,
 }
@@ -679,11 +744,20 @@ impl LoadedLanguage {
     }
 }
 
+fn capture_requires_theme_token(capture_name: &str) -> bool {
+    !capture_name.starts_with('_')
+        && !matches!(
+            capture_name,
+            "spell" | "nospell" | "conceal" | "conceal_lines"
+        )
+}
+
 /// Runtime registry of known tree-sitter languages.
 pub struct SyntaxRegistry {
     install_root: PathBuf,
     query_asset_root: Option<PathBuf>,
     languages: BTreeMap<String, LanguageConfiguration>,
+    language_order: Vec<String>,
     extensions: BTreeMap<String, String>,
     loaded: BTreeMap<String, LoadedLanguage>,
 }
@@ -718,6 +792,7 @@ impl SyntaxRegistry {
             install_root: install_root.into(),
             query_asset_root: default_query_asset_root(),
             languages: BTreeMap::new(),
+            language_order: Vec::new(),
             extensions: BTreeMap::new(),
             loaded: BTreeMap::new(),
         }
@@ -776,6 +851,7 @@ impl SyntaxRegistry {
             self.extensions
                 .insert(extension.clone(), language_id.clone());
         }
+        self.language_order.push(language_id.clone());
         self.languages.insert(language_id, config);
         Ok(())
     }
@@ -802,8 +878,21 @@ impl SyntaxRegistry {
     /// Returns the language configuration for a path, if one exists.
     pub fn language_for_path(&self, path: impl AsRef<Path>) -> Option<&LanguageConfiguration> {
         let path = path.as_ref();
-        let extension = path.extension()?.to_str()?;
-        self.language_for_extension(extension)
+        let mut best = None;
+        let mut best_score = 0;
+        for language_id in &self.language_order {
+            let Some(language) = self.languages.get(language_id) else {
+                continue;
+            };
+            let Some(score) = language.path_match_score(path) else {
+                continue;
+            };
+            if best.is_none() || score > best_score {
+                best = Some(language);
+                best_score = score;
+            }
+        }
+        best
     }
 
     /// Reports whether a grammar-backed language is installed.
@@ -1107,7 +1196,24 @@ impl SyntaxRegistry {
         language_id: &str,
         buffer: &TextBuffer,
         highlight_window: Option<HighlightWindow>,
+        parse_session: Option<&mut Option<SyntaxParseSession>>,
+    ) -> Result<SyntaxSnapshot, SyntaxError> {
+        self.highlight_buffer_for_language_impl_with_depth(
+            language_id,
+            buffer,
+            highlight_window,
+            parse_session,
+            0,
+        )
+    }
+
+    fn highlight_buffer_for_language_impl_with_depth(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        highlight_window: Option<HighlightWindow>,
         mut parse_session: Option<&mut Option<SyntaxParseSession>>,
+        injection_depth: usize,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         let language_id = language_id.to_owned();
         let config = self
@@ -1126,8 +1232,13 @@ impl SyntaxRegistry {
                 .additional_highlight_languages()
                 .iter()
                 .any(|language| language == inline_language_id);
+        let has_injections = self
+            .loaded
+            .get(&language_id)
+            .and_then(|loaded| loaded.injections_query.as_ref())
+            .is_some();
 
-        let base_parse = if needs_inline_ranges {
+        let base_parse = if needs_inline_ranges || has_injections {
             Some(highlight_loaded_language_with_tree(
                 &language_id,
                 loaded,
@@ -1150,6 +1261,19 @@ impl SyntaxRegistry {
                 parse_session,
             )?
         };
+
+        if let Some(parse) = base_parse.as_ref().filter(|_| has_injections) {
+            let injections = self.highlight_injections_for_tree(
+                &config,
+                &language_id,
+                &parse.tree,
+                buffer,
+                highlight_window,
+                injection_depth,
+            )?;
+            snapshot.highlight_spans.extend(injections.highlight_spans);
+            snapshot.has_errors = snapshot.has_errors || injections.has_errors;
+        }
 
         for extra_language_id in config.additional_highlight_languages() {
             self.ensure_loaded_language(extra_language_id)?;
@@ -1191,7 +1315,121 @@ impl SyntaxRegistry {
             snapshot.has_errors = snapshot.has_errors || extra_snapshot.has_errors;
         }
 
+        sort_highlight_spans(&mut snapshot.highlight_spans);
         Ok(snapshot)
+    }
+
+    fn highlight_injections_for_tree(
+        &mut self,
+        host_config: &LanguageConfiguration,
+        host_language_id: &str,
+        tree: &Tree,
+        buffer: &TextBuffer,
+        highlight_window: Option<HighlightWindow>,
+        injection_depth: usize,
+    ) -> Result<InjectionHighlights, SyntaxError> {
+        if injection_depth >= MAX_INJECTION_DEPTH {
+            return Ok(InjectionHighlights::default());
+        }
+
+        let injection_regions = {
+            let Some(injections_query) = self
+                .loaded
+                .get(host_language_id)
+                .and_then(|loaded| loaded.injections_query.as_ref())
+            else {
+                return Ok(InjectionHighlights::default());
+            };
+            collect_injection_regions(injections_query, tree, buffer, highlight_window)
+        };
+
+        let mut highlights = InjectionHighlights::default();
+        for region in injection_regions {
+            if let Some(window) = highlight_window
+                && !injection_region_intersects_window(&region, window)
+            {
+                continue;
+            }
+
+            let Some(injection_language_id) =
+                self.resolve_injection_language_id(&region.language_name)
+            else {
+                continue;
+            };
+            if host_config
+                .additional_highlight_languages()
+                .iter()
+                .any(|language| language == &injection_language_id)
+            {
+                continue;
+            }
+
+            let Some(source) =
+                buffer_text_for_byte_range(buffer, region.start_byte, region.end_byte)
+            else {
+                continue;
+            };
+            let Ok(snapshot) = self.highlight_buffer_for_language_impl_with_depth(
+                &injection_language_id,
+                &TextBuffer::from_text(source),
+                None,
+                None,
+                injection_depth + 1,
+            ) else {
+                continue;
+            };
+
+            highlights.has_errors = highlights.has_errors || snapshot.has_errors;
+            highlights.highlight_spans.extend(
+                snapshot
+                    .highlight_spans
+                    .into_iter()
+                    .map(|span| translate_injected_highlight_span(span, &region))
+                    .filter(|span| {
+                        highlight_window
+                            .map(|window| span_intersects_window(span, window))
+                            .unwrap_or(true)
+                    }),
+            );
+        }
+
+        Ok(highlights)
+    }
+
+    fn resolve_injection_language_id(&self, raw_language: &str) -> Option<String> {
+        let raw_language = raw_language.trim();
+        if raw_language.is_empty() {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        for candidate in [
+            raw_language.to_owned(),
+            raw_language.to_ascii_lowercase(),
+            raw_language.replace('_', "-"),
+            raw_language.to_ascii_lowercase().replace('_', "-"),
+        ] {
+            if !candidate.is_empty() && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+
+        for candidate in &candidates {
+            if self.languages.contains_key(candidate) {
+                return Some(candidate.clone());
+            }
+        }
+        for candidate in &candidates {
+            if let Some(language) = self.language_for_extension(candidate) {
+                return Some(language.id().to_owned());
+            }
+        }
+        for candidate in &candidates {
+            if let Some(language) = self.language_for_path(candidate) {
+                return Some(language.id().to_owned());
+            }
+        }
+        None
     }
 
     /// Returns the compiled injections query for a language, loading it if needed.
@@ -2601,6 +2839,9 @@ fn highlight_tree(
                 .get(capture.index as usize)
                 .map(|name| name.to_string())
                 .unwrap_or_default();
+            if capture_name.is_empty() || !capture_requires_theme_token(&capture_name) {
+                continue;
+            }
 
             highlight_spans.push(HighlightSpan {
                 start_byte: node.start_byte(),
@@ -2613,6 +2854,92 @@ fn highlight_tree(
         }
     }
     highlight_spans
+}
+
+fn collect_injection_regions(
+    injections_query: &Query,
+    tree: &Tree,
+    buffer: &TextBuffer,
+    highlight_window: Option<HighlightWindow>,
+) -> Vec<InjectionRegion> {
+    let mut query_cursor = QueryCursor::new();
+    if let Some(highlight_window) = highlight_window.filter(|window| !window.is_empty()) {
+        query_cursor.set_point_range(
+            Point {
+                row: highlight_window.start_line(),
+                column: 0,
+            }..Point {
+                row: highlight_window.end_line_exclusive(),
+                column: 0,
+            },
+        );
+    }
+    let capture_names = injections_query.capture_names();
+    let mut regions = Vec::new();
+    let mut matches = query_cursor.matches(
+        injections_query,
+        tree.root_node(),
+        TextBufferProvider { buffer },
+    );
+    loop {
+        matches.advance();
+        let Some(query_match) = matches.get() else {
+            break;
+        };
+        if !general_predicates_match(
+            injections_query,
+            query_match.pattern_index,
+            query_match.captures,
+            buffer,
+        ) {
+            continue;
+        }
+
+        let language_capture = query_match.captures.iter().find_map(|capture| {
+            let capture_name = capture_names.get(capture.index as usize)?;
+            (*capture_name == "injection.language").then(|| {
+                buffer_text_for_byte_range(
+                    buffer,
+                    capture.node.start_byte(),
+                    capture.node.end_byte(),
+                )
+            })?
+        });
+        for capture in query_match.captures {
+            let Some(capture_name) = capture_names.get(capture.index as usize) else {
+                continue;
+            };
+            if *capture_name != "injection.content" {
+                continue;
+            }
+
+            let language_name = query_capture_property_value(
+                injections_query,
+                query_match.pattern_index,
+                capture.index,
+                "injection.language",
+            )
+            .map(str::to_owned)
+            .or_else(|| language_capture.clone())
+            .map(|language| language.trim().to_owned())
+            .filter(|language| !language.is_empty());
+            let Some(language_name) = language_name else {
+                continue;
+            };
+
+            let node = capture.node;
+            let start = node.start_position();
+            let end = node.end_position();
+            regions.push(InjectionRegion {
+                language_name,
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_position: SyntaxPoint::new(start.row, start.column),
+                end_position: SyntaxPoint::new(end.row, end.column),
+            });
+        }
+    }
+    regions
 }
 
 fn sort_highlight_spans(highlight_spans: &mut [HighlightSpan]) {
@@ -2639,6 +2966,11 @@ fn sort_highlight_spans(highlight_spans: &mut [HighlightSpan]) {
 fn span_intersects_window(span: &HighlightSpan, window: HighlightWindow) -> bool {
     span.start_position.line < window.end_line_exclusive()
         && span.end_position.line >= window.start_line()
+}
+
+fn injection_region_intersects_window(region: &InjectionRegion, window: HighlightWindow) -> bool {
+    region.start_position.line < window.end_line_exclusive()
+        && region.end_position.line >= window.start_line()
 }
 
 fn apply_text_edits_to_span(mut span: HighlightSpan, edits: &[TextEdit]) -> HighlightSpan {
@@ -2822,6 +3154,52 @@ fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
     lines.into_iter().collect()
 }
 
+fn buffer_text_for_byte_range(
+    buffer: &TextBuffer,
+    start_byte: usize,
+    end_byte: usize,
+) -> Option<String> {
+    if start_byte >= end_byte || end_byte > buffer.byte_count() {
+        return None;
+    }
+
+    let mut text = String::new();
+    for chunk in buffer.byte_slice_chunks(start_byte..end_byte) {
+        let Ok(chunk) = std::str::from_utf8(chunk) else {
+            return None;
+        };
+        text.push_str(chunk);
+    }
+    Some(text)
+}
+
+fn translate_injected_highlight_span(
+    span: HighlightSpan,
+    region: &InjectionRegion,
+) -> HighlightSpan {
+    let start_line = region.start_position.line + span.start_position.line;
+    let end_line = region.start_position.line + span.end_position.line;
+    let start_column = if span.start_position.line == 0 {
+        region.start_position.column + span.start_position.column
+    } else {
+        span.start_position.column
+    };
+    let end_column = if span.end_position.line == 0 {
+        region.start_position.column + span.end_position.column
+    } else {
+        span.end_position.column
+    };
+
+    HighlightSpan {
+        start_byte: region.start_byte.saturating_add(span.start_byte),
+        end_byte: region.start_byte.saturating_add(span.end_byte),
+        start_position: SyntaxPoint::new(start_line, start_column),
+        end_position: SyntaxPoint::new(end_line, end_column),
+        capture_name: span.capture_name,
+        theme_token: span.theme_token,
+    }
+}
+
 fn highlight_inline_language_per_line(
     language_id: &str,
     loaded: &LoadedLanguage,
@@ -2966,6 +3344,23 @@ fn command_failure_message(command_name: &str, output: &std::process::Output) ->
     }
 
     format!("{command_name} exited with status {}", output.status)
+}
+
+fn normalize_unique_entries<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.is_empty() || normalized.iter().any(|entry| entry == trimmed) {
+            continue;
+        }
+        normalized.push(trimmed.to_owned());
+    }
+    normalized
 }
 
 fn default_install_root() -> PathBuf {
@@ -3133,6 +3528,39 @@ mod tests {
         )
     }
 
+    fn cmake_configuration() -> LanguageConfiguration {
+        LanguageConfiguration::new(
+            "cmake",
+            ["cmake"],
+            rust_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )
+        .with_file_names(["CMakeLists.txt"])
+    }
+
+    fn dockerfile_configuration() -> LanguageConfiguration {
+        LanguageConfiguration::new(
+            "dockerfile",
+            [] as [&str; 0],
+            rust_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [CaptureThemeMapping::new("string", "syntax.string")],
+        )
+        .with_file_names(["Dockerfile"])
+        .with_file_globs(["Dockerfile.*"])
+    }
+
+    fn dev_extension_configuration() -> LanguageConfiguration {
+        LanguageConfiguration::new(
+            "dev",
+            ["dev"],
+            rust_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [CaptureThemeMapping::new("string", "syntax.string")],
+        )
+    }
+
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
@@ -3182,6 +3610,72 @@ mod tests {
                 .language_for_path("src\\main.rs")
                 .map(|language| language.id()),
             Some("rust")
+        );
+    }
+
+    #[test]
+    fn registry_prefers_exact_filenames_and_globs_over_extensions() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(LanguageConfiguration::new(
+            "plaintext",
+            ["txt"],
+            rust_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        must(registry.register(cmake_configuration()));
+        must(registry.register(dockerfile_configuration()));
+
+        assert_eq!(
+            registry
+                .language_for_path("project\\CMakeLists.txt")
+                .map(LanguageConfiguration::id),
+            Some("cmake")
+        );
+        assert_eq!(
+            registry
+                .language_for_path("containers\\Dockerfile.dev")
+                .map(LanguageConfiguration::id),
+            Some("dockerfile")
+        );
+        assert_eq!(
+            registry
+                .language_for_path("notes\\guide.txt")
+                .map(LanguageConfiguration::id),
+            Some("plaintext")
+        );
+    }
+
+    #[test]
+    fn registry_resolves_languages_by_filename_and_glob() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(dockerfile_configuration()));
+
+        assert_eq!(
+            registry
+                .language_for_path("Dockerfile")
+                .map(|language| language.id()),
+            Some("dockerfile")
+        );
+        assert_eq!(
+            registry
+                .language_for_path("containers\\Dockerfile.dev")
+                .map(|language| language.id()),
+            Some("dockerfile")
+        );
+    }
+
+    #[test]
+    fn registry_prefers_filename_globs_over_extension_matches() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(dev_extension_configuration()));
+        must(registry.register(dockerfile_configuration()));
+
+        assert_eq!(
+            registry
+                .language_for_path("containers\\Dockerfile.dev")
+                .map(|language| language.id()),
+            Some("dockerfile")
         );
     }
 
@@ -3259,6 +3753,105 @@ fn main() {
                 .highlight_spans
                 .iter()
                 .any(|span| span.theme_token == "syntax.string.inline")
+        );
+    }
+
+    #[test]
+    fn injected_highlighting_merges_nested_language_and_additional_spans() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(
+                rust_configuration()
+                    .with_additional_highlight_languages(["rust-inline"])
+                    .with_extra_injections_query(
+                        r#"((raw_string_literal
+  (string_content) @injection.content)
+  (#set! injection.language "rs"))"#,
+                    ),
+            ),
+        );
+        must(registry.register(rust_inline_configuration()));
+
+        let buffer = TextBuffer::from_text(
+            r##"fn main() {
+    let source = r#"fn injected() { let value = "volt"; }"#;
+}"##,
+        );
+        let source = buffer.text();
+        let Some(injected_fn_byte) = source.find("injected") else {
+            panic!("expected injected function name in test buffer");
+        };
+        let Some(injected_string_byte) = source.find("volt") else {
+            panic!("expected injected string literal in test buffer");
+        };
+
+        let snapshot = must(registry.highlight_buffer_for_language("rust", &buffer));
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|span| span.theme_token == "syntax.function"
+                    && span.start_byte <= injected_fn_byte
+                    && injected_fn_byte < span.end_byte),
+            "expected injected Rust function highlight at byte {injected_fn_byte}, got {:?}",
+            snapshot.highlight_spans
+        );
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|span| span.theme_token == "syntax.string.inline"
+                    && span.start_byte <= injected_string_byte
+                    && injected_string_byte < span.end_byte),
+            "expected injected additional highlight at byte {injected_string_byte}, got {:?}",
+            snapshot.highlight_spans
+        );
+    }
+
+    #[test]
+    fn unknown_injection_language_is_ignored_without_failing_host_highlighting() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(rust_configuration().with_extra_injections_query(
+                r#"((raw_string_literal
+  (string_content) @injection.content)
+  (#set! injection.language "not-registered"))"#,
+            )),
+        );
+
+        let buffer = TextBuffer::from_text(
+            r##"fn main() {
+    let source = r#"fn injected() {}"#;
+}"##,
+        );
+        let source = buffer.text();
+        let Some(main_byte) = source.find("main") else {
+            panic!("expected main function name in test buffer");
+        };
+        let Some(injected_byte) = source.find("injected") else {
+            panic!("expected injected function name in test buffer");
+        };
+
+        let snapshot = must(registry.highlight_buffer_for_language("rust", &buffer));
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .any(|span| span.theme_token == "syntax.function"
+                    && span.start_byte <= main_byte
+                    && main_byte < span.end_byte),
+            "expected host Rust function highlight at byte {main_byte}, got {:?}",
+            snapshot.highlight_spans
+        );
+        assert!(
+            snapshot
+                .highlight_spans
+                .iter()
+                .all(|span| !(span.theme_token == "syntax.function"
+                    && span.start_byte <= injected_byte
+                    && injected_byte < span.end_byte)),
+            "unexpected injected function highlight at byte {injected_byte}: {:?}",
+            snapshot.highlight_spans
         );
     }
 
@@ -4050,6 +4643,24 @@ fn main() {
             !snapshot.highlight_spans.is_empty(),
             "unknown predicates should allow matches through"
         );
+    }
+
+    #[test]
+    fn highlight_skips_internal_and_meta_captures() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_config_with_query(
+            r#"
+(identifier) @_helper
+(identifier) @function
+(identifier) @spell
+(identifier) @conceal
+"#,
+        )));
+
+        let buffer = TextBuffer::from_text("fn main() {}");
+        let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
+        assert_eq!(snapshot.highlight_spans.len(), 1);
+        assert_eq!(snapshot.highlight_spans[0].capture_name, "function");
     }
 
     #[test]

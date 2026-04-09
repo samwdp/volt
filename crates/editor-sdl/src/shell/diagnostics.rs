@@ -150,6 +150,7 @@ pub(super) fn draw_diagnostic_underlines_for_segment(
     target: &mut DrawTarget<'_>,
     diagnostics: &[DiagnosticLineSpan],
     syntax_spans: Option<&[LineSyntaxSpan]>,
+    char_map: &LineCharMap,
     segment_x: i32,
     y: i32,
     line_len: usize,
@@ -178,9 +179,12 @@ pub(super) fn draw_diagnostic_underlines_for_segment(
             }
             draw_diagnostic_undercurl(
                 target,
-                segment_x + (clipped_start.saturating_sub(segment.start_col) as i32 * cell_width),
+                segment_x
+                    + (char_map.display_cols_between(segment.start_col, clipped_start) as i32
+                        * cell_width),
                 y,
-                (clipped_end.saturating_sub(clipped_start) as i32 * cell_width).max(1),
+                (char_map.display_cols_between(clipped_start, clipped_end) as i32 * cell_width)
+                    .max(1),
                 line_height,
                 diagnostic_color(severity),
             )?;

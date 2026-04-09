@@ -26,6 +26,21 @@ fn rust_test_language() -> editor_syntax::Language {
     tree_sitter_rust::LANGUAGE.into()
 }
 
+fn register_rust_highlight_test_language(runtime: &mut EditorRuntime) -> Result<(), String> {
+    syntax_registry_mut(runtime)?
+        .register(editor_syntax::LanguageConfiguration::new(
+            "rust",
+            ["rs"],
+            rust_test_language,
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            [
+                editor_syntax::CaptureThemeMapping::new("keyword", "syntax.keyword"),
+                editor_syntax::CaptureThemeMapping::new("function", "syntax.function"),
+            ],
+        ))
+        .map_err(|error| error.to_string())
+}
+
 struct TempTestDir {
     path: PathBuf,
 }
@@ -55,6 +70,7 @@ impl Drop for TempTestDir {
 struct HeaderlineTestUserLibrary {
     scrolloff: f64,
     headerline_lines: Vec<String>,
+    headerline_requires_scrolled_viewport: bool,
 }
 
 impl Default for HeaderlineTestUserLibrary {
@@ -62,6 +78,7 @@ impl Default for HeaderlineTestUserLibrary {
         Self {
             scrolloff: 1.0,
             headerline_lines: vec!["fn render(value: usize)".to_owned()],
+            headerline_requires_scrolled_viewport: false,
         }
     }
 }
@@ -247,7 +264,10 @@ impl UserLibrary for HeaderlineTestUserLibrary {
         "https://example.com".to_owned()
     }
 
-    fn headerline_lines(&self, _context: &GhostTextContext<'_>) -> Vec<String> {
+    fn headerline_lines(&self, context: &GhostTextContext<'_>) -> Vec<String> {
+        if self.headerline_requires_scrolled_viewport && context.viewport_top_line == 0 {
+            return Vec::new();
+        }
         self.headerline_lines.clone()
     }
 
@@ -329,6 +349,18 @@ fn resolve_default_workspace_root_prefers_existing_executable_relative_user_dir(
 
     let resolved = resolve_default_workspace_root(Some(&exe_dir.join("volt-tests")), None);
     assert_eq!(resolved, Some(bundled_user_dir));
+}
+
+#[test]
+fn file_open_detail_returns_basenames_for_extension_and_extensionless_files() {
+    assert_eq!(
+        file_open_detail(Path::new("src\\main.rs")).as_deref(),
+        Some("main.rs")
+    );
+    assert_eq!(
+        file_open_detail(Path::new("Makefile")).as_deref(),
+        Some("Makefile")
+    );
 }
 
 #[test]
@@ -963,7 +995,7 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
     let file_path = root.join("alpha.txt");
     std::fs::write(&file_path, "alpha\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_oil_test_buffer(&mut state, &root)?;
     shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
@@ -1942,6 +1974,43 @@ fn draw_buffer_text_keeps_cursor_line_as_one_text_run() -> Result<(), String> {
 }
 
 #[test]
+fn draw_buffer_text_expands_tabs_to_spaces() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let line = "\tcargo";
+    let char_map = LineCharMap::with_tab_width(line, 4);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "    cargo".to_owned(),
+            color: to_render_color(default_color),
+        },]
+    );
+    Ok(())
+}
+
+#[test]
 fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Result<(), String> {
     let line = SectionRenderLine {
         text: format!(
@@ -2005,6 +2074,7 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Result<(), String> {
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
+    let char_map = LineCharMap::new("a");
 
     draw_line_ghost_text_for_segment(
         &mut target,
@@ -2015,6 +2085,7 @@ fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Res
                 start_col: 0,
                 end_col: 1,
             },
+            char_map: &char_map,
             line_len: 1,
             ghost_text: Some(" render(value: usize)"),
             color: Color::RGB(140, 144, 152),
@@ -2039,6 +2110,7 @@ fn draw_line_ghost_text_for_segment_draws_after_the_last_visible_column() -> Res
 fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result<(), String> {
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
+    let char_map = LineCharMap::new("alpha beta");
 
     draw_line_ghost_text_for_segment(
         &mut target,
@@ -2049,6 +2121,7 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
                 start_col: 0,
                 end_col: 10,
             },
+            char_map: &char_map,
             line_len: 24,
             ghost_text: Some("hidden"),
             color: Color::RGB(140, 144, 152),
@@ -2082,7 +2155,7 @@ fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
 }
 
 #[test]
-fn render_buffer_headerline_scrolloff_reserves_rows_for_text() -> Result<(), String> {
+fn render_buffer_headerline_overlays_without_shifting_buffer_rows() -> Result<(), String> {
     let render_user_library = HeaderlineTestUserLibrary::default();
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
     let mut state =
@@ -2116,6 +2189,7 @@ fn render_buffer_headerline_scrolloff_reserves_rows_for_text() -> Result<(), Str
         false,
         None,
         None,
+        render_user_library.commandline_enabled(),
         &render_user_library,
         "default",
         None,
@@ -2132,11 +2206,11 @@ fn render_buffer_headerline_scrolloff_reserves_rows_for_text() -> Result<(), Str
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::Text { y, text, .. } if *y == layout.body_y + 16 && text == "beta"
+        DrawCommand::Text { y, text, .. } if *y == layout.body_y && text == "beta"
     )));
     assert!(!scene.iter().any(|command| matches!(
         command,
-        DrawCommand::Text { y, text, .. } if *y == layout.body_y && text == "beta"
+        DrawCommand::Text { y, text, .. } if *y == layout.body_y + 16 && text == "beta"
     )));
     Ok(())
 }
@@ -2169,6 +2243,7 @@ fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(),
         false,
         None,
         None,
+        render_user_library.commandline_enabled(),
         &render_user_library,
         "default",
         None,
@@ -2186,7 +2261,7 @@ fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(),
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::Text { y, text, .. }
-            if *y == layout.body_y + 16 && text == "alpha"
+            if *y == layout.body_y && text == "alpha"
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
@@ -2196,12 +2271,185 @@ fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(),
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
-            if rect.y == layout.body_y + 16 && *color == cursor_color
+            if rect.y == layout.body_y && *color == cursor_color
     )));
     assert!(!scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
-            if rect.y == layout.body_y + 32 && *color == cursor_color
+            if rect.y == layout.body_y + 16 && *color == cursor_color
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_headerline_divider_sits_below_last_headerline_row() -> Result<(), String> {
+    let render_user_library = HeaderlineTestUserLibrary {
+        scrolloff: 1.0,
+        headerline_lines: vec![
+            "module app".to_owned(),
+            "fn render(value: usize)".to_owned(),
+        ],
+        headerline_requires_scrolled_viewport: false,
+    };
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
+        scrolloff: 1.0,
+        headerline_lines: vec![
+            "module app".to_owned(),
+            "fn render(value: usize)".to_owned(),
+        ],
+        headerline_requires_scrolled_viewport: false,
+    });
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*headerline-divider*", vec!["alpha".to_owned()])?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        render_user_library.commandline_enabled(),
+        &render_user_library,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == 8
+                && rect.y == layout.body_y + (2 * 16) - 1
+                && rect.width == 304
+                && rect.height == 1
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -> Result<(), String>
+{
+    let render_user_library = HeaderlineTestUserLibrary {
+        scrolloff: 3.0,
+        headerline_lines: vec!["STICKY HEADER".to_owned()],
+        headerline_requires_scrolled_viewport: true,
+    };
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
+        scrolloff: 3.0,
+        headerline_lines: vec!["STICKY HEADER".to_owned()],
+        headerline_requires_scrolled_viewport: true,
+    });
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*headerline-activation*",
+        vec![
+            "scope header".to_owned(),
+            "body line".to_owned(),
+            "return 'a'".to_owned(),
+        ],
+    )?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.scroll_row = 0;
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+    let mut hidden_scope_scene = Vec::new();
+    let mut hidden_scope_target = DrawTarget::Scene(&mut hidden_scope_scene);
+    render_buffer(
+        &mut hidden_scope_target,
+        shell_buffer(&state.runtime, buffer_id)?,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        render_user_library.commandline_enabled(),
+        &render_user_library,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+    assert!(!hidden_scope_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { text, .. } if text == "STICKY HEADER"
+    )));
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.scroll_row = 1;
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut sticky_scene = Vec::new();
+    let mut sticky_target = DrawTarget::Scene(&mut sticky_scene);
+    render_buffer(
+        &mut sticky_target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        render_user_library.commandline_enabled(),
+        &render_user_library,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+    assert!(sticky_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, text, .. }
+            if *y == layout.body_y && text == "STICKY HEADER"
     )));
     Ok(())
 }
@@ -2246,7 +2494,7 @@ fn ensure_visible_scrolloff_keeps_cursor_off_top_edge() -> Result<(), String> {
 }
 
 #[test]
-fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> Result<(), String> {
+fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result<(), String> {
     let render_width = 640;
     let render_height = 360;
     let cell_width = 8;
@@ -2270,17 +2518,7 @@ fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> 
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
     let rect = PixelRectToRect::rect(0, 0, render_width, render_height);
     let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
-    let headerline_rows = buffer_headerline_rows(
-        buffer,
-        true,
-        false,
-        &*user_library,
-        state.runtime.services().get::<ThemeRegistry>(),
-        layout.visible_rows,
-    )
-    .min(layout.visible_rows.saturating_sub(1));
-    let content_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
-    let expected_scrolloff = 3usize.min(content_rows.saturating_sub(1) / 2);
+    let expected_scrolloff = 3usize.min(layout.visible_rows.saturating_sub(1) / 2);
     assert!(expected_scrolloff > 1);
     let anchor = buffer_cursor_screen_anchor(
         buffer,
@@ -2291,10 +2529,11 @@ fn sync_visible_buffer_layouts_uses_theme_scrolloff_beside_headerline_rows() -> 
         line_height,
     )
     .ok_or_else(|| "buffer cursor screen anchor was missing".to_owned())?;
-    let cursor_body_row = ((anchor.y - layout.body_y) / line_height) as usize - headerline_rows;
+    let cursor_body_row = ((anchor.y - layout.body_y) / line_height) as usize;
     assert_eq!(
         cursor_body_row,
-        content_rows
+        layout
+            .visible_rows
             .saturating_sub(1)
             .saturating_sub(expected_scrolloff)
     );
@@ -2899,12 +3138,17 @@ fn run_git_in_dir(root: &std::path::Path, args: &[&str]) -> Result<String, Strin
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn init_git_repo_with_commit(label: &str) -> Result<std::path::PathBuf, String> {
+fn init_git_repo(label: &str) -> Result<std::path::PathBuf, String> {
     let repo = unique_temp_dir(label);
     run_git_in_dir(&repo, &["init", "-q"])?;
     run_git_in_dir(&repo, &["config", "user.email", "volt-tests@example.com"])?;
     run_git_in_dir(&repo, &["config", "user.name", "Volt Tests"])?;
     run_git_in_dir(&repo, &["config", "commit.gpgsign", "false"])?;
+    Ok(repo)
+}
+
+fn init_git_repo_with_commit(label: &str) -> Result<std::path::PathBuf, String> {
+    let repo = init_git_repo(label)?;
     std::fs::write(repo.join("README.md"), "seed\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "README.md"])?;
     run_git_in_dir(&repo, &["commit", "-qm", "initial"])?;
@@ -3130,16 +3374,19 @@ fn install_hover_test_overlay(state: &mut ShellState, focused: bool) -> Result<B
                 provider_label: "Alpha".to_owned(),
                 provider_icon: "A".to_owned(),
                 lines: vec!["first".to_owned()],
+                syntax_lines: BTreeMap::new(),
             },
             HoverProviderContent {
                 provider_label: "Beta".to_owned(),
                 provider_icon: "B".to_owned(),
                 lines: vec!["second".to_owned()],
+                syntax_lines: BTreeMap::new(),
             },
             HoverProviderContent {
                 provider_label: "Gamma".to_owned(),
                 provider_icon: "G".to_owned(),
                 lines: vec!["third".to_owned()],
+                syntax_lines: BTreeMap::new(),
             },
         ],
         provider_index: 0,
@@ -3174,6 +3421,7 @@ fn install_scrollable_hover_test_overlay(
             provider_label: "Scrollable".to_owned(),
             provider_icon: "S".to_owned(),
             lines,
+            syntax_lines: BTreeMap::new(),
         }],
         provider_index: 0,
         scroll_offset: 0,
@@ -3849,6 +4097,40 @@ fn git_status_shift_v_visual_x_deletes_selected_items() -> Result<(), String> {
 }
 
 #[test]
+fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String> {
+    let repo = init_git_repo("git-status-fresh-repo")?;
+    let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned();
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, buffer_id)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let snapshot = buffer
+        .git_snapshot()
+        .ok_or_else(|| "git snapshot missing".to_owned())?;
+    let has_commit_action = (0..buffer.line_count()).any(|line_index| {
+        buffer
+            .section_line_meta(line_index)
+            .and_then(|meta| meta.action.as_ref())
+            .is_some_and(|action| action.id() == user::git::ACTION_COMMIT_OPEN)
+    });
+
+    assert_eq!(snapshot.branch(), Some(branch.as_str()));
+    assert!(snapshot.head().is_none());
+    assert!(has_commit_action);
+    assert_eq!(staged, BTreeSet::from(["alpha.txt".to_owned()]));
+    assert!(unstaged.is_empty());
+    assert!(untracked.is_empty());
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_line_is_untracked_uses_section_metadata() {
     let meta = SectionLineMeta {
         section_id: GIT_SECTION_UNTRACKED.to_owned(),
@@ -4180,6 +4462,110 @@ fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), Stri
 
     assert!(layout.statusline_y < commandline_y);
     assert_eq!(commandline_y - layout.statusline_y, 18);
+    Ok(())
+}
+
+#[test]
+fn render_buffer_draws_command_line_row_without_active_overlay() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout_with_command_line(buffer, rect, 16, 8, true);
+    let commandline_y = layout
+        .commandline_y
+        .ok_or_else(|| "command line row is missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        true,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == 8
+                && rect.y == commandline_y
+                && rect.width == 304
+                && rect.height == 16
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    let base_background = Color::RGB(15, 16, 20);
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        320,
+        180,
+        8,
+        16,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == 0
+                && rect.y == 0
+                && rect.width == 320
+                && rect.height == 180
+                && *color == to_render_color(base_background)
+    )));
     Ok(())
 }
 
@@ -4680,7 +5066,7 @@ fn acp_plan_height_caps_wrapped_content_at_ten_rows() -> Result<(), String> {
             .collect(),
     ));
 
-    buffer.sync_acp_viewport_metrics(220, 420, 8, 16);
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
 
     let acp = buffer.acp_state.as_ref().expect("ACP state missing");
     assert_eq!(acp.plan_pane.visible_rows(), 10);
@@ -4705,7 +5091,7 @@ fn acp_scroll_output_to_end_reaches_last_rendered_line() -> Result<(), String> {
         buffer.acp_push_system_message(format!("output line {index}"));
     }
 
-    buffer.sync_acp_viewport_metrics(800, 400, 8, 16);
+    buffer.sync_acp_viewport_metrics(800, 400, 8, 16, true);
     buffer.scroll_output_to_end();
 
     assert!(
@@ -4861,6 +5247,7 @@ fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Resul
         .sync_active_viewport_for_render_size(render_width, render_height, line_height)
         .map_err(|error| error.to_string())?;
 
+    let command_line_visible = state.user_library.commandline_enabled();
     let pane_rect = horizontal_pane_rects(render_width, render_height, 2)
         .into_iter()
         .next()
@@ -4868,17 +5255,19 @@ fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Resul
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    let pane_layout = buffer_footer_layout(
+    let pane_layout = buffer_footer_layout_with_command_line(
         buffer,
         PixelRectToRect::rect(pane_rect.x, pane_rect.y, pane_rect.width, pane_rect.height),
         line_height,
         8,
+        command_line_visible,
     );
-    let full_layout = buffer_footer_layout(
+    let full_layout = buffer_footer_layout_with_command_line(
         buffer,
         PixelRectToRect::rect(0, 0, render_width, render_height),
         line_height,
         8,
+        command_line_visible,
     );
 
     assert_eq!(buffer.viewport_lines(), pane_layout.visible_rows);
@@ -5155,6 +5544,64 @@ fn completion_token_at_cursor_supports_trailing_token_edge() -> Result<(), Strin
 }
 
 #[test]
+fn hover_signature_request_point_prefers_callee_over_enclosing_macro() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let text = "let commands = vec![hook_command(\"alpha\", \"beta\", \"gamma\", \"delta\")];";
+    let cursor_column = text
+        .find("hook_command")
+        .ok_or_else(|| "hook_command missing".to_owned())?
+        + 4;
+    let expected_column = text
+        .find("(\"alpha\"")
+        .ok_or_else(|| "hook_command call missing".to_owned())?
+        + 1;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text(text);
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, cursor_column));
+
+    let point = hover_signature_request_point(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+    );
+
+    assert_eq!(point, TextPoint::new(0, expected_column));
+    Ok(())
+}
+
+#[test]
+fn hover_signature_request_point_preserves_argument_cursor_context() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let text = "hook_command(name, description, hook_name, detail)";
+    let cursor_column = text
+        .find("description")
+        .ok_or_else(|| "description missing".to_owned())?
+        + 3;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text(text);
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(0, cursor_column));
+
+    let point = hover_signature_request_point(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+    );
+
+    assert_eq!(point, TextPoint::new(0, cursor_column));
+    Ok(())
+}
+
+#[test]
 fn manual_autocomplete_entries_only_apply_to_matching_plugin_buffers() {
     let provider = AutocompleteProviderSpec {
         id: "calculator".to_owned(),
@@ -5255,6 +5702,73 @@ fn hover_test_provider_lines_include_theme_and_treesitter_tokens() -> Result<(),
         lines
             .iter()
             .any(|line| line == "Tree-sitter token: @function")
+    );
+    Ok(())
+}
+
+#[test]
+fn render_markdown_hover_content_highlights_registered_code_fences() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    register_rust_highlight_test_language(&mut state.runtime)?;
+
+    let rendered = render_markdown_hover_content(
+        &mut state.runtime,
+        "Example:\n\n```rust\nfn example() {}\n```\n",
+    );
+
+    assert_eq!(
+        rendered.lines,
+        vec![
+            "Example:".to_owned(),
+            String::new(),
+            "```rust".to_owned(),
+            "fn example() {}".to_owned(),
+            "```".to_owned(),
+        ]
+    );
+    assert!(rendered.syntax_lines.get(&3).is_some_and(|spans| {
+        spans
+            .iter()
+            .any(|span| span.theme_token == "syntax.keyword")
+    }));
+    Ok(())
+}
+
+#[test]
+fn hover_diagnostic_provider_fragments_preserve_fenced_code_blocks() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer.text = TextBuffer::from_text("alpha");
+        buffer.set_cursor(TextPoint::new(0, 2));
+        buffer.set_lsp_diagnostics(vec![LspDiagnostic::new(
+            "rust-analyzer",
+            "Try this:\n```rust\nfn example() {}\n```",
+            LspDiagnosticSeverity::Warning,
+            TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+        )]);
+    }
+
+    let fragments = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        hover_diagnostic_provider_fragments(buffer, &NullUserLibrary)
+    };
+
+    assert_eq!(
+        fragments,
+        vec![
+            HoverProviderFragment::PlainLines(vec![format!(
+                "{} rust-analyzer",
+                NullUserLibrary.lsp_diagnostic_icon()
+            )]),
+            HoverProviderFragment::MarkdownText(
+                "Try this:\n```rust\nfn example() {}\n```".to_owned()
+            ),
+        ]
     );
     Ok(())
 }
@@ -5592,6 +6106,52 @@ fn hover_tab_shortcut_focuses_open_overlay() -> Result<(), String> {
 }
 
 #[test]
+fn hover_tab_shortcut_beats_markdown_table_navigation_and_allows_scroll() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*hover-markdown-tab*",
+        "| Header 1 | Header 2 |\n| --- | --- |\n| Some text | Some more text |",
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 2));
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+    let cursor_before = shell_buffer(&state.runtime, buffer_id)?.cursor_point();
+    let _buffer_id = install_scrollable_hover_test_overlay(&mut state, false)?;
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Tab),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(state.hover_focused().map_err(|error| error.to_string())?);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        cursor_before
+    );
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(hover_scroll_offset(&state)?, 1);
+    Ok(())
+}
+
+#[test]
 fn hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_hover_test_overlay(&mut state, false)?;
@@ -5843,6 +6403,94 @@ fn markdown_table_preserves_insert_mode_spaces() -> Result<(), String> {
         Some("| Some text m | Some more text |")
     );
     assert_eq!(buffer.cursor_point(), TextPoint::new(2, 13));
+    Ok(())
+}
+
+#[test]
+fn insert_mode_tab_inserts_spaces_using_language_theme_options() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(&mut state, "*rust-insert-tab*", vec![String::new()])?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 0));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Tab),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let theme_registry = state.runtime.services().get::<ThemeRegistry>();
+    assert!(!theme_lang_use_tabs(theme_registry, Some("rust")));
+    let expected = tab_insert_string(theme_registry, Some("rust"));
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        buffer.cursor_point(),
+        TextPoint::new(0, expected.chars().count())
+    );
+    Ok(())
+}
+
+#[test]
+fn replace_mode_tab_inserts_make_tabs_using_language_theme_options() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*make-replace-tab*", vec!["recipe".to_owned()])?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("make".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 0));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_replace_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Tab),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let theme_registry = state.runtime.services().get::<ThemeRegistry>();
+    assert!(theme_lang_use_tabs(theme_registry, Some("make")));
+    let expected = tab_insert_string(theme_registry, Some("make"));
+    let expected_line = format!("{expected}ecipe");
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some(expected_line.as_str()));
+    assert_eq!(
+        buffer.cursor_point(),
+        TextPoint::new(0, expected.chars().count())
+    );
     Ok(())
 }
 
@@ -6597,9 +7245,21 @@ fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
         .buffer(buffer_id)
         .ok_or_else(|| "browser shell buffer missing".to_owned())?;
     let rect = PixelRectToRect::rect(0, 0, 800, 400);
-    let layout = buffer_footer_layout(buffer, rect, 18, 8);
-    let viewport = browser_viewport_rect(buffer, rect, 8, 18)
-        .ok_or_else(|| "browser viewport missing".to_owned())?;
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        18,
+        8,
+        state.user_library.commandline_enabled(),
+    );
+    let viewport = browser_viewport_rect(
+        buffer,
+        rect,
+        8,
+        18,
+        state.user_library.commandline_enabled(),
+    )
+    .ok_or_else(|| "browser viewport missing".to_owned())?;
     let viewport_bottom = viewport.y + viewport.height as i32;
 
     assert!(viewport.width > 0);
@@ -6616,6 +7276,7 @@ fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
         None,
+        &*state.user_library,
         800,
         400,
         8,
@@ -6656,6 +7317,7 @@ fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), Stri
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
         None,
+        &*state.user_library,
         800,
         400,
         8,
@@ -6691,6 +7353,7 @@ fn browser_sync_plan_hides_surfaces_when_notifications_overlap() -> Result<(), S
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
         None,
+        &*state.user_library,
         800,
         400,
         8,
@@ -7619,6 +8282,7 @@ fn render_buffer_multicursor_draws_one_cursor_per_range() -> Result<(), String> 
         true,
         None,
         None,
+        NullUserLibrary.commandline_enabled(),
         &NullUserLibrary,
         "default",
         None,

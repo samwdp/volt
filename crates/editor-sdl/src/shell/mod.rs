@@ -120,7 +120,7 @@ use sdl3::{
     rect::Rect,
     render::{Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
     surface::Surface,
-    ttf::Font,
+    ttf::{Font, Hinting},
     video::{Window, WindowContext},
 };
 use sdl3_ttf_sys as _;
@@ -504,7 +504,7 @@ impl<'ttf> FontSet<'ttf> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LineSyntaxSpan {
     start: usize,
     end: usize,
@@ -552,18 +552,37 @@ struct LineWrapSegment {
 struct LineCharMap {
     bytes: Vec<usize>,
     whitespace: Vec<bool>,
+    display_columns: Vec<usize>,
 }
 
 impl LineCharMap {
     fn new(line: &str) -> Self {
+        Self::with_tab_width(line, 4)
+    }
+
+    fn with_tab_width(line: &str, tab_width: usize) -> Self {
+        let tab_width = resolved_tab_width(tab_width);
         let mut bytes = Vec::new();
         let mut whitespace = Vec::new();
+        let mut display_columns = Vec::new();
+        let mut display_col = 0usize;
         for (byte_index, character) in line.char_indices() {
             bytes.push(byte_index);
             whitespace.push(character.is_whitespace());
+            display_columns.push(display_col);
+            display_col = display_col.saturating_add(display_columns_for_character(
+                character,
+                display_col,
+                tab_width,
+            ));
         }
         bytes.push(line.len());
-        Self { bytes, whitespace }
+        display_columns.push(display_col);
+        Self {
+            bytes,
+            whitespace,
+            display_columns,
+        }
     }
 
     fn len(&self) -> usize {
@@ -580,6 +599,73 @@ impl LineCharMap {
         let start_byte = self.bytes.get(start).copied().unwrap_or(line.len());
         let end_byte = self.bytes.get(end).copied().unwrap_or(line.len());
         &line[start_byte..end_byte]
+    }
+
+    fn display_col_at(&self, column: usize) -> usize {
+        let index = column.min(self.len());
+        self.display_columns
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| self.display_columns.last().copied().unwrap_or(0))
+    }
+
+    fn display_cols_between(&self, start_col: usize, end_col: usize) -> usize {
+        self.display_col_at(end_col)
+            .saturating_sub(self.display_col_at(start_col))
+    }
+
+    fn char_col_for_display_col(&self, display_col: usize) -> usize {
+        if self.len() == 0 {
+            return 0;
+        }
+        for (index, window) in self.display_columns.windows(2).enumerate() {
+            if display_col < window[1] {
+                return index;
+            }
+        }
+        self.len().saturating_sub(1)
+    }
+
+    fn display_text_for_range(&self, line: &str, start_col: usize, end_col: usize) -> String {
+        if start_col >= end_col {
+            return String::new();
+        }
+        let len = self.len();
+        let start = start_col.min(len);
+        let end = end_col.min(len);
+        let mut rendered = String::new();
+        for column in start..end {
+            let start_byte = self.bytes.get(column).copied().unwrap_or(line.len());
+            let end_byte = self
+                .bytes
+                .get(column.saturating_add(1))
+                .copied()
+                .unwrap_or(line.len());
+            let text = &line[start_byte..end_byte];
+            if text == "\t" {
+                rendered.push_str(&" ".repeat(self.display_cols_between(column, column + 1)));
+            } else {
+                rendered.push_str(text);
+            }
+        }
+        rendered
+    }
+}
+
+fn resolved_tab_width(tab_width: usize) -> usize {
+    if tab_width == 0 { 4 } else { tab_width }
+}
+
+fn display_columns_for_character(character: char, display_col: usize, tab_width: usize) -> usize {
+    if character == '\t' {
+        let remainder = display_col % tab_width;
+        if remainder == 0 {
+            tab_width
+        } else {
+            tab_width - remainder
+        }
+    } else {
+        1
     }
 }
 
@@ -649,28 +735,8 @@ fn buffer_context_overlay_snapshot(
     active: bool,
     typing_active: bool,
     user_library: &dyn UserLibrary,
-    theme_registry: Option<&ThemeRegistry>,
 ) -> Option<BufferContextOverlaySnapshot> {
-    active.then(|| {
-        buffer.context_overlay_snapshot(
-            user_library,
-            theme_scrolloff(theme_registry),
-            typing_active,
-        )
-    })
-}
-
-fn buffer_headerline_rows(
-    buffer: &ShellBuffer,
-    active: bool,
-    typing_active: bool,
-    user_library: &dyn UserLibrary,
-    theme_registry: Option<&ThemeRegistry>,
-    visible_rows: usize,
-) -> usize {
-    buffer_context_overlay_snapshot(buffer, active, typing_active, user_library, theme_registry)
-        .map(|snapshot| count_visible_headerline_lines(&snapshot.headerline_lines, visible_rows))
-        .unwrap_or(0)
+    active.then(|| buffer.context_overlay_snapshot(user_library, typing_active))
 }
 
 fn lsp_formatting_options(
@@ -760,6 +826,16 @@ fn indent_string_from_columns(columns: usize, indent_size: usize, use_tabs: bool
     let tabs = columns / indent_size;
     let spaces = columns % indent_size;
     format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces))
+}
+
+fn tab_insert_string(theme_registry: Option<&ThemeRegistry>, language_id: Option<&str>) -> String {
+    let indent_size = theme_lang_indent(theme_registry, language_id);
+    let indent_columns = if indent_size == 0 { 4 } else { indent_size };
+    indent_string_from_columns(
+        indent_columns,
+        indent_columns,
+        theme_lang_use_tabs(theme_registry, language_id),
+    )
 }
 
 fn desired_indent_columns_for_text(
@@ -1423,7 +1499,7 @@ fn wrap_line_segments(
     let mut start = 0;
     let mut max_cols = first_cols;
     while start < len {
-        let remaining = len - start;
+        let remaining = map.display_cols_between(start, len);
         if remaining <= max_cols {
             segments.push(LineWrapSegment {
                 start_col: start,
@@ -1432,7 +1508,13 @@ fn wrap_line_segments(
             break;
         }
 
-        let wrap_limit = start + max_cols;
+        let mut wrap_limit = start;
+        while wrap_limit < len && map.display_cols_between(start, wrap_limit + 1) <= max_cols {
+            wrap_limit += 1;
+        }
+        if wrap_limit == start {
+            wrap_limit = (start + 1).min(len);
+        }
         let mut break_at = None;
         for idx in (start..wrap_limit).rev() {
             if map.whitespace.get(idx).copied().unwrap_or(false) {
@@ -1473,8 +1555,9 @@ fn wrap_line_segments_for_line(
     wrap_cols: usize,
     indent_size: usize,
 ) -> Vec<LineWrapSegment> {
-    let char_map = LineCharMap::new(line);
-    let (leading_indent_cols, _) = leading_whitespace_info(line, indent_size);
+    let tab_width = resolved_tab_width(indent_size);
+    let char_map = LineCharMap::with_tab_width(line, tab_width);
+    let (leading_indent_cols, _) = leading_whitespace_info(line, tab_width);
     let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
     let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
     wrap_line_segments(&char_map, wrap_cols, continuation_cols)
@@ -3121,14 +3204,13 @@ impl ShellBuffer {
     fn context_overlay_snapshot(
         &self,
         user_library: &dyn UserLibrary,
-        scrolloff: usize,
         typing_active: bool,
     ) -> BufferContextOverlaySnapshot {
         let key = BufferContextOverlayCacheKey {
             buffer_revision: self.text.revision(),
             buffer_name: self.display_name().to_owned(),
             language_id: self.language_id.clone(),
-            viewport_top_line: self.scroll_row.saturating_add(scrolloff),
+            viewport_top_line: self.scroll_row,
             cursor_line: self.cursor_row(),
             cursor_column: self.cursor_col(),
         };
@@ -5035,9 +5117,16 @@ impl ShellBuffer {
         height: u32,
         cell_width: i32,
         line_height: i32,
+        command_line_visible: bool,
     ) {
         let rect = PixelRectToRect::rect(0, 0, width.max(1), height.max(1));
-        let layout = buffer_footer_layout(self, rect, line_height, cell_width);
+        let layout = buffer_footer_layout_with_command_line(
+            self,
+            rect,
+            line_height,
+            cell_width,
+            command_line_visible,
+        );
         self.viewport_lines = layout.visible_rows.max(1);
         let Some(acp_layout) = acp_buffer_layout(self, rect, layout, cell_width, line_height)
         else {
@@ -5059,9 +5148,16 @@ impl ShellBuffer {
         height: u32,
         cell_width: i32,
         line_height: i32,
+        command_line_visible: bool,
     ) {
         let rect = PixelRectToRect::rect(0, 0, width.max(1), height.max(1));
-        let layout = buffer_footer_layout(self, rect, line_height, cell_width);
+        let layout = buffer_footer_layout_with_command_line(
+            self,
+            rect,
+            line_height,
+            cell_width,
+            command_line_visible,
+        );
         let Some(section_layout) =
             plugin_section_buffer_layout(self, rect, layout, cell_width, line_height)
         else {
@@ -7833,6 +7929,7 @@ impl ShellState {
                 let browser_plan = browser_sync_plan(
                     self.ui()?,
                     runtime_popup.as_ref(),
+                    &*shell_user_library(&self.runtime),
                     render_width,
                     render_height,
                     cell_width,
@@ -7939,6 +8036,7 @@ impl ShellState {
                 let browser_plan = browser_sync_plan(
                     self.ui()?,
                     runtime_popup.as_ref(),
+                    &*shell_user_library(&self.runtime),
                     render_width,
                     render_height,
                     cell_width,
@@ -8389,7 +8487,8 @@ impl ShellState {
                             && active_buffer.is_git_status
                         {
                             toggle_git_section(&mut self.runtime).map_err(ShellError::Runtime)?;
-                        } else if matches!(input_mode, InputMode::Insert | InputMode::Replace)
+                        } else if !keymod.intersects(shift_mod())
+                            && matches!(input_mode, InputMode::Insert | InputMode::Replace)
                             && !active_buffer.has_input
                             && !active_buffer.is_read_only
                         {
@@ -8403,9 +8502,16 @@ impl ShellState {
                                 }
                                 close_autocomplete = true;
                             } else {
-                                cycle_runtime_pane(&mut self.runtime)
-                                    .map_err(ShellError::Runtime)?;
-                                close_autocomplete = true;
+                                let insert = {
+                                    let ui = self.ui()?;
+                                    let language_id = ui
+                                        .buffer(active_buffer.buffer_id)
+                                        .and_then(|buffer| buffer.language_id());
+                                    let theme_registry =
+                                        self.runtime.services().get::<ThemeRegistry>();
+                                    tab_insert_string(theme_registry, language_id)
+                                };
+                                self.handle_text_input(&insert)?;
                             }
                         } else {
                             cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
@@ -8697,6 +8803,7 @@ impl ShellState {
         let plan = browser_sync_plan(
             self.ui()?,
             runtime_popup.as_ref(),
+            &*shell_user_library(&self.runtime),
             width,
             height,
             cell_width,
@@ -10193,6 +10300,14 @@ impl ShellState {
         let in_text_insert_mode = matches!(input_mode, InputMode::Insert | InputMode::Replace);
         let hover_visible = self.ui()?.hover().is_some();
 
+        if !picker_visible && !in_text_insert_mode && hover_visible && chord == "Tab" {
+            trigger_hover_focus(&mut self.runtime).map_err(ShellError::Runtime)?;
+            self.queue_suppressed_text_input_for_chord(&chord);
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
         if !picker_visible && !in_text_insert_mode && chord == "Tab" {
             let handled = {
                 let buffer_id =
@@ -10217,14 +10332,6 @@ impl ShellState {
         {
             self.queue_suppressed_text_input_for_chord(&chord);
             self.ui_mut()?.vim_mut().clear_transient();
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
-        }
-
-        if !picker_visible && !in_text_insert_mode && hover_visible && chord == "Tab" {
-            trigger_hover_focus(&mut self.runtime).map_err(ShellError::Runtime)?;
-            self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
             return Ok(true);
@@ -10451,9 +10558,15 @@ impl ShellState {
         line_height: i32,
     ) -> Result<(), ShellError> {
         let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
+        let command_line_visible = shell_user_library(&self.runtime).commandline_enabled();
         let visible_rows = {
             let buffer = shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
-            buffer_visible_rows_for_height(buffer, viewport_height, line_height)
+            buffer_visible_rows_for_height(
+                buffer,
+                viewport_height,
+                line_height,
+                command_line_visible,
+            )
         };
         self.active_buffer_mut()?.set_viewport_lines(visible_rows);
         Ok(())
@@ -10514,7 +10627,7 @@ impl ShellState {
         cell_width: i32,
         line_height: i32,
     ) -> Result<(), ShellError> {
-        let typing_active = self.typing_refresh_budget_active(Instant::now());
+        let command_line_visible = shell_user_library(&self.runtime).commandline_enabled();
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
         let popup_height = runtime_popup
@@ -10559,20 +10672,18 @@ impl ShellState {
                 ui.popup_focus_active(popup),
             ));
         }
-        for (buffer_id, width, height, active) in visible_buffers {
-            let (
-                language_id,
-                visible_rows,
-                is_acp,
-                has_plugin_sections,
-                reserved_top_rows,
-                scrolloff,
-            ) = {
+        for (buffer_id, width, height, _active) in visible_buffers {
+            let (language_id, visible_rows, is_acp, has_plugin_sections, scrolloff) = {
                 let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
-                let visible_rows = buffer_visible_rows_for_height(buffer, height, line_height);
+                let visible_rows = buffer_visible_rows_for_height(
+                    buffer,
+                    height,
+                    line_height,
+                    command_line_visible,
+                );
                 let is_acp = buffer.is_acp_buffer();
                 let has_plugin_sections = buffer.has_plugin_sections();
                 (
@@ -10580,18 +10691,6 @@ impl ShellState {
                     visible_rows,
                     is_acp,
                     has_plugin_sections,
-                    if active && !is_acp && !has_plugin_sections {
-                        buffer_headerline_rows(
-                            buffer,
-                            active,
-                            typing_active,
-                            &*shell_user_library(&self.runtime),
-                            theme_registry,
-                            visible_rows,
-                        )
-                    } else {
-                        0
-                    },
                     if !is_acp && !has_plugin_sections {
                         theme_scrolloff(theme_registry)
                     } else {
@@ -10609,19 +10708,25 @@ impl ShellState {
                 .buffer_mut(buffer_id)
                 .ok_or_else(|| ShellError::Runtime(format!("buffer `{buffer_id}` is missing")))?;
             if is_acp {
-                buffer.sync_acp_viewport_metrics(width, height, cell_width, line_height);
+                buffer.sync_acp_viewport_metrics(
+                    width,
+                    height,
+                    cell_width,
+                    line_height,
+                    command_line_visible,
+                );
             } else if has_plugin_sections {
-                buffer.sync_plugin_section_viewport_metrics(width, height, cell_width, line_height);
+                buffer.sync_plugin_section_viewport_metrics(
+                    width,
+                    height,
+                    cell_width,
+                    line_height,
+                    command_line_visible,
+                );
             } else {
                 buffer.set_viewport_lines(visible_rows);
             }
-            buffer.ensure_visible(
-                visible_rows,
-                wrap_cols,
-                indent_size,
-                reserved_top_rows,
-                scrolloff,
-            );
+            buffer.ensure_visible(visible_rows, wrap_cols, indent_size, 0, scrolloff);
         }
         Ok(())
     }
@@ -11516,9 +11621,14 @@ fn load_font_set<'ttf>(
             primary_path.display()
         ))
     })?;
-    let primary = ttf
+    let mut primary = ttf
         .load_font(&primary_path, settings.font_size as f32)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    if cfg!(target_os = "windows") {
+        // Prefer lighter subpixel hinting so SDL_ttf text lands closer to the
+        // softer DirectWrite/ClearType appearance users expect on Windows.
+        primary.set_hinting(Hinting::LIGHT_SUBPIXEL);
+    }
     let primary_pixel_size = primary_raster_font
         .horizontal_line_metrics(settings.font_size.max(1) as f32)
         .map(|metrics| metrics.ascent - metrics.descent)
@@ -13823,7 +13933,7 @@ fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     cancel_lsp_sync_for_path(runtime, &context.path)?;
-    let (labels, code_actions) = {
+    let load_code_actions = || -> Result<(Vec<String>, Vec<LspCodeAction>), String> {
         let labels = lsp_client
             .sync_buffer(
                 &context.path,
@@ -13835,11 +13945,37 @@ fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
         let code_actions = lsp_client
             .code_actions(&context.path, range)
             .map_err(|error| error.to_string())?;
-        (labels, code_actions)
+        Ok((labels, code_actions))
+    };
+    let (labels, code_actions) = match load_code_actions() {
+        Ok(result) => result,
+        Err(error) => {
+            record_runtime_error(
+                runtime,
+                "lsp.code-actions",
+                format!(
+                    "failed to load code actions for `{}`: {error}",
+                    context.path.display()
+                ),
+            );
+            let picker = lsp_code_actions_status_picker_overlay(
+                "Code actions unavailable",
+                &error,
+                Some(format!("Path: {}", context.path.display())),
+            );
+            shell_ui_mut(runtime)?.set_picker(picker);
+            return Ok(());
+        }
     };
     sync_lsp_buffer_state(runtime, context.workspace_id, context.buffer_id, &labels)?;
     if code_actions.is_empty() {
-        return Err("no code actions available at the cursor".to_owned());
+        let picker = lsp_code_actions_status_picker_overlay(
+            "No code actions available",
+            "The active cursor position does not expose any LSP code actions.",
+            Some(context.path.display().to_string()),
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
     }
     let picker = lsp_code_actions_picker_overlay(
         context.workspace_id,
@@ -14134,20 +14270,22 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
         .ok_or_else(|| "hover registry service missing".to_owned())?;
     let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
     let lsp_context = active_lsp_buffer_context(runtime).ok();
+    let user_library = shell_user_library(runtime);
     let overlay = {
         let ui = shell_ui(runtime)?;
         let Some(buffer) = ui.buffer(buffer_id) else {
             return Ok(());
         };
-        hover_overlay_for_buffer(
+        hover_overlay_draft_for_buffer(
             buffer_id,
             buffer,
             &registry,
             lsp_client.as_ref(),
             lsp_context.as_ref(),
-            &*shell_user_library(runtime),
+            &*user_library,
         )
-    };
+    }
+    .map(|draft| finalize_hover_overlay(runtime, draft));
     let ui = shell_ui_mut(runtime)?;
     if let Some(mut overlay) = overlay {
         overlay.focused = focused;
@@ -15462,6 +15600,78 @@ fn completion_token_at_cursor(buffer: &ShellBuffer) -> Option<(TextRange, String
     ))
 }
 
+fn hover_signature_request_point(buffer: &ShellBuffer) -> TextPoint {
+    let cursor = buffer.cursor_point();
+    let Some((token_range, _)) = completion_token_at_cursor(buffer) else {
+        return cursor;
+    };
+    if cursor < token_range.start() || cursor > token_range.end() {
+        return cursor;
+    }
+    hover_signature_call_point_after_token(buffer, token_range.end()).unwrap_or(cursor)
+}
+
+fn hover_signature_call_point_after_token(
+    buffer: &ShellBuffer,
+    token_end: TextPoint,
+) -> Option<TextPoint> {
+    let mut point = hover_signature_skip_whitespace(buffer, token_end);
+    loop {
+        match buffer.text.char_at_point(point)? {
+            '(' => {
+                let inside_call = buffer.text.point_after(point).unwrap_or(point);
+                return Some(hover_signature_skip_whitespace(buffer, inside_call));
+            }
+            ':' => {
+                let next = buffer.text.point_after(point)?;
+                if buffer.text.char_at_point(next) != Some(':') {
+                    return None;
+                }
+                point = hover_signature_skip_whitespace(
+                    buffer,
+                    buffer.text.point_after(next).unwrap_or(next),
+                );
+            }
+            '<' => point = hover_signature_skip_generic_arguments(buffer, point)?,
+            _ => return None,
+        }
+    }
+}
+
+fn hover_signature_skip_whitespace(buffer: &ShellBuffer, start: TextPoint) -> TextPoint {
+    let mut point = start;
+    while buffer
+        .text
+        .char_at_point(point)
+        .is_some_and(char::is_whitespace)
+    {
+        point = buffer.text.point_after(point).unwrap_or(point);
+    }
+    point
+}
+
+fn hover_signature_skip_generic_arguments(
+    buffer: &ShellBuffer,
+    start: TextPoint,
+) -> Option<TextPoint> {
+    let mut point = start;
+    let mut depth = 0usize;
+    loop {
+        match buffer.text.char_at_point(point)? {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let after_generics = buffer.text.point_after(point).unwrap_or(point);
+                    return Some(hover_signature_skip_whitespace(buffer, after_generics));
+                }
+            }
+            _ => {}
+        }
+        point = buffer.text.point_after(point)?;
+    }
+}
+
 fn autocomplete_request_for_buffer(
     buffer_id: BufferId,
     buffer: &ShellBuffer,
@@ -15493,14 +15703,49 @@ fn autocomplete_request_for_buffer(
     })
 }
 
-fn hover_overlay_for_buffer(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HoverProviderFragment {
+    PlainLines(Vec<String>),
+    MarkdownText(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoverProviderDraft {
+    provider_label: String,
+    provider_icon: String,
+    fragments: Vec<HoverProviderFragment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoverOverlayDraft {
+    buffer_id: BufferId,
+    anchor: TextPoint,
+    token: String,
+    providers: Vec<HoverProviderDraft>,
+    line_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct HoverRenderedContent {
+    lines: Vec<String>,
+    syntax_lines: IndexedSyntaxLines,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownCodeFenceBlock {
+    language: Option<String>,
+    code_start_line: usize,
+    code_end_line_exclusive: usize,
+}
+
+fn hover_overlay_draft_for_buffer(
     buffer_id: BufferId,
     buffer: &ShellBuffer,
     registry: &HoverRegistry,
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
     user_library: &dyn UserLibrary,
-) -> Option<HoverOverlay> {
+) -> Option<HoverOverlayDraft> {
     if registry.providers.is_empty() {
         return None;
     }
@@ -15515,46 +15760,47 @@ fn hover_overlay_for_buffer(
         .providers
         .iter()
         .filter_map(|provider| {
-            let lines = match provider.kind {
-                HoverProviderKind::TestHover => {
-                    hover_test_provider_lines(buffer, token_info.as_ref())
+            let fragments = match provider.kind {
+                HoverProviderKind::TestHover => vec![HoverProviderFragment::PlainLines(
+                    hover_test_provider_lines(buffer, token_info.as_ref()),
+                )],
+                HoverProviderKind::Lsp => {
+                    hover_lsp_provider_fragments(buffer, lsp_client, lsp_context)
                 }
-                HoverProviderKind::Lsp => hover_lsp_provider_lines(buffer, lsp_client, lsp_context),
-                HoverProviderKind::SignatureHelp => {
-                    hover_signature_provider_lines(buffer, lsp_client, lsp_context)
-                }
+                HoverProviderKind::SignatureHelp => vec![HoverProviderFragment::PlainLines(
+                    hover_signature_provider_lines(buffer, lsp_client, lsp_context),
+                )],
                 HoverProviderKind::Diagnostics => {
-                    hover_diagnostic_provider_lines(buffer, user_library)
+                    hover_diagnostic_provider_fragments(buffer, user_library)
                 }
-                HoverProviderKind::Manual => hover_manual_provider_lines(buffer, provider),
+                HoverProviderKind::Manual => vec![HoverProviderFragment::PlainLines(
+                    hover_manual_provider_lines(buffer, provider),
+                )],
             };
-            (!lines.is_empty()).then(|| HoverProviderContent {
+            (!hover_provider_fragments_empty(&fragments)).then(|| HoverProviderDraft {
                 provider_label: provider.label.clone(),
                 provider_icon: provider.icon.clone(),
-                lines,
+                fragments,
             })
         })
         .collect::<Vec<_>>();
     let providers = if providers.is_empty() {
-        vec![HoverProviderContent {
+        vec![HoverProviderDraft {
             provider_label: "Hover".to_owned(),
             provider_icon: editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE.to_owned(),
-            lines: hover_empty_provider_lines(buffer, token_info.as_ref()),
+            fragments: vec![HoverProviderFragment::PlainLines(
+                hover_empty_provider_lines(buffer, token_info.as_ref()),
+            )],
         }]
     } else {
         providers
     };
-    Some(HoverOverlay {
+    Some(HoverOverlayDraft {
         buffer_id,
         anchor,
         token,
         providers,
-        provider_index: 0,
-        scroll_offset: 0,
-        focused: false,
         line_limit: registry.line_limit,
-        pending_g_prefix: false,
-        count: None,
     })
 }
 
@@ -15641,6 +15887,244 @@ fn hover_empty_provider_lines(
     lines
 }
 
+fn hover_provider_fragments_empty(fragments: &[HoverProviderFragment]) -> bool {
+    fragments.iter().all(|fragment| match fragment {
+        HoverProviderFragment::PlainLines(lines) => lines.is_empty(),
+        HoverProviderFragment::MarkdownText(text) => text.trim().is_empty(),
+    })
+}
+
+fn finalize_hover_overlay(runtime: &mut EditorRuntime, draft: HoverOverlayDraft) -> HoverOverlay {
+    let providers = draft
+        .providers
+        .into_iter()
+        .map(|provider| finalize_hover_provider_content(runtime, provider))
+        .collect::<Vec<_>>();
+    HoverOverlay {
+        buffer_id: draft.buffer_id,
+        anchor: draft.anchor,
+        token: draft.token,
+        providers,
+        provider_index: 0,
+        scroll_offset: 0,
+        focused: false,
+        line_limit: draft.line_limit,
+        pending_g_prefix: false,
+        count: None,
+    }
+}
+
+fn finalize_hover_provider_content(
+    runtime: &mut EditorRuntime,
+    draft: HoverProviderDraft,
+) -> HoverProviderContent {
+    let mut content = HoverRenderedContent::default();
+    for fragment in draft.fragments {
+        let rendered = match fragment {
+            HoverProviderFragment::PlainLines(lines) => plain_hover_rendered_content(lines),
+            HoverProviderFragment::MarkdownText(text) => {
+                render_markdown_hover_content(runtime, &text)
+            }
+        };
+        append_hover_rendered_content(&mut content, rendered);
+    }
+    HoverProviderContent {
+        provider_label: draft.provider_label,
+        provider_icon: draft.provider_icon,
+        lines: content.lines,
+        syntax_lines: content.syntax_lines,
+    }
+}
+
+fn plain_hover_rendered_content(lines: Vec<String>) -> HoverRenderedContent {
+    HoverRenderedContent {
+        lines,
+        syntax_lines: BTreeMap::new(),
+    }
+}
+
+fn append_hover_rendered_content(
+    content: &mut HoverRenderedContent,
+    rendered: HoverRenderedContent,
+) {
+    let line_offset = content.lines.len();
+    content.lines.extend(rendered.lines);
+    for (line_index, spans) in rendered.syntax_lines {
+        content.syntax_lines.insert(line_index + line_offset, spans);
+    }
+}
+
+fn render_markdown_hover_content(runtime: &mut EditorRuntime, text: &str) -> HoverRenderedContent {
+    let normalized = normalize_hover_multiline_text(text);
+    let mut rendered = plain_hover_rendered_content(hover_multiline_lines(&normalized));
+    if rendered.lines.is_empty() {
+        return rendered;
+    }
+    let Some(registry) = syntax_registry_mut(runtime).ok() else {
+        return rendered;
+    };
+    let markdown_buffer = TextBuffer::from_text(&normalized);
+    let mut parse_session = None;
+    let (_, syntax_result) = compute_buffer_syntax(
+        registry,
+        None,
+        &markdown_buffer,
+        Some("markdown"),
+        None,
+        &mut parse_session,
+    );
+    if let Some(Ok(snapshot)) = syntax_result {
+        rendered.syntax_lines = index_syntax_lines(snapshot);
+    }
+    apply_markdown_code_fence_syntax(&mut rendered, registry);
+    rendered
+}
+
+fn apply_markdown_code_fence_syntax(
+    rendered: &mut HoverRenderedContent,
+    registry: &mut SyntaxRegistry,
+) {
+    for block in markdown_code_fence_blocks(&rendered.lines) {
+        let Some(language_id) =
+            resolve_markdown_code_fence_language_id(registry, block.language.as_deref())
+        else {
+            continue;
+        };
+        let code_lines =
+            rendered.lines[block.code_start_line..block.code_end_line_exclusive].to_vec();
+        let code_text = code_lines.join("\n");
+        let code_buffer = TextBuffer::from_text(&code_text);
+        let mut parse_session = None;
+        let (_, syntax_result) = compute_buffer_syntax(
+            registry,
+            None,
+            &code_buffer,
+            Some(&language_id),
+            None,
+            &mut parse_session,
+        );
+        let Some(Ok(snapshot)) = syntax_result else {
+            continue;
+        };
+        for line_index in block.code_start_line..block.code_end_line_exclusive {
+            rendered.syntax_lines.remove(&line_index);
+        }
+        for (line_index, spans) in index_syntax_lines(snapshot) {
+            rendered
+                .syntax_lines
+                .insert(block.code_start_line + line_index, spans);
+        }
+    }
+}
+
+fn resolve_markdown_code_fence_language_id(
+    registry: &SyntaxRegistry,
+    language: Option<&str>,
+) -> Option<String> {
+    let candidate = normalize_markdown_code_fence_language(language?)?;
+    if registry.language(&candidate).is_some() {
+        return Some(candidate);
+    }
+    registry
+        .language_for_extension(&candidate)
+        .map(|language| language.id().to_owned())
+}
+
+fn normalize_markdown_code_fence_language(language: &str) -> Option<String> {
+    let token = language
+        .trim()
+        .trim_matches(|character| character == '{' || character == '}')
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    (!token.is_empty()).then_some(token)
+}
+
+fn markdown_code_fence_blocks(lines: &[String]) -> Vec<MarkdownCodeFenceBlock> {
+    let mut blocks = Vec::new();
+    let mut open_fence: Option<(char, usize, usize, Option<String>)> = None;
+
+    for (line_index, line) in lines.iter().enumerate() {
+        let Some((marker, count, rest)) = parse_markdown_fence(line) else {
+            continue;
+        };
+        if let Some((open_marker, open_count, open_line, language)) = &open_fence {
+            if marker == *open_marker && count >= *open_count && rest.trim().is_empty() {
+                let code_start_line = open_line.saturating_add(1);
+                if code_start_line <= line_index {
+                    blocks.push(MarkdownCodeFenceBlock {
+                        language: language.clone(),
+                        code_start_line,
+                        code_end_line_exclusive: line_index,
+                    });
+                }
+                open_fence = None;
+            }
+            continue;
+        }
+        open_fence = Some((
+            marker,
+            count,
+            line_index,
+            normalize_markdown_code_fence_language(&rest),
+        ));
+    }
+
+    if let Some((_, _, open_line, language)) = open_fence {
+        blocks.push(MarkdownCodeFenceBlock {
+            language,
+            code_start_line: open_line.saturating_add(1),
+            code_end_line_exclusive: lines.len(),
+        });
+    }
+
+    blocks
+}
+
+fn parse_markdown_fence(line: &str) -> Option<(char, usize, String)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let count = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    if count < 3 {
+        return None;
+    }
+    Some((
+        marker,
+        count,
+        trimmed.get(count..).unwrap_or_default().trim().to_owned(),
+    ))
+}
+
+fn hover_multiline_lines(text: &str) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut lines = text
+        .split('\n')
+        .map(str::trim_end)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn normalize_hover_multiline_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn hover_manual_provider_lines(buffer: &ShellBuffer, provider: &HoverProviderSpec) -> Vec<String> {
     let plugin_kind = match &buffer.kind {
         BufferKind::Plugin(kind) => Some(kind.as_str()),
@@ -15660,25 +16144,29 @@ fn hover_manual_provider_lines(buffer: &ShellBuffer, provider: &HoverProviderSpe
         .unwrap_or_default()
 }
 
-fn hover_lsp_provider_lines(
+fn hover_lsp_provider_fragments(
     buffer: &ShellBuffer,
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
-) -> Vec<String> {
+) -> Vec<HoverProviderFragment> {
     let hovers = synced_hover_lsp_request(buffer, lsp_client, lsp_context, LspClientManager::hover);
     let show_server_labels = hovers.len() > 1;
-    let mut lines = Vec::new();
+    let mut fragments = Vec::new();
     for hover in hovers {
         if show_server_labels {
-            lines.push(format!(
+            fragments.push(HoverProviderFragment::PlainLines(vec![format!(
                 "{} {}",
                 editor_icons::symbols::cod::COD_INFO,
                 hover.server_id()
-            ));
+            )]));
         }
-        lines.extend(hover.lines().iter().cloned());
+        if hover.is_markdown() {
+            fragments.push(HoverProviderFragment::MarkdownText(hover.text().to_owned()));
+        } else {
+            fragments.push(HoverProviderFragment::PlainLines(hover.lines().to_vec()));
+        }
     }
-    lines
+    fragments
 }
 
 fn hover_signature_provider_lines(
@@ -15686,10 +16174,10 @@ fn hover_signature_provider_lines(
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
 ) -> Vec<String> {
-    let signatures = synced_hover_lsp_request(
-        buffer,
+    let signatures = synced_hover_lsp_request_at_point(
         lsp_client,
         lsp_context,
+        hover_signature_request_point(buffer),
         LspClientManager::signature_help,
     );
     let show_server_labels = signatures.len() > 1;
@@ -15713,6 +16201,15 @@ fn synced_hover_lsp_request<T>(
     lsp_context: Option<&ActiveLspBufferContext>,
     request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
 ) -> Vec<T> {
+    synced_hover_lsp_request_at_point(lsp_client, lsp_context, buffer.cursor_point(), request)
+}
+
+fn synced_hover_lsp_request_at_point<T>(
+    lsp_client: Option<&Arc<LspClientManager>>,
+    lsp_context: Option<&ActiveLspBufferContext>,
+    position: TextPoint,
+    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
+) -> Vec<T> {
     let Some(lsp_client) = lsp_client else {
         return Vec::new();
     };
@@ -15727,14 +16224,14 @@ fn synced_hover_lsp_request<T>(
             context.root.as_deref(),
         )
         .ok()
-        .and_then(|_| request(lsp_client, &context.path, buffer.cursor_point()).ok())
+        .and_then(|_| request(lsp_client, &context.path, position).ok())
         .unwrap_or_default()
 }
 
-fn hover_diagnostic_provider_lines(
+fn hover_diagnostic_provider_fragments(
     buffer: &ShellBuffer,
     user_library: &dyn UserLibrary,
-) -> Vec<String> {
+) -> Vec<HoverProviderFragment> {
     let cursor = buffer.cursor_point();
     let diagnostic_icon = user_library.lsp_diagnostic_icon();
     let diagnostic_line_limit = user_library.lsp_diagnostic_line_limit();
@@ -15743,13 +16240,8 @@ fn hover_diagnostic_provider_lines(
         .iter()
         .filter(|diagnostic| diagnostic_matches_cursor_line(diagnostic, cursor))
         .take(diagnostic_line_limit)
-        .map(|diagnostic| {
-            let source = diagnostic.source();
-            if source.is_empty() {
-                format!("{diagnostic_icon} {}", diagnostic.message())
-            } else {
-                format!("{diagnostic_icon} {} ({source})", diagnostic.message())
-            }
+        .flat_map(|diagnostic| {
+            hover_diagnostic_fragments_for_diagnostic(diagnostic, diagnostic_icon, true)
         })
         .collect::<Vec<_>>();
     if !matching.is_empty() {
@@ -15760,8 +16252,37 @@ fn hover_diagnostic_provider_lines(
         .iter()
         .filter(|diagnostic| diagnostic.range().start().line == cursor.line)
         .take(diagnostic_line_limit)
-        .map(|diagnostic| format!("{diagnostic_icon} {}", diagnostic.message()))
+        .flat_map(|diagnostic| {
+            hover_diagnostic_fragments_for_diagnostic(diagnostic, diagnostic_icon, false)
+        })
         .collect()
+}
+
+fn hover_diagnostic_fragments_for_diagnostic(
+    diagnostic: &LspDiagnostic,
+    diagnostic_icon: &str,
+    include_source_in_plain: bool,
+) -> Vec<HoverProviderFragment> {
+    if !markdown_code_fence_blocks(&hover_multiline_lines(diagnostic.message())).is_empty() {
+        let source = diagnostic.source();
+        let header = if source.is_empty() {
+            format!("{diagnostic_icon} Diagnostic")
+        } else {
+            format!("{diagnostic_icon} {source}")
+        };
+        return vec![
+            HoverProviderFragment::PlainLines(vec![header]),
+            HoverProviderFragment::MarkdownText(diagnostic.message().to_owned()),
+        ];
+    }
+
+    let source = diagnostic.source();
+    let line = if include_source_in_plain && !source.is_empty() {
+        format!("{diagnostic_icon} {} ({source})", diagnostic.message())
+    } else {
+        format!("{diagnostic_icon} {}", diagnostic.message())
+    };
+    vec![HoverProviderFragment::PlainLines(vec![line])]
 }
 
 fn diagnostic_matches_cursor_line(diagnostic: &LspDiagnostic, cursor: TextPoint) -> bool {
@@ -22887,9 +23408,9 @@ fn install_tree_sitter_language(
 }
 
 fn file_open_detail(path: &Path) -> Option<String> {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!(".{extension}"))
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .map(str::to_owned)
 }
 
 fn image_format_for_path(path: &Path) -> Option<ImageBufferFormat> {

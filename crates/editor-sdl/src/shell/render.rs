@@ -34,13 +34,14 @@ pub(super) fn render_shell_state(
     };
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
-    let pane_active_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
+    let pane_active_background = base_background;
     let pane_inactive_background = adjust_color(base_background, if is_dark { -6 } else { 6 });
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
+    let command_line_row_visible = user_library.commandline_enabled();
 
     target.clear(base_background);
 
@@ -84,6 +85,7 @@ pub(super) fn render_shell_state(
                 vim_targets_input,
                 state.vim().recording_macro,
                 command_line,
+                command_line_row_visible,
                 user_library,
                 workspace_name,
                 lsp_server,
@@ -247,6 +249,7 @@ pub(super) fn render_runtime_popup_overlay(
             vim_targets_input,
             state.vim().recording_macro,
             None,
+            user_library.commandline_enabled(),
             user_library,
             workspace_name,
             lsp_server,
@@ -429,7 +432,7 @@ pub(super) fn render_hover_overlay(
     state: &ShellUiState,
     hover: &HoverOverlay,
     pane_rect: Rect,
-    _user_library: &dyn UserLibrary,
+    user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
@@ -443,12 +446,19 @@ pub(super) fn render_hover_overlay(
     let anchor = buffer_cursor_screen_anchor(
         buffer,
         pane_rect,
-        _user_library,
+        user_library,
         theme_registry,
         cell_width,
         line_height,
     )
-    .unwrap_or_else(|| fallback_overlay_anchor(buffer, pane_rect, line_height));
+    .unwrap_or_else(|| {
+        fallback_overlay_anchor(
+            buffer,
+            pane_rect,
+            line_height,
+            user_library.commandline_enabled(),
+        )
+    });
 
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
@@ -496,8 +506,13 @@ pub(super) fn render_hover_overlay(
     let row_height = line_height.max(1);
     let width = overlay_width(pane_rect.width(), cell_width, 44, 74);
     let body_columns = overlay_text_columns(width, 28, cell_width);
-    let body_lines =
-        wrap_overlay_lines(hover.visible_lines(), body_columns, hover.line_limit.max(1));
+    let body_lines = wrap_hover_overlay_lines(
+        provider,
+        hover.scroll_offset,
+        hover.line_limit.max(1),
+        body_columns,
+        hover.line_limit.max(1),
+    );
     let footer_text = if provider.lines.len() > hover.visible_lines().len() {
         Some(format!(
             "Lines {}-{} of {}",
@@ -603,8 +618,18 @@ pub(super) fn render_hover_overlay(
     } else {
         for (index, line) in body_lines.iter().enumerate() {
             let row_y = title_y + row_height + index as i32 * row_height;
-            let line = truncate_text_to_width(line, width.saturating_sub(24), cell_width);
-            draw_text(target, x + 12, row_y, &line, foreground)?;
+            draw_buffer_text(
+                target,
+                x + 12,
+                row_y,
+                &line.line,
+                line.segment,
+                &line.char_map,
+                provider.line_syntax_spans(line.source_line_index),
+                theme_registry,
+                foreground,
+                cell_width,
+            )?;
         }
     }
     if let Some(footer_text) = footer_text {
@@ -617,6 +642,45 @@ pub(super) fn render_hover_overlay(
         )?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct WrappedHoverOverlayLine {
+    source_line_index: usize,
+    line: String,
+    char_map: LineCharMap,
+    segment: LineWrapSegment,
+}
+
+fn wrap_hover_overlay_lines(
+    provider: &HoverProviderContent,
+    scroll_offset: usize,
+    source_line_limit: usize,
+    max_columns: usize,
+    max_rows: usize,
+) -> Vec<WrappedHoverOverlayLine> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    let start = scroll_offset.min(provider.lines.len());
+    let end = (start + source_line_limit).min(provider.lines.len());
+    let mut wrapped = Vec::new();
+    for source_line_index in start..end {
+        let line = provider.lines[source_line_index].clone();
+        let char_map = LineCharMap::new(&line);
+        for segment in wrap_line_segments(&char_map, max_columns, max_columns) {
+            if wrapped.len() >= max_rows {
+                return wrapped;
+            }
+            wrapped.push(WrappedHoverOverlayLine {
+                source_line_index,
+                line: line.clone(),
+                char_map: char_map.clone(),
+                segment,
+            });
+        }
+    }
+    wrapped
 }
 
 pub(super) fn notification_accent_color(
@@ -904,6 +968,7 @@ pub(super) struct BufferFooterLayout {
     pub(super) pane_bottom: i32,
 }
 
+#[cfg(test)]
 pub(super) fn buffer_footer_layout(
     buffer: &ShellBuffer,
     rect: Rect,
@@ -975,12 +1040,14 @@ pub(super) fn buffer_visible_rows_for_height(
     buffer: &ShellBuffer,
     height: u32,
     line_height: i32,
+    command_line_visible: bool,
 ) -> usize {
-    buffer_footer_layout(
+    buffer_footer_layout_with_command_line(
         buffer,
         PixelRectToRect::rect(0, 0, 1, height),
         line_height,
         0,
+        command_line_visible,
     )
     .visible_rows
 }
@@ -1261,16 +1328,13 @@ pub(super) fn buffer_cursor_screen_anchor(
     line_height: i32,
 ) -> Option<CursorScreenAnchor> {
     let cell_width = cell_width.max(1);
-    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
-    let headerline_rows = buffer_headerline_rows(
+    let layout = buffer_footer_layout_with_command_line(
         buffer,
-        true,
-        false,
-        user_library,
-        theme_registry,
-        layout.visible_rows,
-    )
-    .min(layout.visible_rows.saturating_sub(1));
+        rect,
+        line_height,
+        cell_width,
+        user_library.commandline_enabled(),
+    );
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -1280,7 +1344,7 @@ pub(super) fn buffer_cursor_screen_anchor(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows.saturating_sub(headerline_rows),
+        layout.visible_rows,
         wrap_cols,
         indent_size,
     );
@@ -1293,7 +1357,11 @@ pub(super) fn buffer_cursor_screen_anchor(
             let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
             if let Some(segment) = wrapped.segments.get(segment_index) {
                 cursor_row_on_screen = Some(visual_row + segment_index);
-                cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
+                cursor_col_on_screen = Some(
+                    wrapped
+                        .char_map
+                        .display_cols_between(segment.start_col, cursor_col),
+                );
                 cursor_indent_cols = if segment_index == 0 {
                     0
                 } else {
@@ -1302,7 +1370,7 @@ pub(super) fn buffer_cursor_screen_anchor(
             }
         }
         visual_row = visual_row.saturating_add(wrapped.segments.len());
-        if visual_row >= layout.visible_rows.saturating_sub(headerline_rows) {
+        if visual_row >= layout.visible_rows {
             break;
         }
     }
@@ -1314,7 +1382,7 @@ pub(super) fn buffer_cursor_screen_anchor(
             + fringe_width
             + line_number_width
             + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-        y: layout.body_y + (headerline_rows + cursor_row_on_screen) as i32 * line_height,
+        y: layout.body_y + cursor_row_on_screen as i32 * line_height,
         pane_bottom: layout.pane_bottom,
     })
 }
@@ -1332,19 +1400,15 @@ pub(super) fn buffer_point_at_screen(
     clamp_body: bool,
 ) -> Option<TextPoint> {
     let line_height = line_height.max(1);
-    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
-    let headerline_rows = buffer_headerline_rows(
+    let layout = buffer_footer_layout_with_command_line(
         buffer,
-        true,
-        false,
-        user_library,
-        theme_registry,
-        layout.visible_rows,
-    )
-    .min(layout.visible_rows.saturating_sub(1));
-    let body_top = layout.body_y + headerline_rows as i32 * line_height;
-    let body_height =
-        layout.visible_rows.saturating_sub(headerline_rows).max(1) as i32 * line_height;
+        rect,
+        line_height,
+        cell_width,
+        user_library.commandline_enabled(),
+    );
+    let body_top = layout.body_y;
+    let body_height = layout.visible_rows.max(1) as i32 * line_height;
     let body_bottom = body_top + body_height;
     if body_height <= 0 {
         return None;
@@ -1363,7 +1427,7 @@ pub(super) fn buffer_point_at_screen(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows.saturating_sub(headerline_rows),
+        layout.visible_rows,
         wrap_cols,
         indent_size,
     );
@@ -1378,13 +1442,20 @@ pub(super) fn buffer_point_at_screen(
                     wrapped.continuation_indent_cols
                 };
                 let segment_x = text_x + (segment_indent_cols as i32 * cell_width);
-                let column_offset = (x.saturating_sub(segment_x) / cell_width).max(0) as usize;
+                let display_offset = (x.saturating_sub(segment_x) / cell_width).max(0) as usize;
                 let max_col = if line_len == 0 {
                     0
                 } else {
                     segment.end_col.saturating_sub(1)
                 };
-                let column = segment.start_col.saturating_add(column_offset).min(max_col);
+                let display_col = wrapped
+                    .char_map
+                    .display_col_at(segment.start_col)
+                    .saturating_add(display_offset);
+                let column = wrapped
+                    .char_map
+                    .char_col_for_display_col(display_col)
+                    .min(max_col);
                 return Some(TextPoint::new(wrapped.line_index, column));
             }
             visual_row = visual_row.saturating_add(1);
@@ -1397,8 +1468,10 @@ pub(super) fn fallback_overlay_anchor(
     buffer: &ShellBuffer,
     rect: Rect,
     line_height: i32,
+    command_line_visible: bool,
 ) -> CursorScreenAnchor {
-    let layout = buffer_footer_layout(buffer, rect, line_height, 0);
+    let layout =
+        buffer_footer_layout_with_command_line(buffer, rect, line_height, 0, command_line_visible);
     CursorScreenAnchor {
         x: rect.x() + 24,
         y: layout.body_y + 6,
@@ -1433,8 +1506,9 @@ pub(super) fn collect_wrapped_lines(
     let line_count = buffer.line_count();
     while line_index < line_count && visual_rows < max_rows {
         let line = buffer.text.line(line_index).unwrap_or_default();
-        let char_map = LineCharMap::new(&line);
-        let (leading_indent_cols, _) = leading_whitespace_info(&line, indent_size);
+        let tab_width = resolved_tab_width(indent_size);
+        let char_map = LineCharMap::with_tab_width(&line, tab_width);
+        let (leading_indent_cols, _) = leading_whitespace_info(&line, tab_width);
         let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
         let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
         let segments = wrap_line_segments(&char_map, wrap_cols, continuation_cols);
@@ -1465,6 +1539,7 @@ pub(super) fn render_buffer(
     vim_targets_input: bool,
     recording_macro: Option<char>,
     command_line: Option<&CommandLineOverlay>,
+    command_line_row_visible: bool,
     user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
@@ -1588,7 +1663,7 @@ pub(super) fn render_buffer(
         rect,
         line_height,
         cell_width,
-        command_line.is_some(),
+        command_line_row_visible,
     );
     if buffer_is_terminal(&buffer.kind)
         && let Some(terminal_render) = buffer.terminal_render()
@@ -1616,22 +1691,20 @@ pub(super) fn render_buffer(
             cell_width,
             line_height,
         )?;
-        if let Some(command_line) = command_line {
-            render_command_line_overlay(
-                target,
-                command_line,
-                rect,
-                layout,
-                active,
-                input_mode,
-                border_color,
-                text_color,
-                muted,
-                cursor,
-                cell_width,
-                line_height,
-            )?;
-        }
+        render_command_line_overlay(
+            target,
+            command_line,
+            rect,
+            layout,
+            active,
+            input_mode,
+            border_color,
+            text_color,
+            muted,
+            cursor,
+            cell_width,
+            line_height,
+        )?;
         return Ok(());
     }
     let text_x = rect.x() + 12 + cell_width + cell_width * 5;
@@ -1714,13 +1787,8 @@ pub(super) fn render_buffer(
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let cursor_row = buffer.cursor_row();
         let cursor_col = buffer.cursor_col();
-        let context_overlay = buffer_context_overlay_snapshot(
-            buffer,
-            active,
-            typing_active,
-            user_library,
-            theme_registry,
-        );
+        let context_overlay =
+            buffer_context_overlay_snapshot(buffer, active, typing_active, user_library);
         let headerline_lines = context_overlay
             .as_ref()
             .map(|snapshot| {
@@ -1732,8 +1800,7 @@ pub(super) fn render_buffer(
             .unwrap_or_default();
         let headerline_rows = headerline_lines.len();
         let body_y = layout.body_y;
-        let top_reserved_rows = headerline_rows.min(layout.visible_rows.saturating_sub(1));
-        let visible_rows = layout.visible_rows.saturating_sub(top_reserved_rows).max(1);
+        let visible_rows = layout.visible_rows;
         let wrapped_lines = collect_wrapped_lines(
             buffer,
             buffer.scroll_row,
@@ -1757,7 +1824,11 @@ pub(super) fn render_buffer(
                 let segment_index = segment_index_for_column(&wrapped.segments, cursor_col);
                 if let Some(segment) = wrapped.segments.get(segment_index) {
                     cursor_row_on_screen = Some(visual_row + segment_index);
-                    cursor_col_on_screen = Some(cursor_col.saturating_sub(segment.start_col));
+                    cursor_col_on_screen = Some(
+                        wrapped
+                            .char_map
+                            .display_cols_between(segment.start_col, cursor_col),
+                    );
                     cursor_indent_cols = if segment_index == 0 {
                         0
                     } else {
@@ -1792,7 +1863,7 @@ pub(super) fn render_buffer(
                         + fringe_width
                         + line_number_width
                         + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                    body_y + (top_reserved_rows + cursor_row_on_screen) as i32 * line_height,
+                    body_y + cursor_row_on_screen as i32 * line_height,
                     cursor_width,
                     line_height.max(2) as u32,
                 ),
@@ -1825,7 +1896,7 @@ pub(super) fn render_buffer(
                 if visual_row >= visible_rows {
                     break;
                 }
-                let y = body_y + (top_reserved_rows + visual_row) as i32 * line_height;
+                let y = body_y + visual_row as i32 * line_height;
                 let segment_indent_cols = if segment_index == 0 {
                     0
                 } else {
@@ -1836,13 +1907,16 @@ pub(super) fn render_buffer(
                     let start = selection_start.max(segment.start_col);
                     let end = selection_end.min(segment.end_col);
                     if start < end {
+                        let start_display = wrapped
+                            .char_map
+                            .display_cols_between(segment.start_col, start);
+                        let width_display = wrapped.char_map.display_cols_between(start, end);
                         fill_rect(
                             target,
                             PixelRectToRect::rect(
-                                segment_x
-                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                segment_x + (start_display as i32 * cell_width),
                                 y,
-                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                (width_display as i32 * cell_width) as u32,
                                 line_height.max(1) as u32,
                             ),
                             selection,
@@ -1853,13 +1927,16 @@ pub(super) fn render_buffer(
                     let start = selection_start.max(segment.start_col);
                     let end = selection_end.min(segment.end_col);
                     if start < end {
+                        let start_display = wrapped
+                            .char_map
+                            .display_cols_between(segment.start_col, start);
+                        let width_display = wrapped.char_map.display_cols_between(start, end);
                         fill_rect(
                             target,
                             PixelRectToRect::rect(
-                                segment_x
-                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                segment_x + (start_display as i32 * cell_width),
                                 y,
-                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                (width_display as i32 * cell_width) as u32,
                                 line_height.max(1) as u32,
                             ),
                             blend_color(selection, cursor, 0.25),
@@ -1870,13 +1947,16 @@ pub(super) fn render_buffer(
                     let start = selection_start.max(segment.start_col);
                     let end = selection_end.min(segment.end_col);
                     if start < end {
+                        let start_display = wrapped
+                            .char_map
+                            .display_cols_between(segment.start_col, start);
+                        let width_display = wrapped.char_map.display_cols_between(start, end);
                         fill_rect(
                             target,
                             PixelRectToRect::rect(
-                                segment_x
-                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                segment_x + (start_display as i32 * cell_width),
                                 y,
-                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                (width_display as i32 * cell_width) as u32,
                                 line_height.max(1) as u32,
                             ),
                             yank_flash_color,
@@ -1956,6 +2036,7 @@ pub(super) fn render_buffer(
                         target,
                         buffer.lsp_diagnostic_line_spans(line_index),
                         buffer.line_syntax_spans(line_index),
+                        &wrapped.char_map,
                         segment_x,
                         y,
                         line_len,
@@ -1970,6 +2051,7 @@ pub(super) fn render_buffer(
                         x: segment_x,
                         y,
                         segment: *segment,
+                        char_map: &wrapped.char_map,
                         line_len,
                         ghost_text: ghost_text_by_line.get(&line_index).map(String::as_str),
                         color: muted,
@@ -1989,7 +2071,10 @@ pub(super) fn render_buffer(
                         target,
                         PixelRectToRect::rect(
                             segment_x
-                                + (point.column.saturating_sub(segment.start_col) as i32
+                                + (wrapped
+                                    .char_map
+                                    .display_cols_between(segment.start_col, point.column)
+                                    as i32
                                     * cell_width),
                             y,
                             cursor_width,
@@ -2030,7 +2115,7 @@ pub(super) fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
-                    layout.body_y + headerline_rows as i32 * line_height - 3,
+                    layout.body_y + headerline_rows as i32 * line_height - 1,
                     rect.width().saturating_sub(16),
                     1,
                 ),
@@ -2232,22 +2317,20 @@ pub(super) fn render_buffer(
         draw_text(target, draw_x, layout.statusline_y, segment, color)?;
         draw_x += monospace_text_width(segment, cell_width) as i32;
     }
-    if let Some(command_line) = command_line {
-        render_command_line_overlay(
-            target,
-            command_line,
-            rect,
-            layout,
-            active,
-            input_mode,
-            border_color,
-            foreground,
-            muted,
-            cursor,
-            cell_width,
-            line_height,
-        )?;
-    }
+    render_command_line_overlay(
+        target,
+        command_line,
+        rect,
+        layout,
+        active,
+        input_mode,
+        border_color,
+        foreground,
+        muted,
+        cursor,
+        cell_width,
+        line_height,
+    )?;
 
     let _ = ascent;
     fill_rect(
@@ -2267,7 +2350,7 @@ pub(super) fn render_buffer(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_command_line_overlay(
     target: &mut DrawTarget<'_>,
-    command_line: &CommandLineOverlay,
+    command_line: Option<&CommandLineOverlay>,
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
@@ -2282,19 +2365,22 @@ pub(super) fn render_command_line_overlay(
     let Some(commandline_y) = layout.commandline_y else {
         return Ok(());
     };
-    let text_x = rect.x() + 12;
-    let input = command_line.input();
-    let prompt = input.prompt();
     fill_rect(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
-            commandline_y - 4,
+            commandline_y,
             rect.width().saturating_sub(16),
             line_height.max(1) as u32,
         ),
         border_color,
     )?;
+    let Some(command_line) = command_line else {
+        return Ok(());
+    };
+    let text_x = rect.x() + 12;
+    let input = command_line.input();
+    let prompt = input.prompt();
     let rendered = if input.text().is_empty() {
         input.placeholder().map_or_else(
             || prompt.to_owned(),
@@ -3527,10 +3613,11 @@ pub(super) fn block_cursor_text_overlay(
     if cursor_col >= char_map.len() {
         return None;
     }
-    let text = char_map.slice(line, cursor_col, cursor_col.saturating_add(1));
+    let text = char_map.display_text_for_range(line, cursor_col, cursor_col.saturating_add(1));
     (!text.is_empty()).then_some(CursorTextOverlay {
-        draw_x: x + cursor_col.saturating_sub(segment.start_col) as i32 * cell_width,
-        text: text.to_owned(),
+        draw_x: x
+            + (char_map.display_cols_between(segment.start_col, cursor_col) as i32 * cell_width),
+        text,
         color,
     })
 }
@@ -3579,6 +3666,7 @@ pub(super) fn draw_buffer_text(
     };
 
     let mut draw_x = x;
+    let mut segment_char_offset = 0usize;
     for (colored_segment, color) in line_color_segments(
         segment_text,
         clipped_spans,
@@ -3587,11 +3675,19 @@ pub(super) fn draw_buffer_text(
         segment_byte_offsets,
         segment_base_byte,
     ) {
+        let colored_segment_chars = colored_segment.chars().count();
         if colored_segment.is_empty() {
+            segment_char_offset = segment_char_offset.saturating_add(colored_segment_chars);
             continue;
         }
-        draw_text(target, draw_x, y, &colored_segment, color)?;
-        draw_x += monospace_text_width(&colored_segment, cell_width) as i32;
+        let rendered_segment = char_map.display_text_for_range(
+            line,
+            segment_start_col + segment_char_offset,
+            segment_start_col + segment_char_offset + colored_segment_chars,
+        );
+        draw_text(target, draw_x, y, &rendered_segment, color)?;
+        draw_x += monospace_text_width(&rendered_segment, cell_width) as i32;
+        segment_char_offset = segment_char_offset.saturating_add(colored_segment_chars);
     }
     Ok(())
 }
@@ -3600,6 +3696,7 @@ pub(super) struct GhostTextSegmentDraw<'a> {
     pub(super) x: i32,
     pub(super) y: i32,
     pub(super) segment: LineWrapSegment,
+    pub(super) char_map: &'a LineCharMap,
     pub(super) line_len: usize,
     pub(super) ghost_text: Option<&'a str>,
     pub(super) color: Color,
@@ -3617,7 +3714,9 @@ pub(super) fn draw_line_ghost_text_for_segment(
     if visible_end < draw.line_len {
         return Ok(());
     }
-    let visible_cols = visible_end.saturating_sub(draw.segment.start_col);
+    let visible_cols = draw
+        .char_map
+        .display_cols_between(draw.segment.start_col, visible_end);
     // Leave one monospace cell between the closing delimiter and the ghost text.
     let draw_x = draw.x + visible_cols as i32 * draw.cell_width + draw.cell_width;
     draw_text(target, draw_x, draw.y, ghost_text, draw.color)
@@ -3634,18 +3733,6 @@ pub(super) fn visible_headerline_lines(lines: Vec<String>, visible_rows: usize) 
         .collect::<Vec<_>>();
     let start = lines.len().saturating_sub(max_rows);
     lines.into_iter().skip(start).collect()
-}
-
-pub(super) fn count_visible_headerline_lines(lines: &[String], visible_rows: usize) -> usize {
-    let max_rows = visible_rows.saturating_sub(1);
-    if max_rows == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-        .min(max_rows)
 }
 
 pub(super) fn line_color_segments(

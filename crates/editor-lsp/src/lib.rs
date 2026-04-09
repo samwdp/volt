@@ -11,6 +11,7 @@ use std::{
 
 use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
+use editor_path::{PathMatcher, PathPattern, normalize_extension};
 
 pub use client::{
     LspClientError, LspClientManager, LspCodeAction, LspCompletionItem, LspCompletionKind,
@@ -90,12 +91,15 @@ pub struct LanguageServerSpec {
     id: String,
     language_id: String,
     file_extensions: Vec<String>,
+    file_names: Vec<String>,
+    file_globs: Vec<String>,
     document_language_ids: BTreeMap<String, String>,
     program: String,
     args: Vec<String>,
     root_markers: Vec<String>,
     root_strategy: LanguageServerRootStrategy,
     env: Vec<(String, String)>,
+    path_matcher: PathMatcher,
 }
 
 /// Strategy used to choose the LSP workspace root for a file.
@@ -118,19 +122,27 @@ impl LanguageServerSpec {
         program: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let file_extensions = file_extensions
+            .into_iter()
+            .map(|extension| normalize_extension(&extension.into()))
+            .collect::<Vec<_>>();
         Self {
             id: id.into(),
             language_id: language_id.into(),
-            file_extensions: file_extensions
-                .into_iter()
-                .map(|extension| normalize_extension(&extension.into()))
-                .collect(),
+            file_extensions: file_extensions.clone(),
+            file_names: Vec::new(),
+            file_globs: Vec::new(),
             document_language_ids: BTreeMap::new(),
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             root_markers: Vec::new(),
             root_strategy: LanguageServerRootStrategy::Workspace,
             env: Vec::new(),
+            path_matcher: PathMatcher::from_parts(
+                &file_extensions,
+                [] as [&str; 0],
+                [] as [&str; 0],
+            ),
         }
     }
 
@@ -149,20 +161,22 @@ impl LanguageServerSpec {
         self
     }
 
-    /// Overrides the LSP document language id for specific file extensions.
+    /// Overrides the LSP document language id for specific extensions, basenames, or globs.
     pub fn with_document_language_ids<I, E, L>(mut self, mappings: I) -> Self
     where
         I: IntoIterator<Item = (E, L)>,
         E: Into<String>,
         L: Into<String>,
     {
-        for (extension, language_id) in mappings {
-            let extension = normalize_extension(&extension.into());
+        for (path_matcher, language_id) in mappings {
+            let path_matcher = path_matcher.into();
+            let path_matcher = path_matcher.trim();
             let language_id = language_id.into();
-            if extension.is_empty() || language_id.is_empty() {
+            if path_matcher.is_empty() || language_id.is_empty() {
                 continue;
             }
-            self.document_language_ids.insert(extension, language_id);
+            self.document_language_ids
+                .insert(path_matcher.to_owned(), language_id);
         }
         self
     }
@@ -188,13 +202,45 @@ impl LanguageServerSpec {
         &self.file_extensions
     }
 
+    /// Adds exact basenames handled by this server.
+    pub fn with_file_names<I, S>(mut self, file_names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.file_names = normalize_unique_entries(file_names);
+        self.rebuild_path_matcher();
+        self
+    }
+
+    /// Returns the exact basenames handled by this server.
+    pub fn file_names(&self) -> &[String] {
+        &self.file_names
+    }
+
+    /// Adds basename globs handled by this server.
+    pub fn with_file_globs<I, S>(mut self, file_globs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.file_globs = normalize_unique_entries(file_globs);
+        self.rebuild_path_matcher();
+        self
+    }
+
+    /// Returns the basename globs handled by this server.
+    pub fn file_globs(&self) -> &[String] {
+        &self.file_globs
+    }
+
     /// Returns the LSP document language id for a file extension.
     pub fn document_language_id_for_extension(&self, extension: &str) -> &str {
-        let extension = normalize_extension(extension);
-        self.document_language_ids
-            .get(&extension)
-            .map(String::as_str)
-            .unwrap_or(&self.language_id)
+        document_language_id_for_extension(
+            &self.document_language_ids,
+            extension,
+            &self.language_id,
+        )
     }
 
     /// Returns the program executable.
@@ -212,7 +258,7 @@ impl LanguageServerSpec {
         &self.root_markers
     }
 
-    /// Returns the extension-to-language-id overrides.
+    /// Returns the path-matcher-to-language-id overrides.
     pub fn document_language_ids(&self) -> &BTreeMap<String, String> {
         &self.document_language_ids
     }
@@ -225,6 +271,11 @@ impl LanguageServerSpec {
     /// Returns the environment overrides used when launching the server.
     pub fn env(&self) -> &[(String, String)] {
         &self.env
+    }
+
+    /// Returns whether this server should attach to the provided path.
+    pub fn matches_path(&self, path: &Path) -> bool {
+        self.path_match_score(path).is_some()
     }
 
     /// Returns the launch spec used to start the server.
@@ -252,6 +303,15 @@ impl LanguageServerSpec {
             }
         }
     }
+
+    fn rebuild_path_matcher(&mut self) {
+        self.path_matcher =
+            PathMatcher::from_parts(&self.file_extensions, &self.file_names, &self.file_globs);
+    }
+
+    fn path_match_score(&self, path: &Path) -> Option<usize> {
+        self.path_matcher.best_match_score(path)
+    }
 }
 
 /// Prepared session plan for an LSP server.
@@ -278,16 +338,14 @@ impl LanguageServerSession {
 
     /// Returns the document language id that should be sent for a file path.
     pub fn document_language_id_for_path(&self, path: &Path) -> &str {
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| {
-                let extension = normalize_extension(extension);
-                self.document_language_ids
-                    .get(&extension)
-                    .map(String::as_str)
-                    .unwrap_or(&self.language_id)
-            })
-            .unwrap_or(&self.language_id)
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let extension = path.extension().and_then(|value| value.to_str());
+        document_language_id_for_path(
+            &self.document_language_ids,
+            file_name,
+            extension,
+            &self.language_id,
+        )
     }
 
     /// Returns the planned workspace root.
@@ -356,6 +414,7 @@ impl Error for LspError {}
 #[derive(Debug, Default, Clone)]
 pub struct LanguageServerRegistry {
     servers: BTreeMap<String, LanguageServerSpec>,
+    server_order: Vec<String>,
     extensions: BTreeMap<String, Vec<String>>,
 }
 
@@ -387,6 +446,7 @@ impl LanguageServerRegistry {
                 .or_default()
                 .push(server_id.clone());
         }
+        self.server_order.push(server_id.clone());
         self.servers.insert(server_id, spec);
         Ok(())
     }
@@ -420,6 +480,37 @@ impl LanguageServerRegistry {
             .into_iter()
             .flat_map(|server_ids| server_ids.iter())
             .filter_map(|server_id| self.servers.get(server_id))
+            .collect()
+    }
+
+    /// Returns the first server whose path matchers apply to the provided path.
+    pub fn server_for_path(&self, path: &Path) -> Option<&LanguageServerSpec> {
+        self.servers_for_path(path).into_iter().next()
+    }
+
+    /// Returns all servers whose path matchers apply to the provided path.
+    pub fn servers_for_path(&self, path: &Path) -> Vec<&LanguageServerSpec> {
+        let mut best_score: Option<usize> = None;
+        for server_id in &self.server_order {
+            let Some(server) = self.servers.get(server_id) else {
+                continue;
+            };
+            let Some(score) = server.path_match_score(path) else {
+                continue;
+            };
+            best_score = Some(best_score.map_or(score, |current| current.max(score)));
+        }
+
+        let Some(best_score) = best_score else {
+            return Vec::new();
+        };
+
+        self.server_order
+            .iter()
+            .filter_map(|server_id| {
+                let server = self.servers.get(server_id)?;
+                (server.path_match_score(path) == Some(best_score)).then_some(server)
+            })
             .collect()
     }
 
@@ -502,14 +593,9 @@ impl LanguageServerRegistry {
         path: &Path,
         workspace_root: Option<&Path>,
     ) -> Result<Vec<LanguageServerSession>, LspError> {
-        let extension = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .ok_or_else(|| LspError::UnknownExtension(path.display().to_string()))?;
-        let extension = normalize_extension(extension);
-        let servers = self.servers_for_extension(&extension);
+        let servers = self.servers_for_path(path);
         if servers.is_empty() {
-            return Err(LspError::UnknownExtension(extension));
+            return Err(LspError::UnknownExtension(path.display().to_string()));
         }
         let mut sessions = Vec::with_capacity(servers.len());
         for server in servers {
@@ -519,11 +605,79 @@ impl LanguageServerRegistry {
     }
 }
 
-fn normalize_extension(extension: &str) -> String {
-    extension
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
+fn normalize_unique_entries<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.into();
+        let value = value.trim();
+        if !value.is_empty() && !normalized.iter().any(|existing| existing == value) {
+            normalized.push(value.to_owned());
+        }
+    }
+    normalized
+}
+
+fn document_language_id_for_path<'a>(
+    document_language_ids: &'a BTreeMap<String, String>,
+    file_name: Option<&str>,
+    extension: Option<&str>,
+    default_language_id: &'a str,
+) -> &'a str {
+    if let Some(file_name) = file_name {
+        if let Some(language_id) = document_language_ids.get(file_name) {
+            return language_id;
+        }
+        if let Some(language_id) = document_language_id_for_glob(document_language_ids, file_name) {
+            return language_id;
+        }
+    }
+    if let Some(extension) = extension {
+        return document_language_id_for_extension(
+            document_language_ids,
+            extension,
+            default_language_id,
+        );
+    }
+    default_language_id
+}
+
+fn document_language_id_for_extension<'a>(
+    document_language_ids: &'a BTreeMap<String, String>,
+    extension: &str,
+    default_language_id: &'a str,
+) -> &'a str {
+    let extension = normalize_extension(extension);
+    document_language_ids
+        .iter()
+        .find_map(|(path_matcher, language_id)| {
+            (normalize_extension(path_matcher) == extension).then_some(language_id.as_str())
+        })
+        .unwrap_or(default_language_id)
+}
+
+fn document_language_id_for_glob<'a>(
+    document_language_ids: &'a BTreeMap<String, String>,
+    file_name: &str,
+) -> Option<&'a str> {
+    let mut best = None;
+    let mut best_score = 0;
+    for (path_matcher, language_id) in document_language_ids {
+        let Some(path_matcher) = PathPattern::glob(path_matcher) else {
+            continue;
+        };
+        let Some(score) = path_matcher.match_score_for_file_name(file_name) else {
+            continue;
+        };
+        if best.is_none() || score > best_score {
+            best = Some(language_id.as_str());
+            best_score = score;
+        }
+    }
+    best
 }
 
 fn find_root_for_path(
@@ -629,6 +783,23 @@ mod tests {
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
     }
 
+    fn dockerfile_language_server() -> LanguageServerSpec {
+        LanguageServerSpec::new(
+            "dockerfile-language-server",
+            "dockerfile",
+            [] as [&str; 0],
+            "dockerfile-language-server",
+            ["--stdio"],
+        )
+        .with_file_names(["Dockerfile"])
+        .with_file_globs(["Dockerfile.*"])
+        .with_document_language_ids([("Dockerfile", "dockerfile"), ("Dockerfile.*", "dockerfile")])
+    }
+
+    fn dev_extension_server() -> LanguageServerSpec {
+        LanguageServerSpec::new("dev-server", "dev", ["dev"], "dev-server", ["--stdio"])
+    }
+
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
@@ -676,6 +847,36 @@ mod tests {
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].id(), "harper");
         assert_eq!(servers[1].id(), "marksman");
+    }
+
+    #[test]
+    fn registry_resolves_servers_by_filename_and_glob() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(dockerfile_language_server()));
+
+        assert_eq!(
+            registry
+                .server_for_path(Path::new("Dockerfile"))
+                .map(|server| server.id()),
+            Some("dockerfile-language-server")
+        );
+        assert_eq!(
+            registry
+                .server_for_path(Path::new("containers\\Dockerfile.dev"))
+                .map(|server| server.id()),
+            Some("dockerfile-language-server")
+        );
+    }
+
+    #[test]
+    fn registry_prefers_filename_globs_over_extension_matches() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(dev_extension_server()));
+        must(registry.register(dockerfile_language_server()));
+
+        let servers = registry.servers_for_path(Path::new("containers\\Dockerfile.dev"));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id(), "dockerfile-language-server");
     }
 
     #[test]
@@ -729,6 +930,26 @@ mod tests {
         assert_eq!(
             session.document_language_id_for_path(Path::new("app.jsx")),
             "javascriptreact"
+        );
+    }
+
+    #[test]
+    fn prepared_session_resolves_document_language_ids_by_filename_and_glob() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(dockerfile_language_server()));
+
+        let session = must(registry.prepare_session(
+            "dockerfile-language-server",
+            Some(PathBuf::from("P:\\volt")),
+        ));
+
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("Dockerfile")),
+            "dockerfile"
+        );
+        assert_eq!(
+            session.document_language_id_for_path(Path::new("containers\\Dockerfile.dev")),
+            "dockerfile"
         );
     }
 
@@ -792,5 +1013,17 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].server_id(), "harper");
         assert_eq!(sessions[1].server_id(), "marksman");
+    }
+
+    #[test]
+    fn prepare_sessions_for_path_returns_filename_matches_without_extensions() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(dockerfile_language_server()));
+
+        let sessions = must(
+            registry.prepare_sessions_for_path(Path::new("Dockerfile"), Some(Path::new("P:\\"))),
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].server_id(), "dockerfile-language-server");
     }
 }

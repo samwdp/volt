@@ -14,22 +14,23 @@ use std::{
 
 use editor_buffer::{TextPoint, TextRange};
 use lsp_types::{
-    ClientCapabilities, ClientInfo, CompletionParams, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentFormattingParams, DocumentRangeFormattingParams, Documentation, FormattingOptions,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InitializedParams,
-    Location, LocationLink, NumberOrString, ParameterLabel, PartialResultParams, Position,
-    ReferenceContext, ReferenceParams, SignatureHelp, SignatureHelpParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, TraceValue, Uri, VersionedTextDocumentIdentifier,
-    WorkDoneProgressParams, WorkspaceFolder,
+    ClientCapabilities, ClientInfo, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
+    CompletionParams, Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
+    Documentation, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
+    HoverParams, InitializeParams, InitializedParams, Location, LocationLink, MarkedString,
+    MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, ReferenceContext,
+    ReferenceParams, SignatureHelp, SignatureHelpParams, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, TraceValue,
+    Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
         Initialized, Notification,
     },
     request::{
-        Completion, Formatting, GotoDefinition, GotoImplementation, HoverRequest, Initialize,
-        RangeFormatting, References, Request, SignatureHelpRequest,
+        CodeActionRequest, Completion, Formatting, GotoDefinition, GotoImplementation,
+        HoverRequest, Initialize, RangeFormatting, References, Request, SignatureHelpRequest,
     },
 };
 use serde::Serialize;
@@ -41,9 +42,9 @@ use crate::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
 const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CODE_ACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
-const CODE_ACTION_METHOD: &str = "textDocument/codeAction";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -140,19 +141,36 @@ pub enum LspCompletionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspHoverContents {
     server_id: String,
+    text: String,
     lines: Vec<String>,
+    markdown: bool,
 }
 
 impl LspHoverContents {
-    fn new(server_id: impl Into<String>, lines: Vec<String>) -> Self {
+    fn new(
+        server_id: impl Into<String>,
+        text: impl Into<String>,
+        lines: Vec<String>,
+        markdown: bool,
+    ) -> Self {
         Self {
             server_id: server_id.into(),
+            text: text.into(),
             lines,
+            markdown,
         }
     }
 
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub const fn is_markdown(&self) -> bool {
+        self.markdown
     }
 
     pub fn lines(&self) -> &[String] {
@@ -780,10 +798,7 @@ impl LspClientManager {
                 return false;
             }
         }
-        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-            return false;
-        };
-        let servers = self.registry.servers_for_extension(extension);
+        let servers = self.registry.servers_for_path(path);
         if servers.is_empty() {
             return false;
         }
@@ -872,18 +887,12 @@ impl LspClientManager {
     }
 
     pub fn supports_path(&self, path: &Path) -> bool {
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| !self.registry.servers_for_extension(extension).is_empty())
-            .unwrap_or(false)
+        !self.registry.servers_for_path(path).is_empty()
     }
 
     pub fn registered_server_ids_for_path(&self, path: &Path) -> Vec<String> {
-        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-            return Vec::new();
-        };
         self.registry
-            .servers_for_extension(extension)
+            .servers_for_path(path)
             .into_iter()
             .map(|server| server.id().to_owned())
             .collect()
@@ -1532,22 +1541,13 @@ impl LspSessionHandle {
             .diagnostics_for_path(path)
             .into_iter()
             .filter(|diagnostic| diagnostic_matches_request_range(diagnostic.range(), range))
-            .map(|diagnostic| lsp_code_action_diagnostic(&diagnostic))
             .collect::<Vec<_>>();
-        let response = match self.request(
-            CODE_ACTION_METHOD,
-            json!({
-                "textDocument": {
-                    "uri": path_to_uri(path)?,
-                },
-                "range": lsp_range_from_text_range(range),
-                "context": {
-                    "diagnostics": diagnostics,
-                },
-                "workDoneProgressParams": self.work_done_progress_params(CODE_ACTION_METHOD),
-                "partialResultParams": {},
-            }),
-        ) {
+        let response = match self.request_typed::<CodeActionRequest>(code_action_params(
+            path,
+            range,
+            &diagnostics,
+            self.work_done_progress_params(CodeActionRequest::METHOD),
+        )?) {
             Ok(response) => response,
             Err(error) if unsupported_lsp_request(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error),
@@ -2280,6 +2280,8 @@ fn work_done_progress_params(
 fn request_timeout_for_method(method: &str) -> Duration {
     if method == Initialize::METHOD {
         INITIALIZE_REQUEST_TIMEOUT
+    } else if method == CodeActionRequest::METHOD {
+        CODE_ACTION_REQUEST_TIMEOUT
     } else {
         REQUEST_TIMEOUT
     }
@@ -2536,8 +2538,9 @@ fn parse_diagnostic(value: &Value) -> Option<Diagnostic> {
 
 fn parse_hover_response(server_id: &str, value: &Value) -> Option<LspHoverContents> {
     let contents = value.get("contents")?;
-    let lines = hover_lines(contents);
-    (!lines.is_empty()).then(|| LspHoverContents::new(server_id, lines))
+    let (text, markdown) = hover_text(contents)?;
+    let lines = hover_text_lines(&text);
+    (!lines.is_empty()).then(|| LspHoverContents::new(server_id, text, lines, markdown))
 }
 
 fn parse_signature_help_response(
@@ -2763,42 +2766,110 @@ fn diagnostic_matches_request_range(diagnostic_range: TextRange, request_range: 
     diagnostic_range.start() < request_range.end() && request_range.start() < diagnostic_range.end()
 }
 
-fn lsp_code_action_diagnostic(diagnostic: &Diagnostic) -> Value {
-    json!({
-        "range": lsp_range_from_text_range(diagnostic.range()),
-        "severity": lsp_diagnostic_severity(diagnostic.severity()),
-        "source": diagnostic.source(),
-        "message": diagnostic.message(),
+fn code_action_params(
+    path: &Path,
+    range: TextRange,
+    diagnostics: &[Diagnostic],
+    work_done_progress_params: WorkDoneProgressParams,
+) -> Result<CodeActionParams, LspClientError> {
+    Ok(CodeActionParams {
+        text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+        range: lsp_range_from_text_range(range),
+        context: CodeActionContext {
+            diagnostics: diagnostics.iter().map(lsp_code_action_diagnostic).collect(),
+            only: None,
+            trigger_kind: Some(CodeActionTriggerKind::INVOKED),
+        },
+        work_done_progress_params,
+        partial_result_params: PartialResultParams::default(),
     })
 }
 
-fn lsp_diagnostic_severity(severity: DiagnosticSeverity) -> u8 {
+fn lsp_code_action_diagnostic(diagnostic: &Diagnostic) -> LspDiagnostic {
+    LspDiagnostic::new(
+        lsp_range_from_text_range(diagnostic.range()),
+        Some(lsp_diagnostic_severity(diagnostic.severity())),
+        None,
+        Some(diagnostic.source().to_owned()),
+        diagnostic.message().to_owned(),
+        None,
+        None,
+    )
+}
+
+fn lsp_diagnostic_severity(severity: DiagnosticSeverity) -> LspDiagnosticSeverity {
     match severity {
-        DiagnosticSeverity::Error => 1,
-        DiagnosticSeverity::Warning => 2,
-        DiagnosticSeverity::Information => 3,
+        DiagnosticSeverity::Error => LspDiagnosticSeverity::ERROR,
+        DiagnosticSeverity::Warning => LspDiagnosticSeverity::WARNING,
+        DiagnosticSeverity::Information => LspDiagnosticSeverity::INFORMATION,
     }
 }
 
-fn hover_lines(value: &Value) -> Vec<String> {
-    match value {
-        Value::String(text) => normalize_lines(text),
-        Value::Array(values) => values.iter().flat_map(hover_lines).collect::<Vec<_>>(),
-        Value::Object(map) => {
-            if let Some(text) = map.get("value").and_then(Value::as_str) {
-                return normalize_lines(text);
-            }
-            if let Some(text) = map.get("language").and_then(Value::as_str) {
-                let mut lines = vec![format!("Language: {text}")];
-                if let Some(value) = map.get("value").and_then(Value::as_str) {
-                    lines.extend(normalize_lines(value));
-                }
-                return lines;
-            }
-            Vec::new()
+fn hover_text(value: &Value) -> Option<(String, bool)> {
+    let contents = serde_json::from_value::<HoverContents>(value.clone()).ok()?;
+    match contents {
+        HoverContents::Scalar(marked_string) => hover_marked_string(marked_string),
+        HoverContents::Array(values) => {
+            let parts = values
+                .into_iter()
+                .filter_map(hover_marked_string_markdown_text)
+                .collect::<Vec<_>>();
+            let text = normalize_hover_text(&parts.join("\n\n"));
+            (!text.trim().is_empty()).then_some((text, true))
         }
-        _ => Vec::new(),
+        HoverContents::Markup(content) => {
+            let text = normalize_hover_text(&content.value);
+            (!text.trim().is_empty()).then_some((text, content.kind == MarkupKind::Markdown))
+        }
     }
+}
+
+fn hover_marked_string(marked_string: MarkedString) -> Option<(String, bool)> {
+    match marked_string {
+        MarkedString::String(text) => {
+            let text = normalize_hover_text(&text);
+            (!text.trim().is_empty()).then_some((text, true))
+        }
+        MarkedString::LanguageString(language) => {
+            let text =
+                normalize_hover_text(&markdown_code_fence(&language.language, &language.value));
+            (!text.trim().is_empty()).then_some((text, true))
+        }
+    }
+}
+
+fn hover_marked_string_markdown_text(marked_string: MarkedString) -> Option<String> {
+    hover_marked_string(marked_string).map(|(text, _)| text)
+}
+
+fn markdown_code_fence(language: &str, value: &str) -> String {
+    let value = normalize_hover_text(value);
+    let language = language.trim();
+    if language.is_empty() {
+        format!("```\n{value}\n```")
+    } else {
+        format!("```{language}\n{value}\n```")
+    }
+}
+
+fn hover_text_lines(text: &str) -> Vec<String> {
+    let text = normalize_hover_text(text);
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut lines = text
+        .split('\n')
+        .map(str::trim_end)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn normalize_hover_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn signature_help_lines(signature_help: &SignatureHelp) -> Vec<String> {
@@ -3184,7 +3255,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_parser_flattens_markup_content() {
+    fn hover_parser_preserves_markdown_content() {
         let response = json!({
             "contents": {
                 "kind": "markdown",
@@ -3193,13 +3264,54 @@ mod tests {
         });
         let hover = parse_hover_response("rust-analyzer", &response).expect("hover");
         assert_eq!(hover.server_id(), "rust-analyzer");
-        assert!(hover.lines().iter().any(|line| line.contains("fn example")));
-        assert!(
-            hover
-                .lines()
-                .iter()
-                .any(|line| line.contains("Sample docs"))
+        assert!(hover.is_markdown());
+        assert_eq!(hover.text(), "```rust\nfn example()\n```\n\nSample docs");
+        assert_eq!(
+            hover.lines(),
+            &[
+                "```rust".to_owned(),
+                "fn example()".to_owned(),
+                "```".to_owned(),
+                String::new(),
+                "Sample docs".to_owned()
+            ]
         );
+    }
+
+    #[test]
+    fn hover_parser_formats_marked_string_language_blocks_as_markdown() {
+        let response = json!({
+            "contents": [
+                {
+                    "language": "rust",
+                    "value": "fn main() {}"
+                },
+                "Runs the example."
+            ]
+        });
+        let hover = parse_hover_response("rust-analyzer", &response).expect("hover");
+        assert!(hover.is_markdown());
+        assert_eq!(
+            hover.text(),
+            "```rust\nfn main() {}\n```\n\nRuns the example."
+        );
+        assert_eq!(hover.lines()[0], "```rust");
+        assert_eq!(hover.lines()[1], "fn main() {}");
+        assert_eq!(hover.lines()[4], "Runs the example.");
+    }
+
+    #[test]
+    fn hover_parser_keeps_plaintext_markup_plain() {
+        let response = json!({
+            "contents": {
+                "kind": "plaintext",
+                "value": "alpha\nbeta"
+            }
+        });
+        let hover = parse_hover_response("rust-analyzer", &response).expect("hover");
+        assert!(!hover.is_markdown());
+        assert_eq!(hover.text(), "alpha\nbeta");
+        assert_eq!(hover.lines(), &["alpha".to_owned(), "beta".to_owned()]);
     }
 
     #[test]
@@ -3527,6 +3639,79 @@ mod tests {
     }
 
     #[test]
+    fn code_action_params_use_flattened_lsp_shape() {
+        let path = Path::new("P:\\volt\\src\\main.ts");
+        let range = TextRange::new(TextPoint::new(3, 4), TextPoint::new(3, 7));
+        let diagnostics = vec![Diagnostic::new(
+            "typescript",
+            "Cannot find name `missingSymbol`.",
+            DiagnosticSeverity::Error,
+            range,
+        )];
+        let params = code_action_params(
+            path,
+            range,
+            &diagnostics,
+            WorkDoneProgressParams {
+                work_done_token: Some(NumberOrString::String(
+                    "progress:textDocument/codeAction:test".to_owned(),
+                )),
+            },
+        )
+        .expect("code action params");
+        let encoded = serde_json::to_value(params).expect("encoded params");
+        let expected_uri = path_to_uri(path).expect("uri").to_string();
+
+        assert_eq!(
+            encoded
+                .get("textDocument")
+                .and_then(|text_document| text_document.get("uri"))
+                .and_then(Value::as_str),
+            Some(expected_uri.as_str())
+        );
+        assert_eq!(
+            encoded.get("range"),
+            Some(&json!({
+                "start": { "line": 3, "character": 4 },
+                "end": { "line": 3, "character": 7 },
+            }))
+        );
+        assert_eq!(
+            encoded
+                .get("context")
+                .and_then(|context| context.get("triggerKind"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            encoded
+                .get("context")
+                .and_then(|context| context.get("diagnostics"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            encoded
+                .get("context")
+                .and_then(|context| context.get("diagnostics"))
+                .and_then(Value::as_array)
+                .and_then(|diagnostics| diagnostics.first())
+                .and_then(|diagnostic| diagnostic.get("severity"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            encoded.get("workDoneToken"),
+            Some(&Value::String(
+                "progress:textDocument/codeAction:test".to_owned(),
+            ))
+        );
+        assert!(encoded.get("workDoneProgressParams").is_none());
+        assert!(encoded.get("partialResultParams").is_none());
+    }
+
+    #[test]
     fn point_requests_match_covering_diagnostics() {
         let point = TextPoint::new(4, 12);
         let range = TextRange::new(point, point);
@@ -3708,6 +3893,10 @@ mod tests {
         assert_eq!(
             request_timeout_for_method(Initialize::METHOD),
             INITIALIZE_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            request_timeout_for_method(CodeActionRequest::METHOD),
+            CODE_ACTION_REQUEST_TIMEOUT
         );
         assert_eq!(
             request_timeout_for_method(HoverRequest::METHOD),

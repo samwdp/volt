@@ -15,6 +15,7 @@ editor-fs = { path = "../editor-fs" }
 editor-git = { path = "../editor-git" }
 editor-icons = { path = "../editor-icons" }
 editor-lsp = { path = "../editor-lsp" }
+editor-path = { path = "../editor-path" }
 editor-plugin-api = { path = "../../user/sdk" }
 editor-syntax = { path = "../editor-syntax" }
 editor-theme = { path = "../editor-theme" }

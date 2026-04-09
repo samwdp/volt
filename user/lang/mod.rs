@@ -32,6 +32,8 @@ pub mod python;
 pub mod rust;
 /// SCSS language support and theme mappings.
 pub mod scss;
+/// Curated declarative grammar-backed languages.
+mod simple;
 /// SQL language support and theme mappings.
 pub mod sql;
 /// TOML language support and theme mappings.
@@ -46,10 +48,10 @@ pub mod zig;
 mod web_queries;
 
 /// Returns plugin packages for all compiled-in languages.
-/// Adding a new language only requires creating `user/lang/newlang.rs` and
-/// adding `pub mod newlang;` + the two calls below — no changes to `user/lib.rs`.
+/// Custom languages keep their own modules, while curated simple grammars live in
+/// `user/lang/simple.rs` and are merged here without touching `user/lib.rs`.
 pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
-    vec![
+    let mut packages = vec![
         c::package(),
         cpp::package(),
         csharp::package(),
@@ -69,12 +71,14 @@ pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
         typescript::package(),
         yaml::package(),
         zig::package(),
-    ]
+    ];
+    packages.extend(simple::packages());
+    packages
 }
 
 /// Returns syntax languages compiled into the user library.
 pub fn syntax_languages() -> Vec<LanguageConfiguration> {
-    vec![
+    let mut languages = vec![
         c::syntax_language(),
         cpp::syntax_language(),
         csharp::syntax_language(),
@@ -98,5 +102,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         typescript::tsx_syntax_language(),
         yaml::syntax_language(),
         zig::syntax_language(),
-    ]
+    ];
+    languages.extend(simple::syntax_languages());
+    languages
 }

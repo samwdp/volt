@@ -314,7 +314,13 @@ pub(super) fn active_terminal_dimensions(
         (rect.width, rect.height)
     };
 
-    let rows = buffer_visible_rows_for_height(buffer, height, line_height).max(1);
+    let rows = buffer_visible_rows_for_height(
+        buffer,
+        height,
+        line_height,
+        shell_user_library(runtime).commandline_enabled(),
+    )
+    .max(1);
     let cols = wrap_columns_for_width(width, cell_width).max(1);
     Ok(Some((
         buffer_id,

@@ -213,6 +213,7 @@ pub(super) struct HoverProviderContent {
     pub(super) provider_label: String,
     pub(super) provider_icon: String,
     pub(super) lines: Vec<String>,
+    pub(super) syntax_lines: IndexedSyntaxLines,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +332,12 @@ impl HoverOverlay {
         let start = self.scroll_offset.min(provider.lines.len());
         let end = (start + self.line_limit).min(provider.lines.len());
         &provider.lines[start..end]
+    }
+}
+
+impl HoverProviderContent {
+    pub(super) fn line_syntax_spans(&self, line_index: usize) -> Option<&[LineSyntaxSpan]> {
+        self.syntax_lines.get(&line_index).map(Vec::as_slice)
     }
 }
 

@@ -1,6 +1,8 @@
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::process::Stdio;
 
+use editor_lsp::LspDocumentTextEdits;
+
 use super::*;
 
 const WORKSPACE_SEARCH_OUTPUT_LIMIT: usize = 48;
@@ -350,6 +352,20 @@ pub(super) fn lsp_code_actions_picker_overlay(
     PickerOverlay::from_entries("Code Actions", entries)
 }
 
+pub(super) fn lsp_code_actions_status_picker_overlay(
+    label: &str,
+    detail: &str,
+    preview: Option<String>,
+) -> PickerOverlay {
+    PickerOverlay::from_entries(
+        "Code Actions",
+        vec![PickerEntry {
+            item: PickerItem::new("lsp-code-action-status", label, detail, preview),
+            action: PickerAction::NoOp,
+        }],
+    )
+}
+
 pub(super) fn lsp_code_action_picker_entry(
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
@@ -359,8 +375,12 @@ pub(super) fn lsp_code_action_picker_entry(
 ) -> PickerEntry {
     let status = if code_action.disabled_reason().is_some() {
         "disabled"
-    } else if lsp_code_action_supported_edits(code_action, path).is_ok() {
-        "edit"
+    } else if lsp_code_action_supported_edits(code_action).is_ok() {
+        if code_action.command_name().is_some() {
+            "edit + command"
+        } else {
+            "edit"
+        }
     } else {
         "unsupported"
     };
@@ -377,7 +397,7 @@ pub(super) fn lsp_code_action_picker_entry(
             format!("lsp-code-action:{index}"),
             code_action.title(),
             detail_parts.join(" | "),
-            lsp_code_action_picker_preview(code_action, path),
+            lsp_code_action_picker_preview(code_action),
         ),
         action: PickerAction::ApplyLspCodeAction {
             workspace_id,
@@ -388,51 +408,47 @@ pub(super) fn lsp_code_action_picker_entry(
     }
 }
 
-pub(super) fn lsp_code_action_picker_preview(
-    code_action: &LspCodeAction,
-    path: &Path,
-) -> Option<String> {
-    match lsp_code_action_supported_edits(code_action, path) {
-        Ok(edits) => {
-            let suffix = if edits.len() == 1 { "" } else { "s" };
+pub(super) fn lsp_code_action_picker_preview(code_action: &LspCodeAction) -> Option<String> {
+    match lsp_code_action_supported_edits(code_action) {
+        Ok(document_edits) => {
+            let edit_count = document_edits
+                .iter()
+                .map(|document_edit| document_edit.edits().len())
+                .sum::<usize>();
+            let file_count = document_edits.len();
+            let edit_suffix = if edit_count == 1 { "" } else { "s" };
+            let file_suffix = if file_count == 1 { "" } else { "s" };
+            let command_suffix = if code_action.command_name().is_some() {
+                " The action also carries a follow-up server command."
+            } else {
+                ""
+            };
             Some(format!(
-                "Apply {} text edit{suffix} to the active file.",
-                edits.len()
+                "Apply {edit_count} text edit{edit_suffix} across {file_count} file{file_suffix}.{command_suffix}"
             ))
         }
         Err(message) => Some(message),
     }
 }
 
-pub(super) fn lsp_code_action_supported_edits<'a>(
-    code_action: &'a LspCodeAction,
-    path: &Path,
-) -> Result<&'a [LspTextEdit], String> {
+pub(super) fn lsp_code_action_supported_edits(
+    code_action: &LspCodeAction,
+) -> Result<&[LspDocumentTextEdits], String> {
     if let Some(reason) = code_action.disabled_reason() {
         return Err(format!("Disabled: {reason}"));
     }
     if code_action.has_resource_operations() {
         return Err("Unsupported: resource operations are not supported yet.".to_owned());
     }
-    if let Some(command_name) = code_action.command_name() {
-        return Err(format!(
-            "Unsupported: command `{command_name}` code actions are not supported yet."
-        ));
-    }
     if code_action.document_edits().is_empty() {
+        if let Some(command_name) = code_action.command_name() {
+            return Err(format!(
+                "Unsupported: command-only code action `{command_name}` is not supported yet."
+            ));
+        }
         return Err("Unsupported: this code action does not include text edits.".to_owned());
     }
-    if code_action.document_edits().len() != 1 {
-        return Err("Unsupported: multi-file code actions are not supported yet.".to_owned());
-    }
-    let document_edit = &code_action.document_edits()[0];
-    if document_edit.path() != path {
-        return Err(format!(
-            "Unsupported: this code action edits `{}` instead of the active file.",
-            document_edit.path().display()
-        ));
-    }
-    Ok(document_edit.edits())
+    Ok(code_action.document_edits())
 }
 
 pub(super) fn apply_lsp_code_action(
@@ -442,19 +458,18 @@ pub(super) fn apply_lsp_code_action(
     path: &Path,
     code_action: &LspCodeAction,
 ) -> Result<(), String> {
-    let edits = lsp_code_action_supported_edits(code_action, path)?;
+    let document_edits = lsp_code_action_supported_edits(code_action)?;
     let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
-    {
-        let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        if buffer.path() != Some(path) {
-            return Err(format!(
-                "buffer `{}` is no longer available for `{}`",
-                path.display(),
-                code_action.title()
-            ));
-        }
-        apply_lsp_text_edits(buffer, edits);
-        buffer.set_cursor(original_cursor);
+    for document_edit in document_edits {
+        apply_lsp_document_edit(
+            runtime,
+            workspace_id,
+            buffer_id,
+            path,
+            original_cursor,
+            document_edit,
+            code_action.title(),
+        )?;
     }
     runtime
         .model_mut()
@@ -462,6 +477,38 @@ pub(super) fn apply_lsp_code_action(
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
     sync_active_buffer(runtime)?;
+    Ok(())
+}
+
+fn apply_lsp_document_edit(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    active_buffer_id: BufferId,
+    active_path: &Path,
+    original_cursor: TextPoint,
+    document_edit: &LspDocumentTextEdits,
+    action_title: &str,
+) -> Result<(), String> {
+    let target_buffer_id = if document_edit.path() == active_path {
+        active_buffer_id
+    } else if let Some(existing) =
+        find_workspace_file_buffer(runtime, workspace_id, document_edit.path())?
+    {
+        existing
+    } else {
+        open_workspace_file(runtime, document_edit.path())?
+    };
+    let buffer = shell_buffer_mut(runtime, target_buffer_id)?;
+    if buffer.path() != Some(document_edit.path()) {
+        return Err(format!(
+            "buffer `{}` is no longer available for `{action_title}`",
+            document_edit.path().display()
+        ));
+    }
+    apply_lsp_text_edits(buffer, document_edit.edits());
+    if target_buffer_id == active_buffer_id {
+        buffer.set_cursor(original_cursor);
+    }
     Ok(())
 }
 

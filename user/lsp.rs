@@ -29,9 +29,35 @@ pub const SERVER_SQLS: &str = "sqls";
 pub const SERVER_OLS: &str = "ols";
 pub const SERVER_TOMBI: &str = "tombi";
 pub const SERVER_YAML_LANGUAGE_SERVER: &str = "yaml-language-server";
+pub const SERVER_BASH_LANGUAGE_SERVER: &str = "bash-language-server";
+pub const SERVER_CMAKE_LANGUAGE_SERVER: &str = "cmake-language-server";
+pub const SERVER_GRAPHQL_LANGUAGE_SERVICE: &str = "graphql-language-service";
+pub const SERVER_TERRAFORM_LS: &str = "terraform-ls";
+pub const SERVER_JDTLS: &str = "jdtls";
+pub const SERVER_KOTLIN_LANGUAGE_SERVER: &str = "kotlin-language-server";
+pub const SERVER_LUA_LANGUAGE_SERVER: &str = "lua-language-server";
+pub const SERVER_NIL: &str = "nil";
+pub const SERVER_PERLNAVIGATOR: &str = "perlnavigator";
+pub const SERVER_INTELEPHENSE: &str = "intelephense";
+pub const SERVER_R_LANGUAGE_SERVER: &str = "r-language-server";
+pub const SERVER_RUBY_LSP: &str = "ruby-lsp";
+pub const SERVER_METALS: &str = "metals";
+pub const SERVER_SOURCEKIT_LSP: &str = "sourcekit-lsp";
+pub const SERVER_TEXLAB: &str = "texlab";
+pub const SERVER_SOLC_LSP: &str = "solc-lsp";
+pub const SERVER_ELIXIR_LS: &str = "elixir-ls";
+pub const SERVER_CLOJURE_LSP: &str = "clojure-lsp";
+pub const SERVER_BUFLS: &str = "bufls";
+pub const SERVER_XML_LANGUAGE_SERVER: &str = "xml-language-server";
 pub const SHOW_BUFFER_DIAGNOSTICS: bool = true;
 pub const DIAGNOSTIC_LINE_LIMIT: usize = 8;
 pub const DIAGNOSTIC_ICON: &str = md::MD_ALERT_CIRCLE_OUTLINE;
+
+#[cfg(windows)]
+const ELIXIR_LS_PROGRAM: &str = "language_server.bat";
+
+#[cfg(not(windows))]
+const ELIXIR_LS_PROGRAM: &str = "language_server.sh";
 
 /// Returns the metadata for the LSP integration package.
 pub fn package() -> PluginPackage {
@@ -85,6 +111,12 @@ pub fn package() -> PluginPackage {
         ),
         hook_command(
             "lsp.code-actions",
+            "Opens LSP code actions available at the cursor.",
+            HOOK_LSP_CODE_ACTIONS,
+            None,
+        ),
+        hook_command(
+            "lsp.code-action",
             "Opens LSP code actions available at the cursor.",
             HOOK_LSP_CODE_ACTIONS,
             None,
@@ -184,6 +216,126 @@ pub fn package() -> PluginPackage {
             "Starts yaml-language-server for the active YAML file.",
             HOOK_LSP_START,
             Some(SERVER_YAML_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-bash-language-server",
+            "Starts bash-language-server for the active shell script.",
+            HOOK_LSP_START,
+            Some(SERVER_BASH_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-cmake-language-server",
+            "Starts cmake-language-server for the active CMake file.",
+            HOOK_LSP_START,
+            Some(SERVER_CMAKE_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-graphql-language-service",
+            "Starts graphql-language-service for the active GraphQL file.",
+            HOOK_LSP_START,
+            Some(SERVER_GRAPHQL_LANGUAGE_SERVICE),
+        ),
+        hook_command(
+            "lsp.start-terraform-ls",
+            "Starts terraform-ls for the active HCL or Terraform file.",
+            HOOK_LSP_START,
+            Some(SERVER_TERRAFORM_LS),
+        ),
+        hook_command(
+            "lsp.start-jdtls",
+            "Starts jdtls for the active Java file.",
+            HOOK_LSP_START,
+            Some(SERVER_JDTLS),
+        ),
+        hook_command(
+            "lsp.start-kotlin-language-server",
+            "Starts kotlin-language-server for the active Kotlin file.",
+            HOOK_LSP_START,
+            Some(SERVER_KOTLIN_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-lua-language-server",
+            "Starts lua-language-server for the active Lua file.",
+            HOOK_LSP_START,
+            Some(SERVER_LUA_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-nil",
+            "Starts nil for the active Nix file.",
+            HOOK_LSP_START,
+            Some(SERVER_NIL),
+        ),
+        hook_command(
+            "lsp.start-perlnavigator",
+            "Starts perlnavigator for the active Perl file.",
+            HOOK_LSP_START,
+            Some(SERVER_PERLNAVIGATOR),
+        ),
+        hook_command(
+            "lsp.start-intelephense",
+            "Starts intelephense for the active PHP file.",
+            HOOK_LSP_START,
+            Some(SERVER_INTELEPHENSE),
+        ),
+        hook_command(
+            "lsp.start-r-language-server",
+            "Starts r-language-server for the active R file.",
+            HOOK_LSP_START,
+            Some(SERVER_R_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-ruby-lsp",
+            "Starts ruby-lsp for the active Ruby file.",
+            HOOK_LSP_START,
+            Some(SERVER_RUBY_LSP),
+        ),
+        hook_command(
+            "lsp.start-metals",
+            "Starts metals for the active Scala file.",
+            HOOK_LSP_START,
+            Some(SERVER_METALS),
+        ),
+        hook_command(
+            "lsp.start-sourcekit-lsp",
+            "Starts sourcekit-lsp for the active Swift file.",
+            HOOK_LSP_START,
+            Some(SERVER_SOURCEKIT_LSP),
+        ),
+        hook_command(
+            "lsp.start-texlab",
+            "Starts texlab for the active LaTeX file.",
+            HOOK_LSP_START,
+            Some(SERVER_TEXLAB),
+        ),
+        hook_command(
+            "lsp.start-solc-lsp",
+            "Starts solc-lsp for the active Solidity file.",
+            HOOK_LSP_START,
+            Some(SERVER_SOLC_LSP),
+        ),
+        hook_command(
+            "lsp.start-elixir-ls",
+            "Starts elixir-ls for the active Elixir file.",
+            HOOK_LSP_START,
+            Some(SERVER_ELIXIR_LS),
+        ),
+        hook_command(
+            "lsp.start-clojure-lsp",
+            "Starts clojure-lsp for the active Clojure file.",
+            HOOK_LSP_START,
+            Some(SERVER_CLOJURE_LSP),
+        ),
+        hook_command(
+            "lsp.start-bufls",
+            "Starts bufls for the active Protocol Buffers file.",
+            HOOK_LSP_START,
+            Some(SERVER_BUFLS),
+        ),
+        hook_command(
+            "lsp.start-xml-language-server",
+            "Starts xml-language-server for the active XML file.",
+            HOOK_LSP_START,
+            Some(SERVER_XML_LANGUAGE_SERVER),
         ),
     ])
     .with_hook_declarations(vec![
@@ -378,6 +530,24 @@ pub fn package() -> PluginPackage {
         ),
         PluginHookBinding::new(
             "buffer.file-open",
+            "lsp.auto-start-makefile",
+            "lsp.start",
+            Some("Makefile"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-gnu-makefile",
+            "lsp.start",
+            Some("GNUmakefile"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-makefile-lower",
+            "lsp.start",
+            Some("makefile"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
             "lsp.auto-start-zig",
             "lsp.start",
             Some(".zig"),
@@ -417,6 +587,438 @@ pub fn package() -> PluginPackage {
             "lsp.auto-start-yml",
             "lsp.start",
             Some(".yml"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sh",
+            "lsp.start",
+            Some(".sh"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-bash",
+            "lsp.start",
+            Some(".bash"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-zsh",
+            "lsp.start",
+            Some(".zsh"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ksh",
+            "lsp.start",
+            Some(".ksh"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ash",
+            "lsp.start",
+            Some(".ash"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-dash",
+            "lsp.start",
+            Some(".dash"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-mksh",
+            "lsp.start",
+            Some(".mksh"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cmake",
+            "lsp.start",
+            Some(".cmake"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cmakelists",
+            "lsp.start",
+            Some("CMakeLists.txt"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-gql",
+            "lsp.start",
+            Some(".gql"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-graphql",
+            "lsp.start",
+            Some(".graphql"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-graphqls",
+            "lsp.start",
+            Some(".graphqls"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-hcl",
+            "lsp.start",
+            Some(".hcl"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-tf",
+            "lsp.start",
+            Some(".tf"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-nomad",
+            "lsp.start",
+            Some(".nomad"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-java",
+            "lsp.start",
+            Some(".java"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-jav",
+            "lsp.start",
+            Some(".jav"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-pde",
+            "lsp.start",
+            Some(".pde"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-kt",
+            "lsp.start",
+            Some(".kt"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-kts",
+            "lsp.start",
+            Some(".kts"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-lua",
+            "lsp.start",
+            Some(".lua"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rockspec",
+            "lsp.start",
+            Some(".rockspec"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-nix",
+            "lsp.start",
+            Some(".nix"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-pl",
+            "lsp.start",
+            Some(".pl"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-pm",
+            "lsp.start",
+            Some(".pm"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-t",
+            "lsp.start",
+            Some(".t"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-psgi",
+            "lsp.start",
+            Some(".psgi"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-php",
+            "lsp.start",
+            Some(".php"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-inc",
+            "lsp.start",
+            Some(".inc"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-php4",
+            "lsp.start",
+            Some(".php4"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-php5",
+            "lsp.start",
+            Some(".php5"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-phtml",
+            "lsp.start",
+            Some(".phtml"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ctp",
+            "lsp.start",
+            Some(".ctp"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-r",
+            "lsp.start",
+            Some(".r"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rb",
+            "lsp.start",
+            Some(".rb"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rake",
+            "lsp.start",
+            Some(".rake"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-irb",
+            "lsp.start",
+            Some(".irb"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-gemspec",
+            "lsp.start",
+            Some(".gemspec"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rabl",
+            "lsp.start",
+            Some(".rabl"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-jbuilder",
+            "lsp.start",
+            Some(".jbuilder"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-jb",
+            "lsp.start",
+            Some(".jb"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-podspec",
+            "lsp.start",
+            Some(".podspec"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rjs",
+            "lsp.start",
+            Some(".rjs"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rbi",
+            "lsp.start",
+            Some(".rbi"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rbs",
+            "lsp.start",
+            Some(".rbs"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-scala",
+            "lsp.start",
+            Some(".scala"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sbt",
+            "lsp.start",
+            Some(".sbt"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sc",
+            "lsp.start",
+            Some(".sc"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-swift",
+            "lsp.start",
+            Some(".swift"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-swiftinterface",
+            "lsp.start",
+            Some(".swiftinterface"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-tex",
+            "lsp.start",
+            Some(".tex"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-dtx",
+            "lsp.start",
+            Some(".dtx"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ins",
+            "lsp.start",
+            Some(".ins"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sty",
+            "lsp.start",
+            Some(".sty"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cls",
+            "lsp.start",
+            Some(".cls"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rd",
+            "lsp.start",
+            Some(".rd"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-bbx",
+            "lsp.start",
+            Some(".bbx"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cbx",
+            "lsp.start",
+            Some(".cbx"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-sol",
+            "lsp.start",
+            Some(".sol"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ex",
+            "lsp.start",
+            Some(".ex"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-exs",
+            "lsp.start",
+            Some(".exs"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-clj",
+            "lsp.start",
+            Some(".clj"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cljs",
+            "lsp.start",
+            Some(".cljs"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cljc",
+            "lsp.start",
+            Some(".cljc"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-edn",
+            "lsp.start",
+            Some(".edn"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-proto",
+            "lsp.start",
+            Some(".proto"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-xml",
+            "lsp.start",
+            Some(".xml"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-svg",
+            "lsp.start",
+            Some(".svg"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-xsd",
+            "lsp.start",
+            Some(".xsd"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-xslt",
+            "lsp.start",
+            Some(".xslt"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-xsl",
+            "lsp.start",
+            Some(".xsl"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-rng",
+            "lsp.start",
+            Some(".rng"),
         ),
     ])
 }
@@ -549,6 +1151,7 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "makefile-language-server",
             ["--stdio"],
         )
+        .with_file_names(["Makefile", "GNUmakefile", "makefile"])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
         .with_root_markers(["Makefile", "GNUmakefile", "makefile"]),
         LanguageServerSpec::new(
@@ -595,6 +1198,204 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "yaml-language-server",
             ["--stdio"],
         ),
+        LanguageServerSpec::new(
+            SERVER_BASH_LANGUAGE_SERVER,
+            "bash",
+            ["sh", "bash", "zsh", "ksh", "ash", "dash", "mksh"],
+            "bash-language-server",
+            ["start"],
+        ),
+        LanguageServerSpec::new(
+            SERVER_CMAKE_LANGUAGE_SERVER,
+            "cmake",
+            ["cmake"],
+            "cmake-language-server",
+            std::iter::empty::<&str>(),
+        )
+        .with_file_names(["CMakeLists.txt"])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["CMakeLists.txt", "CMakePresets.json", "*.cmake"]),
+        LanguageServerSpec::new(
+            SERVER_GRAPHQL_LANGUAGE_SERVICE,
+            "graphql",
+            ["gql", "graphql", "graphqls"],
+            "graphql-lsp",
+            ["server", "-m", "stream"],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "package.json",
+            ".graphqlrc",
+            "graphql.config.js",
+            "graphql.config.ts",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_TERRAFORM_LS,
+            "hcl",
+            ["hcl", "tf", "nomad"],
+            "terraform-ls",
+            ["serve"],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["*.tf", "terragrunt.hcl", ".terraform.lock.hcl"]),
+        LanguageServerSpec::new(
+            SERVER_JDTLS,
+            "java",
+            ["java", "jav", "pde"],
+            "jdtls",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["pom.xml", "build.gradle", "build.gradle.kts"]),
+        LanguageServerSpec::new(
+            SERVER_KOTLIN_LANGUAGE_SERVER,
+            "kotlin",
+            ["kt", "kts"],
+            "kotlin-language-server",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "settings.gradle",
+            "settings.gradle.kts",
+            "build.gradle",
+            "build.gradle.kts",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_LUA_LANGUAGE_SERVER,
+            "lua",
+            ["lua", "rockspec"],
+            "lua-language-server",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            ".luarc.json",
+            ".luacheckrc",
+            ".stylua.toml",
+            "selene.toml",
+            ".git",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_NIL,
+            "nix",
+            ["nix"],
+            "nil",
+            std::iter::empty::<&str>(),
+        ),
+        LanguageServerSpec::new(
+            SERVER_PERLNAVIGATOR,
+            "perl",
+            ["pl", "pm", "t", "psgi"],
+            "perlnavigator",
+            ["--stdio"],
+        ),
+        LanguageServerSpec::new(
+            SERVER_INTELEPHENSE,
+            "php",
+            ["php", "inc", "php4", "php5", "phtml", "ctp"],
+            "intelephense",
+            ["--stdio"],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["composer.json", "index.php"]),
+        LanguageServerSpec::new(
+            SERVER_R_LANGUAGE_SERVER,
+            "r",
+            ["r"],
+            "R",
+            ["--no-echo", "-e", "languageserver::run()"],
+        ),
+        LanguageServerSpec::new(
+            SERVER_RUBY_LSP,
+            "ruby",
+            [
+                "rb", "rake", "irb", "gemspec", "rabl", "jbuilder", "jb", "podspec", "rjs", "rbi",
+                "rbs",
+            ],
+            "ruby-lsp",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["Gemfile", ".ruby-version"]),
+        LanguageServerSpec::new(
+            SERVER_METALS,
+            "scala",
+            ["scala", "sbt", "sc"],
+            "metals",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "build.sbt",
+            "build.sc",
+            "build.gradle",
+            "build.gradle.kts",
+            "pom.xml",
+            ".scala-build",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_SOURCEKIT_LSP,
+            "swift",
+            ["swift", "swiftinterface"],
+            "sourcekit-lsp",
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["Package.swift"]),
+        LanguageServerSpec::new(
+            SERVER_TEXLAB,
+            "latex",
+            ["tex", "dtx", "ins", "sty", "cls", "rd", "bbx", "cbx"],
+            "texlab",
+            std::iter::empty::<&str>(),
+        ),
+        LanguageServerSpec::new(SERVER_SOLC_LSP, "solidity", ["sol"], "solc", ["--lsp"])
+            .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+            .with_root_markers([
+                "foundry.toml",
+                "hardhat.config.js",
+                "hardhat.config.ts",
+                "truffle-config.js",
+                "truffle-config.ts",
+                "brownie-config.yaml",
+                "brownie-config.yml",
+            ]),
+        LanguageServerSpec::new(
+            SERVER_ELIXIR_LS,
+            "elixir",
+            ["ex", "exs"],
+            ELIXIR_LS_PROGRAM,
+            std::iter::empty::<&str>(),
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["mix.exs", ".formatter.exs"]),
+        LanguageServerSpec::new(
+            SERVER_CLOJURE_LSP,
+            "clojure",
+            ["clj", "cljs", "cljc", "edn"],
+            "clojure-lsp",
+            std::iter::empty::<&str>(),
+        )
+        .with_document_language_ids([("edn", "edn")])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "deps.edn",
+            "project.clj",
+            "bb.edn",
+            "build.boot",
+            "shadow-cljs.edn",
+        ]),
+        LanguageServerSpec::new(SERVER_BUFLS, "proto", ["proto"], "bufls", ["serve"])
+            .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+            .with_root_markers(["buf.yaml", "buf.work.yaml", "buf.gen.yaml", "buf.lock"]),
+        LanguageServerSpec::new(
+            SERVER_XML_LANGUAGE_SERVER,
+            "xml",
+            ["xml", "svg", "xsd", "xslt", "xsl", "rng"],
+            "xml-language-server",
+            ["--stdio"],
+        ),
     ]
 }
 
@@ -617,6 +1418,33 @@ fn hook_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor_plugin_api::{LanguageServerSpec, PluginPackage};
+
+    fn server_by_id<'a>(servers: &'a [LanguageServerSpec], id: &str) -> &'a LanguageServerSpec {
+        servers
+            .iter()
+            .find(|server| server.id() == id)
+            .unwrap_or_else(|| panic!("language server `{id}` missing"))
+    }
+
+    fn string_values(values: &[String]) -> Vec<&str> {
+        values.iter().map(String::as_str).collect()
+    }
+
+    fn has_command(package: &PluginPackage, name: &str) -> bool {
+        package
+            .commands()
+            .iter()
+            .any(|command| command.name() == name)
+    }
+
+    fn has_auto_start_binding(package: &PluginPackage, detail: &str) -> bool {
+        package.hook_bindings().iter().any(|binding| {
+            binding.hook_name() == "buffer.file-open"
+                && binding.command_name() == "lsp.start"
+                && binding.detail_filter() == Some(detail)
+        })
+    }
 
     #[test]
     fn package_registers_rich_language_server_defaults() {
@@ -626,49 +1454,64 @@ mod tests {
 
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 24);
-        assert_eq!(package.hook_bindings().len(), 32);
-        assert_eq!(servers.len(), 16);
-        assert!(ids.contains(&SERVER_RUST_ANALYZER));
-        assert!(ids.contains(&SERVER_MARKSMAN));
-        assert!(ids.contains(&SERVER_CSHARP_LS));
-        assert!(ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
-        assert!(ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
-        assert!(ids.contains(&SERVER_VSCODE_HTML_LANGUAGE_SERVER));
-        assert!(ids.contains(&SERVER_VSCODE_CSS_LANGUAGE_SERVER));
-        assert!(ids.contains(&SERVER_CLANGD));
-        assert!(ids.contains(&SERVER_PYRIGHT_LANGSERVER));
-        assert!(ids.contains(&SERVER_MAKEFILE_LANGUAGE_SERVER));
-        assert!(ids.contains(&SERVER_ZLS));
-        assert!(ids.contains(&SERVER_GOPLS));
-        assert!(ids.contains(&SERVER_SQLS));
-        assert!(ids.contains(&SERVER_OLS));
-        assert!(ids.contains(&SERVER_TOMBI));
-        assert!(ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
+        assert_eq!(package.commands().len(), 45);
+        assert_eq!(package.hook_bindings().len(), 107);
+        assert_eq!(servers.len(), 36);
+        for expected in [
+            SERVER_RUST_ANALYZER,
+            SERVER_MARKSMAN,
+            SERVER_CSHARP_LS,
+            SERVER_TYPESCRIPT_LANGUAGE_SERVER,
+            SERVER_VSCODE_JSON_LANGUAGE_SERVER,
+            SERVER_VSCODE_HTML_LANGUAGE_SERVER,
+            SERVER_VSCODE_CSS_LANGUAGE_SERVER,
+            SERVER_CLANGD,
+            SERVER_PYRIGHT_LANGSERVER,
+            SERVER_MAKEFILE_LANGUAGE_SERVER,
+            SERVER_ZLS,
+            SERVER_GOPLS,
+            SERVER_SQLS,
+            SERVER_OLS,
+            SERVER_TOMBI,
+            SERVER_YAML_LANGUAGE_SERVER,
+            SERVER_BASH_LANGUAGE_SERVER,
+            SERVER_CMAKE_LANGUAGE_SERVER,
+            SERVER_GRAPHQL_LANGUAGE_SERVICE,
+            SERVER_TERRAFORM_LS,
+            SERVER_JDTLS,
+            SERVER_KOTLIN_LANGUAGE_SERVER,
+            SERVER_LUA_LANGUAGE_SERVER,
+            SERVER_NIL,
+            SERVER_PERLNAVIGATOR,
+            SERVER_INTELEPHENSE,
+            SERVER_R_LANGUAGE_SERVER,
+            SERVER_RUBY_LSP,
+            SERVER_METALS,
+            SERVER_SOURCEKIT_LSP,
+            SERVER_TEXLAB,
+            SERVER_SOLC_LSP,
+            SERVER_ELIXIR_LS,
+            SERVER_CLOJURE_LSP,
+            SERVER_BUFLS,
+            SERVER_XML_LANGUAGE_SERVER,
+        ] {
+            assert!(ids.contains(&expected), "{expected} missing");
+        }
 
-        let rust = servers
-            .iter()
-            .find(|server| server.id() == SERVER_RUST_ANALYZER)
-            .expect("rust-analyzer missing");
+        let rust = server_by_id(&servers, SERVER_RUST_ANALYZER);
         assert_eq!(rust.language_id(), "rust");
         assert!(
             rust.args().is_empty(),
             "rust-analyzer now speaks stdio without a `--stdio` flag"
         );
 
-        let csharp = servers
-            .iter()
-            .find(|server| server.id() == SERVER_CSHARP_LS)
-            .expect("csharp-ls missing");
+        let csharp = server_by_id(&servers, SERVER_CSHARP_LS);
         assert_eq!(
             csharp.args().iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["--features", "razor-support,metadata-uris"]
         );
 
-        let typescript = servers
-            .iter()
-            .find(|server| server.id() == SERVER_TYPESCRIPT_LANGUAGE_SERVER)
-            .expect("typescript-language-server missing");
+        let typescript = server_by_id(&servers, SERVER_TYPESCRIPT_LANGUAGE_SERVER);
         assert_eq!(typescript.language_id(), "typescript");
         assert_eq!(
             typescript
@@ -703,10 +1546,7 @@ mod tests {
             "javascriptreact"
         );
 
-        let css = servers
-            .iter()
-            .find(|server| server.id() == SERVER_VSCODE_CSS_LANGUAGE_SERVER)
-            .expect("vscode-css-language-server missing");
+        let css = server_by_id(&servers, SERVER_VSCODE_CSS_LANGUAGE_SERVER);
         assert_eq!(css.language_id(), "css");
         assert_eq!(
             css.file_extensions()
@@ -722,10 +1562,7 @@ mod tests {
         assert_eq!(css.document_language_id_for_extension(".css"), "css");
         assert_eq!(css.document_language_id_for_extension(".scss"), "scss");
 
-        let clangd = servers
-            .iter()
-            .find(|server| server.id() == SERVER_CLANGD)
-            .expect("clangd missing");
+        let clangd = server_by_id(&servers, SERVER_CLANGD);
         assert_eq!(clangd.language_id(), "cpp");
         assert!(
             clangd.args().is_empty(),
@@ -735,27 +1572,24 @@ mod tests {
         assert_eq!(clangd.document_language_id_for_extension(".h"), "c");
         assert_eq!(clangd.document_language_id_for_extension(".cpp"), "cpp");
 
-        let python = servers
-            .iter()
-            .find(|server| server.id() == SERVER_PYRIGHT_LANGSERVER)
-            .expect("jedi-language-server missing");
+        let python = server_by_id(&servers, SERVER_PYRIGHT_LANGSERVER);
         assert_eq!(python.language_id(), "python");
         assert_eq!(
             python.args().iter().map(String::as_str).collect::<Vec<_>>(),
             vec![""]
         );
 
-        let go = servers
-            .iter()
-            .find(|server| server.id() == SERVER_GOPLS)
-            .expect("gopls missing");
+        let make = server_by_id(&servers, SERVER_MAKEFILE_LANGUAGE_SERVER);
+        assert_eq!(
+            string_values(make.file_names()),
+            vec!["Makefile", "GNUmakefile", "makefile"]
+        );
+
+        let go = server_by_id(&servers, SERVER_GOPLS);
         assert_eq!(go.language_id(), "go");
         assert!(go.args().is_empty());
 
-        let yaml = servers
-            .iter()
-            .find(|server| server.id() == SERVER_YAML_LANGUAGE_SERVER)
-            .expect("yaml-language-server missing");
+        let yaml = server_by_id(&servers, SERVER_YAML_LANGUAGE_SERVER);
         assert_eq!(yaml.language_id(), "yaml");
         assert_eq!(
             yaml.file_extensions()
@@ -769,48 +1603,21 @@ mod tests {
             vec!["--stdio"]
         );
 
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.stop")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.restart")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.log")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.definition")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.references")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.implementation")
-        );
-        assert!(
-            package
-                .commands()
-                .iter()
-                .any(|command| command.name() == "lsp.code-actions")
-        );
+        for command_name in [
+            "lsp.stop",
+            "lsp.restart",
+            "lsp.log",
+            "lsp.definition",
+            "lsp.references",
+            "lsp.implementation",
+            "lsp.code-actions",
+            "lsp.code-action",
+        ] {
+            assert!(
+                has_command(&package, command_name),
+                "{command_name} missing"
+            );
+        }
         assert_eq!(package.key_bindings().len(), 1);
         assert!(
             package
@@ -818,5 +1625,411 @@ mod tests {
                 .iter()
                 .any(|binding| binding.chord() == CODE_ACTIONS_CHORD)
         );
+    }
+
+    #[test]
+    fn package_registers_query_language_server_start_commands_and_auto_start_bindings() {
+        let package = package();
+
+        for command_name in [
+            "lsp.start-bash-language-server",
+            "lsp.start-cmake-language-server",
+            "lsp.start-graphql-language-service",
+            "lsp.start-terraform-ls",
+            "lsp.start-jdtls",
+            "lsp.start-kotlin-language-server",
+            "lsp.start-lua-language-server",
+            "lsp.start-nil",
+            "lsp.start-perlnavigator",
+            "lsp.start-intelephense",
+            "lsp.start-r-language-server",
+            "lsp.start-ruby-lsp",
+            "lsp.start-metals",
+            "lsp.start-sourcekit-lsp",
+            "lsp.start-texlab",
+            "lsp.start-solc-lsp",
+            "lsp.start-elixir-ls",
+            "lsp.start-clojure-lsp",
+            "lsp.start-bufls",
+            "lsp.start-xml-language-server",
+        ] {
+            assert!(
+                has_command(&package, command_name),
+                "{command_name} missing"
+            );
+        }
+
+        for detail in [
+            ".sh",
+            ".bash",
+            ".zsh",
+            ".ksh",
+            ".ash",
+            ".dash",
+            ".mksh",
+            ".cmake",
+            ".gql",
+            ".graphql",
+            ".graphqls",
+            ".hcl",
+            ".tf",
+            ".nomad",
+            ".java",
+            ".jav",
+            ".pde",
+            ".kt",
+            ".kts",
+            ".lua",
+            ".rockspec",
+            ".nix",
+            ".pl",
+            ".pm",
+            ".t",
+            ".psgi",
+            ".php",
+            ".inc",
+            ".php4",
+            ".php5",
+            ".phtml",
+            ".ctp",
+            ".r",
+            ".rb",
+            ".rake",
+            ".irb",
+            ".gemspec",
+            ".rabl",
+            ".jbuilder",
+            ".jb",
+            ".podspec",
+            ".rjs",
+            ".rbi",
+            ".rbs",
+            ".scala",
+            ".sbt",
+            ".sc",
+            ".swift",
+            ".swiftinterface",
+            ".tex",
+            ".dtx",
+            ".ins",
+            ".sty",
+            ".cls",
+            ".rd",
+            ".bbx",
+            ".cbx",
+            ".sol",
+            ".ex",
+            ".exs",
+            ".clj",
+            ".cljs",
+            ".cljc",
+            ".edn",
+            ".proto",
+            ".xml",
+            ".svg",
+            ".xsd",
+            ".xslt",
+            ".xsl",
+            ".rng",
+            "Makefile",
+            "GNUmakefile",
+            "makefile",
+            "CMakeLists.txt",
+        ] {
+            assert!(
+                has_auto_start_binding(&package, detail),
+                "missing auto-start binding for `{detail}`"
+            );
+        }
+    }
+
+    #[test]
+    fn new_language_servers_expose_expected_program_args_and_workspace_roots() {
+        let servers = language_servers();
+
+        let bash = server_by_id(&servers, SERVER_BASH_LANGUAGE_SERVER);
+        assert_eq!(bash.language_id(), "bash");
+        assert_eq!(
+            string_values(bash.file_extensions()),
+            vec!["sh", "bash", "zsh", "ksh", "ash", "dash", "mksh"]
+        );
+        assert_eq!(bash.program(), "bash-language-server");
+        assert_eq!(string_values(bash.args()), vec!["start"]);
+
+        let cmake = server_by_id(&servers, SERVER_CMAKE_LANGUAGE_SERVER);
+        assert_eq!(cmake.language_id(), "cmake");
+        assert_eq!(cmake.program(), "cmake-language-server");
+        assert!(cmake.args().is_empty());
+        assert_eq!(string_values(cmake.file_names()), vec!["CMakeLists.txt"]);
+        assert_eq!(
+            cmake.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(cmake.root_markers()),
+            vec!["CMakeLists.txt", "CMakePresets.json", "*.cmake"]
+        );
+
+        let graphql = server_by_id(&servers, SERVER_GRAPHQL_LANGUAGE_SERVICE);
+        assert_eq!(graphql.language_id(), "graphql");
+        assert_eq!(graphql.program(), "graphql-lsp");
+        assert_eq!(
+            string_values(graphql.args()),
+            vec!["server", "-m", "stream"]
+        );
+        assert_eq!(
+            graphql.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(graphql.root_markers()),
+            vec![
+                "package.json",
+                ".graphqlrc",
+                "graphql.config.js",
+                "graphql.config.ts",
+            ]
+        );
+
+        let terraform = server_by_id(&servers, SERVER_TERRAFORM_LS);
+        assert_eq!(terraform.language_id(), "hcl");
+        assert_eq!(terraform.program(), "terraform-ls");
+        assert_eq!(string_values(terraform.args()), vec!["serve"]);
+        assert_eq!(
+            terraform.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(terraform.root_markers()),
+            vec!["*.tf", "terragrunt.hcl", ".terraform.lock.hcl"]
+        );
+
+        let java = server_by_id(&servers, SERVER_JDTLS);
+        assert_eq!(java.language_id(), "java");
+        assert_eq!(java.program(), "jdtls");
+        assert!(java.args().is_empty());
+        assert_eq!(
+            java.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(java.root_markers()),
+            vec!["pom.xml", "build.gradle", "build.gradle.kts"]
+        );
+
+        let kotlin = server_by_id(&servers, SERVER_KOTLIN_LANGUAGE_SERVER);
+        assert_eq!(kotlin.language_id(), "kotlin");
+        assert_eq!(kotlin.program(), "kotlin-language-server");
+        assert!(kotlin.args().is_empty());
+        assert_eq!(
+            kotlin.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(kotlin.root_markers()),
+            vec![
+                "settings.gradle",
+                "settings.gradle.kts",
+                "build.gradle",
+                "build.gradle.kts",
+            ]
+        );
+
+        let lua = server_by_id(&servers, SERVER_LUA_LANGUAGE_SERVER);
+        assert_eq!(lua.language_id(), "lua");
+        assert_eq!(lua.program(), "lua-language-server");
+        assert!(lua.args().is_empty());
+        assert_eq!(
+            lua.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(lua.root_markers()),
+            vec![
+                ".luarc.json",
+                ".luacheckrc",
+                ".stylua.toml",
+                "selene.toml",
+                ".git",
+            ]
+        );
+
+        let nix = server_by_id(&servers, SERVER_NIL);
+        assert_eq!(nix.language_id(), "nix");
+        assert_eq!(nix.program(), "nil");
+        assert!(nix.args().is_empty());
+
+        let perl = server_by_id(&servers, SERVER_PERLNAVIGATOR);
+        assert_eq!(perl.language_id(), "perl");
+        assert_eq!(perl.program(), "perlnavigator");
+        assert_eq!(string_values(perl.args()), vec!["--stdio"]);
+
+        let php = server_by_id(&servers, SERVER_INTELEPHENSE);
+        assert_eq!(php.language_id(), "php");
+        assert_eq!(php.program(), "intelephense");
+        assert_eq!(string_values(php.args()), vec!["--stdio"]);
+        assert_eq!(
+            php.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(php.root_markers()),
+            vec!["composer.json", "index.php"]
+        );
+
+        let r = server_by_id(&servers, SERVER_R_LANGUAGE_SERVER);
+        assert_eq!(r.language_id(), "r");
+        assert_eq!(r.program(), "R");
+        assert_eq!(
+            string_values(r.args()),
+            vec!["--no-echo", "-e", "languageserver::run()"]
+        );
+
+        let ruby = server_by_id(&servers, SERVER_RUBY_LSP);
+        assert_eq!(ruby.language_id(), "ruby");
+        assert_eq!(ruby.program(), "ruby-lsp");
+        assert!(ruby.args().is_empty());
+        assert_eq!(
+            ruby.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(ruby.root_markers()),
+            vec!["Gemfile", ".ruby-version"]
+        );
+
+        let metals = server_by_id(&servers, SERVER_METALS);
+        assert_eq!(metals.language_id(), "scala");
+        assert_eq!(metals.program(), "metals");
+        assert!(metals.args().is_empty());
+        assert_eq!(
+            metals.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(metals.root_markers()),
+            vec![
+                "build.sbt",
+                "build.sc",
+                "build.gradle",
+                "build.gradle.kts",
+                "pom.xml",
+                ".scala-build",
+            ]
+        );
+
+        let swift = server_by_id(&servers, SERVER_SOURCEKIT_LSP);
+        assert_eq!(swift.language_id(), "swift");
+        assert_eq!(swift.program(), "sourcekit-lsp");
+        assert!(swift.args().is_empty());
+        assert_eq!(
+            swift.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(string_values(swift.root_markers()), vec!["Package.swift"]);
+
+        let texlab = server_by_id(&servers, SERVER_TEXLAB);
+        assert_eq!(texlab.language_id(), "latex");
+        assert_eq!(
+            string_values(texlab.file_extensions()),
+            vec!["tex", "dtx", "ins", "sty", "cls", "rd", "bbx", "cbx"]
+        );
+        assert_eq!(texlab.program(), "texlab");
+        assert!(texlab.args().is_empty());
+
+        let solidity = server_by_id(&servers, SERVER_SOLC_LSP);
+        assert_eq!(solidity.language_id(), "solidity");
+        assert_eq!(string_values(solidity.file_extensions()), vec!["sol"]);
+        assert_eq!(solidity.program(), "solc");
+        assert_eq!(string_values(solidity.args()), vec!["--lsp"]);
+        assert_eq!(
+            solidity.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(solidity.root_markers()),
+            vec![
+                "foundry.toml",
+                "hardhat.config.js",
+                "hardhat.config.ts",
+                "truffle-config.js",
+                "truffle-config.ts",
+                "brownie-config.yaml",
+                "brownie-config.yml",
+            ]
+        );
+
+        let elixir = server_by_id(&servers, SERVER_ELIXIR_LS);
+        assert_eq!(elixir.language_id(), "elixir");
+        assert_eq!(string_values(elixir.file_extensions()), vec!["ex", "exs"]);
+        assert_eq!(elixir.program(), ELIXIR_LS_PROGRAM);
+        assert!(elixir.args().is_empty());
+        assert_eq!(
+            elixir.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(elixir.root_markers()),
+            vec!["mix.exs", ".formatter.exs"]
+        );
+
+        let clojure = server_by_id(&servers, SERVER_CLOJURE_LSP);
+        assert_eq!(clojure.language_id(), "clojure");
+        assert_eq!(
+            string_values(clojure.file_extensions()),
+            vec!["clj", "cljs", "cljc", "edn"]
+        );
+        assert_eq!(clojure.program(), "clojure-lsp");
+        assert!(clojure.args().is_empty());
+        assert_eq!(
+            clojure.document_language_id_for_extension(".clj"),
+            "clojure"
+        );
+        assert_eq!(
+            clojure.document_language_id_for_extension(".cljs"),
+            "clojure"
+        );
+        assert_eq!(
+            clojure.document_language_id_for_extension(".cljc"),
+            "clojure"
+        );
+        assert_eq!(clojure.document_language_id_for_extension(".edn"), "edn");
+        assert_eq!(
+            clojure.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(clojure.root_markers()),
+            vec![
+                "deps.edn",
+                "project.clj",
+                "bb.edn",
+                "build.boot",
+                "shadow-cljs.edn"
+            ]
+        );
+
+        let proto = server_by_id(&servers, SERVER_BUFLS);
+        assert_eq!(proto.language_id(), "proto");
+        assert_eq!(string_values(proto.file_extensions()), vec!["proto"]);
+        assert_eq!(proto.program(), "bufls");
+        assert_eq!(string_values(proto.args()), vec!["serve"]);
+        assert_eq!(
+            proto.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert_eq!(
+            string_values(proto.root_markers()),
+            vec!["buf.yaml", "buf.work.yaml", "buf.gen.yaml", "buf.lock"]
+        );
+
+        let xml = server_by_id(&servers, SERVER_XML_LANGUAGE_SERVER);
+        assert_eq!(xml.language_id(), "xml");
+        assert_eq!(
+            string_values(xml.file_extensions()),
+            vec!["xml", "svg", "xsd", "xslt", "xsl", "rng"]
+        );
+        assert_eq!(xml.program(), "xml-language-server");
+        assert_eq!(string_values(xml.args()), vec!["--stdio"]);
     }
 }

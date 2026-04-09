@@ -3632,13 +3632,24 @@ pub(super) fn git_status_snapshot(
     )?;
     let status = parse_status(&status_output).map_err(|error| error.to_string())?;
 
-    let head_output = git_command_output(
+    let head_exists = git_command_output_optional(
         runtime,
         root,
-        "log -1 --oneline",
-        &["log", "-1", "--oneline"],
-    )?;
-    let head = parse_log_oneline(&head_output).into_iter().next();
+        "rev-parse --verify HEAD",
+        &["rev-parse", "--verify", "HEAD"],
+    )
+    .is_some();
+    let head = if head_exists {
+        let head_output = git_command_output(
+            runtime,
+            root,
+            "log -1 --oneline",
+            &["log", "-1", "--oneline"],
+        )?;
+        parse_log_oneline(&head_output).into_iter().next()
+    } else {
+        None
+    };
 
     let upstream = git_command_output_optional(
         runtime,
@@ -3661,7 +3672,7 @@ pub(super) fn git_status_snapshot(
         .unwrap_or_default();
     let stashes = parse_stash_list(&stash_output);
 
-    let unpulled = if upstream.is_some() {
+    let unpulled = if head_exists && upstream.is_some() {
         let output = git_command_output(
             runtime,
             root,
@@ -3672,7 +3683,7 @@ pub(super) fn git_status_snapshot(
     } else {
         Vec::new()
     };
-    let unpushed = if upstream.is_some() {
+    let unpushed = if head_exists && upstream.is_some() {
         let output = git_command_output(
             runtime,
             root,
@@ -3683,13 +3694,17 @@ pub(super) fn git_status_snapshot(
     } else {
         Vec::new()
     };
-    let recent_output = git_command_output(
-        runtime,
-        root,
-        "log --oneline",
-        &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
-    )?;
-    let recent = parse_log_oneline(&recent_output);
+    let recent = if head_exists {
+        let recent_output = git_command_output(
+            runtime,
+            root,
+            "log --oneline",
+            &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
+        )?;
+        parse_log_oneline(&recent_output)
+    } else {
+        Vec::new()
+    };
 
     let in_progress = git_dir_path(runtime, root)
         .map(detect_in_progress)

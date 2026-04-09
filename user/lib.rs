@@ -989,16 +989,25 @@ mod tests {
     };
     use crate::calculator;
     use crate::lsp::{
-        SERVER_CLANGD, SERVER_CSHARP_LS, SERVER_GOPLS, SERVER_MAKEFILE_LANGUAGE_SERVER,
-        SERVER_MARKSMAN, SERVER_OLS, SERVER_PYRIGHT_LANGSERVER, SERVER_RUST_ANALYZER, SERVER_SQLS,
+        SERVER_BASH_LANGUAGE_SERVER, SERVER_BUFLS, SERVER_CLANGD, SERVER_CLOJURE_LSP,
+        SERVER_CMAKE_LANGUAGE_SERVER, SERVER_CSHARP_LS, SERVER_ELIXIR_LS, SERVER_GOPLS,
+        SERVER_GRAPHQL_LANGUAGE_SERVICE, SERVER_INTELEPHENSE, SERVER_JDTLS,
+        SERVER_KOTLIN_LANGUAGE_SERVER, SERVER_LUA_LANGUAGE_SERVER, SERVER_MAKEFILE_LANGUAGE_SERVER,
+        SERVER_MARKSMAN, SERVER_METALS, SERVER_NIL, SERVER_OLS, SERVER_PERLNAVIGATOR,
+        SERVER_PYRIGHT_LANGSERVER, SERVER_R_LANGUAGE_SERVER, SERVER_RUBY_LSP, SERVER_RUST_ANALYZER,
+        SERVER_SOLC_LSP, SERVER_SOURCEKIT_LSP, SERVER_SQLS, SERVER_TERRAFORM_LS, SERVER_TEXLAB,
         SERVER_TOMBI, SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_CSS_LANGUAGE_SERVER,
         SERVER_VSCODE_HTML_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
-        SERVER_YAML_LANGUAGE_SERVER, SERVER_ZLS,
+        SERVER_XML_LANGUAGE_SERVER, SERVER_YAML_LANGUAGE_SERVER, SERVER_ZLS,
     };
     use editor_buffer::TextBuffer;
     use editor_plugin_api::UserLibrary;
     use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn mapped_theme_token<'a>(
         language: &'a LanguageConfiguration,
@@ -1019,6 +1028,104 @@ mod tests {
             .iter()
             .find(|language| language.id() == language_id)
             .map(|language| language.file_extensions().to_vec())
+    }
+
+    fn highlight_query_asset_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("crates")
+            .join("volt")
+            .join("assets")
+            .join("grammars")
+            .join("queries")
+    }
+
+    fn bundled_highlight_query(language_id: &str) -> String {
+        let path = highlight_query_asset_root()
+            .join(language_id)
+            .join("highlights.scm");
+        fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+    }
+
+    fn query_capture_names(source: &str) -> BTreeSet<String> {
+        let bytes = source.as_bytes();
+        let mut capture_names = BTreeSet::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b';' => {
+                    while index < bytes.len() && bytes[index] != b'\n' {
+                        index += 1;
+                    }
+                }
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                            index += 2;
+                            continue;
+                        }
+                        let is_string_end = bytes[index] == b'"';
+                        index += 1;
+                        if is_string_end {
+                            break;
+                        }
+                    }
+                }
+                b'@' => {
+                    let start = index + 1;
+                    let mut end = start;
+                    while end < bytes.len()
+                        && matches!(
+                            bytes[end],
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
+                        )
+                    {
+                        end += 1;
+                    }
+                    if end > start {
+                        capture_names.insert(source[start..end].to_owned());
+                        index = end;
+                    } else {
+                        index += 1;
+                    }
+                }
+                _ => {
+                    index += 1;
+                }
+            }
+        }
+        capture_names
+    }
+
+    fn capture_requires_theme_token(capture_name: &str) -> bool {
+        !capture_name.starts_with('_')
+            && !matches!(
+                capture_name,
+                "spell" | "nospell" | "conceal" | "conceal_lines"
+            )
+    }
+
+    fn registered_highlight_theme_tokens(languages: &[LanguageConfiguration]) -> BTreeSet<String> {
+        let mut tokens = BTreeSet::new();
+        for language in languages {
+            let bundled_query = bundled_highlight_query(language.id());
+            for query_source in
+                std::iter::once(bundled_query.as_str()).chain(language.extra_highlight_query())
+            {
+                for capture_name in query_capture_names(query_source) {
+                    if !capture_requires_theme_token(&capture_name) {
+                        continue;
+                    }
+                    let theme_token = mapped_theme_token(language, &capture_name)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("syntax.{capture_name}"));
+                    tokens.insert(theme_token);
+                }
+            }
+        }
+        tokens
     }
 
     #[test]
@@ -1144,38 +1251,84 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 23);
+        assert!(languages.len() >= 44);
         let ids = languages
             .iter()
             .map(|language| language.id())
             .collect::<Vec<_>>();
+        assert!(ids.contains(&"bash"));
         assert!(ids.contains(&"c"));
+        assert!(ids.contains(&"clojure"));
+        assert!(ids.contains(&"cmake"));
         assert!(ids.contains(&"csharp"));
         assert!(ids.contains(&"cpp"));
         assert!(ids.contains(&"css"));
-        assert!(ids.contains(&"rust"));
+        assert!(ids.contains(&"elixir"));
         assert!(ids.contains(&"gitcommit"));
         assert!(ids.contains(&"go"));
+        assert!(ids.contains(&"graphql"));
+        assert!(ids.contains(&"hcl"));
         assert!(ids.contains(&"html"));
         assert!(ids.contains(&"javascript"));
+        assert!(ids.contains(&"java"));
         assert!(ids.contains(&"jsx"));
         assert!(ids.contains(&"json"));
+        assert!(ids.contains(&"kotlin"));
+        assert!(ids.contains(&"latex"));
+        assert!(ids.contains(&"lua"));
         assert!(ids.contains(&"make"));
         assert!(ids.contains(&"markdown"));
         assert!(ids.contains(&"markdown-inline"));
+        assert!(ids.contains(&"nix"));
         assert!(ids.contains(&"odin"));
+        assert!(ids.contains(&"perl"));
+        assert!(ids.contains(&"php"));
+        assert!(ids.contains(&"proto"));
         assert!(ids.contains(&"python"));
+        assert!(ids.contains(&"r"));
+        assert!(ids.contains(&"ruby"));
+        assert!(ids.contains(&"rust"));
+        assert!(ids.contains(&"scala"));
         assert!(ids.contains(&"scss"));
+        assert!(ids.contains(&"solidity"));
         assert!(ids.contains(&"sql"));
+        assert!(ids.contains(&"swift"));
         assert!(ids.contains(&"toml"));
         assert!(ids.contains(&"typescript"));
         assert!(ids.contains(&"tsx"));
+        assert!(ids.contains(&"vim"));
+        assert!(ids.contains(&"xml"));
         assert!(ids.contains(&"yaml"));
         assert!(ids.contains(&"zig"));
 
         assert_eq!(
+            language_extensions(&languages, "bash"),
+            Some(vec![
+                "sh".to_owned(),
+                "bash".to_owned(),
+                "zsh".to_owned(),
+                "ksh".to_owned(),
+                "ash".to_owned(),
+                "dash".to_owned(),
+                "mksh".to_owned(),
+            ])
+        );
+        assert_eq!(
             language_extensions(&languages, "c"),
             Some(vec!["c".to_owned(), "h".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "clojure"),
+            Some(vec![
+                "clj".to_owned(),
+                "cljs".to_owned(),
+                "cljc".to_owned(),
+                "edn".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "cmake"),
+            Some(vec!["cmake".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "csharp"),
@@ -1197,12 +1350,32 @@ mod tests {
             Some(vec!["css".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "elixir"),
+            Some(vec!["ex".to_owned(), "exs".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "go"),
             Some(vec!["go".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "graphql"),
+            Some(vec![
+                "gql".to_owned(),
+                "graphql".to_owned(),
+                "graphqls".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "hcl"),
+            Some(vec!["hcl".to_owned(), "tf".to_owned(), "nomad".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "html"),
             Some(vec!["html".to_owned(), "htm".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "java"),
+            Some(vec!["java".to_owned(), "jav".to_owned(), "pde".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "rust"),
@@ -1221,6 +1394,27 @@ mod tests {
             Some(vec!["json".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "kotlin"),
+            Some(vec!["kt".to_owned(), "kts".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "latex"),
+            Some(vec![
+                "tex".to_owned(),
+                "dtx".to_owned(),
+                "ins".to_owned(),
+                "sty".to_owned(),
+                "cls".to_owned(),
+                "rd".to_owned(),
+                "bbx".to_owned(),
+                "cbx".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "lua"),
+            Some(vec!["lua".to_owned(), "rockspec".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "make"),
             Some(vec!["mk".to_owned(), "mak".to_owned(), "make".to_owned()])
         );
@@ -1233,16 +1427,76 @@ mod tests {
             Some(vec!["odin".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "nix"),
+            Some(vec!["nix".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "perl"),
+            Some(vec![
+                "pl".to_owned(),
+                "pm".to_owned(),
+                "t".to_owned(),
+                "psgi".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "php"),
+            Some(vec![
+                "php".to_owned(),
+                "inc".to_owned(),
+                "php4".to_owned(),
+                "php5".to_owned(),
+                "phtml".to_owned(),
+                "ctp".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "proto"),
+            Some(vec!["proto".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "python"),
             Some(vec!["py".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "r"),
+            Some(vec!["r".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "ruby"),
+            Some(vec![
+                "rb".to_owned(),
+                "rake".to_owned(),
+                "irb".to_owned(),
+                "gemspec".to_owned(),
+                "rabl".to_owned(),
+                "jbuilder".to_owned(),
+                "jb".to_owned(),
+                "podspec".to_owned(),
+                "rjs".to_owned(),
+                "rbi".to_owned(),
+                "rbs".to_owned(),
+            ])
+        );
+        assert_eq!(
+            language_extensions(&languages, "scala"),
+            Some(vec!["scala".to_owned(), "sbt".to_owned(), "sc".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "scss"),
             Some(vec!["scss".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "solidity"),
+            Some(vec!["sol".to_owned()])
+        );
+        assert_eq!(
             language_extensions(&languages, "sql"),
             Some(vec!["sql".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "swift"),
+            Some(vec!["swift".to_owned(), "swiftinterface".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "toml"),
@@ -1261,6 +1515,21 @@ mod tests {
             Some(vec!["yaml".to_owned(), "yml".to_owned()])
         );
         assert_eq!(
+            language_extensions(&languages, "vim"),
+            Some(vec!["vim".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "xml"),
+            Some(vec![
+                "xml".to_owned(),
+                "svg".to_owned(),
+                "xsd".to_owned(),
+                "xslt".to_owned(),
+                "xsl".to_owned(),
+                "rng".to_owned(),
+            ])
+        );
+        assert_eq!(
             language_extensions(&languages, "zig"),
             Some(vec!["zig".to_owned()])
         );
@@ -1272,21 +1541,41 @@ mod tests {
         let server_ids = servers.iter().map(|server| server.id()).collect::<Vec<_>>();
         let adapters = debug_adapters();
 
-        assert_eq!(servers.len(), 16);
+        assert_eq!(servers.len(), 36);
+        assert!(server_ids.contains(&SERVER_BASH_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_BUFLS));
         assert!(server_ids.contains(&SERVER_CLANGD));
+        assert!(server_ids.contains(&SERVER_CLOJURE_LSP));
+        assert!(server_ids.contains(&SERVER_CMAKE_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_RUST_ANALYZER));
         assert!(server_ids.contains(&SERVER_MARKSMAN));
         assert!(server_ids.contains(&SERVER_CSHARP_LS));
+        assert!(server_ids.contains(&SERVER_ELIXIR_LS));
         assert!(server_ids.contains(&SERVER_GOPLS));
+        assert!(server_ids.contains(&SERVER_GRAPHQL_LANGUAGE_SERVICE));
+        assert!(server_ids.contains(&SERVER_INTELEPHENSE));
+        assert!(server_ids.contains(&SERVER_JDTLS));
+        assert!(server_ids.contains(&SERVER_KOTLIN_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_LUA_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_MAKEFILE_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_METALS));
+        assert!(server_ids.contains(&SERVER_NIL));
         assert!(server_ids.contains(&SERVER_OLS));
+        assert!(server_ids.contains(&SERVER_PERLNAVIGATOR));
         assert!(server_ids.contains(&SERVER_PYRIGHT_LANGSERVER));
+        assert!(server_ids.contains(&SERVER_R_LANGUAGE_SERVER));
+        assert!(server_ids.contains(&SERVER_RUBY_LSP));
+        assert!(server_ids.contains(&SERVER_SOLC_LSP));
+        assert!(server_ids.contains(&SERVER_SOURCEKIT_LSP));
         assert!(server_ids.contains(&SERVER_SQLS));
+        assert!(server_ids.contains(&SERVER_TERRAFORM_LS));
+        assert!(server_ids.contains(&SERVER_TEXLAB));
         assert!(server_ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_VSCODE_CSS_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_VSCODE_HTML_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_TOMBI));
+        assert!(server_ids.contains(&SERVER_XML_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
         assert!(server_ids.contains(&SERVER_ZLS));
         assert_eq!(adapters.len(), 1);
@@ -1344,6 +1633,41 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["html", "htm"]
+        );
+
+        let clojure = servers
+            .iter()
+            .find(|server| server.id() == SERVER_CLOJURE_LSP)
+            .expect("clojure-lsp missing");
+        assert_eq!(
+            clojure.document_language_id_for_extension(".clj"),
+            "clojure"
+        );
+        assert_eq!(clojure.document_language_id_for_extension(".edn"), "edn");
+
+        let solidity = servers
+            .iter()
+            .find(|server| server.id() == SERVER_SOLC_LSP)
+            .expect("solc-lsp missing");
+        assert_eq!(
+            solidity
+                .args()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["--lsp"]
+        );
+
+        let xml = servers
+            .iter()
+            .find(|server| server.id() == SERVER_XML_LANGUAGE_SERVER)
+            .expect("xml-language-server missing");
+        assert_eq!(
+            xml.file_extensions()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["xml", "svg", "xsd", "xslt", "xsl", "rng"]
         );
     }
 
@@ -1424,6 +1748,22 @@ mod tests {
         ];
         for theme in themes {
             for token in TOKENS {
+                assert!(
+                    theme.color(token).is_some(),
+                    "theme `{}` is missing `{token}`",
+                    theme.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_library_themes_cover_registered_highlight_query_tokens() {
+        let languages = syntax_languages();
+        let required_tokens = registered_highlight_theme_tokens(&languages);
+
+        for theme in themes() {
+            for token in &required_tokens {
                 assert!(
                     theme.color(token).is_some(),
                     "theme `{}` is missing `{token}`",

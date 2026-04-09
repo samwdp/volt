@@ -325,7 +325,7 @@
                         <li>
                             <strong><code>package() -&gt; PluginPackage</code></strong> &#8212; registers the
                             attach command, the <code>lang.&lt;id&gt;.attached</code> hook declaration, and a
-                            <code>buffer.file-open</code> hook binding for each file extension.
+                            <code>buffer.file-open</code> hook binding for each configured file matcher.
                         </li>
                         <li>
                             <strong><code>syntax_language() -&gt; LanguageConfiguration</code></strong> &#8212;
@@ -478,8 +478,8 @@ pub fn syntax_language() -&gt; LanguageConfiguration {
                                 <td><code>&amp;[&amp;str]</code></td>
                                 <td><code>&amp;["lua"]</code></td>
                                 <td>
-                                    File extensions (without the dot) that trigger auto-attach. One
-                                    <code>buffer.file-open</code> hook binding is created per extension.
+                                    File extensions (without the dot) that trigger auto-attach. Language
+                                    modules can also subscribe by exact basename or glob when needed.
                                 </td>
                             </tr>
                             <tr>

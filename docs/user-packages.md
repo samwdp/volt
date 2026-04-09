@@ -156,7 +156,7 @@ PluginHookBinding::new(
     "buffer.file-open",         // hook to subscribe to
     "lang-rust.auto-attach",    // subscriber identifier
     "lang-rust.attach",         // command to run
-    Some(".rs"),                 // only fire for .rs files
+    Some(".rs"),                 // match Rust files by extension
 )
 ```
 
@@ -164,7 +164,7 @@ Common host-owned hooks include:
 
 | Hook                    | Detail              | Description                        |
 |-------------------------|---------------------|------------------------------------|
-| `buffer.file-open`      | file extension      | Fires when a file buffer opens     |
+| `buffer.file-open`      | basename            | Fires when a file buffer opens; filters can match `.ext`, exact names, or globs |
 | `buffer.save`           | —                   | Fires to save the active buffer    |
 | `buffer.close`          | —                   | Fires to close the active buffer   |
 | `plugin.evaluate`       | —                   | Evaluates a plugin buffer          |

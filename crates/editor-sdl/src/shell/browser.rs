@@ -244,9 +244,14 @@ pub(super) fn browser_state_for_kind(
     Some(state)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "browser sync needs the full viewport and overlay context"
+)]
 pub(super) fn browser_sync_plan(
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
+    user_library: &dyn UserLibrary,
     width: u32,
     height: u32,
     cell_width: i32,
@@ -314,6 +319,7 @@ pub(super) fn browser_sync_plan(
             ),
             cell_width,
             line_height,
+            user_library.commandline_enabled(),
         ) else {
             continue;
         };
@@ -336,6 +342,7 @@ pub(super) fn browser_sync_plan(
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
             cell_width,
             line_height,
+            user_library.commandline_enabled(),
         )
         && !notification_rects
             .iter()
@@ -379,8 +386,15 @@ pub(super) fn browser_viewport_rect(
     rect: Rect,
     cell_width: i32,
     line_height: i32,
+    command_line_visible: bool,
 ) -> Option<BrowserViewportRect> {
-    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        command_line_visible,
+    );
     let viewport = browser_buffer_layout(buffer, rect, layout, cell_width, line_height)?.viewport;
     let x = viewport.x();
     let y = viewport.y();
