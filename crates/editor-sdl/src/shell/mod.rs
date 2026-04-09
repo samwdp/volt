@@ -11027,7 +11027,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let window_effect_settings = current_window_effect_settings(theme_registry);
     let mut theme_reload_state = ThemeReloadState::new();
     let mut window_builder = video.window(&config.title, config.width, config.height);
-    window_builder.position_centered().resizable().high_pixel_density();
+    window_builder
+        .position_centered()
+        .resizable()
+        .high_pixel_density();
     if config.hidden {
         window_builder.hidden();
     }
