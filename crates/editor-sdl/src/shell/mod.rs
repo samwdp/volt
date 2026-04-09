@@ -409,6 +409,7 @@ impl DrawTarget<'_> {
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
     font_size: u32,
+    display_scale: f32,
     window_effects: WindowEffects,
 }
 
@@ -448,6 +449,18 @@ fn preferred_primary_font_hinting() -> Option<Hinting> {
     } else {
         None
     }
+}
+
+fn normalize_display_scale(display_scale: f32) -> f32 {
+    if display_scale.is_finite() && display_scale > 0.0 {
+        (display_scale * 1000.0).round() / 1000.0
+    } else {
+        1.0
+    }
+}
+
+fn scaled_font_size(font_size: u32, display_scale: f32) -> f32 {
+    font_size.max(1) as f32 * normalize_display_scale(display_scale)
 }
 
 struct IconFont<'ttf> {
@@ -11012,11 +11025,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     )?;
     let theme_registry = state.runtime.services().get::<ThemeRegistry>();
     let window_effect_settings = current_window_effect_settings(theme_registry);
-    let mut theme_settings = theme_runtime_settings(theme_registry, &config);
     let mut theme_reload_state = ThemeReloadState::new();
-    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
     let mut window_builder = video.window(&config.title, config.width, config.height);
-    window_builder.position_centered().resizable();
+    window_builder.position_centered().resizable().high_pixel_density();
     if config.hidden {
         window_builder.hidden();
     }
@@ -11026,6 +11037,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .build()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     apply_window_effects(&mut window, window_effect_settings)?;
+    let mut theme_settings =
+        theme_runtime_settings(theme_registry, &config, window.display_scale());
+    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
     let icon = load_window_icon()?;
     if !window.set_icon(icon) {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
@@ -11074,6 +11088,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     &ttf,
                     &state,
                     &config,
+                    canvas.window().display_scale(),
                     &mut theme_settings,
                     &mut fonts,
                     &mut font_path,
@@ -11436,6 +11451,7 @@ fn update_theme_runtime<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
     config: &ShellConfig,
+    display_scale: f32,
     theme_settings: &mut ThemeRuntimeSettings,
     fonts: &mut FontSet<'ttf>,
     font_path: &mut PathBuf,
@@ -11444,7 +11460,11 @@ fn update_theme_runtime<'ttf>(
     ascent: &mut i32,
     cell_width: &mut i32,
 ) -> Result<bool, ShellError> {
-    let updated = theme_runtime_settings(state.runtime.services().get::<ThemeRegistry>(), config);
+    let updated = theme_runtime_settings(
+        state.runtime.services().get::<ThemeRegistry>(),
+        config,
+        display_scale,
+    );
     if &updated == theme_settings {
         return Ok(false);
     }
@@ -11573,6 +11593,7 @@ fn theme_source_fingerprint_from_dir(themes_dir: &Path) -> Option<ThemeSourceFin
 fn theme_runtime_settings(
     theme_registry: Option<&ThemeRegistry>,
     config: &ShellConfig,
+    display_scale: f32,
 ) -> ThemeRuntimeSettings {
     let font_request = theme_registry
         .and_then(|registry| registry.resolve_string(OPTION_FONT))
@@ -11586,6 +11607,7 @@ fn theme_runtime_settings(
     ThemeRuntimeSettings {
         font_request,
         font_size,
+        display_scale: normalize_display_scale(display_scale),
         window_effects: current_window_effect_settings(theme_registry),
     }
 }
@@ -11769,6 +11791,7 @@ fn load_font_set<'ttf>(
     settings: &ThemeRuntimeSettings,
     user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
+    let effective_font_size = scaled_font_size(settings.font_size, settings.display_scale);
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
     let primary_font_data: &'static [u8] = Box::leak(
         fs::read(&primary_path)
@@ -11783,7 +11806,7 @@ fn load_font_set<'ttf>(
     let primary_raster_font = RasterFont::from_bytes(
         primary_font_data,
         fontdue::FontSettings {
-            scale: settings.font_size.max(1) as f32,
+            scale: effective_font_size,
             ..fontdue::FontSettings::default()
         },
     )
@@ -11800,17 +11823,17 @@ fn load_font_set<'ttf>(
         ))
     })?;
     let mut primary = ttf
-        .load_font(&primary_path, settings.font_size as f32)
+        .load_font(&primary_path, effective_font_size)
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     if let Some(hinting) = preferred_primary_font_hinting() {
         primary.set_hinting(hinting);
     }
     let primary_pixel_size = primary_raster_font
-        .horizontal_line_metrics(settings.font_size.max(1) as f32)
+        .horizontal_line_metrics(effective_font_size)
         .map(|metrics| metrics.ascent - metrics.descent)
         .filter(|height| *height > f32::EPSILON)
-        .map(|height| settings.font_size.max(1) as f32 * primary.height().max(1) as f32 / height)
-        .unwrap_or(settings.font_size.max(1) as f32);
+        .map(|height| effective_font_size * primary.height().max(1) as f32 / height)
+        .unwrap_or(effective_font_size);
     let cell_width = primary
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
@@ -11838,7 +11861,7 @@ fn load_font_set<'ttf>(
                     ))
                 })?;
             let font = ttf
-                .load_font(&path, settings.font_size as f32)
+                .load_font(&path, effective_font_size)
                 .map_err(|error| ShellError::Sdl(error.to_string()))?;
             Ok((name, font, raster_font))
         })
@@ -11856,7 +11879,7 @@ fn load_font_set<'ttf>(
         ligatures_enabled: user_library.ligature_config().enabled,
         icon_fonts,
         icon_chars,
-        icon_pixel_size: settings.font_size as f32,
+        icon_pixel_size: effective_font_size,
         cell_width,
     });
     validate_bundled_icon_fonts(&fonts, user_library)?;
