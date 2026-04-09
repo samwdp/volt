@@ -451,6 +451,12 @@ fn preferred_primary_font_hinting() -> Option<Hinting> {
     }
 }
 
+/// Normalizes the SDL window display scale for font rasterization.
+///
+/// SDL reports integral and fractional HiDPI scale factors; rounding to three
+/// decimal places keeps repeated comparisons stable across frames while
+/// preserving practical DPI values. Invalid or non-positive values fall back to
+/// 1.0 so font loading never requests a zero-sized raster.
 fn normalize_display_scale(display_scale: f32) -> f32 {
     if display_scale.is_finite() && display_scale > 0.0 {
         (display_scale * 1000.0).round() / 1000.0
@@ -459,6 +465,10 @@ fn normalize_display_scale(display_scale: f32) -> f32 {
     }
 }
 
+/// Converts the logical theme font size into the window's effective pixel size.
+///
+/// The logical font size is clamped to at least 1px, then multiplied by the
+/// window display scale so text stays physically readable on HiDPI displays.
 fn scaled_font_size(font_size: u32, display_scale: f32) -> f32 {
     font_size.max(1) as f32 * normalize_display_scale(display_scale)
 }

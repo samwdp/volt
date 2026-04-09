@@ -4899,7 +4899,7 @@ fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
 fn scaled_font_size_uses_window_display_scale() {
     assert_eq!(scaled_font_size(18, 2.0), 36.0);
     assert_eq!(scaled_font_size(18, 1.25), 22.5);
-    assert_eq!(scaled_font_size(18, 0.0), 18.0);
+    assert_eq!(scaled_font_size(18, -1.0), 18.0);
 }
 
 #[test]
