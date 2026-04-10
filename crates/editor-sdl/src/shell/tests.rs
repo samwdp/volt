@@ -12,6 +12,7 @@ use editor_plugin_api::{
 use editor_plugin_host::StatuslineContext;
 use editor_render::horizontal_pane_rects;
 use sdl3::mouse::MouseState;
+use sdl3::video::WindowFlags;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -4876,11 +4877,12 @@ fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
     };
 
     let mut window_builder = video.window("Volt Smoke", 320, 180);
-    window_builder.hidden();
+    window_builder.hidden().high_pixel_density();
     window_builder.set_flags(
         window_builder.flags() | crate::window_effects::window_creation_flags(window_effects),
     );
     let mut window = window_builder.build().map_err(|error| error.to_string())?;
+    assert!(WindowFlags::from(window.window_flags()).contains(WindowFlags::HIGH_PIXEL_DENSITY));
     apply_window_effects(&mut window, window_effects).map_err(|error| error.to_string())?;
 
     let mut canvas = window.into_canvas();
@@ -4891,6 +4893,13 @@ fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
     let size = canvas.output_size().map_err(|error| error.to_string())?;
     assert_eq!(size, (320, 180));
     Ok(())
+}
+
+#[test]
+fn scaled_font_size_uses_window_display_scale() {
+    assert_eq!(scaled_font_size(18, 2.0), 36.0);
+    assert_eq!(scaled_font_size(18, 1.25), 22.5);
+    assert_eq!(scaled_font_size(18, -1.0), 18.0);
 }
 
 #[test]
