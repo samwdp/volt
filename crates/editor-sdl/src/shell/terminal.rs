@@ -101,6 +101,46 @@ pub(super) fn buffer_is_terminal(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Terminal)
 }
 
+pub(super) fn focus_active_terminal_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let popup =
+        active_runtime_popup(runtime)?.ok_or_else(|| "terminal popup is not open".to_owned())?;
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let (buffer_name, buffer_kind) = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(popup.active_buffer)
+            .ok_or_else(|| format!("buffer `{}` is missing", popup.active_buffer))?;
+        (buffer.name().to_owned(), buffer.kind().clone())
+    };
+    if !matches!(buffer_kind, BufferKind::Terminal) {
+        return Err(format!(
+            "active popup buffer `{}` is not a terminal buffer",
+            popup.active_buffer
+        ));
+    }
+    {
+        let user_library = shell_user_library(runtime);
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_popup_buffer(
+            popup.active_buffer,
+            &buffer_name,
+            BufferKind::Terminal,
+            &*user_library,
+        );
+        ui.set_popup_buffer(popup.active_buffer);
+        ui.set_popup_focus(true);
+    }
+    ensure_terminal_session(runtime, popup.active_buffer)?;
+    shell_ui_mut(runtime)?.enter_insert_mode();
+    Ok(())
+}
+
 pub(super) fn close_terminal_buffers_for_workspace(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -415,6 +455,18 @@ pub(super) fn write_active_terminal_key(
         .map_err(|error| error.to_string())
 }
 
+pub(super) fn terminal_buffer_cursor_point_for_normal_mode(
+    buffer: &ShellBuffer,
+) -> Option<TextPoint> {
+    if !buffer_is_terminal(&buffer.kind) {
+        return None;
+    }
+    let render_cursor = buffer.terminal_render()?.cursor()?;
+    let line = buffer.line_at_viewport_offset(render_cursor.row() as usize);
+    let column = (render_cursor.col() as usize).min(buffer.line_len_chars(line));
+    Some(TextPoint::new(line, column))
+}
+
 pub(super) fn close_terminal_buffer(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
@@ -476,6 +528,7 @@ pub(super) fn render_terminal_buffer(
     statusline_inactive: Color,
     selection_color: Color,
     yank_flash_color: Color,
+    cursor_roundness: u32,
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
@@ -591,9 +644,10 @@ pub(super) fn render_terminal_buffer(
             text_x,
             layout.body_y,
             cursor,
-            cursor.shape(),
+            terminal_cursor_shape_for_input_mode(input_mode, cursor),
             cursor_color,
             base_background,
+            cursor_roundness,
             cell_width,
             line_height,
         )?;
@@ -636,6 +690,16 @@ pub(super) fn render_terminal_buffer(
     Ok(())
 }
 
+fn terminal_cursor_shape_for_input_mode(
+    input_mode: InputMode,
+    cursor: &editor_terminal::TerminalCursorSnapshot,
+) -> editor_terminal::TerminalCursorShape {
+    match input_mode {
+        InputMode::Insert | InputMode::Replace => editor_terminal::TerminalCursorShape::Beam,
+        InputMode::Normal | InputMode::Visual => cursor.shape(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_terminal_cursor(
     target: &mut DrawTarget<'_>,
@@ -645,6 +709,7 @@ pub(super) fn draw_terminal_cursor(
     shape: editor_terminal::TerminalCursorShape,
     cursor_color: Color,
     text_override_color: Color,
+    cursor_roundness: u32,
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
@@ -672,7 +737,7 @@ pub(super) fn draw_terminal_cursor(
             )?;
         }
         editor_terminal::TerminalCursorShape::Beam => {
-            fill_rect(
+            fill_rounded_rect(
                 target,
                 PixelRectToRect::rect(
                     x,
@@ -680,6 +745,7 @@ pub(super) fn draw_terminal_cursor(
                     (cell_width / 4).max(2) as u32,
                     line_height.max(2) as u32,
                 ),
+                cursor_roundness,
                 cursor_color,
             )?;
         }

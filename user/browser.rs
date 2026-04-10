@@ -1,7 +1,7 @@
 use crate::icon_font::symbols::{cod, md};
 use editor_plugin_api::{
     PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    PluginVimMode,
+    PluginVimMode, browser_hooks,
 };
 
 pub const BROWSER_KIND: &str = "browser";
@@ -31,11 +31,10 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "browser.open-popup",
             "Opens the browser buffer in the popup window.",
-            vec![PluginAction::open_buffer(
-                BUFFER_NAME,
-                BROWSER_KIND,
-                Some("Browser"),
-            )],
+            vec![
+                PluginAction::open_buffer(BUFFER_NAME, BROWSER_KIND, Some("Browser")),
+                PluginAction::emit_hook(browser_hooks::OPEN_POPUP, None::<&str>),
+            ],
         ),
         PluginCommand::new(
             "browser.url",

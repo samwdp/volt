@@ -93,7 +93,7 @@ use editor_plugin_api::{
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
     OilDefaults, OilKeyAction, PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks,
     browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks,
-    lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
+    lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -208,8 +208,10 @@ const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
+const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = "ui.browser.focus-input";
+const HOOK_TERMINAL_OPEN_POPUP: &str = terminal_hooks::OPEN_POPUP;
 const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
 const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
@@ -286,6 +288,7 @@ const TOKEN_GIT_STATUS_STASH_NAME: &str = "git.status.stash.name";
 const TOKEN_GIT_STATUS_STASH_SUMMARY: &str = "git.status.stash.summary";
 const TOKEN_GIT_STATUS_COMMAND: &str = "git.status.command";
 const TOKEN_GIT_STATUS_MESSAGE: &str = "git.status.message";
+const TOKEN_COMMANDLINE_BACKGROUND: &str = "ui.commandline.background";
 const TOKEN_STATUSLINE_ACTIVE: &str = "ui.statusline.active";
 const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
 const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
@@ -696,6 +699,21 @@ impl LineCharMap {
         self.len().saturating_sub(1)
     }
 
+    fn is_zero_width_col(&self, column: usize) -> bool {
+        column < self.len() && self.display_cols_between(column, column.saturating_add(1)) == 0
+    }
+
+    fn cursor_anchor_col(&self, column: usize) -> usize {
+        if column >= self.len() {
+            return self.len();
+        }
+        let mut column = column;
+        while column > 0 && self.is_zero_width_col(column) {
+            column = column.saturating_sub(1);
+        }
+        column
+    }
+
     fn display_text_for_range(&self, line: &str, start_col: usize, end_col: usize) -> String {
         if start_col >= end_col {
             return String::new();
@@ -714,6 +732,12 @@ impl LineCharMap {
             let text = &line[start_byte..end_byte];
             if text == "\t" {
                 rendered.push_str(&" ".repeat(self.display_cols_between(column, column + 1)));
+            } else if text
+                .chars()
+                .next()
+                .is_some_and(is_zero_width_display_character)
+            {
+                continue;
             } else {
                 rendered.push_str(text);
             }
@@ -726,8 +750,14 @@ fn resolved_tab_width(tab_width: usize) -> usize {
     if tab_width == 0 { 4 } else { tab_width }
 }
 
+fn is_zero_width_display_character(character: char) -> bool {
+    matches!(character as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+}
+
 fn display_columns_for_character(character: char, display_col: usize, tab_width: usize) -> usize {
-    if character == '\t' {
+    if is_zero_width_display_character(character) {
+        0
+    } else if character == '\t' {
         let remainder = display_col % tab_width;
         if remainder == 0 {
             tab_width
@@ -4246,7 +4276,8 @@ impl ShellBuffer {
 
     fn set_syntax_snapshot(&mut self, syntax: Option<SyntaxSnapshot>) {
         let syntax_window = syntax.as_ref().and_then(|_| self.full_syntax_window());
-        self.set_indexed_syntax_lines(syntax.map(index_syntax_lines), syntax_window);
+        let syntax_lines = syntax.map(|snapshot| index_syntax_lines(snapshot, &self.text));
+        self.set_indexed_syntax_lines(syntax_lines, syntax_window);
     }
 
     fn set_indexed_syntax_lines(
@@ -5747,11 +5778,10 @@ fn acp_multiline_text_lines(
     let text = text.as_ref();
     let mut lines = Vec::new();
     let continuation_prefix = acp_padding_prefix(&prefix);
-    let parts = if text.is_empty() {
-        vec![String::new()]
-    } else {
-        text.split('\n').map(str::to_owned).collect::<Vec<_>>()
-    };
+    let parts = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect::<Vec<_>>();
     for (index, line) in parts.into_iter().enumerate() {
         lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
             prefix: if index == 0 {
@@ -12318,6 +12348,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_BROWSER_OPEN_POPUP,
+        "Focuses the browser popup after opening it.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_BROWSER_URL,
         "Detects a URL in the active buffer and opens it in the popup browser.",
     )?;
@@ -12325,6 +12360,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_BROWSER_FOCUS_INPUT,
         "Focuses the browser input section.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_TERMINAL_OPEN_POPUP,
+        "Focuses the terminal popup after opening it.",
     )?;
     register_hook(runtime, HOOK_GIT_DIFF_OPEN, "Opens the git diff buffer.")?;
     register_hook(runtime, HOOK_GIT_LOG_OPEN, "Opens the git log buffer.")?;
@@ -12686,7 +12726,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             let previous_mode = shell_ui(runtime)?.input_mode();
             let buffer_id = active_shell_buffer_id(runtime)?;
             let is_directory = buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind);
-            let cursor_point = active_shell_buffer_mut(runtime)?.cursor_point();
+            let cursor_point = {
+                let buffer = shell_buffer(runtime, buffer_id)?;
+                terminal_buffer_cursor_point_for_normal_mode(buffer)
+                    .unwrap_or_else(|| buffer.cursor_point())
+            };
             let has_input = active_shell_buffer_has_input(runtime)?;
             let targeted_input = active_shell_buffer_vim_targets_input(runtime)?;
             let finish_change = {
@@ -12722,14 +12766,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             if targeted_input
                 && has_input
                 && let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut()
+                && previous_mode == InputMode::Visual
             {
-                if previous_mode == InputMode::Visual {
-                    input.clear_selection();
-                } else if matches!(previous_mode, InputMode::Insert | InputMode::Replace)
-                    && input.cursor_char() > 0
-                {
-                    let _ = input.move_left();
-                }
+                input.clear_selection();
             }
             if let Some((anchor, head, kind)) = visual_snapshot {
                 store_last_visual_selection(runtime, anchor, head, kind)?;
@@ -13450,6 +13489,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_BROWSER_OPEN_POPUP,
+            "shell.browser-open-popup",
+            |_, runtime| {
+                browser::focus_active_browser_popup(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_BROWSER_URL, "shell.browser-url", |_, runtime| {
             open_detected_browser_url(runtime)?;
             Ok(())
@@ -13461,6 +13510,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.browser-focus-input",
             |_, runtime| {
                 focus_browser_input_section(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_TERMINAL_OPEN_POPUP,
+            "shell.terminal-open-popup",
+            |_, runtime| {
+                terminal::focus_active_terminal_popup(runtime)?;
                 Ok(())
             },
         )
@@ -16223,7 +16282,7 @@ fn render_markdown_hover_content(runtime: &mut EditorRuntime, text: &str) -> Hov
         &mut parse_session,
     );
     if let Some(Ok(snapshot)) = syntax_result {
-        rendered.syntax_lines = index_syntax_lines(snapshot);
+        rendered.syntax_lines = index_syntax_lines(snapshot, &markdown_buffer);
     }
     apply_markdown_code_fence_syntax(&mut rendered, registry);
     rendered
@@ -16258,7 +16317,7 @@ fn apply_markdown_code_fence_syntax(
         for line_index in block.code_start_line..block.code_end_line_exclusive {
             rendered.syntax_lines.remove(&line_index);
         }
-        for (line_index, spans) in index_syntax_lines(snapshot) {
+        for (line_index, spans) in index_syntax_lines(snapshot, &code_buffer) {
             rendered
                 .syntax_lines
                 .insert(block.code_start_line + line_index, spans);
@@ -17067,7 +17126,10 @@ impl SyntaxRefreshWorkerState {
                     let (highlight_span_count, syntax_result) = match syntax_result {
                         Some(Ok(snapshot)) => {
                             let highlight_span_count = snapshot.highlight_count();
-                            (highlight_span_count, Some(Ok(index_syntax_lines(snapshot))))
+                            (
+                                highlight_span_count,
+                                Some(Ok(index_syntax_lines(snapshot, &request.text))),
+                            )
                         }
                         Some(Err(error)) => (0, Some(Err(error.to_string()))),
                         None => (0, None),
@@ -23274,6 +23336,7 @@ fn split_runtime_pane(
         let ui = shell_ui_mut(runtime)?;
         ui.ensure_buffer(split_buffer_id, &buffer_name, buffer_kind, &*user_library);
         ui.split_pane(pane_id, split_buffer_id, direction);
+        ui.focus_pane(pane_id);
     }
     let window_id = active_window_id(runtime)?;
     let hook_name = match direction {
@@ -23546,7 +23609,10 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
         match syntax_result {
             Some(Ok(snapshot)) => {
                 buffer.set_language_id(language_id.clone());
-                buffer.set_indexed_syntax_lines(Some(index_syntax_lines(snapshot)), syntax_window);
+                buffer.set_indexed_syntax_lines(
+                    Some(index_syntax_lines(snapshot, &text)),
+                    syntax_window,
+                );
                 buffer.set_syntax_error(None);
             }
             Some(Err(error)) => {

@@ -645,7 +645,7 @@ mod tests {
         let new_pane_id = runtime.model_mut().split_pane(workspace_id, notes_id)?;
         let workspace = runtime.model().workspace(workspace_id)?;
         assert_eq!(workspace.pane_count(), 2);
-        assert_eq!(workspace.active_pane_id(), Some(initial_pane));
+        assert_eq!(workspace.active_pane_id(), Some(new_pane_id));
         assert_eq!(
             workspace
                 .pane(new_pane_id)
@@ -653,10 +653,10 @@ mod tests {
             Some(notes_id)
         );
 
-        runtime.model_mut().focus_pane(workspace_id, new_pane_id)?;
+        runtime.model_mut().focus_pane(workspace_id, initial_pane)?;
         assert_eq!(
             runtime.model().workspace(workspace_id)?.active_pane_id(),
-            Some(new_pane_id)
+            Some(initial_pane)
         );
 
         Ok(())

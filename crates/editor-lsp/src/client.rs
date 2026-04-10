@@ -2211,11 +2211,11 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
         },
         "textDocument": {
             "hover": {
-                "contentFormat": ["markdown", "plaintext"]
+                "contentFormat": ["markdown"]
             },
             "signatureHelp": {
                 "signatureInformation": {
-                    "documentationFormat": ["markdown", "plaintext"],
+                    "documentationFormat": ["markdown"],
                     "parameterInformation": {
                         "labelOffsetSupport": true
                     },
@@ -2224,8 +2224,8 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
             },
             "completion": {
                 "completionItem": {
-                    "documentationFormat": ["markdown", "plaintext"],
-                    "snippetSupport": false
+                    "documentationFormat": ["markdown"],
+                    "snippetSupport": true
                 }
             },
             "codeAction": {

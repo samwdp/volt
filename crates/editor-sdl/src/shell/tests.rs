@@ -2043,6 +2043,71 @@ fn draw_buffer_text_expands_tabs_to_spaces() -> Result<(), String> {
 }
 
 #[test]
+fn line_char_map_treats_variation_selectors_as_zero_width() {
+    let line = "⚛️x";
+    let char_map = LineCharMap::new(line);
+
+    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 2);
+    assert_eq!(char_map.display_text_for_range(line, 0, 2), "⚛");
+    assert_eq!(
+        char_map.display_text_for_range(line, 0, line.chars().count()),
+        "⚛x"
+    );
+}
+
+#[test]
+fn line_char_map_cursor_anchor_skips_variation_selectors() {
+    let line = "⚛️x";
+    let char_map = LineCharMap::new(line);
+
+    assert_eq!(char_map.cursor_anchor_col(0), 0);
+    assert_eq!(char_map.cursor_anchor_col(1), 0);
+    assert_eq!(char_map.cursor_anchor_col(2), 2);
+}
+
+#[test]
+fn draw_buffer_text_omits_variation_selectors_from_scene_text() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let line = "⚛️";
+    let char_map = LineCharMap::new(line);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "⚛".to_owned(),
+            color: to_render_color(default_color),
+        },]
+    );
+    Ok(())
+}
+
+#[test]
+fn monospace_text_width_ignores_variation_selectors() {
+    assert_eq!(monospace_text_width("⚛️", 8), 8);
+}
+
+#[test]
 fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Result<(), String> {
     let line = SectionRenderLine {
         text: format!(
@@ -2686,6 +2751,31 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
 }
 
 #[test]
+fn acp_multiline_text_lines_strip_carriage_returns() {
+    let lines = acp_multiline_text_lines(
+        vec![
+            acp_icon_segment(
+                editor_icons::symbols::cod::COD_COMMENT,
+                AcpColorRole::Accent,
+            ),
+            acp_text_segment(" ", AcpColorRole::Default),
+        ],
+        "alpha\r\nbeta\r\n",
+        AcpColorRole::Default,
+    );
+
+    let rendered = lines
+        .into_iter()
+        .map(|line| match line {
+            AcpRenderedLine::Text(line) => line.text,
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec!["alpha", "beta", ""]);
+}
+
+#[test]
 fn wrap_line_segments_keeps_unbroken_words_together() {
     let segments = wrap_line_segments(&LineCharMap::new("alpha betagamma delta"), 10, 10);
 
@@ -2720,6 +2810,31 @@ fn block_cursor_text_overlay_positions_multibyte_cursor_text() {
 
     assert_eq!(overlay.draw_x, 32);
     assert_eq!(overlay.text, "é");
+    assert_eq!(overlay.color, Color::RGB(1, 2, 3));
+}
+
+#[test]
+fn block_cursor_text_overlay_uses_visible_glyph_for_variation_selector() {
+    let line = "⚛️x";
+    let char_map = LineCharMap::new(line);
+    let overlay = block_cursor_text_overlay(
+        24,
+        line,
+        &char_map,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        0,
+        0,
+        1,
+        Some(Color::RGB(1, 2, 3)),
+        8,
+    )
+    .expect("cursor on a variation selector should reuse the visible glyph");
+
+    assert_eq!(overlay.draw_x, 24);
+    assert_eq!(overlay.text, "⚛");
     assert_eq!(overlay.color, Color::RGB(1, 2, 3));
 }
 
@@ -4605,6 +4720,77 @@ fn browser_input_layout_uses_symmetric_vertical_padding() -> Result<(), String> 
 }
 
 #[test]
+fn render_browser_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    let cursor_color = Color::RGB(7, 77, 177);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?;
+        input.set_text("volt");
+        input.cursor = 2;
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let browser_layout = browser_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "browser layout missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_browser_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        InputMode::Normal,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        cursor_color,
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let cursor_color = to_render_color(cursor_color);
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x >= browser_layout.input.rect.x()
+                && rect.x < browser_layout.input.rect.x() + browser_layout.input.rect.width() as i32
+                && rect.y >= browser_layout.input.rect.y()
+                && rect.y < browser_layout.input.rect.y() + browser_layout.input.rect.height() as i32
+                && rect.width == 8
+                && rect.height == 16
+                && *color == cursor_color
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x >= browser_layout.input.rect.x()
+                && rect.x < browser_layout.input.rect.x() + browser_layout.input.rect.width() as i32
+                && rect.y >= browser_layout.input.rect.y()
+                && rect.y < browser_layout.input.rect.y() + browser_layout.input.rect.height() as i32
+                && rect.width == 8
+                && rect.height == 16
+                && *color == cursor_color
+    )));
+    Ok(())
+}
+
+#[test]
 fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer = state
@@ -4617,7 +4803,7 @@ fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), Stri
         .ok_or_else(|| "command line row is missing".to_owned())?;
 
     assert!(layout.statusline_y < commandline_y);
-    assert_eq!(commandline_y - layout.statusline_y, 18);
+    assert_eq!(commandline_y - layout.statusline_y, 26);
     Ok(())
 }
 
@@ -4665,9 +4851,172 @@ fn render_buffer_draws_command_line_row_without_active_overlay() -> Result<(), S
         command,
         DrawCommand::FillRect { rect, .. }
             if rect.x == 8
+                && rect.y == commandline_y - 6
+                && rect.width == 304
+                && rect.height == 1
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == 8
                 && rect.y == commandline_y
                 && rect.width == 304
                 && rect.height == 16
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_path_draws_command_line_separator_without_footer_fill()
+-> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            1,
+            12,
+            vec![editor_terminal::TerminalRenderLine::new(vec![
+                editor_terminal::TerminalRenderRun::new(
+                    0,
+                    11,
+                    "echo hello",
+                    editor_terminal::TerminalRgb {
+                        r: 215,
+                        g: 221,
+                        b: 232,
+                    },
+                    None,
+                    None,
+                ),
+            ])],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                0,
+                0,
+                1,
+                editor_terminal::TerminalCursorShape::Beam,
+                "e",
+            )),
+            None,
+        ));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout_with_command_line(buffer, rect, 16, 8, true);
+    let commandline_y = layout
+        .commandline_y
+        .ok_or_else(|| "command line row is missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        true,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == 8
+                && rect.y == commandline_y - 6
+                && rect.width == 304
+                && rect.height == 1
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == 8
+                && rect.y == commandline_y
+                && rect.width == 304
+                && rect.height == 16
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme").with_token(
+                TOKEN_COMMANDLINE_BACKGROUND,
+                editor_theme::Color::rgba(10, 20, 30, 144),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout_with_command_line(buffer, rect, 16, 8, true);
+    let commandline_y = layout
+        .commandline_y
+        .ok_or_else(|| "command line row is missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        true,
+        &NullUserLibrary,
+        "test-theme",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == 8
+                && rect.y == commandline_y
+                && rect.width == 304
+                && rect.height == 16
+                && *color == to_render_color(Color::RGBA(10, 20, 30, 144))
     )));
     Ok(())
 }
@@ -5770,6 +6119,80 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
 }
 
 #[test]
+fn render_acp_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "volt", None)?;
+    let cursor_color = Color::RGB(17, 97, 197);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        let _ = buffer.focus_acp_input();
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.cursor = 2;
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "missing ACP layout".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        cursor_color,
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let cursor_color = to_render_color(cursor_color);
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x >= acp_layout.input.rect.x()
+                && rect.x < acp_layout.input.rect.x() + acp_layout.input.rect.width() as i32
+                && rect.y >= acp_layout.input.rect.y()
+                && rect.y < acp_layout.input.rect.y() + acp_layout.input.rect.height() as i32
+                && rect.width == 8
+                && rect.height == 16
+                && *color == cursor_color
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x >= acp_layout.input.rect.x()
+                && rect.x < acp_layout.input.rect.x() + acp_layout.input.rect.width() as i32
+                && rect.y >= acp_layout.input.rect.y()
+                && rect.y < acp_layout.input.rect.y() + acp_layout.input.rect.height() as i32
+                && rect.width == 8
+                && rect.height == 16
+                && *color == cursor_color
+    )));
+    Ok(())
+}
+
+#[test]
 fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Result<(), String> {
     let render_width = 640;
     let render_height = 320;
@@ -5973,6 +6396,14 @@ fn font_role_prefers_icon_font_for_symbol_like_prompt_glyphs() -> Result<(), Str
         FontRole::Icon(0)
     );
     Ok(())
+}
+
+#[test]
+fn strip_zero_width_display_characters_removes_variation_selectors() {
+    assert_eq!(
+        strip_zero_width_display_characters("- ⚛️ Built with Expo Router").as_ref(),
+        "- ⚛ Built with Expo Router"
+    );
 }
 
 #[test]
@@ -6314,24 +6745,57 @@ fn hover_diagnostic_provider_fragments_preserve_fenced_code_blocks() -> Result<(
 
 #[test]
 fn index_syntax_lines_preserves_capture_names() {
-    let lines = index_syntax_lines(editor_syntax::SyntaxSnapshot {
-        language_id: "rust".to_owned(),
-        root_kind: "source_file".to_owned(),
-        has_errors: false,
-        highlight_spans: vec![editor_syntax::HighlightSpan {
-            start_byte: 0,
-            end_byte: 5,
-            start_position: editor_syntax::SyntaxPoint::new(0, 0),
-            end_position: editor_syntax::SyntaxPoint::new(0, 5),
-            capture_name: "function".to_owned(),
-            theme_token: "syntax.function".to_owned(),
-        }],
-    });
+    let text = TextBuffer::from_text("alpha");
+    let lines = index_syntax_lines(
+        editor_syntax::SyntaxSnapshot {
+            language_id: "rust".to_owned(),
+            root_kind: "source_file".to_owned(),
+            has_errors: false,
+            highlight_spans: vec![editor_syntax::HighlightSpan {
+                start_byte: 0,
+                end_byte: 5,
+                start_position: editor_syntax::SyntaxPoint::new(0, 0),
+                end_position: editor_syntax::SyntaxPoint::new(0, 5),
+                capture_name: "function".to_owned(),
+                theme_token: "syntax.function".to_owned(),
+            }],
+        },
+        &text,
+    );
 
     let spans = lines.get(&0).expect("expected indexed syntax line");
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].capture_name, "function");
     assert_eq!(spans[0].theme_token, "syntax.function");
+}
+
+#[test]
+fn index_syntax_lines_converts_byte_columns_after_variation_selector() {
+    let line = "- ⚛️ Built";
+    let text = TextBuffer::from_text(line);
+    let start_byte = line.find("Built").expect("Built should be present");
+    let end_byte = start_byte + "Built".len();
+    let lines = index_syntax_lines(
+        editor_syntax::SyntaxSnapshot {
+            language_id: "markdown".to_owned(),
+            root_kind: "document".to_owned(),
+            has_errors: false,
+            highlight_spans: vec![editor_syntax::HighlightSpan {
+                start_byte,
+                end_byte,
+                start_position: editor_syntax::SyntaxPoint::new(0, start_byte),
+                end_position: editor_syntax::SyntaxPoint::new(0, end_byte),
+                capture_name: "text.literal".to_owned(),
+                theme_token: "syntax.string".to_owned(),
+            }],
+        },
+        &text,
+    );
+
+    assert_eq!(
+        syntax_span_segments(line, lines.get(&0).expect("expected line spans")),
+        vec![("syntax.string".to_owned(), "Built".to_owned())]
+    );
 }
 
 #[test]
@@ -6362,6 +6826,43 @@ fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
         Some("https://example.com/docs")
     );
     assert_eq!(buffer.display_name(), "*browser* https://example.com/docs");
+    Ok(())
+}
+
+#[test]
+fn browser_escape_from_insert_keeps_input_cursor_position() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_browser_input();
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?;
+        input.set_text("https://example.com");
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_NORMAL, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(ui.vim().target, VimTarget::Input);
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .cursor_char(),
+        "https://example.com".chars().count()
+    );
     Ok(())
 }
 
@@ -6399,6 +6900,39 @@ fn acp_input_field_visual_yank_copies_selected_text() -> Result<(), String> {
             .ok_or_else(|| "ACP input field missing".to_owned())?
             .selection_anchor,
         None
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_escape_from_insert_keeps_input_cursor_position() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "prompt", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_NORMAL, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(ui.vim().target, VimTarget::Input);
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .cursor_char(),
+        "prompt".chars().count()
     );
     Ok(())
 }
@@ -6472,7 +7006,7 @@ fn acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer() -> Result<(
             .input_field()
             .ok_or_else(|| "ACP input field missing".to_owned())?
             .cursor_char(),
-        "prompt".chars().count().saturating_sub(1)
+        "prompt".chars().count()
     );
 
     state
@@ -8443,6 +8977,151 @@ fn terminal_mode_insert_hook_allows_reentering_insert_for_terminals() -> Result<
 }
 
 #[test]
+fn terminal_mode_normal_hook_uses_live_terminal_cursor_position() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.set_viewport_lines(2);
+        buffer.replace_with_lines_follow_output(vec![
+            "zero".to_owned(),
+            "one".to_owned(),
+            "two".to_owned(),
+            "three456".to_owned(),
+        ]);
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            2,
+            8,
+            vec![
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        3,
+                        "two",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        8,
+                        "three456",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+            ],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                1,
+                5,
+                1,
+                editor_terminal::TerminalCursorShape::Beam,
+                "e",
+            )),
+            None,
+        ));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_NORMAL, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(buffer.cursor_point(), TextPoint::new(3, 5));
+    Ok(())
+}
+
+#[test]
+fn terminal_popup_mode_normal_hook_uses_live_terminal_cursor_position() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_popup_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal popup test buffer missing".to_owned())?;
+        buffer.set_viewport_lines(2);
+        buffer.replace_with_lines_follow_output(vec![
+            "zero".to_owned(),
+            "one".to_owned(),
+            "two".to_owned(),
+            "three456".to_owned(),
+        ]);
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            2,
+            8,
+            vec![
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        3,
+                        "two",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+                editor_terminal::TerminalRenderLine::new(vec![
+                    editor_terminal::TerminalRenderRun::new(
+                        0,
+                        8,
+                        "three456",
+                        editor_terminal::TerminalRgb {
+                            r: 215,
+                            g: 221,
+                            b: 232,
+                        },
+                        None,
+                        None,
+                    ),
+                ]),
+            ],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                1,
+                4,
+                1,
+                editor_terminal::TerminalCursorShape::Beam,
+                "e",
+            )),
+            None,
+        ));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_NORMAL, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert!(ui.popup_focus);
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(buffer.cursor_point(), TextPoint::new(3, 4));
+    Ok(())
+}
+
+#[test]
 fn terminal_vim_edit_shortcuts_enter_insert_mode_instead_of_read_only_errors() -> Result<(), String>
 {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
@@ -8514,6 +9193,87 @@ fn terminal_popup_bootstraps_session_and_enters_insert_mode() -> Result<(), Stri
     assert_eq!(popup.active_buffer, buffer_id);
     assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
     assert!(terminal_buffer_state(&state.runtime)?.contains(buffer_id));
+    Ok(())
+}
+
+#[test]
+fn terminal_popup_command_focuses_the_popup_surface() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let pane_buffer = active_shell_buffer_id(&state.runtime)?;
+
+    state
+        .runtime
+        .execute_command("terminal.popup")
+        .map_err(|error| error.to_string())?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "terminal popup was not opened".to_owned())?;
+    let ui = shell_ui(&state.runtime)?;
+    assert!(ui.popup_focus);
+    assert_eq!(ui.popup_buffer_id, Some(popup.active_buffer));
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, popup.active_buffer);
+    assert_ne!(popup.active_buffer, pane_buffer);
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert!(terminal_buffer_state(&state.runtime)?.contains(popup.active_buffer));
+    Ok(())
+}
+
+#[test]
+fn browser_popup_command_focuses_the_popup_surface() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let pane_buffer = active_shell_buffer_id(&state.runtime)?;
+
+    state
+        .runtime
+        .execute_command("browser.open-popup")
+        .map_err(|error| error.to_string())?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "browser popup was not opened".to_owned())?;
+    let ui = shell_ui(&state.runtime)?;
+    assert!(ui.popup_focus);
+    assert_eq!(ui.popup_buffer_id, Some(popup.active_buffer));
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, popup.active_buffer);
+    assert_ne!(popup.active_buffer, pane_buffer);
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert!(matches!(
+        shell_buffer(&state.runtime, popup.active_buffer)?.kind,
+        BufferKind::Plugin(ref kind) if kind == user::browser::BROWSER_KIND
+    ));
+    Ok(())
+}
+
+#[test]
+fn split_runtime_pane_switches_focus_to_the_new_pane() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let original_pane_id = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .active_pane_id()
+        .ok_or_else(|| "initial pane is missing".to_owned())?;
+
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+
+    let runtime_workspace = state
+        .runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?;
+    let active_pane_id = runtime_workspace
+        .active_pane_id()
+        .ok_or_else(|| "split pane is missing".to_owned())?;
+    assert_ne!(active_pane_id, original_pane_id);
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_pane_id(),
+        Some(active_pane_id)
+    );
     Ok(())
 }
 
@@ -8673,6 +9433,7 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
         Color::RGB(140, 144, 152),
         Color::RGBA(55, 71, 99, 255),
         Color::RGBA(112, 196, 255, 120),
+        2,
         8,
         16,
     )
@@ -8766,6 +9527,7 @@ fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), Strin
         Color::RGB(140, 144, 152),
         selection_color,
         Color::RGBA(112, 196, 255, 120),
+        2,
         8,
         16,
     )
@@ -8852,6 +9614,7 @@ fn render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity() ->
         Color::RGB(140, 144, 152),
         Color::RGBA(55, 71, 99, 255),
         Color::RGBA(112, 196, 255, 120),
+        2,
         8,
         16,
     )
@@ -9051,6 +9814,7 @@ fn render_terminal_buffer_uses_buffer_cursor_in_normal_mode() -> Result<(), Stri
         Color::RGB(140, 144, 152),
         Color::RGBA(55, 71, 99, 255),
         Color::RGBA(112, 196, 255, 120),
+        2,
         8,
         16,
     )
@@ -9068,6 +9832,113 @@ fn render_terminal_buffer_uses_buffer_cursor_in_normal_mode() -> Result<(), Stri
         DrawCommand::FillRoundedRect { rect, color, .. }
             if rect.x == text_x
                 && rect.y == layout.body_y
+                && *color == to_render_color(cursor_color)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_terminal_buffer_uses_editor_insert_cursor_style() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    let cursor_color = Color::RGB(110, 170, 255);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.replace_with_lines_follow_output(vec!["echo hello".to_owned()]);
+        buffer.set_terminal_render(editor_terminal::TerminalRenderSnapshot::new(
+            1,
+            12,
+            vec![editor_terminal::TerminalRenderLine::new(vec![
+                editor_terminal::TerminalRenderRun::new(
+                    0,
+                    10,
+                    "echo hello",
+                    editor_terminal::TerminalRgb {
+                        r: 215,
+                        g: 221,
+                        b: 232,
+                    },
+                    None,
+                    None,
+                ),
+            ])],
+            Some(editor_terminal::TerminalCursorSnapshot::new(
+                0,
+                3,
+                1,
+                editor_terminal::TerminalCursorShape::Block,
+                "o",
+            )),
+            None,
+        ));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let text_x = rect.x() + 12;
+    let expected_x = text_x + 3 * 8;
+    let expected_y = layout.body_y;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_terminal_buffer(
+        &mut target,
+        buffer,
+        buffer
+            .terminal_render()
+            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+        rect,
+        layout,
+        true,
+        InputMode::Insert,
+        None,
+        None,
+        None,
+        Color::RGB(15, 16, 20),
+        cursor_color,
+        Color::RGB(215, 221, 232),
+        Color::RGB(40, 44, 52),
+        "status".to_owned(),
+        Color::RGB(110, 170, 255),
+        Color::RGB(140, 144, 152),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        4,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, radius }
+            if rect.x == expected_x
+                && rect.y == expected_y
+                && rect.width == 2
+                && rect.height == 16
+                && *radius == 4
+                && *color == to_render_color(cursor_color)
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == expected_x
+                && rect.y == expected_y
+                && rect.width == 2
+                && rect.height == 16
+                && *color == to_render_color(cursor_color)
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == expected_x
+                && rect.y == expected_y
+                && rect.width == 8
+                && rect.height == 16
                 && *color == to_render_color(cursor_color)
     )));
     Ok(())

@@ -618,6 +618,7 @@ impl EditorModel {
         let mut pane = Pane::new(pane_id);
         pane.add_buffer(buffer_id);
         workspace.panes.insert(pane_id, pane);
+        workspace.active_pane = Some(pane_id);
         Ok(pane_id)
     }
 

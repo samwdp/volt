@@ -1,5 +1,5 @@
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, terminal_hooks,
 };
 use std::env;
 
@@ -57,11 +57,10 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "terminal.popup",
             "Opens a popup-hosted terminal buffer.",
-            vec![PluginAction::open_buffer(
-                "*terminal-popup*",
-                "terminal",
-                Some("Terminal"),
-            )],
+            vec![
+                PluginAction::open_buffer("*terminal-popup*", "terminal", Some("Terminal")),
+                PluginAction::emit_hook(terminal_hooks::OPEN_POPUP, None::<&str>),
+            ],
         ),
     ])
     .with_key_bindings(vec![PluginKeyBinding::new(

@@ -23,6 +23,9 @@ use tree_sitter_language::LanguageFn;
 pub const ROLE: &str =
     "Tree-sitter language registration, installation, parsing, highlighting, and indentation.";
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const DEFAULT_QUERY_ASSET_SEARCH_DEPTH: usize = 6;
 const MAX_INJECTION_DEPTH: usize = 8;
 const QUERY_ASSET_DIR_CANDIDATES: &[&[&str]] = &[
@@ -33,6 +36,15 @@ const QUERY_ASSET_DIR_CANDIDATES: &[&[&str]] = &[
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
     ROLE
+}
+
+fn configure_background_command(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 /// Function pointer that returns a statically linked tree-sitter language handle.
@@ -935,7 +947,9 @@ impl SyntaxRegistry {
         fs::create_dir_all(&parent)
             .map_err(|error| io_error("create temp parent", &parent, error))?;
 
-        let clone_output = Command::new("git")
+        let mut clone_command = Command::new("git");
+        configure_background_command(&mut clone_command);
+        let clone_output = clone_command
             .args([
                 "clone",
                 "--depth",
@@ -3294,6 +3308,7 @@ fn build_shared_library(
     let output_path = grammar.installed_library_path(install_root);
     let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
     let mut command = Command::new(compiler);
+    configure_background_command(&mut command);
     if cfg!(target_os = "macos") {
         command.args(["-fPIC", "-dynamiclib"]);
     } else {

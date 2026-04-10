@@ -103,20 +103,46 @@ pub(super) fn open_browser_popup_with_url(
         .model_mut()
         .open_popup_buffer(workspace_id, "Browser", buffer_id)
         .map_err(|error| error.to_string())?;
+    focus_active_browser_popup(runtime)?;
+    navigate_browser_buffer(runtime, buffer_id, raw_url)
+}
+
+pub(super) fn focus_active_browser_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let popup =
+        active_runtime_popup(runtime)?.ok_or_else(|| "browser popup is not open".to_owned())?;
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let (buffer_name, buffer_kind) = {
+        let workspace = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = workspace
+            .buffer(popup.active_buffer)
+            .ok_or_else(|| format!("buffer `{}` is missing", popup.active_buffer))?;
+        (buffer.name().to_owned(), buffer.kind().clone())
+    };
+    if !matches!(&buffer_kind, BufferKind::Plugin(kind) if kind == BROWSER_KIND) {
+        return Err(format!(
+            "active popup buffer `{}` is not a browser buffer",
+            popup.active_buffer
+        ));
+    }
     {
         let user_library = shell_user_library(runtime);
         let ui = shell_ui_mut(runtime)?;
         ui.ensure_popup_buffer(
-            buffer_id,
-            BROWSER_BUFFER_NAME,
-            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            popup.active_buffer,
+            &buffer_name,
+            buffer_kind,
             &*user_library,
         );
-        ui.set_popup_buffer(buffer_id);
+        ui.set_popup_buffer(popup.active_buffer);
+        ui.set_popup_focus(true);
     }
-    shell_ui_mut(runtime)?.set_popup_focus(true);
-    enter_insert_mode_for_input_buffer(runtime, buffer_id)?;
-    navigate_browser_buffer(runtime, buffer_id, raw_url)
+    enter_insert_mode_for_input_buffer(runtime, popup.active_buffer)
 }
 
 pub(super) fn browser_buffer_display_name(current_url: Option<&str>) -> String {

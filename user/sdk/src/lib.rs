@@ -83,7 +83,13 @@ pub mod oil_hooks {
 
 /// Hook name constants for the browser buffer.
 pub mod browser_hooks {
+    pub const OPEN_POPUP: &str = "ui.browser.open-popup";
     pub const URL: &str = "ui.browser.url";
+}
+
+/// Hook name constants for terminal buffers.
+pub mod terminal_hooks {
+    pub const OPEN_POPUP: &str = "ui.terminal.open-popup";
 }
 
 /// Hook name constants for the native image viewer.
