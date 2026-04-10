@@ -31,6 +31,8 @@ use editor_theme::ThemeRegistry;
 
 #[cfg(test)]
 mod standalone_user;
+#[cfg(test)]
+mod standalone_user_manifest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartupProfile {

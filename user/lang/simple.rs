@@ -75,11 +75,12 @@ impl SimpleLanguageDefinition {
             self.extensions,
             self.file_names,
             self.file_globs,
-            self.repository,
-            self.grammar_dir,
-            self.source_dir,
-            self.install_dir_name,
-            self.symbol_name,
+            common::GrammarSourceSpec::new(
+                self.repository,
+                self.install_dir_name,
+                self.symbol_name,
+            )
+            .with_source_paths(self.grammar_dir, self.source_dir),
         )
     }
 }

@@ -1,20 +1,9 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, io, path::Path};
 
 #[path = "src/standalone_user.rs"]
 mod standalone_user;
-
-const STANDALONE_USER_VENDOR_CRATES: &[&str] = &[
-    "editor-buffer",
-    "editor-core",
-    "editor-dap",
-    "editor-fs",
-    "editor-git",
-    "editor-icons",
-    "editor-jobs",
-    "editor-lsp",
-    "editor-syntax",
-    "editor-theme",
-];
+#[path = "src/standalone_user_manifest.rs"]
+mod standalone_user_manifest;
 
 fn main() {
     if let Err(error) = copy_user_directory() {
@@ -43,14 +32,14 @@ fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
     if !user_dir.is_dir() {
         return Ok(());
     }
+    let vendor_crates =
+        standalone_user_manifest::standalone_user_vendor_crates(workspace_root, &user_dir)?;
     let target_profile_dir = target_profile_dir()?;
     let destination = target_profile_dir.join("user");
-    if destination.exists() {
-        fs::remove_dir_all(&destination)?;
-    }
+    remove_dir_all_if_exists(&destination)?;
     copy_dir_recursive(&user_dir, &destination)?;
-    vendor_user_support_crates(workspace_root, &destination)?;
-    rewrite_standalone_user_manifests(&destination)?;
+    vendor_user_support_crates(workspace_root, &destination, &vendor_crates)?;
+    rewrite_standalone_user_manifests(workspace_root, &user_dir, &destination, &vendor_crates)?;
     standalone_user::setup_standalone_user_repository(&destination)?;
 
     Ok(())
@@ -59,14 +48,13 @@ fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
 fn vendor_user_support_crates(
     workspace_root: &Path,
     user_destination: &Path,
+    vendor_crates: &BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vendor_dir = user_destination.join("vendor");
-    if vendor_dir.exists() {
-        fs::remove_dir_all(&vendor_dir)?;
-    }
-    fs::create_dir_all(&vendor_dir)?;
+    remove_dir_all_if_exists(&vendor_dir)?;
+    create_dir_all_with_retry(&vendor_dir)?;
 
-    for crate_name in STANDALONE_USER_VENDOR_CRATES {
+    for crate_name in vendor_crates {
         let source = workspace_root.join("crates").join(crate_name);
         let destination = vendor_dir.join(crate_name);
         copy_dir_recursive(&source, &destination)?;
@@ -76,37 +64,32 @@ fn vendor_user_support_crates(
 }
 
 fn rewrite_standalone_user_manifests(
+    workspace_root: &Path,
+    user_source: &Path,
     user_destination: &Path,
+    vendor_crates: &BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let user_replacements = standalone_user_manifest::standalone_user_path_replacements(
+        &user_source.join("Cargo.toml"),
+        workspace_root,
+        "vendor",
+    )?;
     rewrite_manifest(
         &user_destination.join("Cargo.toml"),
-        &[
-            ("../crates/editor-core", "vendor/editor-core"),
-            ("../crates/editor-fs", "vendor/editor-fs"),
-            ("../crates/editor-git", "vendor/editor-git"),
-            ("../crates/editor-icons", "vendor/editor-icons"),
-            ("../crates/editor-syntax", "vendor/editor-syntax"),
-            ("../crates/editor-theme", "vendor/editor-theme"),
-            ("../crates/editor-buffer", "vendor/editor-buffer"),
-        ],
+        &user_replacements,
         true,
+    )?;
+    let sdk_replacements = standalone_user_manifest::standalone_user_path_replacements(
+        &user_source.join("sdk").join("Cargo.toml"),
+        workspace_root,
+        "../vendor",
     )?;
     rewrite_manifest(
         &user_destination.join("sdk").join("Cargo.toml"),
-        &[
-            ("../../crates/editor-buffer", "../vendor/editor-buffer"),
-            ("../../crates/editor-core", "../vendor/editor-core"),
-            ("../../crates/editor-dap", "../vendor/editor-dap"),
-            ("../../crates/editor-fs", "../vendor/editor-fs"),
-            ("../../crates/editor-git", "../vendor/editor-git"),
-            ("../../crates/editor-icons", "../vendor/editor-icons"),
-            ("../../crates/editor-lsp", "../vendor/editor-lsp"),
-            ("../../crates/editor-syntax", "../vendor/editor-syntax"),
-            ("../../crates/editor-theme", "../vendor/editor-theme"),
-        ],
+        &sdk_replacements,
         false,
     )?;
-    for crate_name in STANDALONE_USER_VENDOR_CRATES {
+    for crate_name in vendor_crates {
         rewrite_manifest(
             &user_destination
                 .join("vendor")
@@ -122,13 +105,13 @@ fn rewrite_standalone_user_manifests(
 
 fn rewrite_manifest(
     manifest_path: &Path,
-    path_replacements: &[(&str, &str)],
+    path_replacements: &[standalone_user_manifest::ManifestPathReplacement],
     add_workspace_root: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = fs::read_to_string(manifest_path)?.replace("\r\n", "\n");
     manifest = inline_workspace_package_fields(manifest);
-    for (from, to) in path_replacements {
-        manifest = manifest.replace(from, to);
+    for replacement in path_replacements {
+        manifest = manifest.replace(&replacement.from, &replacement.to);
     }
     if add_workspace_root {
         manifest = add_standalone_workspace_root(manifest);
@@ -173,9 +156,7 @@ fn copy_assets_directory() -> Result<(), Box<dyn std::error::Error>> {
     }
     let target_profile_dir = target_profile_dir()?;
     let destination = target_profile_dir.join("assets");
-    if destination.exists() {
-        fs::remove_dir_all(&destination)?;
-    }
+    remove_dir_all_if_exists(&destination)?;
     copy_dir_recursive(&assets_dir, &destination)?;
 
     Ok(())
@@ -197,7 +178,7 @@ fn target_profile_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", source.display());
-    fs::create_dir_all(destination)?;
+    create_dir_all_with_retry(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
@@ -208,11 +189,63 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), Box<dyn s
             }
             copy_dir_recursive(&path, &target)?;
         } else if path.is_file() {
-            fs::copy(&path, &target)?;
+            copy_file_with_retry(&path, &target)?;
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     Ok(())
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => retry_windows_locked_fs(|| fs::remove_dir_all(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_dir_all_with_retry(path: &Path) -> io::Result<()> {
+    retry_windows_locked_fs(|| fs::create_dir_all(path))
+}
+
+fn copy_file_with_retry(source: &Path, destination: &Path) -> io::Result<u64> {
+    retry_windows_locked_fs(|| fs::copy(source, destination))
+}
+
+fn retry_windows_locked_fs<T, F>(mut operation: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    #[cfg(windows)]
+    {
+        const WINDOWS_LOCK_RETRY_ATTEMPTS: usize = 20;
+        const WINDOWS_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+        for attempt in 0..WINDOWS_LOCK_RETRY_ATTEMPTS {
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error)
+                    if windows_should_retry_locked_fs(&error)
+                        && attempt + 1 < WINDOWS_LOCK_RETRY_ATTEMPTS =>
+                {
+                    // Windows can transiently hold files in target\debug while concurrent builds
+                    // or scanners touch freshly written artifacts.
+                    std::thread::sleep(WINDOWS_LOCK_RETRY_DELAY);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("retry loop always returns on success or final failure")
+    }
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+}
+
+#[cfg(windows)]
+fn windows_should_retry_locked_fs(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
 }
 
 fn should_skip_dir(path: &Path) -> bool {

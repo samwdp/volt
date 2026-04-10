@@ -4148,6 +4148,7 @@ dependencies = [
  "editor-terminal",
  "editor-theme",
  "embed-resource",
+ "toml",
  "volt-user",
 ]
 

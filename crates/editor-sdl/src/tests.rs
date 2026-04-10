@@ -63,7 +63,7 @@ fn user_shell_state() -> Result<ShellState, Box<dyn std::error::Error>> {
 
 #[test]
 fn vim_bindings_switch_modes_and_move_words() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "alpha beta")?;
 
     state.handle_text_input("w")?;
@@ -79,7 +79,7 @@ fn vim_bindings_switch_modes_and_move_words() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn vim_extended_motions_and_edit_commands_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "alpha beta")?;
 
     state.handle_text_input("w")?;
@@ -156,7 +156,7 @@ fn vim_command_line_runs_shell_commands_and_substitutions() -> Result<(), Box<dy
 
 #[test]
 fn vim_counts_operators_and_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "alpha beta gamma")?;
 
     state.handle_text_input("d")?;
@@ -187,7 +187,7 @@ fn vim_counts_operators_and_text_objects_work() -> Result<(), Box<dyn std::error
 
 #[test]
 fn vim_visual_mode_and_find_repeats_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("bananas");
 
     state.handle_text_input("f")?;
@@ -213,7 +213,7 @@ fn vim_visual_mode_and_find_repeats_work() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn vim_linewise_visual_mode_and_anchor_swap_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree\n");
 
     state.handle_text_input("V")?;
@@ -236,7 +236,7 @@ fn vim_linewise_visual_mode_and_anchor_swap_work() -> Result<(), Box<dyn std::er
 
 #[test]
 fn vim_visual_block_insert_applies_to_all_lines() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
@@ -258,7 +258,7 @@ fn vim_visual_block_insert_applies_to_all_lines() -> Result<(), Box<dyn std::err
 
 #[test]
 fn vim_visual_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
 
     state.handle_text_input("v")?;
@@ -281,7 +281,7 @@ fn vim_visual_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn vim_multicursor_ctrl_b_adds_next_exact_match() -> Result<(), Box<dyn std::error::Error>> {
+fn vim_multicursor_gn_adds_next_exact_match() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = user_shell_state()?;
     set_active_buffer_text(
         &mut state,
@@ -289,7 +289,8 @@ fn vim_multicursor_ctrl_b_adds_next_exact_match() -> Result<(), Box<dyn std::err
     )?;
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
     let mc = state
         .ui()?
         .vim()
@@ -300,7 +301,8 @@ fn vim_multicursor_ctrl_b_adds_next_exact_match() -> Result<(), Box<dyn std::err
     assert_eq!(mc.ranges.len(), 1);
     assert_eq!(state.input_mode()?, InputMode::Normal);
 
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
     let mc = state
         .ui()?
         .vim()
@@ -322,8 +324,10 @@ fn vim_multicursor_caw_changes_all_matches() -> Result<(), Box<dyn std::error::E
     )?;
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
 
     state.handle_text_input("c")?;
     state.handle_text_input("a")?;
@@ -351,8 +355,10 @@ fn vim_multicursor_motions_move_linked_cursor_offsets() -> Result<(), Box<dyn st
     )?;
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
 
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
-    assert!(state.try_runtime_keybinding(Keycode::B, Mod::LCTRLMOD)?);
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
 
     state.handle_text_input("l")?;
     let mc = state
@@ -368,7 +374,7 @@ fn vim_multicursor_motions_move_linked_cursor_offsets() -> Result<(), Box<dyn st
 
 #[test]
 fn vim_counted_line_end_and_aliases_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one\ntwo\nthree");
 
     state.handle_text_input("2")?;
@@ -406,7 +412,7 @@ fn vim_counted_line_end_and_aliases_work() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn vim_substitute_delete_counts_and_visual_toggles_work() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
 
     state.handle_text_input("2")?;
@@ -446,7 +452,7 @@ fn vim_substitute_delete_counts_and_visual_toggles_work() -> Result<(), Box<dyn 
 
 #[test]
 fn vim_search_prompt_and_repeats_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one two one two");
 
     state.handle_text_input("/")?;
@@ -479,7 +485,7 @@ fn vim_search_prompt_and_repeats_work() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn vim_search_prompt_supports_fuzzy_matches() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("one two one two");
 
     state.handle_text_input("/")?;
@@ -710,7 +716,7 @@ fn hover_closes_after_cursor_motion() -> Result<(), Box<dyn std::error::Error>> 
 
 #[test]
 fn vim_search_prompt_matches_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "Users user")?;
 
     state.handle_text_input("/")?;
@@ -724,7 +730,7 @@ fn vim_search_prompt_matches_case_insensitive() -> Result<(), Box<dyn std::error
 
 #[test]
 fn vim_search_picker_selects_match_entries() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     set_active_buffer_text(&mut state, "alpha\nsplit here\nbeta\nsplit again\n")?;
 
     state.handle_text_input("/")?;
@@ -751,7 +757,7 @@ fn vim_search_picker_selects_match_entries() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn vim_quickref_word_motions_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
 
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
     state.handle_text_input("W")?;
@@ -797,7 +803,7 @@ fn vim_quickref_word_motions_work() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn vim_word_motions_treat_punctuation_as_words() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text =
         TextBuffer::from_text("PluginKeymapScope::Workspace,\n),\nnormal_binding");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 19));
@@ -843,7 +849,7 @@ fn vim_word_motions_treat_punctuation_as_words() -> Result<(), Box<dyn std::erro
 
 #[test]
 fn vim_quickref_structure_motions_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
 
     state.active_buffer_mut()?.text = TextBuffer::from_text("Alpha. Bravo! Charlie?");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
@@ -908,7 +914,7 @@ fn vim_quickref_structure_motions_work() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn vim_quickref_change_ops_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
 
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha");
     state.handle_text_input("r")?;
@@ -970,7 +976,7 @@ fn vim_quickref_change_ops_work() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn vim_quickref_repeat_registers_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
 
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
@@ -1016,7 +1022,7 @@ fn vim_quickref_repeat_registers_work() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn vim_yanks_set_flash_selections() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha beta\ngamma delta");
     let buffer_id = state.active_buffer_mut()?.id();
 
@@ -1069,7 +1075,7 @@ fn vim_yanks_set_flash_selections() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn vim_delimited_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("call(foo[bar], \"baz\")");
 
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 17));
@@ -1120,8 +1126,45 @@ fn vim_delimited_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn vim_user_bindings_change_inside_quote_text_objects() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+
+    set_active_buffer_text(&mut state, "call('bar')")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 7));
+    state.handle_text_input("c")?;
+    state.handle_text_input("i")?;
+    state.handle_text_input("'")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    state.handle_text_input("zip")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "call('zip')");
+
+    set_active_buffer_text(&mut state, "call(\"baz\")")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 7));
+    state.handle_text_input("c")?;
+    state.handle_text_input("i")?;
+    state.handle_text_input("\"")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    state.handle_text_input("zip")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "call(\"zip\")");
+
+    set_active_buffer_text(&mut state, "call(`qux`)")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 7));
+    state.handle_text_input("c")?;
+    state.handle_text_input("i")?;
+    state.handle_text_input("`")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    state.handle_text_input("zip")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "call(`zip`)");
+
+    Ok(())
+}
+
+#[test]
 fn vim_quickref_text_objects_work() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
 
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpha-beta gamma");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 7));

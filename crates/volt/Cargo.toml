@@ -28,5 +28,11 @@ editor-theme = { path = "../editor-theme" }
 editor-icons = { path = "../editor-icons" }
 user = { package = "volt-user", path = "../../user" }
 
+[build-dependencies]
+toml = "0.8.23"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "2.5.1"
+
+[dev-dependencies]
+toml = "0.8.23"

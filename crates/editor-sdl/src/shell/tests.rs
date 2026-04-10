@@ -2187,7 +2187,7 @@ fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
 }
 
 #[test]
-fn render_buffer_headerline_overlays_without_shifting_buffer_rows() -> Result<(), String> {
+fn render_buffer_headerline_reserves_rows_above_buffer_body() -> Result<(), String> {
     let render_user_library = HeaderlineTestUserLibrary::default();
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
     let mut state =
@@ -2238,23 +2238,123 @@ fn render_buffer_headerline_overlays_without_shifting_buffer_rows() -> Result<()
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::Text { y, text, .. } if *y == layout.body_y && text == "beta"
+        DrawCommand::Text { y, text, .. } if *y == layout.body_y + 16 && text == "beta"
     )));
     assert!(!scene.iter().any(|command| matches!(
         command,
-        DrawCommand::Text { y, text, .. } if *y == layout.body_y + 16 && text == "beta"
+        DrawCommand::Text { y, text, .. } if *y == layout.body_y && text == "beta"
     )));
     Ok(())
 }
 
 #[test]
-fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(), String> {
+fn render_buffer_headerline_keeps_cursor_below_sticky_row() -> Result<(), String> {
     let render_user_library = HeaderlineTestUserLibrary::default();
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
     let mut state =
         ShellState::new_with_user_library(default_error_log_path(), false, user_library)
             .map_err(|error| error.to_string())?;
-    let buffer_id = install_text_test_buffer(&mut state, "*headerline*", vec!["alpha".to_owned()])?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*headerline*",
+        vec!["abcdefghijklmnopqrstuvwxyz".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 25));
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let cursor_color = to_render_color(Color::RGB(110, 170, 255));
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        render_user_library.commandline_enabled(),
+        &render_user_library,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, text, .. }
+            if *y == layout.body_y + 16 && text == "abcdefghijklmnopqrstuvwxyz"
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, text, .. }
+            if *y == layout.body_y && text == "fn render(value: usize)"
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.y == layout.body_y + 16 && *color == cursor_color
+    )));
+    let headerline_index = scene
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                DrawCommand::Text { y, text, .. }
+                    if *y == layout.body_y && text == "fn render(value: usize)"
+            )
+        })
+        .ok_or_else(|| "missing headerline draw".to_owned())?;
+    let cursor_index = scene
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                DrawCommand::FillRoundedRect { rect, color, .. }
+                    if rect.y == layout.body_y + 16 && *color == cursor_color
+            )
+        })
+        .ok_or_else(|| "missing cursor draw".to_owned())?;
+    assert!(cursor_index > headerline_index);
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.y == layout.body_y && *color == cursor_color
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_headerline_truncates_preserving_tail_scope() -> Result<(), String> {
+    let render_user_library = HeaderlineTestUserLibrary {
+        scrolloff: 1.0,
+        headerline_lines: vec!["abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz".to_owned()],
+        headerline_requires_scrolled_viewport: false,
+    };
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
+        scrolloff: 1.0,
+        headerline_lines: vec!["abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz".to_owned()],
+        headerline_requires_scrolled_viewport: false,
+    });
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*headerline-gap*", vec!["alpha".to_owned()])?;
     shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 2));
 
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
@@ -2293,19 +2393,9 @@ fn render_buffer_headerline_does_not_shift_buffer_rows_or_cursor() -> Result<(),
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::Text { y, text, .. }
-            if *y == layout.body_y && text == "alpha"
+            if *y == layout.body_y && text.starts_with("...")
     )));
     assert!(scene.iter().any(|command| matches!(
-        command,
-        DrawCommand::Text { y, text, .. }
-            if *y == layout.body_y && text == "fn render(value: usize)"
-    )));
-    assert!(scene.iter().any(|command| matches!(
-        command,
-        DrawCommand::FillRoundedRect { rect, color, .. }
-            if rect.y == layout.body_y && *color == cursor_color
-    )));
-    assert!(!scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
             if rect.y == layout.body_y + 16 && *color == cursor_color
@@ -2549,7 +2639,13 @@ fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result
 
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
     let rect = PixelRectToRect::rect(0, 0, render_width, render_height);
-    let layout = buffer_footer_layout(buffer, rect, line_height, cell_width);
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        user_library.commandline_enabled(),
+    );
     let expected_scrolloff = 3usize.min(layout.visible_rows.saturating_sub(1) / 2);
     assert!(expected_scrolloff > 1);
     let anchor = buffer_cursor_screen_anchor(
@@ -3586,6 +3682,34 @@ fn frame_pacing_is_deferred_while_typing() {
 }
 
 #[test]
+fn normal_mode_text_input_does_not_activate_typing_budget() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    state
+        .handle_text_input("k")
+        .map_err(|error| error.to_string())?;
+
+    assert!(!state.secondary_refresh_deferred_for_typing(Instant::now()));
+    assert!(!state.typing_refresh_budget_active(Instant::now()));
+    Ok(())
+}
+
+#[test]
+fn insert_mode_text_input_activates_typing_budget() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    state
+        .handle_text_input("x")
+        .map_err(|error| error.to_string())?;
+
+    assert!(state.secondary_refresh_deferred_for_typing(Instant::now()));
+    assert!(state.typing_refresh_budget_active(Instant::now()));
+    Ok(())
+}
+
+#[test]
 fn context_overlay_cache_reuses_stale_snapshot_while_typing() {
     let cached = BufferContextOverlaySnapshot {
         key: BufferContextOverlayCacheKey {
@@ -4560,6 +4684,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         &ThemeRuntimeSettings {
             font_request: None,
             font_size: 16,
+            display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -4614,6 +4739,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         &ThemeRuntimeSettings {
             font_request: None,
             font_size: 16,
+            display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -4681,7 +4807,7 @@ fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
         )
         .unwrap_or_else(|error| panic!("unexpected error: {error}"));
 
-    let settings = theme_runtime_settings(Some(&registry), &ShellConfig::default());
+    let settings = theme_runtime_settings(Some(&registry), &ShellConfig::default(), 1.0);
 
     assert_eq!(
         settings.window_effects,
@@ -4703,6 +4829,7 @@ fn render_picker_overlay_keeps_picker_background_opaque_with_window_opacity() ->
         &ThemeRuntimeSettings {
             font_request: None,
             font_size: 16,
+            display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -4756,6 +4883,7 @@ fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String>
         &ThemeRuntimeSettings {
             font_request: None,
             font_size: 16,
+            display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -7162,7 +7290,7 @@ fn focused_hover_ctrl_scroll_motions_are_bounded() -> Result<(), String> {
 
 #[test]
 fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     state.runtime.services_mut().insert(CommandLog::default());
     state
         .runtime
@@ -7223,7 +7351,7 @@ fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
 
 #[test]
 fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     state.runtime.services_mut().insert(CommandLog::default());
     state
         .runtime
@@ -7302,7 +7430,7 @@ fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
 
 #[test]
 fn vim_command_line_completion_includes_user_aliases() -> Result<(), String> {
-    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let state = state_with_user_library()?;
 
     let write_matches = vim_command_line_completion_matches(&state.runtime, "wr");
     assert!(write_matches.contains(&"write".to_owned()));
@@ -7315,7 +7443,7 @@ fn vim_command_line_completion_includes_user_aliases() -> Result<(), String> {
 
 #[test]
 fn execute_vim_command_line_split_alias_splits_workspace() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
 
     assert_eq!(shell_ui(&state.runtime)?.pane_count(), 1);
     execute_vim_command_line(&mut state.runtime, "split")?;
@@ -7325,7 +7453,7 @@ fn execute_vim_command_line_split_alias_splits_workspace() -> Result<(), String>
 
 #[test]
 fn execute_vim_command_line_commands_alias_opens_picker() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
 
     execute_vim_command_line(&mut state.runtime, "commands")?;
     assert!(shell_ui(&state.runtime)?.picker().is_some());

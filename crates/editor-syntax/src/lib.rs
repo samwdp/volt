@@ -1059,6 +1059,28 @@ impl SyntaxRegistry {
         buffer: &TextBuffer,
         point: TextPoint,
     ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
+        self.ancestor_contexts_for_language_impl(language_id, buffer, point, None)
+    }
+
+    /// Returns named ancestor nodes for a cursor location, ordered innermost to outermost,
+    /// reusing an existing parse session when provided.
+    pub fn ancestor_contexts_for_language_with_parse_session(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        point: TextPoint,
+        parse_session: &mut Option<SyntaxParseSession>,
+    ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
+        self.ancestor_contexts_for_language_impl(language_id, buffer, point, Some(parse_session))
+    }
+
+    fn ancestor_contexts_for_language_impl(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+        point: TextPoint,
+        parse_session: Option<&mut Option<SyntaxParseSession>>,
+    ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
         let language_id = language_id.to_owned();
         if !self.languages.contains_key(&language_id) {
             return Err(SyntaxError::UnknownLanguage(language_id));
@@ -1068,7 +1090,7 @@ impl SyntaxRegistry {
             .loaded
             .get(&language_id)
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
-        let parse_result = parse_tree(&language_id, loaded, buffer, None)?;
+        let parse_result = parse_tree(&language_id, loaded, buffer, parse_session)?;
         let point = text_point_to_tree_sitter_point(buffer, point);
         let Some(mut node) = parse_result
             .tree
@@ -3734,6 +3756,45 @@ fn main() {
         assert!(kinds.contains(&"function_item"));
         assert!(kinds.contains(&"impl_item"));
         assert!(!kinds.contains(&"source_file"));
+    }
+
+    #[test]
+    fn ancestor_contexts_parse_session_matches_cold_query_after_edits() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut buffer = TextBuffer::from_text(
+            r#"impl Demo {
+    fn render(value: usize) {
+        let current = value;
+    }
+}
+"#,
+        );
+        let mut parse_session = None;
+
+        let cold =
+            must(registry.ancestor_contexts_for_language("rust", &buffer, TextPoint::new(2, 8)));
+        let incremental = must(registry.ancestor_contexts_for_language_with_parse_session(
+            "rust",
+            &buffer,
+            TextPoint::new(2, 8),
+            &mut parse_session,
+        ));
+        assert_eq!(incremental, cold);
+
+        buffer.set_cursor(TextPoint::new(2, 8));
+        buffer.insert_text("mut ");
+
+        let cold_after =
+            must(registry.ancestor_contexts_for_language("rust", &buffer, TextPoint::new(2, 12)));
+        let incremental_after = must(registry.ancestor_contexts_for_language_with_parse_session(
+            "rust",
+            &buffer,
+            TextPoint::new(2, 12),
+            &mut parse_session,
+        ));
+        assert_eq!(incremental_after, cold_after);
     }
 
     #[test]

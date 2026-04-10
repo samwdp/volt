@@ -3,6 +3,51 @@ use editor_plugin_api::{
 };
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GrammarSourceSpec<'a> {
+    repository: &'a str,
+    grammar_dir: &'a str,
+    source_dir: &'a str,
+    install_dir_name: &'a str,
+    symbol_name: &'a str,
+}
+
+impl<'a> GrammarSourceSpec<'a> {
+    pub(super) const fn new(
+        repository: &'a str,
+        install_dir_name: &'a str,
+        symbol_name: &'a str,
+    ) -> Self {
+        Self {
+            repository,
+            grammar_dir: ".",
+            source_dir: "src",
+            install_dir_name,
+            symbol_name,
+        }
+    }
+
+    pub(super) const fn with_source_paths(
+        mut self,
+        grammar_dir: &'a str,
+        source_dir: &'a str,
+    ) -> Self {
+        self.grammar_dir = grammar_dir;
+        self.source_dir = source_dir;
+        self
+    }
+
+    fn grammar_source(self) -> GrammarSource {
+        GrammarSource::new(
+            self.repository,
+            self.grammar_dir,
+            self.source_dir,
+            self.install_dir_name,
+            self.symbol_name,
+        )
+    }
+}
+
 pub(super) fn package(
     language_id: &str,
     display_name: &str,
@@ -93,11 +138,7 @@ pub(super) fn syntax_language(
         extensions,
         &[],
         &[],
-        repository,
-        ".",
-        "src",
-        install_dir_name,
-        symbol_name,
+        GrammarSourceSpec::new(repository, install_dir_name, symbol_name),
     )
 }
 
@@ -115,11 +156,7 @@ pub(super) fn syntax_language_with_path_matchers(
         extensions,
         file_names,
         file_globs,
-        repository,
-        ".",
-        "src",
-        install_dir_name,
-        symbol_name,
+        GrammarSourceSpec::new(repository, install_dir_name, symbol_name),
     )
 }
 
@@ -128,22 +165,12 @@ pub(super) fn syntax_language_with_source_and_path_matchers(
     extensions: &[&str],
     file_names: &[&str],
     file_globs: &[&str],
-    repository: &str,
-    grammar_dir: &str,
-    source_dir: &str,
-    install_dir_name: &str,
-    symbol_name: &str,
+    source: GrammarSourceSpec<'_>,
 ) -> LanguageConfiguration {
     let language = LanguageConfiguration::from_grammar(
         language_id,
         extensions.iter().copied(),
-        GrammarSource::new(
-            repository,
-            grammar_dir,
-            source_dir,
-            install_dir_name,
-            symbol_name,
-        ),
+        source.grammar_source(),
         standard_capture_mappings(),
     );
     let language = if file_names.is_empty() {

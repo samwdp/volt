@@ -1,14 +1,12 @@
-use editor_plugin_api::SyntaxNodeContext;
-
 use crate::icon_font;
 
-pub fn format_context_label(lines: &[&str], context: &SyntaxNodeContext) -> Option<String> {
-    let context_line = lines.get(context.start_position.line)?.trim();
+pub fn format_context_label_from_header(context_line: &str, kind: &str) -> Option<String> {
+    let context_line = context_line.trim();
     if context_line.is_empty() {
         return None;
     }
-    let summary = summarize_context(context_line, &context.kind)?;
-    let icon = context_icon(&context.kind, &summary);
+    let summary = summarize_context(context_line, kind)?;
+    let icon = context_icon(kind, &summary);
     Some(format!("{icon} {summary}"))
 }
 

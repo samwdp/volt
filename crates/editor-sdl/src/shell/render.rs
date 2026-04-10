@@ -1068,6 +1068,16 @@ pub(super) fn buffer_visible_rows_for_height(
     .visible_rows
 }
 
+fn buffer_visible_headerline_lines(
+    buffer: &ShellBuffer,
+    user_library: &dyn UserLibrary,
+    visible_rows: usize,
+) -> Vec<String> {
+    buffer_context_overlay_snapshot(buffer, true, false, user_library)
+        .map(|snapshot| visible_headerline_lines(snapshot.headerline_lines, visible_rows))
+        .unwrap_or_default()
+}
+
 pub(super) fn image_buffer_viewport_rect(rect: Rect, layout: BufferFooterLayout) -> Option<Rect> {
     let x = rect.x().saturating_add(8);
     let y = layout.body_y;
@@ -1352,6 +1362,10 @@ pub(super) fn buffer_cursor_screen_anchor(
         cell_width,
         user_library.commandline_enabled(),
     );
+    let headerline_rows =
+        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows).len();
+    let body_y = layout.body_y + headerline_rows as i32 * line_height;
+    let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let fringe_width = cell_width;
     let line_number_width = cell_width * 5;
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
@@ -1361,7 +1375,7 @@ pub(super) fn buffer_cursor_screen_anchor(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows,
+        visible_rows,
         wrap_cols,
         indent_size,
     );
@@ -1387,7 +1401,7 @@ pub(super) fn buffer_cursor_screen_anchor(
             }
         }
         visual_row = visual_row.saturating_add(wrapped.segments.len());
-        if visual_row >= layout.visible_rows {
+        if visual_row >= visible_rows {
             break;
         }
     }
@@ -1399,7 +1413,7 @@ pub(super) fn buffer_cursor_screen_anchor(
             + fringe_width
             + line_number_width
             + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-        y: layout.body_y + cursor_row_on_screen as i32 * line_height,
+        y: body_y + cursor_row_on_screen as i32 * line_height,
         pane_bottom: layout.pane_bottom,
     })
 }
@@ -1424,8 +1438,11 @@ pub(super) fn buffer_point_at_screen(
         cell_width,
         user_library.commandline_enabled(),
     );
-    let body_top = layout.body_y;
-    let body_height = layout.visible_rows.max(1) as i32 * line_height;
+    let headerline_rows =
+        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows).len();
+    let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
+    let body_top = layout.body_y + headerline_rows as i32 * line_height;
+    let body_height = visible_rows as i32 * line_height;
     let body_bottom = body_top + body_height;
     if body_height <= 0 {
         return None;
@@ -1444,7 +1461,7 @@ pub(super) fn buffer_point_at_screen(
     let wrapped_lines = collect_wrapped_lines(
         buffer,
         buffer.scroll_row,
-        layout.visible_rows,
+        visible_rows,
         wrap_cols,
         indent_size,
     );
@@ -1818,8 +1835,8 @@ pub(super) fn render_buffer(
             .map(|snapshot| snapshot.ghost_text_by_line)
             .unwrap_or_default();
         let headerline_rows = headerline_lines.len();
-        let body_y = layout.body_y;
-        let visible_rows = layout.visible_rows;
+        let body_y = layout.body_y + headerline_rows as i32 * line_height;
+        let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
         let wrapped_lines = collect_wrapped_lines(
             buffer,
             buffer.scroll_row,
@@ -1861,36 +1878,6 @@ pub(super) fn render_buffer(
             }
         }
 
-        let show_text_cursor = !buffer.has_input_field()
-            || !active
-            || !vim_targets_input
-            || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
-        if show_text_cursor
-            && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
-                (cursor_row_on_screen, cursor_col_on_screen)
-            && cursor_row_on_screen < visible_rows
-        {
-            let cursor_width = match input_mode {
-                InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
-                InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
-            };
-            fill_rounded_rect(
-                target,
-                PixelRectToRect::rect(
-                    rect.x()
-                        + 12
-                        + fringe_width
-                        + line_number_width
-                        + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
-                    body_y + cursor_row_on_screen as i32 * line_height,
-                    cursor_width,
-                    line_height.max(2) as u32,
-                ),
-                cursor_roundness,
-                cursor,
-            )?;
-        }
-
         let gutter_x = rect.x() + 12;
         let fringe_x = gutter_x;
         let line_number_x = gutter_x + fringe_width;
@@ -1898,6 +1885,30 @@ pub(super) fn render_buffer(
         let headerline_width = rect
             .width()
             .saturating_sub((text_x - rect.x()).max(0) as u32 + 12);
+        let show_text_cursor = !buffer.has_input_field()
+            || !active
+            || !vim_targets_input
+            || !matches!(input_mode, InputMode::Insert | InputMode::Replace);
+        let cursor_width = match input_mode {
+            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
+            InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
+        };
+        let primary_cursor_rect = if show_text_cursor
+            && let (Some(cursor_row_on_screen), Some(cursor_col_on_screen)) =
+                (cursor_row_on_screen, cursor_col_on_screen)
+            && cursor_row_on_screen < visible_rows
+        {
+            Some(PixelRectToRect::rect(
+                text_x + ((cursor_indent_cols + cursor_col_on_screen) as i32 * cell_width),
+                body_y + cursor_row_on_screen as i32 * line_height,
+                cursor_width,
+                line_height.max(2) as u32,
+            ))
+        } else {
+            None
+        };
+        let mut primary_cursor_text_overlay: Option<(i32, CursorTextOverlay)> = None;
+        let mut multicursor_rects = Vec::new();
         let mut visual_row = 0usize;
         for wrapped in wrapped_lines {
             let line_index = wrapped.line_index;
@@ -2035,20 +2046,22 @@ pub(super) fn render_buffer(
                     text_color,
                     cell_width,
                 )?;
-                if let Some(overlay) = block_cursor_text_overlay(
-                    segment_x,
-                    &wrapped.line,
-                    &wrapped.char_map,
-                    *segment,
-                    line_index,
-                    cursor_row,
-                    cursor_col,
-                    (matches!(input_mode, InputMode::Normal | InputMode::Visual)
-                        && !vim_targets_input)
-                        .then_some(base_background),
-                    cell_width,
-                ) {
-                    draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
+                if primary_cursor_text_overlay.is_none()
+                    && let Some(overlay) = block_cursor_text_overlay(
+                        segment_x,
+                        &wrapped.line,
+                        &wrapped.char_map,
+                        *segment,
+                        line_index,
+                        cursor_row,
+                        cursor_col,
+                        (matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                            && !vim_targets_input)
+                            .then_some(base_background),
+                        cell_width,
+                    )
+                {
+                    primary_cursor_text_overlay = Some((y, overlay));
                 }
                 if user_library.lsp_show_buffer_diagnostics() && buffer.lsp_enabled() {
                     draw_diagnostic_underlines_for_segment(
@@ -2082,26 +2095,17 @@ pub(super) fn render_buffer(
                         && point.column >= segment.start_col
                         && point.column <= segment.end_col
                 }) {
-                    let cursor_width = match input_mode {
-                        InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
-                        InputMode::Insert | InputMode::Replace => (cell_width / 4).max(2) as u32,
-                    };
-                    fill_rounded_rect(
-                        target,
-                        PixelRectToRect::rect(
-                            segment_x
-                                + (wrapped
-                                    .char_map
-                                    .display_cols_between(segment.start_col, point.column)
-                                    as i32
-                                    * cell_width),
-                            y,
-                            cursor_width,
-                            line_height.max(2) as u32,
-                        ),
-                        cursor_roundness,
-                        cursor,
-                    )?;
+                    multicursor_rects.push(PixelRectToRect::rect(
+                        segment_x
+                            + (wrapped
+                                .char_map
+                                .display_cols_between(segment.start_col, point.column)
+                                as i32
+                                * cell_width),
+                        y,
+                        cursor_width,
+                        line_height.max(2) as u32,
+                    ));
                 }
                 visual_row = visual_row.saturating_add(1);
             }
@@ -2127,7 +2131,11 @@ pub(super) fn render_buffer(
                     target,
                     text_x,
                     y,
-                    &truncate_text_to_width(headerline, headerline_width, cell_width),
+                    &truncate_text_to_width_preserving_end(
+                        headerline,
+                        headerline_width,
+                        cell_width,
+                    ),
                     statusline_active,
                 )?;
             }
@@ -2135,13 +2143,22 @@ pub(super) fn render_buffer(
                 target,
                 PixelRectToRect::rect(
                     rect.x() + 8,
-                    layout.body_y + headerline_rows as i32 * line_height - 1,
+                    body_y.saturating_sub(1),
                     rect.width().saturating_sub(16),
                     1,
                 ),
                 border_color,
                 window_effects,
             )?;
+        }
+        for rect in multicursor_rects {
+            fill_rounded_rect(target, rect, cursor_roundness, cursor)?;
+        }
+        if let Some(rect) = primary_cursor_rect {
+            fill_rounded_rect(target, rect, cursor_roundness, cursor)?;
+        }
+        if let Some((y, overlay)) = primary_cursor_text_overlay {
+            draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
         }
     }
 
@@ -5447,6 +5464,39 @@ pub(super) fn truncate_text_to_width(text: &str, max_width: u32, cell_width: i32
 
     truncated.push_str(ellipsis);
     truncated
+}
+
+pub(super) fn truncate_text_to_width_preserving_end(
+    text: &str,
+    max_width: u32,
+    cell_width: i32,
+) -> String {
+    if text.is_empty() || max_width == 0 {
+        return String::new();
+    }
+
+    let cell_width = cell_width.max(1) as u32;
+    let max_cells = (max_width / cell_width) as usize;
+    if text.chars().count() <= max_cells {
+        return text.to_owned();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_cells = ellipsis.chars().count();
+    if max_cells <= ellipsis_cells {
+        return "...".to_owned();
+    }
+
+    let available_cells = max_cells.saturating_sub(ellipsis_cells);
+    let suffix = text
+        .chars()
+        .rev()
+        .take(available_cells)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{ellipsis}{suffix}")
 }
 
 pub(super) struct PixelRectToRect;

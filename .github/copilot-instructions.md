@@ -3,6 +3,7 @@
 ## Build, test, and lint
 
 - Use `cargo xtask fmt`, `cargo xtask fmt-check`, `cargo xtask check`, `cargo xtask clippy`, `cargo xtask test`, and `cargo xtask ci`. `cargo xtask ci` `cargo clippy --workspace --all-targets -- -D warnings` is the full validation path used by CI.
+- Always run `cargo xtask ci` when validating any changes and fix them before you mark anything as complete
 - Run a single test with `cargo test -p <package> <test_name>`. Example: `cargo test -p volt-user user_library_exports_themes`.
 - For an exact match, use the module-qualified test name: `cargo test -p volt-user tests::user_library_exports_themes -- --exact`.
 - Before finishing a task, run the runtime smoke test: `cargo run -p volt -- --shell-hidden` (unless the user asks you to skip runtime checks).

@@ -9452,7 +9452,9 @@ impl ShellState {
         if self.should_suppress_text_input(text) {
             return Ok(());
         }
-        self.last_text_input_at = Some(Instant::now());
+        if self.text_input_activates_typing_budget()? {
+            self.last_text_input_at = Some(Instant::now());
+        }
         self.last_text_input_profile = None;
         let profile_started = self.typing_profiler.as_ref().map(|_| Instant::now());
         let hover_before = self.ui()?.hover().cloned();
@@ -9469,6 +9471,16 @@ impl ShellState {
             self.last_text_input_profile = Some(profile_started.elapsed());
         }
         result
+    }
+
+    fn text_input_activates_typing_budget(&self) -> Result<bool, ShellError> {
+        if self.command_line_visible()? || self.picker_visible()? {
+            return Ok(true);
+        }
+        Ok(matches!(
+            self.input_mode()?,
+            InputMode::Insert | InputMode::Replace
+        ))
     }
 
     fn handle_text_input_inner(&mut self, text: &str) -> Result<(), ShellError> {
@@ -10742,8 +10754,16 @@ impl ShellState {
                 ui.popup_focus_active(popup),
             ));
         }
-        for (buffer_id, width, height, _active) in visible_buffers {
-            let (language_id, visible_rows, is_acp, has_plugin_sections, scrolloff) = {
+        let user_library = shell_user_library(&self.runtime);
+        for (buffer_id, width, height, active) in visible_buffers {
+            let (
+                language_id,
+                visible_rows,
+                is_acp,
+                has_plugin_sections,
+                scrolloff,
+                reserved_top_rows,
+            ) = {
                 let theme_registry = self.runtime.services().get::<ThemeRegistry>();
                 let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
@@ -10756,6 +10776,15 @@ impl ShellState {
                 );
                 let is_acp = buffer.is_acp_buffer();
                 let has_plugin_sections = buffer.has_plugin_sections();
+                let reserved_top_rows = if active && !is_acp && !has_plugin_sections {
+                    buffer_context_overlay_snapshot(buffer, true, false, &*user_library)
+                        .map(|snapshot| {
+                            visible_headerline_lines(snapshot.headerline_lines, visible_rows).len()
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 (
                     buffer.language_id().map(str::to_owned),
                     visible_rows,
@@ -10766,6 +10795,7 @@ impl ShellState {
                     } else {
                         0
                     },
+                    reserved_top_rows,
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -10796,7 +10826,13 @@ impl ShellState {
             } else {
                 buffer.set_viewport_lines(visible_rows);
             }
-            buffer.ensure_visible(visible_rows, wrap_cols, indent_size, 0, scrolloff);
+            buffer.ensure_visible(
+                visible_rows,
+                wrap_cols,
+                indent_size,
+                reserved_top_rows,
+                scrolloff,
+            );
         }
         Ok(())
     }

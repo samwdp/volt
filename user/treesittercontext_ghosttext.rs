@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use editor_plugin_api::{GhostTextContext, GhostTextLine, treesitter};
 
-use crate::treesittercontext_shared::format_context_label;
+use crate::treesittercontext_shared::format_context_label_from_header;
 
 /// Returns inline ghost-text breadcrumbs derived from tree-sitter contexts.
 pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
@@ -15,24 +15,42 @@ pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
         context.cursor_line,
         context.cursor_column,
     );
-    build_ghost_text_lines(context.buffer_text, context.cursor_line, &contexts)
+    build_ghost_text_lines(
+        context.buffer_text,
+        context.buffer_id,
+        context.buffer_revision,
+        context.cursor_line,
+        &contexts,
+    )
 }
 
 fn build_ghost_text_lines(
     buffer_text: &str,
+    buffer_id: u64,
+    buffer_revision: u64,
     cursor_line: usize,
     contexts: &[editor_plugin_api::SyntaxNodeContext],
 ) -> Vec<GhostTextLine> {
-    let lines = buffer_text.lines().collect::<Vec<_>>();
-    if lines.is_empty() {
-        return Vec::new();
-    }
     let mut by_line = BTreeMap::new();
     for context in contexts {
-        if !should_render_context(&lines, cursor_line, context) {
+        if !should_render_context(
+            buffer_text,
+            buffer_id,
+            buffer_revision,
+            cursor_line,
+            context,
+        ) {
             continue;
         }
-        let Some(text) = format_context_label(&lines, context) else {
+        let Some(source_line) = treesitter::buffer_line_text(
+            buffer_text,
+            buffer_id,
+            buffer_revision,
+            context.start_position.line,
+        ) else {
+            continue;
+        };
+        let Some(text) = format_context_label_from_header(&source_line, &context.kind) else {
             continue;
         };
         by_line.entry(context.end_position.line).or_insert(text);
@@ -44,7 +62,9 @@ fn build_ghost_text_lines(
 }
 
 fn should_render_context(
-    lines: &[&str],
+    buffer_text: &str,
+    buffer_id: u64,
+    buffer_revision: u64,
     cursor_line: usize,
     context: &editor_plugin_api::SyntaxNodeContext,
 ) -> bool {
@@ -55,7 +75,10 @@ fn should_render_context(
         return true;
     }
     context.start_position.line < context.end_position.line
-        && is_block_closing_line(lines.get(cursor_line).copied().unwrap_or_default())
+        && is_block_closing_line(
+            &treesitter::buffer_line_text(buffer_text, buffer_id, buffer_revision, cursor_line)
+                .unwrap_or_default(),
+        )
         && is_block_like_kind(&context.kind)
 }
 
@@ -134,7 +157,7 @@ mod tests {
             },
         ];
 
-        let lines = build_ghost_text_lines(buffer, 2, &contexts);
+        let lines = build_ghost_text_lines(buffer, 1, 1, 2, &contexts);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].text.contains("render(value: usize)"));
         assert!(lines[1].text.contains("impl Demo"));
@@ -188,7 +211,7 @@ mod tests {
             },
         ];
 
-        let lines = build_ghost_text_lines(buffer, 2, &contexts);
+        let lines = build_ghost_text_lines(buffer, 1, 1, 2, &contexts);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].text.contains("for item in items"));
         assert!(lines[1].text.contains("render()"));
@@ -203,7 +226,7 @@ mod tests {
             end_position: SyntaxPoint::new(0, 52),
         }];
 
-        let lines = build_ghost_text_lines(buffer, 0, &contexts);
+        let lines = build_ghost_text_lines(buffer, 1, 1, 0, &contexts);
         assert!(lines.is_empty());
     }
 
@@ -216,7 +239,7 @@ mod tests {
             end_position: SyntaxPoint::new(2, 2),
         }];
 
-        let lines = build_ghost_text_lines(buffer, 2, &contexts);
+        let lines = build_ghost_text_lines(buffer, 1, 1, 2, &contexts);
         assert!(lines.is_empty());
     }
 
@@ -229,7 +252,7 @@ mod tests {
             end_position: SyntaxPoint::new(2, 1),
         }];
 
-        let lines = build_ghost_text_lines(buffer, 2, &contexts);
+        let lines = build_ghost_text_lines(buffer, 1, 1, 2, &contexts);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].line, 2);
         assert!(lines[0].text.contains("render()"));

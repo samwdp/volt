@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use editor_plugin_api::{GhostTextContext, treesitter};
 
-use crate::treesittercontext_shared::format_context_label;
+use crate::treesittercontext_shared::format_context_label_from_header;
+
+const MAX_HEADERLINE_CONTEXTS: usize = 4;
+const HEADERLINE_SEPARATOR: &str = "  >  ";
 
 /// Returns sticky headerline breadcrumbs derived from tree-sitter contexts.
 pub fn headerline_lines(context: &GhostTextContext<'_>) -> Vec<String> {
@@ -15,37 +18,56 @@ pub fn headerline_lines(context: &GhostTextContext<'_>) -> Vec<String> {
         context.cursor_line,
         context.cursor_column,
     );
-    build_headerline_lines(context.buffer_text, context.viewport_top_line, &contexts)
+    build_headerline_lines(
+        context.buffer_text,
+        context.buffer_id,
+        context.buffer_revision,
+        context.viewport_top_line,
+        &contexts,
+    )
 }
 
 fn build_headerline_lines(
     buffer_text: &str,
+    buffer_id: u64,
+    buffer_revision: u64,
     viewport_top_line: usize,
     contexts: &[editor_plugin_api::SyntaxNodeContext],
 ) -> Vec<String> {
-    let lines = buffer_text.lines().collect::<Vec<_>>();
-    if lines.is_empty() {
+    if viewport_top_line == 0 {
         return Vec::new();
     }
     let mut seen = BTreeSet::new();
-    let mut headerline = Vec::new();
+    let mut breadcrumbs = Vec::new();
     for context in contexts.iter().rev() {
         if context.start_position.line >= viewport_top_line {
             continue;
         }
-        let Some(text) = format_context_label(&lines, context) else {
+        let Some(source_line) = treesitter::buffer_line_text(
+            buffer_text,
+            buffer_id,
+            buffer_revision,
+            context.start_position.line,
+        ) else {
+            continue;
+        };
+        let Some(text) = format_context_label_from_header(&source_line, &context.kind) else {
             continue;
         };
         if seen.insert(text.clone()) {
-            headerline.push(text);
+            breadcrumbs.push(text);
         }
     }
-    headerline
+    if breadcrumbs.is_empty() {
+        return Vec::new();
+    }
+    let start = breadcrumbs.len().saturating_sub(MAX_HEADERLINE_CONTEXTS);
+    vec![breadcrumbs[start..].join(HEADERLINE_SEPARATOR)]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_headerline_lines;
+    use super::{HEADERLINE_SEPARATOR, build_headerline_lines};
     use crate::{icon_font, treesittercontext_shared::summarize_context};
     use editor_syntax::{SyntaxNodeContext, SyntaxPoint};
 
@@ -67,17 +89,13 @@ mod tests {
         ];
 
         assert_eq!(
-            build_headerline_lines(buffer, 2, &contexts),
-            vec![
-                format!(
-                    "{} impl Demo",
-                    icon_font::symbols::cod::COD_SYMBOL_STRUCTURE
-                ),
-                format!(
-                    "{} render(value: usize)",
-                    icon_font::symbols::cod::COD_SYMBOL_METHOD
-                ),
-            ]
+            build_headerline_lines(buffer, 1, 1, 2, &contexts),
+            vec![format!(
+                "{} impl Demo{}{} render(value: usize)",
+                icon_font::symbols::cod::COD_SYMBOL_STRUCTURE,
+                HEADERLINE_SEPARATOR,
+                icon_font::symbols::cod::COD_SYMBOL_METHOD,
+            )]
         );
     }
 
@@ -99,13 +117,13 @@ mod tests {
         ];
 
         assert_eq!(
-            build_headerline_lines(buffer, 1, &contexts),
+            build_headerline_lines(buffer, 1, 1, 1, &contexts),
             vec![format!(
                 "{} impl Demo",
                 icon_font::symbols::cod::COD_SYMBOL_STRUCTURE
             )]
         );
-        assert!(build_headerline_lines(buffer, 0, &contexts).is_empty());
+        assert!(build_headerline_lines(buffer, 1, 1, 0, &contexts).is_empty());
     }
 
     #[test]
