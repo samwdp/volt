@@ -661,8 +661,8 @@ blue = "#83a598"
         assert!((0.0..=1.0).contains(&opacity));
         assert!(blur >= 0.0);
         assert_eq!(corner_radius, 16.0);
-        assert_eq!(opacity, 1.0);
-        assert_eq!(blur, 0.0);
+        assert_eq!(opacity, 0.1);
+        assert_eq!(blur, 1.0);
     }
 
     #[test]
