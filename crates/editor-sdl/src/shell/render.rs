@@ -5458,32 +5458,86 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
             .map_err(|error| ShellError::Sdl(error.to_string()));
     }
 
-    canvas.set_draw_color(color);
+    let previous_blend_mode = canvas.blend_mode();
+    canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
     let rect_height = rect.height() as i32;
     let rect_width = rect.width() as i32;
 
-    for row in 0..rect_height {
-        let inset = if row < radius {
-            let dy = radius - row - 1;
-            radius - ((radius * radius - dy * dy) as f64).sqrt().floor() as i32
-        } else if row >= rect_height - radius {
-            let dy = row - (rect_height - radius);
-            radius - ((radius * radius - dy * dy) as f64).sqrt().floor() as i32
-        } else {
-            0
-        };
+    let result = (|| {
+        for row in 0..rect_height {
+            let (inset, edge_alpha) =
+                rounded_rect_row_coverage(row, rect_height, rect_width, radius, color.a);
+            let width = rect_width - (inset * 2);
+            if width > 0 {
+                canvas.set_draw_color(color);
+                canvas
+                    .fill_rect(Rect::new(rect.x() + inset, rect.y() + row, width as u32, 1))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
 
-        let width = rect_width - (inset * 2);
-        if width <= 0 {
-            continue;
+            if edge_alpha > 0 && inset > 0 {
+                let edge_color = Color::RGBA(color.r, color.g, color.b, edge_alpha);
+                canvas.set_draw_color(edge_color);
+                canvas
+                    .fill_rect(Rect::new(rect.x() + inset - 1, rect.y() + row, 1, 1))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                canvas
+                    .fill_rect(Rect::new(
+                        rect.x() + rect_width - inset,
+                        rect.y() + row,
+                        1,
+                        1,
+                    ))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
         }
+        Ok(())
+    })();
 
-        canvas
-            .fill_rect(Rect::new(rect.x() + inset, rect.y() + row, width as u32, 1))
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    canvas.set_blend_mode(previous_blend_mode);
+    result
+}
+
+fn rounded_rect_row_coverage(
+    row: i32,
+    rect_height: i32,
+    rect_width: i32,
+    radius: i32,
+    alpha: u8,
+) -> (i32, u8) {
+    let corner_distance = if row < radius {
+        radius as f32 - row as f32 - 0.5
+    } else if row >= rect_height - radius {
+        row as f32 - (rect_height - radius) as f32 + 0.5
+    } else {
+        return (0, 0);
+    };
+    let radius_f = radius as f32;
+    let inset = radius_f - (radius_f * radius_f - corner_distance * corner_distance).sqrt();
+    let full_inset = inset.ceil() as i32;
+    let full_inset = full_inset.clamp(0, rect_width / 2);
+    let coverage = (full_inset as f32 - inset).clamp(0.0, 1.0);
+    (full_inset, ((coverage * f32::from(alpha)).round()) as u8)
+}
+
+#[cfg(test)]
+mod render_rounded_rect_tests {
+    use super::rounded_rect_row_coverage;
+
+    #[test]
+    fn rounded_rect_row_coverage_is_symmetric() {
+        let top = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        let bottom = rounded_rect_row_coverage(11, 12, 20, 4, 255);
+        assert_eq!(top, bottom);
     }
 
-    Ok(())
+    #[test]
+    fn rounded_rect_row_coverage_adds_partial_edge_pixels() {
+        let (inset, alpha) = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        assert_eq!(inset, 2);
+        assert!(alpha > 0);
+        assert!(alpha < 255);
+    }
 }
 
 pub(super) fn draw_undercurl_canvas<T: RenderTarget>(
