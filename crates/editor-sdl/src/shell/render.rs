@@ -193,6 +193,13 @@ pub(super) fn render_shell_state(
     Ok(())
 }
 
+pub(super) fn shared_corner_radius(theme_registry: Option<&ThemeRegistry>) -> u32 {
+    theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_CORNER_RADIUS))
+        .map(|value| value.clamp(0.0, 64.0).round() as u32)
+        .unwrap_or(16)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CursorScreenAnchor {
     pub(super) x: i32,
@@ -2795,20 +2802,28 @@ pub(super) fn render_text_panel(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let window_effects = current_window_effect_settings(theme_registry);
+    let corner_radius = shared_corner_radius(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let header_height = text_panel_header_height(title, line_height.max(1));
     if header_height > 0 {
         let header_rect = PixelRectToRect::rect(
@@ -2818,7 +2833,7 @@ pub(super) fn render_text_panel(
             header_height as u32,
         );
         let header_color = header_background;
-        let header_radius = 9.min(header_rect.height() / 2);
+        let header_radius = inner_radius.min(header_rect.height() / 2);
         fill_window_surface_rounded_rect(
             target,
             header_rect,
@@ -2953,6 +2968,7 @@ pub(super) fn render_input_panel(
     pane_layout: TextPaneLayout,
     input_mode: InputMode,
     window_effects: WindowEffects,
+    corner_radius: u32,
     panel_background: Color,
     foreground: Color,
     muted: Color,
@@ -2970,14 +2986,21 @@ pub(super) fn render_input_panel(
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let input_x = rect.x() + INPUT_PANEL_VERTICAL_PADDING;
     let input_y = rect.y() + INPUT_PANEL_VERTICAL_PADDING;
     let prompt = input.prompt();
@@ -3207,6 +3230,7 @@ pub(super) fn render_acp_buffer_body(
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let active_pane = state.active_pane;
+    let corner_radius = shared_corner_radius(theme_registry);
 
     render_acp_pane(
         target,
@@ -3279,6 +3303,7 @@ pub(super) fn render_acp_buffer_body(
         acp_layout.input,
         input_mode,
         window_effects,
+        corner_radius,
         panel_background,
         foreground,
         muted,
@@ -3352,20 +3377,28 @@ pub(super) fn render_acp_pane(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let window_effects = current_window_effect_settings(theme_registry);
+    let corner_radius = shared_corner_radius(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let header_height = (line_height + 10).max(line_height);
     let header_rect = PixelRectToRect::rect(
         rect.x() + 1,
@@ -3378,7 +3411,7 @@ pub(super) fn render_acp_pane(
     } else {
         header_background
     };
-    let header_radius = 9.min(header_rect.height() / 2);
+    let header_radius = inner_radius.min(header_rect.height() / 2);
     fill_window_surface_rounded_rect(
         target,
         header_rect,
@@ -5458,32 +5491,71 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
             .map_err(|error| ShellError::Sdl(error.to_string()));
     }
 
-    canvas.set_draw_color(color);
+    let previous_blend_mode = canvas.blend_mode();
+    canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
     let rect_height = rect.height() as i32;
     let rect_width = rect.width() as i32;
 
-    for row in 0..rect_height {
-        let inset = if row < radius {
-            let dy = radius - row - 1;
-            radius - ((radius * radius - dy * dy) as f64).sqrt().floor() as i32
-        } else if row >= rect_height - radius {
-            let dy = row - (rect_height - radius);
-            radius - ((radius * radius - dy * dy) as f64).sqrt().floor() as i32
-        } else {
-            0
-        };
+    let result = (|| {
+        for row in 0..rect_height {
+            let (inset, edge_alpha) =
+                rounded_rect_row_coverage(row, rect_height, rect_width, radius, color.a);
+            let width = rect_width - (inset * 2);
+            if width > 0 {
+                canvas.set_draw_color(color);
+                canvas
+                    .fill_rect(Rect::new(rect.x() + inset, rect.y() + row, width as u32, 1))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
 
-        let width = rect_width - (inset * 2);
-        if width <= 0 {
-            continue;
+            if edge_alpha > 0 && inset > 0 {
+                let edge_color = Color::RGBA(color.r, color.g, color.b, edge_alpha);
+                canvas.set_draw_color(edge_color);
+                canvas
+                    .fill_rect(Rect::new(rect.x() + inset - 1, rect.y() + row, 1, 1))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+                canvas
+                    .fill_rect(Rect::new(
+                        rect.x() + rect_width - inset,
+                        rect.y() + row,
+                        1,
+                        1,
+                    ))
+                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            }
         }
+        Ok(())
+    })();
 
-        canvas
-            .fill_rect(Rect::new(rect.x() + inset, rect.y() + row, width as u32, 1))
-            .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    }
+    canvas.set_blend_mode(previous_blend_mode);
+    result
+}
 
-    Ok(())
+fn rounded_rect_row_coverage(
+    row: i32,
+    rect_height: i32,
+    rect_width: i32,
+    radius: i32,
+    alpha: u8,
+) -> (i32, u8) {
+    // Measure from pixel centers so the scanline coverage matches the blended edge pixels.
+    let corner_distance = if row < radius {
+        radius as f32 - row as f32 - 0.5
+    } else if row >= rect_height - radius {
+        row as f32 - (rect_height - radius) as f32 + 0.5
+    } else {
+        return (0, 0);
+    };
+    let radius_f = radius as f32;
+    let inset = radius_f - (radius_f * radius_f - corner_distance * corner_distance).sqrt();
+    let full_inset = inset.ceil() as i32;
+    let full_inset = full_inset.clamp(0, rect_width / 2);
+    let coverage = (full_inset as f32 - inset).clamp(0.0, 1.0);
+    (full_inset, scaled_coverage_alpha(coverage, alpha))
+}
+
+fn scaled_coverage_alpha(coverage: f32, alpha: u8) -> u8 {
+    ((coverage * f32::from(alpha)).round()) as u8
 }
 
 pub(super) fn draw_undercurl_canvas<T: RenderTarget>(
@@ -5594,5 +5666,25 @@ impl PixelRectToRect {
 
     pub(super) fn from_pixel_rect(rect: PixelRect) -> Rect {
         Self::rect(rect.x, rect.y, rect.width, rect.height)
+    }
+}
+
+#[cfg(test)]
+mod render_rounded_rect_tests {
+    use super::rounded_rect_row_coverage;
+
+    #[test]
+    fn rounded_rect_row_coverage_is_symmetric() {
+        let top = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        let bottom = rounded_rect_row_coverage(11, 12, 20, 4, 255);
+        assert_eq!(top, bottom);
+    }
+
+    #[test]
+    fn rounded_rect_row_coverage_adds_partial_edge_pixels() {
+        let (inset, alpha) = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        assert!(inset > 0);
+        assert!(alpha > 0);
+        assert!(alpha < 255);
     }
 }

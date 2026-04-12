@@ -1043,10 +1043,7 @@ pub(super) fn render_picker_overlay(
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
         .max(1) as i32;
-    let picker_roundness = theme_registry
-        .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
-        .map(|value| value.clamp(0.0, 64.0).round() as u32)
-        .unwrap_or(16);
+    let corner_radius = shared_corner_radius(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let foreground = theme_color(
         theme_registry,
@@ -1076,7 +1073,7 @@ pub(super) fn render_picker_overlay(
             popup_rect.width,
             popup_rect.height,
         ),
-        picker_roundness,
+        corner_radius,
         picker_highlight,
         window_effects,
     )?;
@@ -1086,7 +1083,7 @@ pub(super) fn render_picker_overlay(
         popup_rect.width.saturating_sub(4),
         popup_rect.height.saturating_sub(4),
     );
-    let inner_radius = picker_roundness.saturating_sub(2);
+    let inner_radius = corner_radius.saturating_sub(2);
     fill_window_surface_rounded_rect(
         target,
         inner_rect,

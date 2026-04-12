@@ -95,14 +95,14 @@ scrolloff = 5
 font = "Liga Berkeley Mono"
 font_size = 18
 cursor_roundness = 2
-picker_roundness = 16
+corner_radius = 16
 ```
 
 This is where you change:
 
 - edit `font` to use a specific installed font, or use `"default"` for Volt's fallback font selection
 - edit `font_size` to change text size
-- edit `scrolloff`, `cursor_roundness`, or other shared UI options
+- edit `scrolloff`, `cursor_roundness`, `corner_radius`, or other shared UI options
 
 Language-specific defaults also live in `global.toml` under sections like:
 

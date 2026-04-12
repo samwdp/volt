@@ -541,6 +541,7 @@ pub(super) fn render_browser_buffer_body(
         ),
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
+    let corner_radius = shared_corner_radius(theme_registry);
     fill_window_surface_rect(
         target,
         browser_layout.viewport,
@@ -554,6 +555,7 @@ pub(super) fn render_browser_buffer_body(
         browser_layout.input,
         input_mode,
         window_effects,
+        corner_radius,
         panel_background,
         foreground,
         muted,
