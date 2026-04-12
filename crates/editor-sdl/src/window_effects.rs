@@ -12,6 +12,8 @@ pub(crate) const OPTION_WINDOW_BLUR: &str = "window.blur";
 
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
 const DEFAULT_WINDOW_BLUR: f32 = 0.0;
+const SDL_VIDEO_DRIVER_X11: &str = "x11";
+const SDL_VIDEO_DRIVER_WAYLAND: &str = "wayland";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowOpacityMode {
@@ -223,7 +225,7 @@ fn requested_window_opacity_mode() -> WindowOpacityMode {
 #[cfg(any(test, target_os = "linux"))]
 fn window_opacity_mode_for_driver(driver: Option<&str>) -> WindowOpacityMode {
     match driver {
-        Some("x11" | "wayland") => WindowOpacityMode::NativeWindow,
+        Some(SDL_VIDEO_DRIVER_X11 | SDL_VIDEO_DRIVER_WAYLAND) => WindowOpacityMode::NativeWindow,
         _ => WindowOpacityMode::Surface,
     }
 }
@@ -235,6 +237,9 @@ fn current_video_driver_name() -> Option<String> {
         if driver.is_null() {
             return None;
         }
+        // SAFETY: SDL owns this NUL-terminated driver name for the lifetime of the
+        // initialized video subsystem, and we copy it into an owned String
+        // immediately before returning.
         CStr::from_ptr(driver).to_str().ok().map(str::to_owned)
     }
 }
@@ -286,6 +291,8 @@ mod platform {
     use sdl3::video::Window;
 
     pub(super) fn apply_blur(_window: &Window, _blur: f32) -> Result<(), String> {
+        // Linux compositor blur remains backend-specific; keep this as an
+        // intentional no-op so window.opacity can still be applied.
         Ok(())
     }
 
