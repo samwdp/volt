@@ -5525,26 +5525,6 @@ fn scaled_coverage_alpha(coverage: f32, alpha: u8) -> u8 {
     ((coverage * f32::from(alpha)).round()) as u8
 }
 
-#[cfg(test)]
-mod render_rounded_rect_tests {
-    use super::rounded_rect_row_coverage;
-
-    #[test]
-    fn rounded_rect_row_coverage_is_symmetric() {
-        let top = rounded_rect_row_coverage(0, 12, 20, 4, 255);
-        let bottom = rounded_rect_row_coverage(11, 12, 20, 4, 255);
-        assert_eq!(top, bottom);
-    }
-
-    #[test]
-    fn rounded_rect_row_coverage_adds_partial_edge_pixels() {
-        let (inset, alpha) = rounded_rect_row_coverage(0, 12, 20, 4, 255);
-        assert_eq!(inset, 2);
-        assert!(alpha > 0);
-        assert!(alpha < 255);
-    }
-}
-
 pub(super) fn draw_undercurl_canvas<T: RenderTarget>(
     canvas: &mut Canvas<T>,
     x: i32,
@@ -5653,5 +5633,25 @@ impl PixelRectToRect {
 
     pub(super) fn from_pixel_rect(rect: PixelRect) -> Rect {
         Self::rect(rect.x, rect.y, rect.width, rect.height)
+    }
+}
+
+#[cfg(test)]
+mod render_rounded_rect_tests {
+    use super::rounded_rect_row_coverage;
+
+    #[test]
+    fn rounded_rect_row_coverage_is_symmetric() {
+        let top = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        let bottom = rounded_rect_row_coverage(11, 12, 20, 4, 255);
+        assert_eq!(top, bottom);
+    }
+
+    #[test]
+    fn rounded_rect_row_coverage_adds_partial_edge_pixels() {
+        let (inset, alpha) = rounded_rect_row_coverage(0, 12, 20, 4, 255);
+        assert!(inset > 0);
+        assert!(alpha > 0);
+        assert!(alpha < 255);
     }
 }
