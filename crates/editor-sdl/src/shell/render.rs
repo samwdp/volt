@@ -5505,6 +5505,7 @@ fn rounded_rect_row_coverage(
     radius: i32,
     alpha: u8,
 ) -> (i32, u8) {
+    // Measure from pixel centers so the scanline coverage matches the blended edge pixels.
     let corner_distance = if row < radius {
         radius as f32 - row as f32 - 0.5
     } else if row >= rect_height - radius {
@@ -5517,7 +5518,11 @@ fn rounded_rect_row_coverage(
     let full_inset = inset.ceil() as i32;
     let full_inset = full_inset.clamp(0, rect_width / 2);
     let coverage = (full_inset as f32 - inset).clamp(0.0, 1.0);
-    (full_inset, ((coverage * f32::from(alpha)).round()) as u8)
+    (full_inset, scaled_coverage_alpha(coverage, alpha))
+}
+
+fn scaled_coverage_alpha(coverage: f32, alpha: u8) -> u8 {
+    ((coverage * f32::from(alpha)).round()) as u8
 }
 
 #[cfg(test)]
