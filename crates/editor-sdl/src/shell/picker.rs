@@ -1036,6 +1036,7 @@ pub(super) fn render_picker_overlay(
     theme_registry: Option<&ThemeRegistry>,
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
+    let window_effects = current_window_effect_settings(theme_registry);
     let cell_width = fonts
         .primary()
         .size_of_char('M')
@@ -1046,14 +1047,14 @@ pub(super) fn render_picker_overlay(
         .and_then(|registry| registry.resolve_number(OPTION_PICKER_ROUNDNESS))
         .map(|value| value.clamp(0.0, 64.0).round() as u32)
         .unwrap_or(16);
-    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(29, 32, 40));
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let foreground = theme_color(
         theme_registry,
         "ui.foreground",
         Color::RGBA(215, 221, 232, 255),
     );
     let is_dark = is_dark_color(base_background);
-    let popup_background = adjust_color(base_background, if is_dark { 8 } else { -8 });
+    let popup_background = theme_color(theme_registry, "ui.picker.background", base_background);
     let highlight_background = adjust_color(popup_background, if is_dark { 16 } else { -16 });
     let picker_highlight = theme_color(
         theme_registry,
@@ -1067,7 +1068,7 @@ pub(super) fn render_picker_overlay(
     let muted = blend_color(foreground, popup_background, 0.25);
     let subtle = blend_color(foreground, popup_background, 0.4);
     // Border using two rounded rectangles (outer border color, inner background)
-    fill_rounded_rect(
+    fill_window_surface_rounded_rect(
         target,
         PixelRectToRect::rect(
             popup_rect.x,
@@ -1077,6 +1078,7 @@ pub(super) fn render_picker_overlay(
         ),
         picker_roundness,
         picker_highlight,
+        window_effects,
     )?;
     let inner_rect = PixelRectToRect::rect(
         popup_rect.x + 2,
@@ -1085,7 +1087,13 @@ pub(super) fn render_picker_overlay(
         popup_rect.height.saturating_sub(4),
     );
     let inner_radius = picker_roundness.saturating_sub(2);
-    fill_rounded_rect(target, inner_rect, inner_radius, popup_background)?;
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        popup_background,
+        window_effects,
+    )?;
 
     draw_text(
         target,
@@ -1159,7 +1167,7 @@ pub(super) fn render_picker_overlay(
         let detail_x = content_left + label_width as i32 + 16;
         let detail_width = content_width.saturating_sub(label_width + 16);
         if selected {
-            fill_rect(
+            fill_window_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     popup_rect.x + 12,
@@ -1168,6 +1176,7 @@ pub(super) fn render_picker_overlay(
                     row_height as u32,
                 ),
                 highlight_background,
+                window_effects,
             )?;
         }
 

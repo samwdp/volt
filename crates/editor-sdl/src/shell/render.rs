@@ -222,7 +222,7 @@ pub(super) fn render_runtime_popup_overlay(
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
-    let popup_background = adjust_color(base_background, if is_dark { 12 } else { -12 });
+    let popup_background = base_background;
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
     fill_window_surface_rect(target, popup_rect, popup_background, window_effects)?;

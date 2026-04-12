@@ -5145,6 +5145,123 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
     Ok(())
 }
 
+fn render_shell_state_scene_with_docked_runtime_popup(
+    theme_registry: Option<&ThemeRegistry>,
+) -> Result<(Vec<DrawCommand>, Rect), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_terminal_popup_test_buffer(&mut state)?;
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "runtime popup was not opened".to_owned())?;
+    let ui = shell_ui(&state.runtime)?;
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let width = 320;
+    let height = 180;
+    let cell_width = 8;
+    let line_height = 16;
+    let popup_height = popup_window_height(height, line_height);
+    let popup_rect = PixelRectToRect::rect(
+        0,
+        height.saturating_sub(popup_height) as i32,
+        width,
+        popup_height,
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        Some(&popup),
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        theme_registry,
+        width,
+        height,
+        cell_width,
+        line_height,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok((scene, popup_rect))
+}
+
+#[test]
+fn render_shell_state_uses_theme_background_for_docked_runtime_popup_surface() -> Result<(), String>
+{
+    let base_background = Color::RGB(15, 16, 20);
+    let (scene, popup_rect) = render_shell_state_scene_with_docked_runtime_popup(None)?;
+    let popup_surface_fills = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::FillRect { rect, color }
+                if rect.x == popup_rect.x()
+                    && rect.y == popup_rect.y()
+                    && rect.width == popup_rect.width()
+                    && rect.height == popup_rect.height() =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(popup_surface_fills, vec![to_render_color(base_background)]);
+    Ok(())
+}
+
+#[test]
+fn render_shell_state_applies_window_opacity_to_docked_runtime_popup_surface() -> Result<(), String>
+{
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let (scene, popup_rect) = render_shell_state_scene_with_docked_runtime_popup(Some(&registry))?;
+    let popup_surface_fills = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::FillRect { rect, color }
+                if rect.x == popup_rect.x()
+                    && rect.y == popup_rect.y()
+                    && rect.width == popup_rect.width()
+                    && rect.height == popup_rect.height() =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        popup_surface_fills,
+        vec![to_render_color(Color::RGBA(15, 16, 20, 128))]
+    );
+    Ok(())
+}
+
 #[test]
 fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
     let mut registry = ThemeRegistry::new();
@@ -5168,8 +5285,7 @@ fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
 }
 
 #[test]
-fn render_picker_overlay_keeps_picker_background_opaque_with_window_opacity() -> Result<(), String>
-{
+fn render_picker_overlay_applies_window_opacity_to_picker_background() -> Result<(), String> {
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let _video = sdl_context.video().map_err(|error| error.to_string())?;
     let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
@@ -5217,7 +5333,11 @@ fn render_picker_overlay_keeps_picker_background_opaque_with_window_opacity() ->
                 && rect.y == popup_rect.y + 2
                 && rect.width == popup_rect.width.saturating_sub(4)
                 && rect.height == popup_rect.height.saturating_sub(4)
-                && color.a == 255
+                && *color == to_render_color(Color::RGBA(15, 16, 20, 128))
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { color, .. } if color.a == 255
     )));
     Ok(())
 }
@@ -5262,8 +5382,7 @@ fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String>
     picker::render_picker_overlay(&mut target, &fonts, &picker, 320, 180, 16, None)
         .map_err(|error| error.to_string())?;
 
-    let base_background = Color::RGB(29, 32, 40);
-    let popup_background = adjust_color(base_background, 8);
+    let popup_background = Color::RGB(15, 16, 20);
     let foreground = Color::RGBA(215, 221, 232, 255);
     let expected_muted = blend_color(foreground, popup_background, 0.25);
 
