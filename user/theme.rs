@@ -647,6 +647,9 @@ blue = "#83a598"
     fn bundled_shared_theme_config_includes_window_effect_defaults() {
         let shared = bundled_shared_theme_config();
         let theme = shared.apply_to_theme(Theme::new("test-theme", "Test Theme"));
+        let corner_radius = theme
+            .option_number("corner_radius")
+            .unwrap_or_else(|| panic!("shared config missing corner_radius"));
         let opacity = theme
             .option_number("window.opacity")
             .unwrap_or_else(|| panic!("shared config missing window.opacity"));
@@ -654,8 +657,10 @@ blue = "#83a598"
             .option_number("window.blur")
             .unwrap_or_else(|| panic!("shared config missing window.blur"));
 
+        assert!(corner_radius >= 0.0);
         assert!((0.0..=1.0).contains(&opacity));
         assert!(blur >= 0.0);
+        assert_eq!(corner_radius, 16.0);
         assert_eq!(opacity, 1.0);
         assert_eq!(blur, 0.0);
     }
@@ -668,6 +673,7 @@ blue = "#83a598"
 [options]
 font = "Example Mono"
 font_size = 14
+corner_radius = 10
 "window.opacity" = 0.75
 "window.blur" = 12.0
 
@@ -695,6 +701,7 @@ background = "#112233"
 
         assert_eq!(theme.option_string("font"), Some("Example Mono"));
         assert_eq!(theme.option_number("font_size"), Some(14.0));
+        assert_eq!(theme.option_number("corner_radius"), Some(10.0));
         assert_eq!(theme.option_number("window.opacity"), Some(0.75));
         assert_eq!(theme.option_number("window.blur"), Some(12.0));
         assert_eq!(theme.option_number("langs.rust.indent"), Some(4.0));

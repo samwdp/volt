@@ -193,6 +193,13 @@ pub(super) fn render_shell_state(
     Ok(())
 }
 
+pub(super) fn shared_corner_radius(theme_registry: Option<&ThemeRegistry>) -> u32 {
+    theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_CORNER_RADIUS))
+        .map(|value| value.clamp(0.0, 64.0).round() as u32)
+        .unwrap_or(16)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CursorScreenAnchor {
     pub(super) x: i32,
@@ -2795,20 +2802,28 @@ pub(super) fn render_text_panel(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let window_effects = current_window_effect_settings(theme_registry);
+    let corner_radius = shared_corner_radius(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let header_height = text_panel_header_height(title, line_height.max(1));
     if header_height > 0 {
         let header_rect = PixelRectToRect::rect(
@@ -2818,7 +2833,7 @@ pub(super) fn render_text_panel(
             header_height as u32,
         );
         let header_color = header_background;
-        let header_radius = 9.min(header_rect.height() / 2);
+        let header_radius = inner_radius.min(header_rect.height() / 2);
         fill_window_surface_rounded_rect(
             target,
             header_rect,
@@ -2953,6 +2968,7 @@ pub(super) fn render_input_panel(
     pane_layout: TextPaneLayout,
     input_mode: InputMode,
     window_effects: WindowEffects,
+    corner_radius: u32,
     panel_background: Color,
     foreground: Color,
     muted: Color,
@@ -2970,14 +2986,21 @@ pub(super) fn render_input_panel(
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let input_x = rect.x() + INPUT_PANEL_VERTICAL_PADDING;
     let input_y = rect.y() + INPUT_PANEL_VERTICAL_PADDING;
     let prompt = input.prompt();
@@ -3207,6 +3230,7 @@ pub(super) fn render_acp_buffer_body(
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let active_pane = state.active_pane;
+    let corner_radius = shared_corner_radius(theme_registry);
 
     render_acp_pane(
         target,
@@ -3279,6 +3303,7 @@ pub(super) fn render_acp_buffer_body(
         acp_layout.input,
         input_mode,
         window_effects,
+        corner_radius,
         panel_background,
         foreground,
         muted,
@@ -3352,20 +3377,28 @@ pub(super) fn render_acp_pane(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let window_effects = current_window_effect_settings(theme_registry);
+    let corner_radius = shared_corner_radius(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
         rect.width().saturating_sub(2),
         rect.height().saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, inner_rect, 9, panel_background, window_effects)?;
+    let inner_radius = corner_radius.saturating_sub(1);
+    fill_window_surface_rounded_rect(
+        target,
+        inner_rect,
+        inner_radius,
+        panel_background,
+        window_effects,
+    )?;
     let header_height = (line_height + 10).max(line_height);
     let header_rect = PixelRectToRect::rect(
         rect.x() + 1,
@@ -3378,7 +3411,7 @@ pub(super) fn render_acp_pane(
     } else {
         header_background
     };
-    let header_radius = 9.min(header_rect.height() / 2);
+    let header_radius = inner_radius.min(header_rect.height() / 2);
     fill_window_surface_rounded_rect(
         target,
         header_rect,
