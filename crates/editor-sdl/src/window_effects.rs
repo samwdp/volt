@@ -508,7 +508,10 @@ mod tests {
         set_window_opacity_mode(mode);
 
         assert_eq!(mode, WindowOpacityMode::NativeWindow);
-        assert_eq!(current_window_opacity_mode(), WindowOpacityMode::NativeWindow);
+        assert_eq!(
+            current_window_opacity_mode(),
+            WindowOpacityMode::NativeWindow
+        );
         assert_eq!(window.opacity_calls, vec![0.4]);
     }
 
