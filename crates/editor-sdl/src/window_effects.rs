@@ -305,8 +305,8 @@ mod tests {
         NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY, WindowEffects,
         WindowOpacityMode, apply_window_effects_to_target, configure_window_opacity_driver,
         current_window_opacity_mode, normalize_window_blur, normalize_window_opacity,
-        set_window_opacity_mode, sync_window_opacity, update_window_effects_to_target,
-        window_creation_flags, window_opacity_mode_for_driver,
+        requested_window_opacity_mode, set_window_opacity_mode, sync_window_opacity,
+        update_window_effects_to_target, window_creation_flags, window_opacity_mode_for_driver,
     };
     use editor_theme::{Theme, ThemeRegistry};
     use sdl3::video::WindowFlags;
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn configure_window_opacity_driver_updates_requested_mode() {
-        configure_window_opacity_driver(Some(SDL_VIDEO_DRIVER_X11));
+        configure_window_opacity_driver(Some("x11"));
         let mut window = RecordingWindow::default();
         let mode = sync_window_opacity(&mut window, 0.4, requested_window_opacity_mode());
 
