@@ -5423,7 +5423,7 @@ pub(super) fn fill_rect(
 }
 
 pub(super) fn window_surface_color(color: Color, window_effects: WindowEffects) -> Color {
-    let alpha = (f32::from(color.a) * window_effects.opacity)
+    let alpha = (f32::from(color.a) * crate::window_effects::window_surface_opacity(window_effects))
         .round()
         .clamp(0.0, 255.0) as u8;
     Color::RGBA(color.r, color.g, color.b, alpha)

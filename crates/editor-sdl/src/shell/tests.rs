@@ -5467,6 +5467,7 @@ fn theme_source_fingerprint_from_dir_changes_when_global_toml_changes() -> Resul
 fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let video = sdl_context.video().map_err(|error| error.to_string())?;
+    crate::window_effects::configure_window_opacity_driver(Some(video.current_video_driver()));
     let window_effects = crate::window_effects::WindowEffects {
         opacity: 0.35,
         blur: 0.0,

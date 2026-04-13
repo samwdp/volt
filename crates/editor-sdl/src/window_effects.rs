@@ -1,5 +1,6 @@
 use editor_theme::ThemeRegistry;
 use sdl3::video::{Window, WindowFlags};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::ShellError;
 
@@ -8,6 +9,26 @@ pub(crate) const OPTION_WINDOW_BLUR: &str = "window.blur";
 
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
 const DEFAULT_WINDOW_BLUR: f32 = 0.0;
+const SDL_VIDEO_DRIVER_X11: &str = "x11";
+const SDL_VIDEO_DRIVER_WAYLAND: &str = "wayland";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowOpacityMode {
+    Surface = 0,
+    NativeWindow = 1,
+}
+
+impl WindowOpacityMode {
+    fn from_stored(value: u8) -> Self {
+        match value {
+            1 => Self::NativeWindow,
+            _ => Self::Surface,
+        }
+    }
+}
+
+static WINDOW_OPACITY_MODE: AtomicU8 = AtomicU8::new(WindowOpacityMode::Surface as u8);
+static REQUESTED_WINDOW_OPACITY_MODE: AtomicU8 = AtomicU8::new(WindowOpacityMode::Surface as u8);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WindowEffects {
@@ -45,12 +66,17 @@ pub(crate) fn window_creation_flags(settings: WindowEffects) -> WindowFlags {
     WindowFlags::TRANSPARENT
 }
 
-trait NativeWindowBlurTarget {
+trait NativeWindowEffectsTarget {
+    fn set_native_window_opacity(&mut self, opacity: f32) -> Result<(), String>;
     fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String>;
     fn clear_native_window_blur(&mut self) -> Result<(), String>;
 }
 
-impl NativeWindowBlurTarget for Window {
+impl NativeWindowEffectsTarget for Window {
+    fn set_native_window_opacity(&mut self, opacity: f32) -> Result<(), String> {
+        self.set_opacity(opacity).map_err(|error| error.to_string())
+    }
+
     fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String> {
         platform::apply_blur(self, blur)
     }
@@ -66,6 +92,13 @@ pub(crate) fn current_window_effect_settings(
     WindowEffects::resolve(theme_registry)
 }
 
+pub(crate) fn configure_window_opacity_driver(driver: Option<&str>) {
+    REQUESTED_WINDOW_OPACITY_MODE.store(
+        window_opacity_mode_for_driver(driver) as u8,
+        Ordering::Relaxed,
+    );
+}
+
 pub(crate) fn normalize_window_opacity(value: f64) -> f32 {
     if !value.is_finite() {
         return DEFAULT_WINDOW_OPACITY;
@@ -78,6 +111,13 @@ pub(crate) fn normalize_window_blur(value: f64) -> f32 {
         return DEFAULT_WINDOW_BLUR;
     }
     value.clamp(0.0, f64::from(f32::MAX)) as f32
+}
+
+pub(crate) fn window_surface_opacity(settings: WindowEffects) -> f32 {
+    match current_window_opacity_mode() {
+        WindowOpacityMode::NativeWindow => DEFAULT_WINDOW_OPACITY,
+        WindowOpacityMode::Surface => settings.opacity,
+    }
 }
 
 pub(crate) fn apply_window_effects(
@@ -96,22 +136,33 @@ pub(crate) fn update_window_effects(
 }
 
 fn apply_window_effects_to_target(
-    window: &mut impl NativeWindowBlurTarget,
+    window: &mut impl NativeWindowEffectsTarget,
     settings: WindowEffects,
 ) -> Result<(), ShellError> {
-    // CONTEXT: window.opacity is already applied to renderer-owned background
-    // surfaces so text stays fully opaque. Native window opacity would fade the
-    // entire OS window and double-apply the effect.
-    let _ = settings.opacity;
+    // CONTEXT: most platforms keep window.opacity on renderer-owned background
+    // surfaces so text stays fully opaque. Linux X11/Wayland compositors are
+    // more reliable with native SDL window opacity, so that path can override
+    // renderer-side alpha when it succeeds.
+    set_window_opacity_mode(sync_window_opacity(
+        window,
+        settings.opacity,
+        requested_window_opacity_mode(),
+    ));
     apply_window_blur(window, settings.blur)
 }
 
 fn update_window_effects_to_target(
-    window: &mut impl NativeWindowBlurTarget,
+    window: &mut impl NativeWindowEffectsTarget,
     previous: WindowEffects,
     next: WindowEffects,
 ) -> Result<(), ShellError> {
-    let _ = next.opacity;
+    if previous.opacity != next.opacity {
+        set_window_opacity_mode(sync_window_opacity(
+            window,
+            next.opacity,
+            requested_window_opacity_mode(),
+        ));
+    }
     if next.blur > DEFAULT_WINDOW_BLUR {
         return apply_window_blur(window, next.blur);
     }
@@ -122,7 +173,7 @@ fn update_window_effects_to_target(
 }
 
 fn apply_window_blur(
-    window: &mut impl NativeWindowBlurTarget,
+    window: &mut impl NativeWindowEffectsTarget,
     blur: f32,
 ) -> Result<(), ShellError> {
     if blur <= DEFAULT_WINDOW_BLUR {
@@ -136,10 +187,44 @@ fn apply_window_blur(
     })
 }
 
-fn clear_window_blur(window: &mut impl NativeWindowBlurTarget) -> Result<(), ShellError> {
+fn clear_window_blur(window: &mut impl NativeWindowEffectsTarget) -> Result<(), ShellError> {
     window.clear_native_window_blur().map_err(|error| {
         ShellError::Runtime(format!("failed to clear {OPTION_WINDOW_BLUR}: {error}"))
     })
+}
+
+fn current_window_opacity_mode() -> WindowOpacityMode {
+    WindowOpacityMode::from_stored(WINDOW_OPACITY_MODE.load(Ordering::Relaxed))
+}
+
+fn set_window_opacity_mode(mode: WindowOpacityMode) {
+    WINDOW_OPACITY_MODE.store(mode as u8, Ordering::Relaxed);
+}
+
+fn sync_window_opacity(
+    window: &mut impl NativeWindowEffectsTarget,
+    opacity: f32,
+    requested_mode: WindowOpacityMode,
+) -> WindowOpacityMode {
+    if requested_mode != WindowOpacityMode::NativeWindow {
+        return WindowOpacityMode::Surface;
+    }
+    match window.set_native_window_opacity(opacity) {
+        Ok(()) => WindowOpacityMode::NativeWindow,
+        Err(_) => WindowOpacityMode::Surface,
+    }
+}
+
+fn requested_window_opacity_mode() -> WindowOpacityMode {
+    WindowOpacityMode::from_stored(REQUESTED_WINDOW_OPACITY_MODE.load(Ordering::Relaxed))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn window_opacity_mode_for_driver(driver: Option<&str>) -> WindowOpacityMode {
+    match driver {
+        Some(SDL_VIDEO_DRIVER_X11 | SDL_VIDEO_DRIVER_WAYLAND) => WindowOpacityMode::NativeWindow,
+        _ => WindowOpacityMode::Surface,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -188,10 +273,10 @@ mod platform {
 mod platform {
     use sdl3::video::Window;
 
-    pub(super) fn apply_blur(_window: &Window, blur: f32) -> Result<(), String> {
-        Err(format!(
-            "Linux SDL windows do not expose a reliable blur backend; requested {blur}, but compositor blur remains platform-specific"
-        ))
+    pub(super) fn apply_blur(_window: &Window, _blur: f32) -> Result<(), String> {
+        // Linux compositor blur remains backend-specific; keep this as an
+        // intentional no-op so window.opacity can still be applied.
+        Ok(())
     }
 
     pub(super) fn clear_blur(_window: &Window) -> Result<(), String> {
@@ -217,22 +302,34 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        NativeWindowBlurTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY, WindowEffects,
-        apply_window_effects_to_target, normalize_window_blur, normalize_window_opacity,
-        update_window_effects_to_target, window_creation_flags,
+        NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY, WindowEffects,
+        WindowOpacityMode, apply_window_effects_to_target, configure_window_opacity_driver,
+        current_window_opacity_mode, normalize_window_blur, normalize_window_opacity,
+        requested_window_opacity_mode, set_window_opacity_mode, sync_window_opacity,
+        update_window_effects_to_target, window_creation_flags, window_opacity_mode_for_driver,
     };
     use editor_theme::{Theme, ThemeRegistry};
     use sdl3::video::WindowFlags;
 
     #[derive(Default)]
     struct RecordingWindow {
+        opacity_calls: Vec<f32>,
         blur_calls: Vec<f32>,
         clear_calls: usize,
+        opacity_error: Option<String>,
         blur_error: Option<String>,
         clear_error: Option<String>,
     }
 
-    impl NativeWindowBlurTarget for RecordingWindow {
+    impl NativeWindowEffectsTarget for RecordingWindow {
+        fn set_native_window_opacity(&mut self, opacity: f32) -> Result<(), String> {
+            self.opacity_calls.push(opacity);
+            match &self.opacity_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+
         fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String> {
             self.blur_calls.push(blur);
             match &self.blur_error {
@@ -259,11 +356,15 @@ mod tests {
 
     #[test]
     fn window_effects_default_to_opaque_without_theme_values() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         assert_eq!(WindowEffects::resolve(None), WindowEffects::default());
     }
 
     #[test]
     fn window_effects_resolve_normalized_theme_values() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut registry = ThemeRegistry::new();
         must(
             registry.register(
@@ -284,6 +385,8 @@ mod tests {
 
     #[test]
     fn window_effect_normalizers_handle_non_finite_values() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         assert_eq!(normalize_window_opacity(f64::NAN), 1.0);
         assert_eq!(normalize_window_blur(f64::NEG_INFINITY), 0.0);
         assert_eq!(normalize_window_blur(f64::INFINITY), 0.0);
@@ -292,6 +395,8 @@ mod tests {
 
     #[test]
     fn window_creation_flags_always_request_transparent_surface_for_live_updates() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         assert!(
             window_creation_flags(WindowEffects {
                 opacity: 0.75,
@@ -311,6 +416,8 @@ mod tests {
 
     #[test]
     fn apply_window_effects_ignores_native_window_opacity_to_keep_text_opaque() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
         must(apply_window_effects_to_target(
@@ -321,12 +428,15 @@ mod tests {
             },
         ));
 
+        assert!(window.opacity_calls.is_empty());
         assert!(window.blur_calls.is_empty());
         assert_eq!(window.clear_calls, 0);
     }
 
     #[test]
     fn apply_window_effects_still_calls_native_blur_backend_when_requested() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
         must(apply_window_effects_to_target(
@@ -337,12 +447,15 @@ mod tests {
             },
         ));
 
+        assert!(window.opacity_calls.is_empty());
         assert_eq!(window.blur_calls, vec![18.0]);
         assert_eq!(window.clear_calls, 0);
     }
 
     #[test]
     fn update_window_effects_clears_native_blur_when_disabled() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
         must(update_window_effects_to_target(
@@ -357,7 +470,75 @@ mod tests {
             },
         ));
 
+        assert!(window.opacity_calls.is_empty());
         assert!(window.blur_calls.is_empty());
         assert_eq!(window.clear_calls, 1);
+    }
+
+    #[test]
+    fn linux_native_window_opacity_targets_x11_and_wayland_only() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        assert_eq!(
+            window_opacity_mode_for_driver(Some("x11")),
+            WindowOpacityMode::NativeWindow
+        );
+        assert_eq!(
+            window_opacity_mode_for_driver(Some("wayland")),
+            WindowOpacityMode::NativeWindow
+        );
+        assert_eq!(
+            window_opacity_mode_for_driver(Some("cocoa")),
+            WindowOpacityMode::Surface
+        );
+        assert_eq!(
+            window_opacity_mode_for_driver(None),
+            WindowOpacityMode::Surface
+        );
+    }
+
+    #[test]
+    fn sync_window_opacity_uses_native_window_when_supported() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let mut window = RecordingWindow::default();
+
+        let mode = sync_window_opacity(&mut window, 0.4, WindowOpacityMode::NativeWindow);
+        set_window_opacity_mode(mode);
+
+        assert_eq!(mode, WindowOpacityMode::NativeWindow);
+        assert_eq!(
+            current_window_opacity_mode(),
+            WindowOpacityMode::NativeWindow
+        );
+        assert_eq!(window.opacity_calls, vec![0.4]);
+    }
+
+    #[test]
+    fn sync_window_opacity_falls_back_to_surface_when_native_call_fails() {
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let mut window = RecordingWindow {
+            opacity_error: Some("unsupported".to_owned()),
+            ..RecordingWindow::default()
+        };
+
+        let mode = sync_window_opacity(&mut window, 0.4, WindowOpacityMode::NativeWindow);
+        set_window_opacity_mode(mode);
+
+        assert_eq!(mode, WindowOpacityMode::Surface);
+        assert_eq!(current_window_opacity_mode(), WindowOpacityMode::Surface);
+        assert_eq!(window.opacity_calls, vec![0.4]);
+    }
+
+    #[test]
+    fn configure_window_opacity_driver_updates_requested_mode() {
+        configure_window_opacity_driver(Some("x11"));
+        let mut window = RecordingWindow::default();
+        let mode = sync_window_opacity(&mut window, 0.4, requested_window_opacity_mode());
+
+        assert_eq!(mode, WindowOpacityMode::NativeWindow);
+
+        configure_window_opacity_driver(None);
     }
 }
