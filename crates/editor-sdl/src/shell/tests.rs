@@ -3408,6 +3408,27 @@ fn open_repo_git_status_buffer(
     Ok(buffer_id)
 }
 
+fn wait_for_terminal_buffer_close(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        refresh_pending_terminal(&mut state.runtime, 800, 600, 8, 16)?;
+        let tracked = terminal_buffer_state(&state.runtime)?.contains(buffer_id);
+        let buffered = shell_ui(&state.runtime)?.buffer(buffer_id).is_some();
+        if !tracked && !buffered {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let tracked = terminal_buffer_state(&state.runtime)?.contains(buffer_id);
+    let buffered = shell_ui(&state.runtime)?.buffer(buffer_id).is_some();
+    let popup_visible = active_runtime_popup(&state.runtime)?.is_some();
+    Err(format!(
+        "temporary terminal buffer `{buffer_id}` did not close in time (tracked={tracked}, buffered={buffered}, popup_visible={popup_visible})"
+    ))
+}
+
 fn open_oil_test_buffer(
     state: &mut ShellState,
     root: &std::path::Path,
@@ -4402,6 +4423,73 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
 }
 
 #[test]
+fn git_push_upstream_runs_in_terminal_popup_and_refreshes_status() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-push-upstream-popup")?;
+    let remote = unique_temp_dir("git-push-upstream-popup-remote");
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", remote.display()))?,
+        ],
+    )?;
+    let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned();
+    run_git_in_dir(
+        &repo,
+        &["push", "-q", "--set-upstream", "origin", branch.as_str()],
+    )?;
+    std::fs::write(repo.join("feature.txt"), "feature\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "feature.txt"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "feature"])?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let snapshot = shell_buffer(&state.runtime, buffer_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing before push".to_owned())?;
+    assert_eq!(snapshot.ahead(), 1);
+    assert_eq!(snapshot.unpushed().len(), 1);
+
+    push_git_to_upstream(&mut state.runtime, buffer_id)?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "terminal popup was not opened for git push".to_owned())?;
+    assert!(shell_ui(&state.runtime)?.popup_focus);
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert!(buffer_is_terminal(
+        &shell_buffer(&state.runtime, popup.active_buffer)?.kind
+    ));
+
+    wait_for_terminal_buffer_close(&mut state, popup.active_buffer)?;
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.popup_focus);
+    assert_eq!(ui.popup_buffer_id, None);
+    assert!(ui.buffer(popup.active_buffer).is_none());
+    assert!(!terminal_buffer_state(&state.runtime)?.contains(popup.active_buffer));
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
+
+    let refreshed = shell_buffer(&state.runtime, buffer_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing after push".to_owned())?;
+    assert_eq!(refreshed.ahead(), 0);
+    assert!(refreshed.unpushed().is_empty());
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&remote).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_line_is_untracked_uses_section_metadata() {
     let meta = SectionLineMeta {
         section_id: GIT_SECTION_UNTRACKED.to_owned(),
@@ -5230,8 +5318,8 @@ fn render_shell_state_uses_theme_background_for_docked_runtime_popup_surface() -
 }
 
 #[test]
-fn render_shell_state_applies_window_opacity_to_docked_runtime_popup_surface() -> Result<(), String>
-{
+fn render_shell_state_uses_opaque_overlay_chrome_for_docked_runtime_popup_surface()
+-> Result<(), String> {
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -5257,7 +5345,121 @@ fn render_shell_state_applies_window_opacity_to_docked_runtime_popup_surface() -
 
     assert_eq!(
         popup_surface_fills,
-        vec![to_render_color(Color::RGBA(15, 16, 20, 128))]
+        vec![to_render_color(Color::RGBA(15, 16, 20, 255))]
+    );
+    Ok(())
+}
+
+fn render_shell_state_scene_with_notification_overlay(
+    theme_registry: Option<&ThemeRegistry>,
+) -> Result<(Vec<DrawCommand>, Rect), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let now = Instant::now();
+    shell_ui_mut(&mut state.runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "toast".to_owned(),
+            severity: NotificationSeverity::Info,
+            title: "Overlay".to_owned(),
+            body_lines: vec!["Readability check".to_owned()],
+            progress: None,
+            active: true,
+            action: None,
+        },
+        now,
+    );
+    let ui = shell_ui(&state.runtime)?;
+    let width = 320;
+    let height = 180;
+    let cell_width = 8;
+    let line_height = 16;
+    let rect = notification_overlay_layouts(
+        &ui.visible_notifications(now),
+        width,
+        height,
+        cell_width,
+        line_height,
+    )
+    .first()
+    .map(|layout| layout.rect)
+    .ok_or_else(|| "notification overlay was not created".to_owned())?;
+
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        theme_registry,
+        width,
+        height,
+        cell_width,
+        line_height,
+        12,
+        now,
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok((scene, rect))
+}
+
+#[test]
+fn render_shell_state_uses_opaque_overlay_chrome_for_notification_surface() -> Result<(), String> {
+    let base_background = Color::RGB(15, 16, 20);
+    let expected_background = adjust_color(base_background, 18);
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let (scene, notification_rect) =
+        render_shell_state_scene_with_notification_overlay(Some(&registry))?;
+    let notification_surface_fills = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::FillRoundedRect { rect, color, .. }
+                if rect.x == notification_rect.x + 1
+                    && rect.y == notification_rect.y + 1
+                    && rect.width == notification_rect.width().saturating_sub(2)
+                    && rect.height == notification_rect.height().saturating_sub(2) =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        notification_surface_fills,
+        vec![to_render_color(Color::RGBA(
+            expected_background.r,
+            expected_background.g,
+            expected_background.b,
+            255,
+        ))]
     );
     Ok(())
 }
@@ -5285,7 +5487,7 @@ fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
 }
 
 #[test]
-fn render_picker_overlay_applies_window_opacity_to_picker_background() -> Result<(), String> {
+fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let _video = sdl_context.video().map_err(|error| error.to_string())?;
     let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
@@ -5333,11 +5535,208 @@ fn render_picker_overlay_applies_window_opacity_to_picker_background() -> Result
                 && rect.y == popup_rect.y + 2
                 && rect.width == popup_rect.width.saturating_sub(4)
                 && rect.height == popup_rect.height.saturating_sub(4)
-                && *color == to_render_color(Color::RGBA(15, 16, 20, 128))
+                && *color == to_render_color(Color::RGBA(15, 16, 20, 255))
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::Text { color, .. } if color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*autocomplete-overlay*",
+        vec!["alpha".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 5));
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: "alpha".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: "manual".to_owned(),
+            provider_label: "Manual".to_owned(),
+            provider_icon: "M".to_owned(),
+            item_icon: "•".to_owned(),
+            label: "alpha".to_owned(),
+            replacement: "alpha".to_owned(),
+            detail: Some("detail".to_owned()),
+            documentation: Some("documentation".to_owned()),
+        }],
+        selected_index: 0,
+        loading: false,
+    };
+    let base_background = theme_color(Some(&registry), "ui.background", Color::RGB(15, 16, 20));
+    let is_dark = is_dark_color(base_background);
+    let accent = theme_color(
+        Some(&registry),
+        "ui.selection",
+        adjust_color(base_background, if is_dark { 48 } else { -48 }),
+    );
+    let panel_background = theme_color(
+        Some(&registry),
+        "ui.autocomplete.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let selected_background = theme_color(
+        Some(&registry),
+        "ui.autocomplete.selection",
+        blend_color(accent, panel_background, 0.72),
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_autocomplete_overlay(
+        &mut target,
+        shell_ui(&state.runtime)?,
+        &overlay,
+        PixelRectToRect::rect(0, 0, 640, 360),
+        &NullUserLibrary,
+        Some(&registry),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { color, .. }
+            if *color
+                == to_render_color(Color::RGBA(
+                    panel_background.r,
+                    panel_background.g,
+                    panel_background.b,
+                    255,
+                ))
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { color, .. }
+            if *color
+                == to_render_color(Color::RGBA(
+                    selected_background.r,
+                    selected_background.g,
+                    selected_background.b,
+                    255,
+                ))
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_text_test_buffer(&mut state, "*hover-overlay*", vec!["hover".to_owned()])?;
+    install_hover_test_overlay(&mut state, false)?;
+    let hover = shell_ui(&state.runtime)?
+        .hover()
+        .cloned()
+        .ok_or_else(|| "hover overlay missing".to_owned())?;
+
+    let base_background = theme_color(Some(&registry), "ui.background", Color::RGB(15, 16, 20));
+    let base_foreground = theme_color(
+        Some(&registry),
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let accent = theme_color(
+        Some(&registry),
+        "ui.selection",
+        adjust_color(base_background, if is_dark { 48 } else { -48 }),
+    );
+    let background = theme_color(
+        Some(&registry),
+        "ui.hover.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let header_background = theme_color(
+        Some(&registry),
+        "ui.hover.header.background",
+        adjust_color(background, if is_dark { 6 } else { -6 }),
+    );
+    let selected_tab = theme_color(
+        Some(&registry),
+        "ui.hover.selection",
+        blend_color(accent, header_background, 0.68),
+    );
+    let _muted = theme_color(
+        Some(&registry),
+        "ui.hover.muted",
+        blend_color(base_foreground, background, 0.46),
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_hover_overlay(
+        &mut target,
+        shell_ui(&state.runtime)?,
+        &hover,
+        PixelRectToRect::rect(0, 0, 640, 360),
+        &NullUserLibrary,
+        Some(&registry),
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { color, .. }
+            if *color
+                == to_render_color(Color::RGBA(
+                    background.r,
+                    background.g,
+                    background.b,
+                    255,
+                ))
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { color, .. }
+            if *color
+                == to_render_color(Color::RGBA(
+                    header_background.r,
+                    header_background.g,
+                    header_background.b,
+                    255,
+                ))
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { color, .. }
+            if *color
+                == to_render_color(Color::RGBA(
+                    selected_tab.r,
+                    selected_tab.g,
+                    selected_tab.b,
+                    255,
+                ))
     )));
     Ok(())
 }
@@ -5465,6 +5864,7 @@ fn theme_source_fingerprint_from_dir_changes_when_global_toml_changes() -> Resul
 
 #[test]
 fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
+    let _guard = crate::window_effects::lock_window_effects_for_tests();
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let video = sdl_context.video().map_err(|error| error.to_string())?;
     crate::window_effects::configure_window_opacity_driver(Some(video.current_video_driver()));
@@ -5737,7 +6137,7 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
 }
 
 #[test]
-fn render_plugin_sections_header_applies_window_opacity() -> Result<(), String> {
+fn render_plugin_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -5763,20 +6163,6 @@ fn render_plugin_sections_header_applies_window_opacity() -> Result<(), String> 
         header_height,
     );
     let base_background = Color::RGB(15, 16, 20);
-    let panel_background = theme_color(
-        Some(&registry),
-        "ui.panel.background",
-        adjust_color(base_background, 8),
-    );
-    let header_background = theme_color(
-        Some(&registry),
-        "ui.panel.header.background",
-        adjust_color(panel_background, 12),
-    );
-    let expected = to_render_color(window_surface_color(
-        header_background,
-        current_window_effect_settings(Some(&registry)),
-    ));
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_plugin_section_buffer_body(
@@ -5805,11 +6191,147 @@ fn render_plugin_sections_header_applies_window_opacity() -> Result<(), String> 
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == pane_layout.panes[0].rect.x()
+                && rect.y == pane_layout.panes[0].rect.y()
+                && rect.width == pane_layout.panes[0].rect.width()
+                && rect.height == pane_layout.panes[0].rect.height()
+                && color.a == 255
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
             if rect.x == header_rect.x()
                 && rect.y == header_rect.y()
                 && rect.width == header_rect.width()
                 && rect.height == header_rect.height()
-                && *color == expected
+                && color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_acp_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let _ = buffer.focus_acp_input();
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "missing ACP layout".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        Some(&registry),
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == acp_layout.input.rect.x()
+                && rect.y == acp_layout.input.rect.y()
+                && rect.width == acp_layout.input.rect.width()
+                && rect.height == acp_layout.input.rect.height()
+                && color.a == 255
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == acp_layout.plan.rect.x() + 1
+                && rect.y == acp_layout.plan.rect.y() + 1
+                && rect.width == acp_layout.plan.rect.width().saturating_sub(2)
+                && color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_browser_selected_section_border_stays_opaque() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?;
+        input.set_text("volt");
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let browser_layout = browser_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "browser layout missing".to_owned())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_browser_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        InputMode::Normal,
+        Some(&registry),
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == browser_layout.input.rect.x()
+                && rect.y == browser_layout.input.rect.y()
+                && rect.width == browser_layout.input.rect.width()
+                && rect.height == browser_layout.input.rect.height()
+                && color.a == 255
     )));
     Ok(())
 }
@@ -8214,6 +8736,134 @@ fn gcc_toggles_current_line_comments() -> Result<(), String> {
         Some("    println!(\"hi\");")
     );
     assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+fn run_gcc_comment_toggle(state: &mut ShellState) -> Result<(), String> {
+    state
+        .handle_text_input("g")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn comment_toggle_styles_cover_all_shipped_syntax_languages() {
+    let missing = user::syntax_languages()
+        .into_iter()
+        .filter_map(|language| {
+            comment_style_for_language_path(
+                Some(language.id()),
+                language.file_extensions().first().map(String::as_str),
+                language.file_names().first().map(String::as_str),
+            )
+            .is_none()
+            .then(|| language.id().to_owned())
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "missing comment styles for: {}",
+        missing.join(", ")
+    );
+}
+
+#[test]
+fn gcc_toggles_prefix_comment_styles() -> Result<(), String> {
+    for (language_id, original, commented) in [
+        ("clojure", "  (inc value)", "  ; (inc value)"),
+        ("latex", "  \\section{Intro}", "  % \\section{Intro}"),
+        ("vim", "  set number", "  \" set number"),
+    ] {
+        let user_library: Arc<dyn UserLibrary> = Arc::new(user::UserLibraryImpl);
+        let mut state =
+            ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+                .map_err(|error| error.to_string())?;
+        let buffer_id = install_text_test_buffer(
+            &mut state,
+            &format!("*{language_id}-comment-line*"),
+            vec![original.to_owned()],
+        )?;
+        shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .set_language_id(Some(language_id.to_owned()));
+        shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 2));
+
+        run_gcc_comment_toggle(&mut state)?;
+        assert_eq!(
+            shell_buffer(&state.runtime, buffer_id)?
+                .text
+                .line(0)
+                .as_deref(),
+            Some(commented),
+            "expected `{language_id}` to use `{commented}`",
+        );
+
+        run_gcc_comment_toggle(&mut state)?;
+        assert_eq!(
+            shell_buffer(&state.runtime, buffer_id)?
+                .text
+                .line(0)
+                .as_deref(),
+            Some(original),
+            "expected `{language_id}` to restore the original line",
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn gcc_toggles_block_comment_styles() -> Result<(), String> {
+    for (language_id, original, commented) in [
+        ("css", "  color: red;", "  /* color: red; */"),
+        ("html", "  <div>volt</div>", "  <!-- <div>volt</div> -->"),
+        (
+            "json",
+            "  \"name\": \"volt\",",
+            "  /* \"name\": \"volt\", */",
+        ),
+        ("markdown", "  - item", "  <!-- - item -->"),
+        ("xml", "  <tag/>", "  <!-- <tag/> -->"),
+    ] {
+        let user_library: Arc<dyn UserLibrary> = Arc::new(user::UserLibraryImpl);
+        let mut state =
+            ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+                .map_err(|error| error.to_string())?;
+        let buffer_id = install_text_test_buffer(
+            &mut state,
+            &format!("*{language_id}-block-comment-line*"),
+            vec![original.to_owned()],
+        )?;
+        shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .set_language_id(Some(language_id.to_owned()));
+        shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 2));
+
+        run_gcc_comment_toggle(&mut state)?;
+        assert_eq!(
+            shell_buffer(&state.runtime, buffer_id)?
+                .text
+                .line(0)
+                .as_deref(),
+            Some(commented),
+            "expected `{language_id}` to use `{commented}`",
+        );
+
+        run_gcc_comment_toggle(&mut state)?;
+        assert_eq!(
+            shell_buffer(&state.runtime, buffer_id)?
+                .text
+                .line(0)
+                .as_deref(),
+            Some(original),
+            "expected `{language_id}` to restore the original line",
+        );
+    }
+
     Ok(())
 }
 

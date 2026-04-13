@@ -23,5 +23,6 @@ tree-sitter-language = "0.1.7"
 
 [dev-dependencies]
 editor-buffer = { path = "../editor-buffer" }
+tree-sitter-html = "0.23.2"
 tree-sitter-rust = "0.24.1"
 

@@ -232,8 +232,8 @@ pub(super) fn render_runtime_popup_overlay(
     let popup_background = base_background;
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
-    fill_window_surface_rect(target, popup_rect, popup_background, window_effects)?;
-    fill_window_surface_rect(
+    fill_overlay_surface_rect(target, popup_rect, popup_background, window_effects)?;
+    fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(popup_rect.x(), popup_rect.y(), popup_rect.width(), 1),
         border_color,
@@ -388,15 +388,15 @@ pub(super) fn render_autocomplete_overlay(
         width.saturating_sub(2),
         height.saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, outer_rect, 8, border, window_effects)?;
-    fill_window_surface_rounded_rect(target, inner_rect, 7, panel_background, window_effects)?;
-    fill_window_surface_rect(
+    fill_overlay_surface_rounded_rect(target, outer_rect, 8, border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, inner_rect, 7, panel_background, window_effects)?;
+    fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
         border,
         window_effects,
     )?;
-    fill_window_surface_rect(
+    fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(
             x + list_width as i32 + 1,
@@ -414,7 +414,7 @@ pub(super) fn render_autocomplete_overlay(
     for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
         let row_y = y + 8 + index as i32 * row_height;
         if index == autocomplete.selected_index {
-            fill_window_surface_rect(
+            fill_overlay_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     x + 6,
@@ -567,15 +567,15 @@ pub(super) fn render_hover_overlay(
         width.saturating_sub(2),
         height.saturating_sub(2),
     );
-    fill_window_surface_rounded_rect(target, outer_rect, 8, focus_border, window_effects)?;
-    fill_window_surface_rounded_rect(target, inner_rect, 7, background, window_effects)?;
-    fill_window_surface_rect(
+    fill_overlay_surface_rounded_rect(target, outer_rect, 8, focus_border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, inner_rect, 7, background, window_effects)?;
+    fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(x + 1, y + 1, width.saturating_sub(2), tabs_height),
         header_background,
         window_effects,
     )?;
-    fill_window_surface_rect(
+    fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(x + 1, y + tabs_height as i32, width.saturating_sub(2), 1),
         border,
@@ -588,7 +588,7 @@ pub(super) fn render_hover_overlay(
         let label = format!("{} {}", tab.provider_icon, tab.provider_label);
         let tab_width = monospace_text_width(&label, cell_width).saturating_add(16);
         if index == hover.provider_index {
-            fill_window_surface_rounded_rect(
+            fill_overlay_surface_rounded_rect(
                 target,
                 PixelRectToRect::rect(tab_x - 4, tab_y - 2, tab_width, row_height as u32 + 4),
                 5,
@@ -864,9 +864,9 @@ pub(super) fn render_notification_overlay(
             layout.rect.width().saturating_sub(2),
             layout.rect.height().saturating_sub(2),
         );
-        fill_window_surface_rounded_rect(target, outer_rect, 10, border, window_effects)?;
-        fill_window_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
-        fill_window_surface_rounded_rect(
+        fill_overlay_surface_rounded_rect(target, outer_rect, 10, border, window_effects)?;
+        fill_overlay_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
+        fill_overlay_surface_rounded_rect(
             target,
             PixelRectToRect::rect(
                 layout.rect.x() + 1,
@@ -918,7 +918,7 @@ pub(super) fn render_notification_overlay(
             let bar_width = layout.rect.width().saturating_sub(28);
             let bar_x = layout.rect.x() + 14;
             let bar_y = layout.rect.y() + layout.rect.height() as i32 - 10;
-            fill_window_surface_rounded_rect(
+            fill_overlay_surface_rounded_rect(
                 target,
                 PixelRectToRect::rect(bar_x, bar_y, bar_width, 4),
                 2,
@@ -2809,7 +2809,7 @@ pub(super) fn render_text_panel(
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
@@ -2817,7 +2817,7 @@ pub(super) fn render_text_panel(
         rect.height().saturating_sub(2),
     );
     let inner_radius = corner_radius.saturating_sub(1);
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         inner_rect,
         inner_radius,
@@ -2834,7 +2834,7 @@ pub(super) fn render_text_panel(
         );
         let header_color = header_background;
         let header_radius = inner_radius.min(header_rect.height() / 2);
-        fill_window_surface_rounded_rect(
+        fill_overlay_surface_rounded_rect(
             target,
             header_rect,
             header_radius,
@@ -2842,7 +2842,7 @@ pub(super) fn render_text_panel(
             window_effects,
         )?;
         if header_rect.height() > header_radius {
-            fill_window_surface_rect(
+            fill_overlay_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     header_rect.x(),
@@ -2986,7 +2986,7 @@ pub(super) fn render_input_panel(
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
@@ -2994,7 +2994,7 @@ pub(super) fn render_input_panel(
         rect.height().saturating_sub(2),
     );
     let inner_radius = corner_radius.saturating_sub(1);
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         inner_rect,
         inner_radius,
@@ -3384,7 +3384,7 @@ pub(super) fn render_acp_pane(
     } else {
         border_color
     };
-    fill_window_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
     let inner_rect = PixelRectToRect::rect(
         rect.x() + 1,
         rect.y() + 1,
@@ -3392,7 +3392,7 @@ pub(super) fn render_acp_pane(
         rect.height().saturating_sub(2),
     );
     let inner_radius = corner_radius.saturating_sub(1);
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         inner_rect,
         inner_radius,
@@ -3412,7 +3412,7 @@ pub(super) fn render_acp_pane(
         header_background
     };
     let header_radius = inner_radius.min(header_rect.height() / 2);
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         header_rect,
         header_radius,
@@ -3420,7 +3420,7 @@ pub(super) fn render_acp_pane(
         window_effects,
     )?;
     if header_rect.height() > header_radius {
-        fill_window_surface_rect(
+        fill_overlay_surface_rect(
             target,
             PixelRectToRect::rect(
                 header_rect.x(),
@@ -5429,6 +5429,14 @@ pub(super) fn window_surface_color(color: Color, window_effects: WindowEffects) 
     Color::RGBA(color.r, color.g, color.b, alpha)
 }
 
+pub(super) fn overlay_window_surface_color(color: Color, window_effects: WindowEffects) -> Color {
+    let alpha = (f32::from(color.a)
+        * crate::window_effects::overlay_window_surface_opacity(window_effects))
+    .round()
+    .clamp(0.0, 255.0) as u8;
+    Color::RGBA(color.r, color.g, color.b, alpha)
+}
+
 pub(super) fn clear_window_surface(
     target: &mut DrawTarget<'_>,
     color: Color,
@@ -5444,6 +5452,19 @@ pub(super) fn fill_window_surface_rect(
     window_effects: WindowEffects,
 ) -> Result<(), ShellError> {
     fill_rect(target, rect, window_surface_color(color, window_effects))
+}
+
+pub(super) fn fill_overlay_surface_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_rect(
+        target,
+        rect,
+        overlay_window_surface_color(color, window_effects),
+    )
 }
 
 pub(super) fn fill_rounded_rect(
@@ -5474,6 +5495,21 @@ pub(super) fn fill_window_surface_rounded_rect(
         rect,
         radius,
         window_surface_color(color, window_effects),
+    )
+}
+
+pub(super) fn fill_overlay_surface_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_rounded_rect(
+        target,
+        rect,
+        radius,
+        overlay_window_surface_color(color, window_effects),
     )
 }
 

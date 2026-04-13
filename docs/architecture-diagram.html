@@ -1,793 +1,846 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Volt Editor - Architecture</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-dark: #0a0e14;
-            --bg-layer: #151b24;
-            --accent-rust: #f74c00;
-            --accent-cyan: #00e8ff;
-            --accent-purple: #b877db;
-            --accent-green: #bae67e;
-            --text-primary: #e6e6e6;
-            --text-dim: #8a919e;
-            --border: #1f2937;
-            --glow: rgba(0, 232, 255, 0.3);
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Volt Editor - Architecture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Orbitron:wght@700;900&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0e14;
+      --bg-layer: #151b24;
+      --accent-rust: #f74c00;
+      --accent-cyan: #00e8ff;
+      --accent-purple: #b877db;
+      --accent-green: #bae67e;
+      --text-primary: #e6e6e6;
+      --text-dim: #8a919e;
+      --border: #1f2937;
+      --glow: rgba(0, 232, 255, 0.3);
+    }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
-        body {
-            font-family: 'JetBrains Mono', monospace;
-            background: var(--bg-dark);
-            color: var(--text-primary);
-            overflow-x: hidden;
-            min-height: 100vh;
-            position: relative;
-        }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      overflow-x: hidden;
+      min-height: 100vh;
+      position: relative;
+    }
 
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: 
-                radial-gradient(circle at 20% 30%, rgba(247, 76, 0, 0.05) 0%, transparent 50%),
-                radial-gradient(circle at 80% 70%, rgba(0, 232, 255, 0.05) 0%, transparent 50%),
-                repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 232, 255, 0.03) 2px, rgba(0, 232, 255, 0.03) 4px);
-            pointer-events: none;
-            z-index: 0;
-        }
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background:
+        radial-gradient(circle at 20% 30%, rgba(247, 76, 0, 0.05) 0%, transparent 50%),
+        radial-gradient(circle at 80% 70%, rgba(0, 232, 255, 0.05) 0%, transparent 50%),
+        repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 232, 255, 0.03) 2px, rgba(0, 232, 255, 0.03) 4px);
+      pointer-events: none;
+      z-index: 0;
+    }
 
-        .container {
-            max-width: 1800px;
-            margin: 0 auto;
-            padding: 60px 40px;
-            position: relative;
-            z-index: 1;
-        }
+    .container {
+      max-width: 1800px;
+      margin: 0 auto;
+      padding: 60px 40px;
+      position: relative;
+      z-index: 1;
+    }
 
-        .docs-link {
-            position: fixed;
-            top: 24px;
-            left: 24px;
-            z-index: 2;
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 16px;
-            border-radius: 999px;
-            border: 1px solid rgba(0, 232, 255, 0.35);
-            background: rgba(10, 14, 20, 0.82);
-            color: var(--text-primary);
-            text-decoration: none;
-            font-size: 0.85rem;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            backdrop-filter: blur(14px);
-            box-shadow: 0 0 24px rgba(0, 232, 255, 0.16);
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
-        }
+    .docs-link {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 232, 255, 0.35);
+      background: rgba(10, 14, 20, 0.82);
+      color: var(--text-primary);
+      text-decoration: none;
+      font-size: 0.85rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 0 24px rgba(0, 232, 255, 0.16);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
+    }
 
-        .docs-link:hover {
-            transform: translateY(-2px);
-            border-color: var(--accent-purple);
-        }
+    .docs-link:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent-purple);
+    }
 
-        header {
-            text-align: center;
-            margin-bottom: 80px;
-            animation: slideDown 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+    header {
+      text-align: center;
+      margin-bottom: 80px;
+      animation: slideDown 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
 
-        @keyframes slideDown {
-            from {
-                opacity: 0;
-                transform: translateY(-30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+    @keyframes slideDown {
+      from {
+        opacity: 0;
+        transform: translateY(-30px);
+      }
 
-        h1 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: clamp(3rem, 8vw, 6rem);
-            font-weight: 900;
-            letter-spacing: -0.02em;
-            background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 50%, var(--accent-rust) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 16px;
-            text-transform: uppercase;
-            position: relative;
-            display: inline-block;
-        }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
 
-        h1::after {
-            content: '';
-            position: absolute;
-            bottom: -10px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 120px;
-            height: 3px;
-            background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
-            box-shadow: 0 0 20px var(--glow);
-        }
+    h1 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: clamp(3rem, 8vw, 6rem);
+      font-weight: 900;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 50%, var(--accent-rust) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      position: relative;
+      display: inline-block;
+    }
 
-        .subtitle {
-            font-size: 1.2rem;
-            color: var(--text-dim);
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            font-weight: 400;
-            margin-top: 30px;
-        }
+    h1::after {
+      content: '';
+      position: absolute;
+      bottom: -10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+      box-shadow: 0 0 20px var(--glow);
+    }
 
-        .subtitle span {
-            color: var(--accent-rust);
-            font-weight: 600;
-        }
+    .subtitle {
+      font-size: 1.2rem;
+      color: var(--text-dim);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-weight: 400;
+      margin-top: 30px;
+    }
 
-        .architecture {
-            display: flex;
-            flex-direction: column;
-            gap: 32px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
-        }
+    .subtitle span {
+      color: var(--accent-rust);
+      font-weight: 600;
+    }
 
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+    .architecture {
+      display: flex;
+      flex-direction: column;
+      gap: 32px;
+      animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+    }
 
-        .layer {
-            background: var(--bg-layer);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 32px;
-            position: relative;
-            overflow: hidden;
-            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
 
-        .layer::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            transition: opacity 0.4s;
-            opacity: 0;
-        }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
 
-        .layer:hover {
-            border-color: var(--accent-cyan);
-            transform: translateY(-4px);
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 40px var(--glow);
-        }
+    .layer {
+      background: var(--bg-layer);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
 
-        .layer:hover::before {
-            opacity: 1;
-        }
+    .layer::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      transition: opacity 0.4s;
+      opacity: 0;
+    }
 
-        .layer:nth-child(1) { animation-delay: 0.4s; }
-        .layer:nth-child(2) { animation-delay: 0.5s; }
-        .layer:nth-child(3) { animation-delay: 0.6s; }
-        .layer:nth-child(4) { animation-delay: 0.7s; }
-        .layer:nth-child(5) { animation-delay: 0.8s; }
+    .layer:hover {
+      border-color: var(--accent-cyan);
+      transform: translateY(-4px);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 40px var(--glow);
+    }
 
-        .layer-ui::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan)); }
-        .layer-plugins::before { background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green)); }
-        .layer-core::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-rust)); }
-        .layer-runtime::before { background: linear-gradient(90deg, var(--accent-rust), var(--accent-purple)); }
-        .layer-platform::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan)); }
+    .layer:hover::before {
+      opacity: 1;
+    }
 
-        .layer-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-        }
+    .layer:nth-child(1) {
+      animation-delay: 0.4s;
+    }
 
-        .layer-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.8rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+    .layer:nth-child(2) {
+      animation-delay: 0.5s;
+    }
 
-        .layer-ui .layer-title { color: var(--accent-purple); }
-        .layer-plugins .layer-title { color: var(--accent-cyan); }
-        .layer-core .layer-title { color: var(--accent-green); }
-        .layer-runtime .layer-title { color: var(--accent-rust); }
-        .layer-platform .layer-title { color: var(--accent-purple); }
+    .layer:nth-child(3) {
+      animation-delay: 0.6s;
+    }
 
-        .layer-badge {
-            font-size: 0.75rem;
-            padding: 6px 12px;
-            border-radius: 6px;
-            background: rgba(0, 232, 255, 0.1);
-            border: 1px solid var(--accent-cyan);
-            color: var(--accent-cyan);
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            font-weight: 600;
-        }
+    .layer:nth-child(4) {
+      animation-delay: 0.7s;
+    }
 
-        .components {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-        }
+    .layer:nth-child(5) {
+      animation-delay: 0.8s;
+    }
 
-        .component {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            position: relative;
-            overflow: hidden;
-        }
+    .layer-ui::before {
+      background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan));
+    }
 
-        .component::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 4px;
-            height: 100%;
-            background: var(--accent-cyan);
-            transform: scaleY(0);
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            transform-origin: bottom;
-        }
+    .layer-plugins::before {
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+    }
 
-        .component:hover {
-            background: rgba(255, 255, 255, 0.05);
-            border-color: var(--accent-cyan);
-            transform: translateX(4px);
-        }
+    .layer-core::before {
+      background: linear-gradient(90deg, var(--accent-green), var(--accent-rust));
+    }
 
-        .component:hover::before {
-            transform: scaleY(1);
-        }
+    .layer-runtime::before {
+      background: linear-gradient(90deg, var(--accent-rust), var(--accent-purple));
+    }
 
-        .component-name {
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: var(--text-primary);
-            font-size: 0.95rem;
-        }
+    .layer-platform::before {
+      background: linear-gradient(90deg, var(--accent-purple), var(--accent-cyan));
+    }
 
-        .component-desc {
-            font-size: 0.8rem;
-            color: var(--text-dim);
-            line-height: 1.5;
-        }
+    .layer-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
 
-        .flow-indicator {
-            text-align: center;
-            padding: 16px 0;
-            position: relative;
-        }
+    .layer-title {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
 
-        .flow-arrow {
-            font-size: 2rem;
-            color: var(--accent-cyan);
-            animation: pulse 2s ease-in-out infinite;
-            display: inline-block;
-        }
+    .layer-ui .layer-title {
+      color: var(--accent-purple);
+    }
 
-        @keyframes pulse {
-            0%, 100% {
-                opacity: 0.4;
-                transform: translateY(0);
-            }
-            50% {
-                opacity: 1;
-                transform: translateY(8px);
-            }
-        }
+    .layer-plugins .layer-title {
+      color: var(--accent-cyan);
+    }
 
-        .integrations {
-            margin-top: 60px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1s both;
-        }
+    .layer-core .layer-title {
+      color: var(--accent-green);
+    }
 
-        .integrations-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 2rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 32px;
-            color: var(--accent-cyan);
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-        }
+    .layer-runtime .layer-title {
+      color: var(--accent-rust);
+    }
 
-        .integration-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 24px;
-        }
+    .layer-platform .layer-title {
+      color: var(--accent-purple);
+    }
 
-        .integration-card {
-            background: var(--bg-layer);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+    .layer-badge {
+      font-size: 0.75rem;
+      padding: 6px 12px;
+      border-radius: 6px;
+      background: rgba(0, 232, 255, 0.1);
+      border: 1px solid var(--accent-cyan);
+      color: var(--accent-cyan);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-weight: 600;
+    }
 
-        .integration-card:hover {
-            border-color: var(--accent-rust);
-            box-shadow: 0 10px 40px rgba(247, 76, 0, 0.2);
-            transform: translateY(-4px);
-        }
+    .components {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
 
-        .integration-card h3 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.3rem;
-            color: var(--accent-rust);
-            margin-bottom: 16px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+    .component {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
 
-        .integration-items {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
+    .component::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent-cyan);
+      transform: scaleY(0);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      transform-origin: bottom;
+    }
 
-        .integration-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            font-size: 0.9rem;
-            color: var(--text-dim);
-        }
+    .component:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--accent-cyan);
+      transform: translateX(4px);
+    }
 
-        .integration-item::before {
-            content: '▸';
-            color: var(--accent-rust);
-            font-weight: bold;
-            font-size: 1.2rem;
-        }
+    .component:hover::before {
+      transform: scaleY(1);
+    }
 
-        .tech-stack {
-            margin-top: 60px;
-            text-align: center;
-            padding: 40px;
-            background: rgba(0, 232, 255, 0.03);
-            border-radius: 16px;
-            border: 1px solid rgba(0, 232, 255, 0.1);
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.2s both;
-        }
+    .component-name {
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+      font-size: 0.95rem;
+    }
 
-        .tech-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.5rem;
-            color: var(--accent-green);
-            margin-bottom: 24px;
-            text-transform: uppercase;
-            letter-spacing: 0.15em;
-        }
+    .component-desc {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
 
-        .tech-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            justify-content: center;
-        }
+    .flow-indicator {
+      text-align: center;
+      padding: 16px 0;
+      position: relative;
+    }
 
-        .tech-tag {
-            padding: 10px 20px;
-            background: rgba(186, 230, 126, 0.1);
-            border: 1px solid var(--accent-green);
-            border-radius: 24px;
-            color: var(--accent-green);
-            font-size: 0.85rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+    .flow-arrow {
+      font-size: 2rem;
+      color: var(--accent-cyan);
+      animation: pulse 2s ease-in-out infinite;
+      display: inline-block;
+    }
 
-        .tech-tag:hover {
-            background: var(--accent-green);
-            color: var(--bg-dark);
-            transform: scale(1.1);
-            box-shadow: 0 0 20px rgba(186, 230, 126, 0.4);
-        }
+    @keyframes pulse {
 
-        footer {
-            margin-top: 80px;
-            text-align: center;
-            color: var(--text-dim);
-            font-size: 0.9rem;
-            padding: 20px;
-            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.4s both;
-        }
+      0%,
+      100% {
+        opacity: 0.4;
+        transform: translateY(0);
+      }
 
-        footer strong {
-            color: var(--accent-rust);
-        }
+      50% {
+        opacity: 1;
+        transform: translateY(8px);
+      }
+    }
 
-        @media (max-width: 768px) {
-            .container {
-                padding: 40px 20px;
-            }
+    .integrations {
+      margin-top: 60px;
+      animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1s both;
+    }
 
-            h1 {
-                font-size: 3rem;
-            }
+    .integrations-title {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 2rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 32px;
+      color: var(--accent-cyan);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
 
-            .components {
-                grid-template-columns: 1fr;
-            }
+    .integration-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
 
-            .integration-grid {
-                grid-template-columns: 1fr;
-            }
-        }
+    .integration-card {
+      background: var(--bg-layer);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
 
-        /* Scrollbar styling */
-        ::-webkit-scrollbar {
-            width: 12px;
-        }
+    .integration-card:hover {
+      border-color: var(--accent-rust);
+      box-shadow: 0 10px 40px rgba(247, 76, 0, 0.2);
+      transform: translateY(-4px);
+    }
 
-        ::-webkit-scrollbar-track {
-            background: var(--bg-dark);
-        }
+    .integration-card h3 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.3rem;
+      color: var(--accent-rust);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
 
-        ::-webkit-scrollbar-thumb {
-            background: var(--accent-cyan);
-            border-radius: 6px;
-        }
+    .integration-items {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
 
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--accent-purple);
-        }
-    </style>
+    .integration-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .integration-item::before {
+      content: '▸';
+      color: var(--accent-rust);
+      font-weight: bold;
+      font-size: 1.2rem;
+    }
+
+    .tech-stack {
+      margin-top: 60px;
+      text-align: center;
+      padding: 40px;
+      background: rgba(0, 232, 255, 0.03);
+      border-radius: 16px;
+      border: 1px solid rgba(0, 232, 255, 0.1);
+      animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.2s both;
+    }
+
+    .tech-title {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.5rem;
+      color: var(--accent-green);
+      margin-bottom: 24px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+    }
+
+    .tech-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+    }
+
+    .tech-tag {
+      padding: 10px 20px;
+      background: rgba(186, 230, 126, 0.1);
+      border: 1px solid var(--accent-green);
+      border-radius: 24px;
+      color: var(--accent-green);
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .tech-tag:hover {
+      background: var(--accent-green);
+      color: var(--bg-dark);
+      transform: scale(1.1);
+      box-shadow: 0 0 20px rgba(186, 230, 126, 0.4);
+    }
+
+    footer {
+      margin-top: 80px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      padding: 20px;
+      animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 1.4s both;
+    }
+
+    footer strong {
+      color: var(--accent-rust);
+    }
+
+    @media (max-width: 768px) {
+      .container {
+        padding: 40px 20px;
+      }
+
+      h1 {
+        font-size: 3rem;
+      }
+
+      .components {
+        grid-template-columns: 1fr;
+      }
+
+      .integration-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 12px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg-dark);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--accent-cyan);
+      border-radius: 6px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--accent-purple);
+    }
+  </style>
 </head>
+
 <body>
-    <div class="container">
-        <a class="docs-link" href="index.html">← Docs Home</a>
-        <header>
-            <h1>VOLT</h1>
-            <p class="subtitle">Modal Text Editor Architecture • <span>Rust-Powered</span></p>
-        </header>
+  <div class="container">
+    <a class="docs-link" href="index.html">← Docs Home</a>
+    <header>
+      <h1>VOLT</h1>
+      <p class="subtitle">Modal Text Editor Architecture • <span>Rust-Powered</span></p>
+    </header>
 
-        <div class="architecture">
-            <!-- UI Layer -->
-            <div class="layer layer-ui">
-                <div class="layer-header">
-                    <h2 class="layer-title">User Interface Layer</h2>
-                    <span class="layer-badge">Presentation</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Statusline</div>
-                        <div class="component-desc">Real-time editor status display</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Picker UI</div>
-                        <div class="component-desc">Fuzzy finder interface</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Oil File Browser</div>
-                        <div class="component-desc">Directory navigation</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal Buffer</div>
-                        <div class="component-desc">Integrated shell interface</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Undotree UI</div>
-                        <div class="component-desc">Visual undo history</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Hover Info</div>
-                        <div class="component-desc">Contextual information display</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
-
-            <!-- Plugin Layer -->
-            <div class="layer layer-plugins">
-                <div class="layer-header">
-                    <h2 class="layer-title">Plugin Packages</h2>
-                    <span class="layer-badge">Extensibility</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Buffer</div>
-                        <div class="component-desc">Buffer management & save operations</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Workspace</div>
-                        <div class="component-desc">Project & workspace control</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Vim</div>
-                        <div class="component-desc">Modal editing keybindings</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">LSP</div>
-                        <div class="component-desc">Language server lifecycle</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">DAP</div>
-                        <div class="component-desc">Debug adapter protocol</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Git</div>
-                        <div class="component-desc">Version control integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal</div>
-                        <div class="component-desc">Shell integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Autocomplete</div>
-                        <div class="component-desc">Completion providers</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">TreeSitter</div>
-                        <div class="component-desc">Grammar installer</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Multicursor</div>
-                        <div class="component-desc">Multi-cursor editing</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Theme</div>
-                        <div class="component-desc">Color scheme management</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Lang Support</div>
-                        <div class="component-desc">Rust, TS, JS, C#, YAML, TOML, MD</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
-
-            <!-- Core Layer -->
-            <div class="layer layer-core">
-                <div class="layer-header">
-                    <h2 class="layer-title">Editor Core Crates</h2>
-                    <span class="layer-badge">Engine</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">editor-buffer</div>
-                        <div class="component-desc">Text buffer & undo/redo</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-core</div>
-                        <div class="component-desc">Cursor & selection ops</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-syntax</div>
-                        <div class="component-desc">Tree-sitter highlighting</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-theme</div>
-                        <div class="component-desc">Theme system & tokens</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-render</div>
-                        <div class="component-desc">Rendering pipeline</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-fs</div>
-                        <div class="component-desc">File system operations</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-lsp</div>
-                        <div class="component-desc">LSP client integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-dap</div>
-                        <div class="component-desc">Debug adapter client</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-git</div>
-                        <div class="component-desc">Git repository ops</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-terminal</div>
-                        <div class="component-desc">Terminal emulation</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">editor-picker</div>
-                        <div class="component-desc">Fuzzy search backend</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">user/sdk</div>
-                        <div class="component-desc">Plugin architecture</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
-
-            <!-- Runtime Layer -->
-            <div class="layer layer-runtime">
-                <div class="layer-header">
-                    <h2 class="layer-title">Runtime & Systems</h2>
-                    <span class="layer-badge">Infrastructure</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">Tokio Runtime</div>
-                        <div class="component-desc">Async I/O & concurrency</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Terminal Emulation</div>
-                        <div class="component-desc">PTY & VT100 parsing</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Plugin Host</div>
-                        <div class="component-desc">ABI-stable FFI loader</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Message Passing</div>
-                        <div class="component-desc">Crossbeam channels</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="flow-indicator">
-                <div class="flow-arrow">↓</div>
-            </div>
-
-            <!-- Platform Layer -->
-            <div class="layer layer-platform">
-                <div class="layer-header">
-                    <h2 class="layer-title">Graphics & Platform</h2>
-                    <span class="layer-badge">Foundation</span>
-                </div>
-                <div class="components">
-                    <div class="component">
-                        <div class="component-name">SDL3</div>
-                        <div class="component-desc">Graphics rendering & input</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">WebView2</div>
-                        <div class="component-desc">Complex UI rendering</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Windows API</div>
-                        <div class="component-desc">Platform integration</div>
-                    </div>
-                    <div class="component">
-                        <div class="component-name">Cross-platform</div>
-                        <div class="component-desc">Windows, macOS, Linux support</div>
-                    </div>
-                </div>
-            </div>
+    <div class="architecture">
+      <!-- UI Layer -->
+      <div class="layer layer-ui">
+        <div class="layer-header">
+          <h2 class="layer-title">User Interface Layer</h2>
+          <span class="layer-badge">Presentation</span>
         </div>
-
-        <!-- External Integrations -->
-        <div class="integrations">
-            <h2 class="integrations-title">External Integrations</h2>
-            <div class="integration-grid">
-                <div class="integration-card">
-                    <h3>Language Servers</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">rust-analyzer (Rust)</div>
-                        <div class="integration-item">typescript-language-server</div>
-                        <div class="integration-item">csharp-ls (C#)</div>
-                        <div class="integration-item">yaml-language-server</div>
-                        <div class="integration-item">taplo (TOML)</div>
-                    </div>
-                </div>
-                <div class="integration-card">
-                    <h3>Debug Adapters</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">CodeLLDB (Rust/C++)</div>
-                        <div class="integration-item">Node Debug Adapter</div>
-                        <div class="integration-item">Custom DAP clients</div>
-                    </div>
-                </div>
-                <div class="integration-card">
-                    <h3>Version Control</h3>
-                    <div class="integration-items">
-                        <div class="integration-item">Git2 (libgit2 bindings)</div>
-                        <div class="integration-item">Staging & commit UI</div>
-                        <div class="integration-item">Diff visualization</div>
-                        <div class="integration-item">Branch management</div>
-                    </div>
-                </div>
-            </div>
+        <div class="components">
+          <div class="component">
+            <div class="component-name">Statusline</div>
+            <div class="component-desc">Real-time editor status display</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Picker UI</div>
+            <div class="component-desc">Fuzzy finder interface</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Oil File Browser</div>
+            <div class="component-desc">Directory navigation</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Terminal Buffer</div>
+            <div class="component-desc">Integrated shell interface</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Undotree UI</div>
+            <div class="component-desc">Visual undo history</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Hover Info</div>
+            <div class="component-desc">Contextual information display</div>
+          </div>
         </div>
+      </div>
 
-        <!-- Tech Stack -->
-        <div class="tech-stack">
-            <h3 class="tech-title">Core Technologies</h3>
-            <div class="tech-tags">
-                <span class="tech-tag">Rust</span>
-                <span class="tech-tag">SDL3</span>
-                <span class="tech-tag">WebView2</span>
-                <span class="tech-tag">Tree-sitter</span>
-                <span class="tech-tag">LSP</span>
-                <span class="tech-tag">DAP</span>
-                <span class="tech-tag">Tokio</span>
-                <span class="tech-tag">Serde</span>
-                <span class="tech-tag">Ropey</span>
-                <span class="tech-tag">ABI Stable</span>
-                <span class="tech-tag">Crossbeam</span>
-                <span class="tech-tag">Alacritty Terminal</span>
-            </div>
+      <div class="flow-indicator">
+        <div class="flow-arrow">↓</div>
+      </div>
+
+      <!-- Plugin Layer -->
+      <div class="layer layer-plugins">
+        <div class="layer-header">
+          <h2 class="layer-title">Plugin Packages</h2>
+          <span class="layer-badge">Extensibility</span>
         </div>
+        <div class="components">
+          <div class="component">
+            <div class="component-name">Buffer</div>
+            <div class="component-desc">Buffer management & save operations</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Workspace</div>
+            <div class="component-desc">Project & workspace control</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Vim</div>
+            <div class="component-desc">Modal editing keybindings</div>
+          </div>
+          <div class="component">
+            <div class="component-name">LSP</div>
+            <div class="component-desc">Language server lifecycle</div>
+          </div>
+          <div class="component">
+            <div class="component-name">DAP</div>
+            <div class="component-desc">Debug adapter protocol</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Git</div>
+            <div class="component-desc">Version control integration</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Terminal</div>
+            <div class="component-desc">Shell integration</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Autocomplete</div>
+            <div class="component-desc">Completion providers</div>
+          </div>
+          <div class="component">
+            <div class="component-name">TreeSitter</div>
+            <div class="component-desc">Grammar installer</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Multicursor</div>
+            <div class="component-desc">Multi-cursor editing</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Theme</div>
+            <div class="component-desc">Color scheme management</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Lang Support</div>
+            <div class="component-desc">Rust, TS, JS, C#, YAML, TOML, MD</div>
+          </div>
+        </div>
+      </div>
 
-        <footer>
-            <strong>Volt</strong> — A production-grade modal text editor bridging Vim keybindings with modern IDE capabilities
-        </footer>
+      <div class="flow-indicator">
+        <div class="flow-arrow">↓</div>
+      </div>
+
+      <!-- Core Layer -->
+      <div class="layer layer-core">
+        <div class="layer-header">
+          <h2 class="layer-title">Editor Core Crates</h2>
+          <span class="layer-badge">Engine</span>
+        </div>
+        <div class="components">
+          <div class="component">
+            <div class="component-name">editor-buffer</div>
+            <div class="component-desc">Text buffer & undo/redo</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-core</div>
+            <div class="component-desc">Cursor & selection ops</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-syntax</div>
+            <div class="component-desc">Tree-sitter highlighting</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-theme</div>
+            <div class="component-desc">Theme system & tokens</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-render</div>
+            <div class="component-desc">Rendering pipeline</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-fs</div>
+            <div class="component-desc">File system operations</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-lsp</div>
+            <div class="component-desc">LSP client integration</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-dap</div>
+            <div class="component-desc">Debug adapter client</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-git</div>
+            <div class="component-desc">Git repository ops</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-terminal</div>
+            <div class="component-desc">Terminal emulation</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-picker</div>
+            <div class="component-desc">Fuzzy search backend</div>
+          </div>
+          <div class="component">
+            <div class="component-name">user/sdk</div>
+            <div class="component-desc">Plugin architecture</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-indicator">
+        <div class="flow-arrow">↓</div>
+      </div>
+
+      <!-- Runtime Layer -->
+      <div class="layer layer-runtime">
+        <div class="layer-header">
+          <h2 class="layer-title">Runtime & Systems</h2>
+          <span class="layer-badge">Infrastructure</span>
+        </div>
+        <div class="components">
+          <div class="component">
+            <div class="component-name">Tokio Runtime</div>
+            <div class="component-desc">Async I/O & concurrency</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Terminal Emulation</div>
+            <div class="component-desc">PTY & VT100 parsing</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Plugin Host</div>
+            <div class="component-desc">ABI-stable FFI loader</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Message Passing</div>
+            <div class="component-desc">Crossbeam channels</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-indicator">
+        <div class="flow-arrow">↓</div>
+      </div>
+
+      <!-- Platform Layer -->
+      <div class="layer layer-platform">
+        <div class="layer-header">
+          <h2 class="layer-title">Graphics & Platform</h2>
+          <span class="layer-badge">Foundation</span>
+        </div>
+        <div class="components">
+          <div class="component">
+            <div class="component-name">SDL3</div>
+            <div class="component-desc">Graphics rendering & input</div>
+          </div>
+          <div class="component">
+            <div class="component-name">WebView2</div>
+            <div class="component-desc">Complex UI rendering</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Windows API</div>
+            <div class="component-desc">Platform integration</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Cross-platform</div>
+            <div class="component-desc">Windows, macOS, Linux support</div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <script>
-        // Intersection Observer for staggered animations
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.style.opacity = '1';
-                    entry.target.style.transform = 'translateY(0)';
-                }
-            });
-        }, {
-            threshold: 0.1
-        });
+    <!-- External Integrations -->
+    <div class="integrations">
+      <h2 class="integrations-title">External Integrations</h2>
+      <div class="integration-grid">
+        <div class="integration-card">
+          <h3>Language Servers</h3>
+          <div class="integration-items">
+            <div class="integration-item">rust-analyzer (Rust)</div>
+            <div class="integration-item">typescript-language-server</div>
+            <div class="integration-item">csharp-ls (C#)</div>
+            <div class="integration-item">yaml-language-server</div>
+            <div class="integration-item">taplo (TOML)</div>
+          </div>
+        </div>
+        <div class="integration-card">
+          <h3>Debug Adapters</h3>
+          <div class="integration-items">
+            <div class="integration-item">CodeLLDB (Rust/C++)</div>
+            <div class="integration-item">Node Debug Adapter</div>
+            <div class="integration-item">Custom DAP clients</div>
+          </div>
+        </div>
+        <div class="integration-card">
+          <h3>Version Control</h3>
+          <div class="integration-items">
+            <div class="integration-item">Git2 (libgit2 bindings)</div>
+            <div class="integration-item">Staging & commit UI</div>
+            <div class="integration-item">Diff visualization</div>
+            <div class="integration-item">Branch management</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-        document.querySelectorAll('.layer, .integration-card').forEach(el => {
-            observer.observe(el);
-        });
+    <!-- Tech Stack -->
+    <div class="tech-stack">
+      <h3 class="tech-title">Core Technologies</h3>
+      <div class="tech-tags">
+        <span class="tech-tag">Rust</span>
+        <span class="tech-tag">SDL3</span>
+        <span class="tech-tag">WebView2</span>
+        <span class="tech-tag">Tree-sitter</span>
+        <span class="tech-tag">LSP</span>
+        <span class="tech-tag">DAP</span>
+        <span class="tech-tag">Tokio</span>
+        <span class="tech-tag">Serde</span>
+        <span class="tech-tag">Ropey</span>
+        <span class="tech-tag">ABI Stable</span>
+        <span class="tech-tag">Crossbeam</span>
+        <span class="tech-tag">Alacritty Terminal</span>
+      </div>
+    </div>
 
-        // Add subtle parallax effect on mouse move
-        document.addEventListener('mousemove', (e) => {
-            const x = e.clientX / window.innerWidth - 0.5;
-            const y = e.clientY / window.innerHeight - 0.5;
-            
-            document.querySelector('body::before')?.style.setProperty('transform', `translate(${x * 20}px, ${y * 20}px)`);
-        });
-    </script>
+    <footer>
+      <strong>Volt</strong> — A production-grade modal text editor bridging Vim keybindings with modern IDE capabilities
+    </footer>
+  </div>
+
+  <script>
+    // Intersection Observer for staggered animations
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.opacity = '1';
+          entry.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, {
+      threshold: 0.1
+    });
+
+
+    document.querySelectorAll('.layer, .integration-card').forEach(el => {
+      observer.observe(el);
+    });
+
+    // Add subtle parallax effect on mouse move
+    document.addEventListener('mousemove', (e) => {
+      const x = e.clientX / window.innerWidth - 0.5;
+      const y = e.clientY / window.innerHeight - 0.5;
+
+      document.querySelector('body::before')?.style.setProperty('transform', `translate(${x * 20}px, ${y * 20}px)`);
+    });
+  </script>
 </body>
+
 </html>

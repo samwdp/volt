@@ -64,6 +64,8 @@ purple = "#af00db"
 "ui.notification.success" = "pallet.green"
 "ui.notification.warning" = "pallet.yellow-strong"
 "ui.notification.error" = "pallet.red-strong"
+"ui.panel.background" = "pallet.background"
+"ui.panel.header.background" = "pallet.surface"
 # Git status
 "git.status.section.header" = "pallet.yellow"
 "git.status.section.count" = "pallet.green"

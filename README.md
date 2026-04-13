@@ -89,6 +89,18 @@ The shared library is written next to the `volt` binary:
 - macOS: `target/<profile>/libuser.dylib`
 - Windows: `target/<profile>/user.dll`
 
+### Build both at the same time
+
+```bash
+cargo build -p volt -p volt-user
+```
+
+For a release build:
+
+```bash
+cargo build -p volt -p volt-user --release
+```
+
 ### Build the packaged local distribution
 
 To build the local bundle layout used by releases, build both crates together:

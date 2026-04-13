@@ -1065,7 +1065,7 @@ pub(super) fn render_picker_overlay(
     let muted = blend_color(foreground, popup_background, 0.25);
     let subtle = blend_color(foreground, popup_background, 0.4);
     // Border using two rounded rectangles (outer border color, inner background)
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         PixelRectToRect::rect(
             popup_rect.x,
@@ -1084,7 +1084,7 @@ pub(super) fn render_picker_overlay(
         popup_rect.height.saturating_sub(4),
     );
     let inner_radius = corner_radius.saturating_sub(2);
-    fill_window_surface_rounded_rect(
+    fill_overlay_surface_rounded_rect(
         target,
         inner_rect,
         inner_radius,
@@ -1164,7 +1164,7 @@ pub(super) fn render_picker_overlay(
         let detail_x = content_left + label_width as i32 + 16;
         let detail_width = content_width.saturating_sub(label_width + 16);
         if selected {
-            fill_window_surface_rect(
+            fill_overlay_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     popup_rect.x + 12,

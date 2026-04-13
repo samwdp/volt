@@ -853,6 +853,7 @@ mod tests {
     fn registry_resolves_servers_by_filename_and_glob() {
         let mut registry = LanguageServerRegistry::new();
         must(registry.register(dockerfile_language_server()));
+        let dev_dockerfile = Path::new("containers").join("Dockerfile.dev");
 
         assert_eq!(
             registry
@@ -862,7 +863,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .server_for_path(Path::new("containers\\Dockerfile.dev"))
+                .server_for_path(&dev_dockerfile)
                 .map(|server| server.id()),
             Some("dockerfile-language-server")
         );
@@ -873,8 +874,9 @@ mod tests {
         let mut registry = LanguageServerRegistry::new();
         must(registry.register(dev_extension_server()));
         must(registry.register(dockerfile_language_server()));
+        let dev_dockerfile = Path::new("containers").join("Dockerfile.dev");
 
-        let servers = registry.servers_for_path(Path::new("containers\\Dockerfile.dev"));
+        let servers = registry.servers_for_path(&dev_dockerfile);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id(), "dockerfile-language-server");
     }
@@ -937,6 +939,7 @@ mod tests {
     fn prepared_session_resolves_document_language_ids_by_filename_and_glob() {
         let mut registry = LanguageServerRegistry::new();
         must(registry.register(dockerfile_language_server()));
+        let dev_dockerfile = Path::new("containers").join("Dockerfile.dev");
 
         let session = must(registry.prepare_session(
             "dockerfile-language-server",
@@ -948,7 +951,7 @@ mod tests {
             "dockerfile"
         );
         assert_eq!(
-            session.document_language_id_for_path(Path::new("containers\\Dockerfile.dev")),
+            session.document_language_id_for_path(&dev_dockerfile),
             "dockerfile"
         );
     }

@@ -3518,12 +3518,16 @@ mod tests {
         CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
         SyntaxParseSession, SyntaxRegistry, ensure_installed_highlight_query_path,
         install_bundled_queries, maybe_read_query_source_preferring_bundled,
-        read_query_source_preferring_bundled,
+        read_query_source_preferring_bundled, resolve_bundled_query_source,
     };
     use editor_buffer::{TextBuffer, TextPoint};
 
     fn rust_language() -> super::Language {
         tree_sitter_rust::LANGUAGE.into()
+    }
+
+    fn html_language() -> super::Language {
+        tree_sitter_html::LANGUAGE.into()
     }
 
     fn rust_configuration() -> LanguageConfiguration {
@@ -4432,6 +4436,51 @@ fn main() {
             result.is_some(),
             "rust injections query should compile successfully"
         );
+    }
+
+    #[test]
+    fn bundled_html_highlights_query_compiles() {
+        let query_asset_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("volt")
+            .join("assets")
+            .join("grammars")
+            .join("queries");
+        let query_text = must(resolve_bundled_query_source(
+            &query_asset_root,
+            "html",
+            "highlights.scm",
+            &mut Vec::new(),
+        ))
+        .expect("bundled html highlights.scm should exist");
+
+        let config = LanguageConfiguration::new(
+            "html",
+            ["html"],
+            html_language,
+            query_text,
+            [
+                CaptureThemeMapping::new("tag", "syntax.tag"),
+                CaptureThemeMapping::new("tag.delimiter", "syntax.punctuation.delimiter"),
+                CaptureThemeMapping::new("attribute", "syntax.attribute"),
+                CaptureThemeMapping::new("string", "syntax.string"),
+                CaptureThemeMapping::new("string.special.url", "syntax.string.special.url"),
+                CaptureThemeMapping::new("markup.link.label", "syntax.markup.link.label"),
+                CaptureThemeMapping::new("constant", "syntax.constant"),
+                CaptureThemeMapping::new("character.special", "syntax.character.special"),
+            ],
+        );
+
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(config));
+
+        let buffer =
+            TextBuffer::from_text("<!DOCTYPE html>\n<a href=\"https://example.com\">link</a>\n");
+        let snapshot = must(registry.highlight_buffer_for_language("html", &buffer));
+
+        assert_eq!(snapshot.language_id, "html");
+        assert!(!snapshot.has_errors);
+        assert!(!snapshot.highlight_spans.is_empty());
     }
 
     #[test]

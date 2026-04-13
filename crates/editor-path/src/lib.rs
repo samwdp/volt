@@ -262,8 +262,9 @@ mod tests {
     #[test]
     fn matcher_scores_filename_glob_and_extension_paths() {
         let matcher = PathMatcher::from_parts(["rs"], ["Makefile"], ["Dockerfile.*"]);
+        let rust_main = Path::new("src").join("main.rs");
 
-        let extension_score = matcher.best_match_score(Path::new("src\\main.rs"));
+        let extension_score = matcher.best_match_score(&rust_main);
         let file_name_score = matcher.best_match_score(Path::new("Makefile"));
         let glob_score = matcher.best_match_score(Path::new("Dockerfile.dev"));
 
