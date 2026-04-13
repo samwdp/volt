@@ -2,9 +2,6 @@ use editor_theme::ThemeRegistry;
 use sdl3::video::{Window, WindowFlags};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-#[cfg(target_os = "linux")]
-use std::ffi::CStr;
-
 use crate::ShellError;
 
 pub(crate) const OPTION_WINDOW_OPACITY: &str = "window.opacity";
@@ -31,6 +28,7 @@ impl WindowOpacityMode {
 }
 
 static WINDOW_OPACITY_MODE: AtomicU8 = AtomicU8::new(WindowOpacityMode::Surface as u8);
+static REQUESTED_WINDOW_OPACITY_MODE: AtomicU8 = AtomicU8::new(WindowOpacityMode::Surface as u8);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WindowEffects {
@@ -92,6 +90,13 @@ pub(crate) fn current_window_effect_settings(
     theme_registry: Option<&ThemeRegistry>,
 ) -> WindowEffects {
     WindowEffects::resolve(theme_registry)
+}
+
+pub(crate) fn configure_window_opacity_driver(driver: Option<&str>) {
+    REQUESTED_WINDOW_OPACITY_MODE.store(
+        window_opacity_mode_for_driver(driver) as u8,
+        Ordering::Relaxed,
+    );
 }
 
 pub(crate) fn normalize_window_opacity(value: f64) -> f32 {
@@ -211,15 +216,7 @@ fn sync_window_opacity(
 }
 
 fn requested_window_opacity_mode() -> WindowOpacityMode {
-    #[cfg(target_os = "linux")]
-    {
-        return window_opacity_mode_for_driver(current_video_driver_name().as_deref());
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        WindowOpacityMode::Surface
-    }
+    WindowOpacityMode::from_stored(REQUESTED_WINDOW_OPACITY_MODE.load(Ordering::Relaxed))
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -227,20 +224,6 @@ fn window_opacity_mode_for_driver(driver: Option<&str>) -> WindowOpacityMode {
     match driver {
         Some(SDL_VIDEO_DRIVER_X11 | SDL_VIDEO_DRIVER_WAYLAND) => WindowOpacityMode::NativeWindow,
         _ => WindowOpacityMode::Surface,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn current_video_driver_name() -> Option<String> {
-    unsafe {
-        let driver = sdl3::sys::video::SDL_GetCurrentVideoDriver();
-        if driver.is_null() {
-            return None;
-        }
-        // SAFETY: SDL owns this NUL-terminated driver name for the lifetime of the
-        // initialized video subsystem, and we copy it into an owned String
-        // immediately before returning.
-        CStr::from_ptr(driver).to_str().ok().map(str::to_owned)
     }
 }
 
@@ -320,10 +303,10 @@ mod platform {
 mod tests {
     use super::{
         NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY, WindowEffects,
-        WindowOpacityMode, apply_window_effects_to_target, current_window_opacity_mode,
-        normalize_window_blur, normalize_window_opacity, set_window_opacity_mode,
-        sync_window_opacity, update_window_effects_to_target, window_creation_flags,
-        window_opacity_mode_for_driver,
+        WindowOpacityMode, apply_window_effects_to_target, configure_window_opacity_driver,
+        current_window_opacity_mode, normalize_window_blur, normalize_window_opacity,
+        set_window_opacity_mode, sync_window_opacity, update_window_effects_to_target,
+        window_creation_flags, window_opacity_mode_for_driver,
     };
     use editor_theme::{Theme, ThemeRegistry};
     use sdl3::video::WindowFlags;
@@ -373,12 +356,14 @@ mod tests {
 
     #[test]
     fn window_effects_default_to_opaque_without_theme_values() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         assert_eq!(WindowEffects::resolve(None), WindowEffects::default());
     }
 
     #[test]
     fn window_effects_resolve_normalized_theme_values() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut registry = ThemeRegistry::new();
         must(
@@ -400,6 +385,7 @@ mod tests {
 
     #[test]
     fn window_effect_normalizers_handle_non_finite_values() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         assert_eq!(normalize_window_opacity(f64::NAN), 1.0);
         assert_eq!(normalize_window_blur(f64::NEG_INFINITY), 0.0);
@@ -409,6 +395,7 @@ mod tests {
 
     #[test]
     fn window_creation_flags_always_request_transparent_surface_for_live_updates() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         assert!(
             window_creation_flags(WindowEffects {
@@ -429,6 +416,7 @@ mod tests {
 
     #[test]
     fn apply_window_effects_ignores_native_window_opacity_to_keep_text_opaque() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
@@ -447,6 +435,7 @@ mod tests {
 
     #[test]
     fn apply_window_effects_still_calls_native_blur_backend_when_requested() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
@@ -465,6 +454,7 @@ mod tests {
 
     #[test]
     fn update_window_effects_clears_native_blur_when_disabled() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
@@ -487,6 +477,7 @@ mod tests {
 
     #[test]
     fn linux_native_window_opacity_targets_x11_and_wayland_only() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         assert_eq!(
             window_opacity_mode_for_driver(Some("x11")),
@@ -508,6 +499,7 @@ mod tests {
 
     #[test]
     fn sync_window_opacity_uses_native_window_when_supported() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow::default();
 
@@ -524,6 +516,7 @@ mod tests {
 
     #[test]
     fn sync_window_opacity_falls_back_to_surface_when_native_call_fails() {
+        configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
         let mut window = RecordingWindow {
             opacity_error: Some("unsupported".to_owned()),
@@ -536,5 +529,16 @@ mod tests {
         assert_eq!(mode, WindowOpacityMode::Surface);
         assert_eq!(current_window_opacity_mode(), WindowOpacityMode::Surface);
         assert_eq!(window.opacity_calls, vec![0.4]);
+    }
+
+    #[test]
+    fn configure_window_opacity_driver_updates_requested_mode() {
+        configure_window_opacity_driver(Some(SDL_VIDEO_DRIVER_X11));
+        let mut window = RecordingWindow::default();
+        let mode = sync_window_opacity(&mut window, 0.4, requested_window_opacity_mode());
+
+        assert_eq!(mode, WindowOpacityMode::NativeWindow);
+
+        configure_window_opacity_driver(None);
     }
 }

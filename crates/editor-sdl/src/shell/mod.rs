@@ -67,8 +67,8 @@ use crate::state::{
     YankRegister,
 };
 use crate::window_effects::{
-    WindowEffects, apply_window_effects, current_window_effect_settings, update_window_effects,
-    window_creation_flags,
+    WindowEffects, apply_window_effects, configure_window_opacity_driver,
+    current_window_effect_settings, update_window_effects, window_creation_flags,
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
@@ -11087,6 +11087,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let video = sdl_context
         .video()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    configure_window_opacity_driver(Some(video.current_video_driver()));
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
 
