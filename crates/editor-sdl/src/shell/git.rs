@@ -1906,10 +1906,11 @@ pub(super) fn push_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Resu
             .map(str::to_owned)
             .ok_or_else(|| "git push requires a current branch".to_owned())?
     };
-    run_git_push_in_terminal_popup(
+    run_git_push_in_popup_buffer(
         runtime,
         vec![
             "push".to_owned(),
+            "--progress".to_owned(),
             "--set-upstream".to_owned(),
             remote.to_owned(),
             branch,
@@ -2067,32 +2068,35 @@ pub(super) fn push_git_remote_branch(
     remote: &str,
     branch: &str,
 ) -> Result<(), String> {
-    run_git_push_in_terminal_popup(
+    run_git_push_in_popup_buffer(
         runtime,
-        vec!["push".to_owned(), remote.to_owned(), branch.to_owned()],
+        vec![
+            "push".to_owned(),
+            "--progress".to_owned(),
+            remote.to_owned(),
+            branch.to_owned(),
+        ],
     )
 }
 
-fn run_git_push_in_terminal_popup(
+fn run_git_push_in_popup_buffer(
     runtime: &mut EditorRuntime,
     args: Vec<String>,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    let terminal_config = shell_user_library(runtime).terminal_config();
-    let mut terminal_args = terminal_config.args;
-    let shell_program = terminal_config.program;
     let command_label = format!("git {}", args.join(" "));
     let buffer_name = format!("*{command_label}*");
-    terminal_args.push(shell_command_eval_flag(&shell_program).to_owned());
-    terminal_args.push(command_label.clone());
-    let config =
-        LiveTerminalConfig::new(command_label, shell_program, terminal_args).with_cwd(root);
-    open_popup_terminal_command(
+    open_streamed_command_popup(
         runtime,
-        &buffer_name,
-        "Git Push",
-        config,
-        Some(TerminalExitAction::RefreshGitStatusBuffersAndCloseBuffer),
+        StreamedCommandSpec {
+            popup_title: "Git Push".to_owned(),
+            buffer_name,
+            command_label,
+            program: "git".to_owned(),
+            args,
+            cwd: root,
+            on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        },
     )?;
     Ok(())
 }

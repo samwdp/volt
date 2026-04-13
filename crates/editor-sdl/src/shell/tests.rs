@@ -3398,6 +3398,22 @@ fn init_git_repo_with_commit(label: &str) -> Result<std::path::PathBuf, String> 
     Ok(repo)
 }
 
+fn install_git_hook(repo: &std::path::Path, hook_name: &str, script: &str) -> Result<(), String> {
+    let hook_path = repo.join(".git").join("hooks").join(hook_name);
+    std::fs::write(&hook_path, script).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = std::fs::metadata(&hook_path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, permissions).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn open_repo_git_status_buffer(
     state: &mut ShellState,
     root: &std::path::Path,
@@ -3408,13 +3424,46 @@ fn open_repo_git_status_buffer(
     Ok(buffer_id)
 }
 
-fn wait_for_terminal_buffer_close(
+fn wait_for_streamed_command_output_line(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    needle: &str,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        refresh_pending_streamed_commands(&mut state.runtime)?;
+        let tracked = shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id);
+        let matched = shell_ui(&state.runtime)?
+            .buffer(buffer_id)
+            .is_some_and(|buffer| {
+                (0..buffer.line_count()).any(|line_index| {
+                    buffer
+                        .text
+                        .line(line_index)
+                        .unwrap_or_default()
+                        .contains(needle)
+                })
+            });
+        if tracked && matched {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "streamed command buffer `{buffer_id}` never emitted `{needle}` while running"
+    ))
+}
+
+fn wait_for_streamed_command_buffer_close(
     state: &mut ShellState,
     buffer_id: BufferId,
 ) -> Result<(), String> {
     for _ in 0..500 {
-        refresh_pending_terminal(&mut state.runtime, 800, 600, 8, 16)?;
-        let tracked = terminal_buffer_state(&state.runtime)?.contains(buffer_id);
+        refresh_pending_streamed_commands(&mut state.runtime)?;
+        let tracked = shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id);
         let buffered = shell_ui(&state.runtime)?.buffer(buffer_id).is_some();
         if !tracked && !buffered {
             return Ok(());
@@ -3422,10 +3471,13 @@ fn wait_for_terminal_buffer_close(
         thread::sleep(Duration::from_millis(20));
     }
     let tracked = terminal_buffer_state(&state.runtime)?.contains(buffer_id);
+    let worker_tracked = shell_ui(&state.runtime)?
+        .streamed_command_worker
+        .contains(buffer_id);
     let buffered = shell_ui(&state.runtime)?.buffer(buffer_id).is_some();
     let popup_visible = active_runtime_popup(&state.runtime)?.is_some();
     Err(format!(
-        "temporary terminal buffer `{buffer_id}` did not close in time (tracked={tracked}, buffered={buffered}, popup_visible={popup_visible})"
+        "temporary streamed command buffer `{buffer_id}` did not close in time (terminal_tracked={tracked}, worker_tracked={worker_tracked}, buffered={buffered}, popup_visible={popup_visible})"
     ))
 }
 
@@ -4423,7 +4475,7 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
 }
 
 #[test]
-fn git_push_upstream_runs_in_terminal_popup_and_refreshes_status() -> Result<(), String> {
+fn git_push_upstream_streams_into_popup_buffer_and_refreshes_status() -> Result<(), String> {
     let repo = init_git_repo_with_commit("git-push-upstream-popup")?;
     let remote = unique_temp_dir("git-push-upstream-popup-remote");
     run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
@@ -4445,6 +4497,11 @@ fn git_push_upstream_runs_in_terminal_popup_and_refreshes_status() -> Result<(),
         &repo,
         &["push", "-q", "--set-upstream", "origin", branch.as_str()],
     )?;
+    install_git_hook(
+        &repo,
+        "pre-push",
+        "#!/bin/sh\necho \"pre-push hook starting\"\nsleep 1\necho \"pre-push hook finishing\"\n",
+    )?;
     std::fs::write(repo.join("feature.txt"), "feature\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "feature.txt"])?;
     run_git_in_dir(&repo, &["commit", "-qm", "feature"])?;
@@ -4461,19 +4518,27 @@ fn git_push_upstream_runs_in_terminal_popup_and_refreshes_status() -> Result<(),
     push_git_to_upstream(&mut state.runtime, buffer_id)?;
 
     let popup = active_runtime_popup(&state.runtime)?
-        .ok_or_else(|| "terminal popup was not opened for git push".to_owned())?;
+        .ok_or_else(|| "streamed popup was not opened for git push".to_owned())?;
     assert!(shell_ui(&state.runtime)?.popup_focus);
-    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
-    assert!(buffer_is_terminal(
-        &shell_buffer(&state.runtime, popup.active_buffer)?.kind
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    assert!(matches!(
+        &shell_buffer(&state.runtime, popup.active_buffer)?.kind,
+        BufferKind::Plugin(kind) if kind == INTERACTIVE_READONLY_KIND
     ));
+    assert!(!terminal_buffer_state(&state.runtime)?.contains(popup.active_buffer));
 
-    wait_for_terminal_buffer_close(&mut state, popup.active_buffer)?;
+    wait_for_streamed_command_output_line(
+        &mut state,
+        popup.active_buffer,
+        "pre-push hook starting",
+    )?;
+    wait_for_streamed_command_buffer_close(&mut state, popup.active_buffer)?;
     assert!(active_runtime_popup(&state.runtime)?.is_none());
     let ui = shell_ui(&state.runtime)?;
     assert!(!ui.popup_focus);
     assert_eq!(ui.popup_buffer_id, None);
     assert!(ui.buffer(popup.active_buffer).is_none());
+    assert!(!ui.streamed_command_worker.contains(popup.active_buffer));
     assert!(!terminal_buffer_state(&state.runtime)?.contains(popup.active_buffer));
     assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
 

@@ -4,17 +4,6 @@ const VISIBLE_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const HIDDEN_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalExitAction {
-    RefreshGitStatusBuffersAndCloseBuffer,
-}
-
-#[derive(Debug, Clone)]
-struct PendingTerminalLaunch {
-    config: LiveTerminalConfig,
-    on_exit: Option<TerminalExitAction>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalPollPriority {
     Active,
     Visible,
@@ -38,16 +27,14 @@ struct TrackedTerminalSession {
     session: LiveTerminalSession,
     last_poll_at: Option<Instant>,
     buffer_dirty: bool,
-    on_exit: Option<TerminalExitAction>,
 }
 
 impl TrackedTerminalSession {
-    fn new(session: LiveTerminalSession, on_exit: Option<TerminalExitAction>) -> Self {
+    fn new(session: LiveTerminalSession) -> Self {
         Self {
             session,
             last_poll_at: None,
             buffer_dirty: false,
-            on_exit,
         }
     }
 }
@@ -55,7 +42,6 @@ impl TrackedTerminalSession {
 #[derive(Default)]
 pub(super) struct TerminalBufferState {
     sessions: BTreeMap<BufferId, TrackedTerminalSession>,
-    pending_launches: BTreeMap<BufferId, PendingTerminalLaunch>,
 }
 
 impl TerminalBufferState {
@@ -73,32 +59,12 @@ impl TerminalBufferState {
         self.sessions.get_mut(&buffer_id)
     }
 
-    pub(super) fn insert(
-        &mut self,
-        buffer_id: BufferId,
-        session: LiveTerminalSession,
-        on_exit: Option<TerminalExitAction>,
-    ) {
+    pub(super) fn insert(&mut self, buffer_id: BufferId, session: LiveTerminalSession) {
         self.sessions
-            .insert(buffer_id, TrackedTerminalSession::new(session, on_exit));
-    }
-
-    fn queue_launch(
-        &mut self,
-        buffer_id: BufferId,
-        config: LiveTerminalConfig,
-        on_exit: Option<TerminalExitAction>,
-    ) {
-        self.pending_launches
-            .insert(buffer_id, PendingTerminalLaunch { config, on_exit });
-    }
-
-    fn take_pending_launch(&mut self, buffer_id: BufferId) -> Option<PendingTerminalLaunch> {
-        self.pending_launches.remove(&buffer_id)
+            .insert(buffer_id, TrackedTerminalSession::new(session));
     }
 
     pub(super) fn remove(&mut self, buffer_id: BufferId) -> Option<LiveTerminalSession> {
-        self.pending_launches.remove(&buffer_id);
         self.sessions
             .remove(&buffer_id)
             .map(|tracked| tracked.session)
@@ -175,38 +141,6 @@ pub(super) fn focus_active_terminal_popup(runtime: &mut EditorRuntime) -> Result
     Ok(())
 }
 
-pub(super) fn open_popup_terminal_command(
-    runtime: &mut EditorRuntime,
-    buffer_name: &str,
-    popup_title: &str,
-    config: LiveTerminalConfig,
-    on_exit: Option<TerminalExitAction>,
-) -> Result<BufferId, String> {
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|error| error.to_string())?;
-    let buffer_id = runtime
-        .model_mut()
-        .create_popup_buffer(workspace_id, buffer_name, BufferKind::Terminal, None)
-        .map_err(|error| error.to_string())?;
-    runtime
-        .model_mut()
-        .open_popup_buffer(workspace_id, popup_title, buffer_id)
-        .map_err(|error| error.to_string())?;
-    {
-        let user_library = shell_user_library(runtime);
-        let ui = shell_ui_mut(runtime)?;
-        ui.ensure_popup_buffer(buffer_id, buffer_name, BufferKind::Terminal, &*user_library);
-        ui.set_popup_buffer(buffer_id);
-        ui.set_popup_focus(true);
-    }
-    terminal_buffer_state_mut(runtime)?.queue_launch(buffer_id, config, on_exit);
-    ensure_terminal_session(runtime, buffer_id)?;
-    shell_ui_mut(runtime)?.enter_insert_mode();
-    Ok(buffer_id)
-}
-
 pub(super) fn close_terminal_buffers_for_workspace(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -260,8 +194,6 @@ pub(super) fn refresh_pending_terminal(
     }
     let now = Instant::now();
     let mut updates = Vec::new();
-    let mut terminal_buffers_to_close = Vec::new();
-    let mut refresh_git_status = false;
     {
         let state = terminal_buffer_state_mut(runtime)?;
         for buffer_id in terminal_buffer_ids {
@@ -275,17 +207,6 @@ pub(super) fn refresh_pending_terminal(
                 if changed {
                     session.buffer_dirty = true;
                 }
-            }
-            if session.session.has_exited()
-                && let Some(action) = session.on_exit.take()
-            {
-                match action {
-                    TerminalExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
-                        terminal_buffers_to_close.push(buffer_id);
-                        refresh_git_status = true;
-                    }
-                }
-                continue;
             }
             if resized_buffer == Some(buffer_id) {
                 session.buffer_dirty = true;
@@ -301,7 +222,7 @@ pub(super) fn refresh_pending_terminal(
             session.buffer_dirty = false;
         }
     }
-    let mut changed = !updates.is_empty();
+    let changed = !updates.is_empty();
     for (buffer_id, lines, render) in updates {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.set_terminal_render(render);
@@ -311,41 +232,7 @@ pub(super) fn refresh_pending_terminal(
             buffer.replace_with_lines_preserve_view(lines);
         }
     }
-    for buffer_id in terminal_buffers_to_close {
-        close_popup_terminal_buffer(runtime, buffer_id)?;
-        changed = true;
-    }
-    if refresh_git_status {
-        refresh_git_status_buffers(runtime)?;
-        changed = true;
-    }
     Ok(changed)
-}
-
-fn close_popup_terminal_buffer(
-    runtime: &mut EditorRuntime,
-    buffer_id: BufferId,
-) -> Result<(), String> {
-    close_buffer_immediate(runtime, buffer_id)?;
-    if let Some(popup) = active_runtime_popup(runtime)? {
-        let popup_focus_allowed = {
-            let ui = shell_ui(runtime)?;
-            ui.popup_focus_allowed(&popup)
-        };
-        {
-            let ui = shell_ui_mut(runtime)?;
-            ui.set_popup_buffer(popup.active_buffer);
-            if !popup_focus_allowed {
-                ui.set_popup_focus(false);
-            }
-        }
-        ensure_shell_buffer(runtime, popup.active_buffer)?;
-    } else {
-        let ui = shell_ui_mut(runtime)?;
-        ui.set_popup_focus(false);
-        ui.clear_popup_buffer();
-    }
-    Ok(())
 }
 
 fn visible_terminal_buffer_ids(runtime: &EditorRuntime) -> Result<BTreeSet<BufferId>, String> {
@@ -381,27 +268,14 @@ pub(super) fn ensure_terminal_session(
     if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
         return Ok(false);
     }
-    let pending_launch = terminal_buffer_state_mut(runtime)?.take_pending_launch(buffer_id);
-    if pending_launch.is_none() && terminal_buffer_state(runtime)?.contains(buffer_id) {
+    if terminal_buffer_state(runtime)?.contains(buffer_id) {
         return Ok(false);
     }
-    let (config, on_exit) = if let Some(pending_launch) = pending_launch {
-        if let Some(mut session) = terminal_buffer_state_mut(runtime)?.remove(buffer_id) {
-            let title = session.title().to_owned();
-            session.kill().map_err(|error| {
-                format!(
-                    "failed to terminate terminal session `{title}` for buffer `{buffer_id}`: {error}"
-                )
-            })?;
-        }
-        (pending_launch.config, pending_launch.on_exit)
-    } else {
-        (terminal_spawn_config(runtime, buffer_id, 24, 80)?, None)
-    };
+    let config = terminal_spawn_config(runtime, buffer_id, 24, 80)?;
     let session = LiveTerminalSession::spawn(config).map_err(|error| error.to_string())?;
     let lines = session.snapshot().lines().to_vec();
     let render = session.render_snapshot();
-    terminal_buffer_state_mut(runtime)?.insert(buffer_id, session, on_exit);
+    terminal_buffer_state_mut(runtime)?.insert(buffer_id, session);
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     buffer.set_terminal_render(render);
     buffer.replace_with_lines_follow_output(lines);

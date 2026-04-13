@@ -2,6 +2,7 @@ mod acp;
 mod browser;
 mod clipboard;
 mod command_line;
+mod command_stream;
 mod diagnostics;
 mod directory;
 mod git;
@@ -14,6 +15,7 @@ mod workspace_search;
 
 use browser::*;
 use command_line::*;
+use command_stream::*;
 use diagnostics::*;
 use directory::*;
 use git::*;
@@ -6287,6 +6289,7 @@ pub(crate) struct ShellUiState {
     file_reload_worker: FileReloadWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
     lsp_sync_worker: LspSyncWorkerState,
+    streamed_command_worker: StreamedCommandWorkerState,
     indent_parse_sessions: BTreeMap<BufferId, SyntaxParseSession>,
     /// Per-workspace last-used build command.  Set when the user runs
     /// `workspace.compile`; reused by `workspace.recompile`.
@@ -6342,6 +6345,7 @@ impl ShellUiState {
             file_reload_worker: FileReloadWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
             lsp_sync_worker: LspSyncWorkerState::new(),
+            streamed_command_worker: StreamedCommandWorkerState::new(),
             indent_parse_sessions: BTreeMap::new(),
             compile_commands: BTreeMap::new(),
         }
@@ -6777,6 +6781,7 @@ impl ShellUiState {
             self.lsp_sync_worker.cancel_path(path);
         }
         self.indent_parse_sessions.remove(&buffer_id);
+        self.streamed_command_worker.remove(buffer_id);
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.retain(|id| *id != buffer_id);
@@ -10921,6 +10926,10 @@ impl ShellState {
         .map_err(ShellError::Runtime)
     }
 
+    fn refresh_pending_streamed_commands(&mut self) -> Result<bool, ShellError> {
+        refresh_pending_streamed_commands(&mut self.runtime).map_err(ShellError::Runtime)
+    }
+
     fn refresh_pending_lsp(&mut self, typing_active: bool) -> Result<bool, ShellError> {
         refresh_pending_lsp(&mut self.runtime, typing_active).map_err(ShellError::Runtime)
     }
@@ -11346,6 +11355,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 if let Some(frame) = typing_frame.as_mut() {
                     frame.hover_refresh = hover_refresh_started.elapsed();
                 }
+                let command_stream_changed = match state.refresh_pending_streamed_commands() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.command-stream-refresh", error);
+                        false
+                    }
+                };
                 let terminal_refresh_started = Instant::now();
                 let terminal_changed =
                     if typing_refresh_budget_active && !state.active_buffer_is_terminal() {
@@ -11430,6 +11446,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || notification_changed
                     || autocomplete_changed
                     || hover_changed
+                    || command_stream_changed
                     || terminal_changed
                     || syntax_changed
                     || acp_changed
@@ -19646,6 +19663,35 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.remove_buffer(buffer_id);
     sync_active_buffer(runtime)?;
+    Ok(())
+}
+
+fn close_popup_buffer_and_restore_focus(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    if shell_ui(runtime)?.buffer(buffer_id).is_none() {
+        return Ok(());
+    }
+    close_buffer_immediate(runtime, buffer_id)?;
+    if let Some(popup) = active_runtime_popup(runtime)? {
+        let popup_focus_allowed = {
+            let ui = shell_ui(runtime)?;
+            ui.popup_focus_allowed(&popup)
+        };
+        {
+            let ui = shell_ui_mut(runtime)?;
+            ui.set_popup_buffer(popup.active_buffer);
+            if !popup_focus_allowed {
+                ui.set_popup_focus(false);
+            }
+        }
+        ensure_shell_buffer(runtime, popup.active_buffer)?;
+    } else {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_focus(false);
+        ui.clear_popup_buffer();
+    }
     Ok(())
 }
 
