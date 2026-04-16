@@ -490,7 +490,7 @@ pub(super) fn terminal_key_for_event(keycode: Keycode, keymod: Mod) -> Option<Te
         return Some(TerminalKey::CtrlC);
     }
     match keycode {
-        Keycode::Return | Keycode::KpEnter => Some(TerminalKey::Enter),
+        Keycode::Return | Keycode::KpEnter | Keycode::Return2 => Some(TerminalKey::Enter),
         Keycode::Backspace => Some(TerminalKey::Backspace),
         Keycode::Delete => Some(TerminalKey::Delete),
         Keycode::Left => Some(TerminalKey::Left),

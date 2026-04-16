@@ -25,7 +25,7 @@ pub use abi::{
     AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
     AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
     AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo,
-    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiSection,
+    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPdfOpenMode, AbiSection,
     AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
     AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
     AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
@@ -343,6 +343,7 @@ pub trait UserLibrary: Send + Sync {
     fn browser_input_hint(&self, url: Option<&str>) -> String;
     fn browser_url_prompt(&self) -> String;
     fn browser_url_placeholder(&self) -> String;
+    fn pdf_open_mode(&self) -> PdfOpenMode;
     fn headerline_lines(&self, _context: &GhostTextContext<'_>) -> Vec<String> {
         Vec::new()
     }
@@ -726,6 +727,14 @@ pub struct WorkspaceRoot {
 pub struct TerminalConfig {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// Default presentation mode used when opening PDF buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfOpenMode {
+    Rendered,
+    Markdown,
+    Latex,
 }
 
 /// Text ligature configuration exported by the user library.
@@ -1231,7 +1240,7 @@ mod tests {
                 vec![PluginAction::emit_hook("lsp.startup", Some("rust"))],
             )])
             .with_key_bindings(vec![
-                PluginKeyBinding::new("M-x lsp.start", "lsp.start", PluginKeymapScope::Global)
+                PluginKeyBinding::new("Alt+x lsp.start", "lsp.start", PluginKeymapScope::Global)
                     .with_vim_mode(PluginVimMode::Normal),
             ])
             .with_hook_declarations(vec![PluginHookDeclaration::new(
@@ -1268,7 +1277,7 @@ mod tests {
         assert!(package.auto_load());
         assert_eq!(package.description(), "Language server integration.");
         assert_eq!(package.commands()[0].name(), "lsp.start");
-        assert_eq!(package.key_bindings()[0].chord(), "M-x lsp.start");
+        assert_eq!(package.key_bindings()[0].chord(), "Alt+x lsp.start");
         assert_eq!(package.key_bindings()[0].vim_mode(), PluginVimMode::Normal);
         assert_eq!(package.hook_declarations()[0].name(), "lsp.startup");
         assert_eq!(package.hook_bindings()[0].detail_filter(), Some(".rs"));

@@ -5,4 +5,5 @@
 /.idea/
 /.vscode/
 target-validation/*
+target-agent/*
 **/user/lang/grammars/**

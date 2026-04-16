@@ -390,7 +390,7 @@ mod tests {
 
         runtime
             .register_key_binding(
-                "M-x scratch",
+                "Alt+x scratch",
                 "workspace.open-scratch",
                 KeymapScope::Global,
                 CommandSource::Core,
@@ -406,7 +406,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         runtime
-            .execute_key_binding(&KeymapScope::Global, "M-x scratch")
+            .execute_key_binding(&KeymapScope::Global, "Alt+x scratch")
             .map_err(|error| error.to_string())?;
 
         let log = runtime
@@ -427,7 +427,67 @@ mod tests {
         assert!(
             runtime
                 .keymaps()
+                .contains(&KeymapScope::Global, "Alt+x scratch")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_executes_keybindings_registered_with_legacy_aliases() -> Result<(), String> {
+        let mut runtime = EditorRuntime::new();
+        runtime.services_mut().insert(EventLog::default());
+
+        runtime
+            .register_command(
+                "workspace.open-scratch",
+                "Open a scratch buffer.",
+                CommandSource::Core,
+                |runtime| {
+                    let log = runtime
+                        .services_mut()
+                        .get_mut::<EventLog>()
+                        .ok_or_else(|| "event log service missing".to_owned())?;
+                    log.0.push("command:workspace.open-scratch".to_owned());
+                    Ok(())
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        runtime
+            .register_key_binding(
+                "M-x scratch",
+                "workspace.open-scratch",
+                KeymapScope::Global,
+                CommandSource::Core,
+            )
+            .map_err(|error| error.to_string())?;
+
+        runtime
+            .execute_key_binding(&KeymapScope::Global, "Alt+x scratch")
+            .map_err(|error| error.to_string())?;
+
+        let log = runtime
+            .services()
+            .get::<EventLog>()
+            .ok_or_else(|| "event log service missing".to_owned())?;
+
+        assert_eq!(log.0, vec!["command:workspace.open-scratch".to_owned()]);
+        assert!(
+            runtime
+                .keymaps()
+                .contains(&KeymapScope::Global, "Alt+x scratch")
+        );
+        assert!(
+            runtime
+                .keymaps()
                 .contains(&KeymapScope::Global, "M-x scratch")
+        );
+        assert_eq!(
+            runtime
+                .keymaps()
+                .get(&KeymapScope::Global, "Alt+x scratch")
+                .map(|binding| binding.chord()),
+            Some("Alt+x scratch")
         );
 
         Ok(())

@@ -16,8 +16,8 @@ use editor_theme::{Color, Theme, ThemeOption};
 use crate::{
     AcpClient, AutocompleteProvider, AutocompleteProviderItem, GhostTextContext, GhostTextLine,
     GitStatusPrefix, HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, StatuslineContext, TerminalConfig,
-    WorkspaceRoot,
+    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, PdfOpenMode, StatuslineContext,
+    TerminalConfig, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -536,6 +536,34 @@ impl From<AbiOilSortMode> for OilSortMode {
         match value {
             AbiOilSortMode::TypeThenName => Self::TypeThenName,
             AbiOilSortMode::TypeThenNameDesc => Self::TypeThenNameDesc,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AbiPdfOpenMode {
+    Rendered,
+    Markdown,
+    Latex,
+}
+
+impl From<PdfOpenMode> for AbiPdfOpenMode {
+    fn from(value: PdfOpenMode) -> Self {
+        match value {
+            PdfOpenMode::Rendered => Self::Rendered,
+            PdfOpenMode::Markdown => Self::Markdown,
+            PdfOpenMode::Latex => Self::Latex,
+        }
+    }
+}
+
+impl From<AbiPdfOpenMode> for PdfOpenMode {
+    fn from(value: AbiPdfOpenMode) -> Self {
+        match value {
+            AbiPdfOpenMode::Rendered => Self::Rendered,
+            AbiPdfOpenMode::Markdown => Self::Markdown,
+            AbiPdfOpenMode::Latex => Self::Latex,
         }
     }
 }
@@ -1694,8 +1722,9 @@ pub struct UserLibraryModule {
     pub default_build_command: extern "C" fn(RString) -> ROption<RString>,
     pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
     pub ghost_text_lines: extern "C" fn(AbiGhostTextContext) -> RVec<AbiGhostTextLine>,
-    #[sabi(last_prefix_field)]
     pub headerline_lines: extern "C" fn(AbiGhostTextContext) -> RVec<RString>,
+    #[sabi(last_prefix_field)]
+    pub pdf_open_mode: extern "C" fn() -> AbiPdfOpenMode,
 }
 
 impl RootModule for UserLibraryModuleRef {

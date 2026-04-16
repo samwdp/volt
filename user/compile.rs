@@ -79,6 +79,8 @@ pub fn default_build_command(language: &str) -> Option<&'static str> {
         ("cpp", "make"),
         ("cc", "make"),
         ("toml", "cargo build"),
+        ("latex", "latexmk -pdf"),
+        ("tex", "latexmk -pdf"),
     ];
     commands
         .iter()
@@ -185,6 +187,12 @@ mod tests {
     fn default_build_command_returns_cargo_for_rust() {
         assert_eq!(default_build_command("rust"), Some("cargo build"));
         assert_eq!(default_build_command("rs"), Some("cargo build"));
+    }
+
+    #[test]
+    fn default_build_command_returns_latexmk_for_latex() {
+        assert_eq!(default_build_command("latex"), Some("latexmk -pdf"));
+        assert_eq!(default_build_command("tex"), Some("latexmk -pdf"));
     }
 
     #[test]

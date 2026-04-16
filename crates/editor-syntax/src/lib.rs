@@ -174,6 +174,239 @@ impl GrammarSource {
     }
 }
 
+/// One external command needed to install a grammar-backed language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallCommandSpec {
+    label: String,
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl InstallCommandSpec {
+    fn new(
+        label: impl Into<String>,
+        program: impl Into<String>,
+        args: Vec<String>,
+        cwd: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            program: program.into(),
+            args,
+            cwd: cwd.into(),
+        }
+    }
+
+    /// Returns the human-readable command label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the executable name.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Returns the command-line arguments.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Returns the command working directory.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+}
+
+/// Reusable install metadata for one grammar-backed language installation.
+#[derive(Debug)]
+pub struct LanguageInstallPlan {
+    config: LanguageConfiguration,
+    grammar: GrammarSource,
+    install_root: PathBuf,
+    query_asset_root: Option<PathBuf>,
+    temp_clone_root: PathBuf,
+}
+
+impl LanguageInstallPlan {
+    /// Returns the registered language id being installed.
+    pub fn language_id(&self) -> &str {
+        self.config.id()
+    }
+
+    /// Returns the temporary clone root used for this install.
+    pub fn clone_root(&self) -> &Path {
+        &self.temp_clone_root
+    }
+
+    /// Returns the cloned grammar directory inside the temporary checkout.
+    pub fn grammar_dir(&self) -> PathBuf {
+        self.temp_clone_root.join(self.grammar.grammar_dir())
+    }
+
+    /// Returns the source directory used by the generated parser and optional scanners.
+    pub fn source_dir(&self) -> PathBuf {
+        self.grammar_dir().join(self.grammar.source_dir())
+    }
+
+    /// Returns the stable install directory under the registry install root.
+    pub fn install_dir(&self) -> PathBuf {
+        self.grammar.install_directory(&self.install_root)
+    }
+
+    /// Ensures the temporary clone parent exists before launching `git clone`.
+    pub fn prepare_clone_root(&self) -> Result<(), SyntaxError> {
+        let parent = self
+            .temp_clone_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&parent).map_err(|error| io_error("create temp parent", &parent, error))
+    }
+
+    /// Returns the `git clone` command needed to populate the temporary checkout.
+    pub fn clone_command(&self) -> InstallCommandSpec {
+        InstallCommandSpec::new(
+            format!(
+                "git clone --depth 1 {} {}",
+                self.grammar.repository_url(),
+                self.temp_clone_root.display()
+            ),
+            "git",
+            vec![
+                "clone".to_owned(),
+                "--depth".to_owned(),
+                "1".to_owned(),
+                self.grammar.repository_url().to_owned(),
+                self.temp_clone_root.display().to_string(),
+            ],
+            self.temp_clone_root
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(std::env::temp_dir),
+        )
+    }
+
+    /// Creates the install directory and copies bundled query assets into place.
+    pub fn prepare_install_root(&self) -> Result<(), SyntaxError> {
+        ensure_cloned_grammar_dir_exists(&self.grammar_dir())?;
+        fs::create_dir_all(&self.install_root)
+            .map_err(|error| io_error("create grammar install root", &self.install_root, error))?;
+        let install_dir = self.install_dir();
+        if install_dir.exists() {
+            fs::remove_dir_all(&install_dir)
+                .map_err(|error| io_error("replace installed grammar", &install_dir, error))?;
+        }
+        fs::create_dir_all(&install_dir)
+            .map_err(|error| io_error("create install directory", &install_dir, error))?;
+        let query_asset_root = self
+            .query_asset_root
+            .as_deref()
+            .ok_or_else(|| SyntaxError::Io {
+                operation: "resolve bundled query asset root".to_owned(),
+                path: self.install_root.clone(),
+                message: "bundled tree-sitter query assets are not configured".to_owned(),
+            })?;
+        install_bundled_queries(&self.config, query_asset_root, &self.install_root)?;
+        ensure_installed_highlight_query_path(
+            &self.config,
+            &self
+                .grammar
+                .installed_highlight_query_path(&self.install_root),
+        )?;
+        let highlight_query_path = self
+            .grammar
+            .installed_highlight_query_path(&self.install_root);
+        if !highlight_query_path.exists() {
+            return Err(SyntaxError::Io {
+                operation: "locate bundled highlight query".to_owned(),
+                path: query_asset_root
+                    .join(self.config.id())
+                    .join("highlights.scm"),
+                message: "bundled highlights.scm is missing for this language".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the `tree-sitter generate` command when the cloned grammar still needs `parser.c`.
+    pub fn generate_command_if_needed(&self) -> Result<Option<InstallCommandSpec>, SyntaxError> {
+        ensure_cloned_grammar_dir_exists(&self.grammar_dir())?;
+        let parser_path = self.source_dir().join("parser.c");
+        if parser_path.exists() {
+            return Ok(None);
+        }
+        let grammar_js_path = self.grammar_dir().join("grammar.js");
+        if !grammar_js_path.exists() {
+            return Err(SyntaxError::Io {
+                operation: "locate grammar source".to_owned(),
+                path: grammar_js_path,
+                message: "grammar.js is missing and parser.c was not pre-generated".to_owned(),
+            });
+        }
+        Ok(Some(InstallCommandSpec::new(
+            "tree-sitter generate",
+            "tree-sitter",
+            vec!["generate".to_owned()],
+            self.grammar_dir(),
+        )))
+    }
+
+    /// Returns the compiler command for the cloned grammar after `parser.c` is available.
+    pub fn compile_command(&self) -> Result<InstallCommandSpec, SyntaxError> {
+        ensure_cloned_grammar_dir_exists(&self.grammar_dir())?;
+        let source_dir = self.source_dir();
+        let parser_path = source_dir.join("parser.c");
+        if !parser_path.exists() {
+            return Err(SyntaxError::Io {
+                operation: "locate parser source".to_owned(),
+                path: parser_path,
+                message: "parser.c is missing".to_owned(),
+            });
+        }
+
+        let scanner_c = source_dir.join("scanner.c");
+        let scanner_cpp = source_dir.join("scanner.cc");
+        let output_path = self.grammar.installed_library_path(&self.install_root);
+        let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
+        let mut args = Vec::new();
+        if cfg!(target_os = "macos") {
+            args.extend(["-fPIC".to_owned(), "-dynamiclib".to_owned()]);
+        } else {
+            args.extend(["-fPIC".to_owned(), "-shared".to_owned()]);
+        }
+        if scanner_cpp.exists() {
+            args.push("-std=c++14".to_owned());
+        }
+        args.push(parser_path.display().to_string());
+        if scanner_c.exists() {
+            args.push(scanner_c.display().to_string());
+        }
+        if scanner_cpp.exists() {
+            args.push(scanner_cpp.display().to_string());
+        }
+        args.push("-I".to_owned());
+        args.push(source_dir.display().to_string());
+        args.push("-o".to_owned());
+        args.push(output_path.display().to_string());
+        Ok(InstallCommandSpec::new(
+            format!("{compiler} {}", args.join(" ")),
+            compiler,
+            args,
+            self.grammar_dir(),
+        ))
+    }
+}
+
+impl Drop for LanguageInstallPlan {
+    fn drop(&mut self) {
+        if self.temp_clone_root.exists() {
+            let _ = fs::remove_dir_all(&self.temp_clone_root);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum LanguageLoader {
     Static {
@@ -924,96 +1157,56 @@ impl SyntaxRegistry {
         })
     }
 
-    /// Installs a grammar-backed language into the configured install root.
-    pub fn install_language(&mut self, language_id: &str) -> Result<PathBuf, SyntaxError> {
+    /// Builds a reusable install plan for one grammar-backed language.
+    pub fn prepare_language_install(
+        &self,
+        language_id: &str,
+    ) -> Result<Option<LanguageInstallPlan>, SyntaxError> {
         let config = self
             .languages
             .get(language_id)
             .cloned()
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.to_owned()))?;
         let Some(grammar) = config.grammar().cloned() else {
-            return Ok(self.install_root.clone());
+            return Ok(None);
         };
 
         let temp_clone_root = std::env::temp_dir().join(format!(
             "volt-treesitter-{}",
             temp_guid_like_directory_name()
         ));
-        let _cleanup = TempCloneGuard::new(temp_clone_root.clone());
-        let parent = temp_clone_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
-        fs::create_dir_all(&parent)
-            .map_err(|error| io_error("create temp parent", &parent, error))?;
+        Ok(Some(LanguageInstallPlan {
+            config,
+            grammar,
+            install_root: self.install_root.clone(),
+            query_asset_root: self.query_asset_root.clone(),
+            temp_clone_root,
+        }))
+    }
 
-        let mut clone_command = Command::new("git");
-        configure_background_command(&mut clone_command);
-        let clone_output = clone_command
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                grammar.repository_url(),
-                &temp_clone_root.display().to_string(),
-            ])
-            .output()
-            .map_err(|error| io_error("run git clone", &temp_clone_root, error))?;
-        if !clone_output.status.success() {
-            return Err(SyntaxError::InstallCommand {
-                language_id: language_id.to_owned(),
-                message: command_failure_message("git clone", &clone_output),
-            });
+    /// Drops any cached loaded grammar/query state for the given language.
+    pub fn invalidate_language(&mut self, language_id: &str) -> Result<(), SyntaxError> {
+        if !self.languages.contains_key(language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
         }
-
-        let cloned_grammar_dir = temp_clone_root.join(grammar.grammar_dir());
-        if !cloned_grammar_dir.exists() {
-            return Err(SyntaxError::Io {
-                operation: "locate cloned grammar directory".to_owned(),
-                path: cloned_grammar_dir,
-                message: "configured grammar directory does not exist in the cloned repository"
-                    .to_owned(),
-            });
-        }
-
-        fs::create_dir_all(&self.install_root)
-            .map_err(|error| io_error("create grammar install root", &self.install_root, error))?;
-        let install_dir = grammar.install_directory(&self.install_root);
-        if install_dir.exists() {
-            fs::remove_dir_all(&install_dir)
-                .map_err(|error| io_error("replace installed grammar", &install_dir, error))?;
-        }
-        fs::create_dir_all(&install_dir)
-            .map_err(|error| io_error("create install directory", &install_dir, error))?;
-        let query_asset_root = self
-            .query_asset_root
-            .as_deref()
-            .ok_or_else(|| SyntaxError::Io {
-                operation: "resolve bundled query asset root".to_owned(),
-                path: self.install_root.clone(),
-                message: "bundled tree-sitter query assets are not configured".to_owned(),
-            })?;
-        install_bundled_queries(&config, query_asset_root, &self.install_root)?;
-        ensure_installed_highlight_query_path(
-            &config,
-            &grammar.installed_highlight_query_path(&self.install_root),
-        )?;
-        let highlight_query_path = grammar.installed_highlight_query_path(&self.install_root);
-        if !highlight_query_path.exists() {
-            return Err(SyntaxError::Io {
-                operation: "locate bundled highlight query".to_owned(),
-                path: query_asset_root.join(config.id()).join("highlights.scm"),
-                message: "bundled highlights.scm is missing for this language".to_owned(),
-            });
-        }
-        build_shared_library(
-            language_id,
-            &grammar,
-            &cloned_grammar_dir,
-            &self.install_root,
-        )?;
-
         self.loaded.remove(language_id);
+        Ok(())
+    }
+
+    /// Installs a grammar-backed language into the configured install root.
+    pub fn install_language(&mut self, language_id: &str) -> Result<PathBuf, SyntaxError> {
+        let Some(install_plan) = self.prepare_language_install(language_id)? else {
+            return Ok(self.install_root.clone());
+        };
+        install_plan.prepare_clone_root()?;
+        run_install_command(language_id, &install_plan.clone_command())?;
+        install_plan.prepare_install_root()?;
+        if let Some(generate_command) = install_plan.generate_command_if_needed()? {
+            run_install_command(language_id, &generate_command)?;
+        }
+        run_install_command(language_id, &install_plan.compile_command()?)?;
+        let install_dir = install_plan.install_dir();
+        self.invalidate_language(language_id)?;
         Ok(install_dir)
     }
 
@@ -3287,59 +3480,40 @@ fn highlight_inline_language_per_line(
     })
 }
 
-fn build_shared_library(
+fn ensure_cloned_grammar_dir_exists(grammar_dir: &Path) -> Result<(), SyntaxError> {
+    if grammar_dir.exists() {
+        return Ok(());
+    }
+    Err(SyntaxError::Io {
+        operation: "locate cloned grammar directory".to_owned(),
+        path: grammar_dir.to_path_buf(),
+        message: "configured grammar directory does not exist in the cloned repository".to_owned(),
+    })
+}
+
+fn run_install_command(
     language_id: &str,
-    grammar: &GrammarSource,
-    grammar_dir: &Path,
-    install_root: &Path,
+    command_spec: &InstallCommandSpec,
 ) -> Result<(), SyntaxError> {
-    let source_dir = grammar_dir.join(grammar.source_dir());
-    let parser_path = source_dir.join("parser.c");
-    if !parser_path.exists() {
-        return Err(SyntaxError::Io {
-            operation: "locate parser source".to_owned(),
-            path: parser_path,
-            message: "parser.c is missing".to_owned(),
-        });
-    }
-
-    let scanner_c = source_dir.join("scanner.c");
-    let scanner_cpp = source_dir.join("scanner.cc");
-    let output_path = grammar.installed_library_path(install_root);
-    let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
-    let mut command = Command::new(compiler);
+    let mut command = Command::new(command_spec.program());
     configure_background_command(&mut command);
-    if cfg!(target_os = "macos") {
-        command.args(["-fPIC", "-dynamiclib"]);
-    } else {
-        command.args(["-fPIC", "-shared"]);
-    }
-    if scanner_cpp.exists() {
-        command.arg("-std=c++14");
-    }
-    command.arg(&parser_path);
-    if scanner_c.exists() {
-        command.arg(&scanner_c);
-    }
-    if scanner_cpp.exists() {
-        command.arg(&scanner_cpp);
-    }
-    command.arg("-I");
-    command.arg(&source_dir);
-    command.arg("-o");
-    command.arg(&output_path);
-    command.current_dir(grammar_dir);
-
     let output = command
+        .args(command_spec.args())
+        .current_dir(command_spec.cwd())
         .output()
-        .map_err(|error| io_error("run grammar compiler", grammar_dir, error))?;
+        .map_err(|error| {
+            io_error(
+                &format!("run {}", command_spec.program()),
+                command_spec.cwd(),
+                error,
+            )
+        })?;
     if !output.status.success() {
         return Err(SyntaxError::InstallCommand {
             language_id: language_id.to_owned(),
-            message: command_failure_message(compiler, &output),
+            message: command_failure_message(command_spec.label(), &output),
         });
     }
-
     Ok(())
 }
 
@@ -3486,24 +3660,6 @@ fn temp_guid_like_directory_name() -> String {
     let part4 = ((value >> 48) & 0xffff) as u16;
     let part5 = (value & 0xffff_ffff_ffff) as u64;
     format!("{part1:08x}-{part2:04x}-{part3:04x}-{part4:04x}-{part5:012x}")
-}
-
-struct TempCloneGuard {
-    path: PathBuf,
-}
-
-impl TempCloneGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl Drop for TempCloneGuard {
-    fn drop(&mut self) {
-        if self.path.exists() {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -4106,6 +4262,122 @@ fn main() {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn install_plan_requests_generate_when_parser_is_missing() {
+        let install_root = TempTestDir::new("install-plan-generate-install");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "latex",
+            ["tex"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-latex.git",
+                ".",
+                "src",
+                "tree-sitter-latex",
+                "tree_sitter_latex",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let plan = registry
+            .prepare_language_install("latex")
+            .expect("plan")
+            .expect("grammar-backed plan");
+        let source_dir = plan.source_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        fs::write(
+            plan.grammar_dir().join("grammar.js"),
+            "module.exports = grammar({});",
+        )
+        .expect("write grammar.js");
+        let parser_path = plan.source_dir().join("parser.c");
+        if parser_path.exists() {
+            fs::remove_file(&parser_path).expect("remove unexpected parser.c");
+        }
+        assert!(
+            !parser_path.exists(),
+            "parser.c should be absent for generate test"
+        );
+        assert!(plan.grammar_dir().join("grammar.js").exists());
+
+        let generate = plan
+            .generate_command_if_needed()
+            .expect("generate command")
+            .expect("missing parser should require generate");
+        assert_eq!(generate.program(), "tree-sitter");
+        assert_eq!(generate.args(), ["generate".to_owned()]);
+        assert_eq!(generate.cwd(), plan.grammar_dir().as_path());
+        assert!(matches!(
+            plan.compile_command(),
+            Err(SyntaxError::Io { message, .. }) if message == "parser.c is missing"
+        ));
+    }
+
+    #[test]
+    fn install_plan_reports_missing_grammar_sources_before_compile() {
+        let install_root = TempTestDir::new("install-plan-missing-sources-install");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "latex",
+            ["tex"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-latex.git",
+                ".",
+                "src",
+                "tree-sitter-latex",
+                "tree_sitter_latex",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let plan = registry
+            .prepare_language_install("latex")
+            .expect("plan")
+            .expect("grammar-backed plan");
+        fs::create_dir_all(plan.source_dir()).expect("create source dir");
+
+        assert!(matches!(
+            plan.generate_command_if_needed(),
+            Err(SyntaxError::Io { message, .. })
+                if message == "grammar.js is missing and parser.c was not pre-generated"
+        ));
+    }
+
+    #[test]
+    fn install_plan_compile_command_prefers_cpp_scanner() {
+        let install_root = TempTestDir::new("install-plan-compile-install");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "latex",
+            ["tex"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-latex.git",
+                ".",
+                "src",
+                "tree-sitter-latex",
+                "tree_sitter_latex",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let plan = registry
+            .prepare_language_install("latex")
+            .expect("plan")
+            .expect("grammar-backed plan");
+        let source_dir = plan.source_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        fs::write(source_dir.join("parser.c"), "/* parser */").expect("write parser.c");
+        fs::write(source_dir.join("scanner.cc"), "// scanner").expect("write scanner.cc");
+
+        assert!(
+            plan.generate_command_if_needed()
+                .expect("generate decision")
+                .is_none()
+        );
+        let compile = plan.compile_command().expect("compile command");
+        assert_eq!(compile.program(), "c++");
+        assert!(compile.args().contains(&"-std=c++14".to_owned()));
+        assert!(compile.args().iter().any(|arg| arg.ends_with("parser.c")));
+        assert!(compile.args().iter().any(|arg| arg.ends_with("scanner.cc")));
     }
 
     #[test]

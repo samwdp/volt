@@ -189,9 +189,9 @@ PluginKeyBinding::new(
 )
 ```
 
-Chord strings use `Ctrl+`, `Shift+`, `Alt+` prefixes (e.g. `"Ctrl+Shift+h"`).
-The shorthand `C-` is equivalent to `Ctrl+` (so `"C-c C-c"` means press
-`Ctrl+c` twice).
+Chord strings use canonical `Ctrl+`, `Alt+`, `Shift+`, and `Gui+` prefixes
+(e.g. `"Ctrl+Shift+h"`). Legacy shorthand such as `C-` is still accepted and
+normalized (`"C-c C-c"` resolves the same as `"Ctrl+c Ctrl+c"`).
 
 **Scopes** control when the binding is active:
 
@@ -377,7 +377,7 @@ use editor_plugin_api::{
 
 pub const BUFFER_NAME: &str = "*calculator*";
 pub const EVALUATE_HANDLER: &str = "calculator.evaluate-buffer";
-pub const EVALUATE_CHORD: &str = "C-c C-c";
+pub const EVALUATE_CHORD: &str = "Ctrl+c Ctrl+c";
 pub const SWITCH_PANE_CHORD: &str = "Ctrl+Tab";
 
 pub fn package() -> PluginPackage {

@@ -15,7 +15,7 @@ pub use buffer_kinds::CALCULATOR as CALCULATOR_KIND;
 
 pub const BUFFER_NAME: &str = "*calculator*";
 pub const EVALUATE_HANDLER: &str = "calculator.evaluate-buffer";
-pub const EVALUATE_CHORD: &str = "C-c C-c";
+pub const EVALUATE_CHORD: &str = "Ctrl+c Ctrl+c";
 pub const SWITCH_PANE_CHORD: &str = "Ctrl+Tab";
 pub const PROVIDER_CALCULATOR: &str = "calculator";
 pub const PROVIDER_LABEL: &str = "Calculator";

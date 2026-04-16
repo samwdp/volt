@@ -90,14 +90,14 @@ use abi_stable::{
 };
 use editor_plugin_api::PluginPackage;
 use editor_plugin_api::{
-    DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, Theme,
+    DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, PdfOpenMode, Theme,
     abi::{
         AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
         AbiGhostTextContext, AbiGhostTextLine, AbiGitStatusPrefix, AbiGitStatusSnapshot,
         AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
         AbiLigatureConfig, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
-        AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig, AbiTheme, AbiWorkspaceRoot,
-        UserLibraryModule, UserLibraryModuleRef,
+        AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig, AbiTheme,
+        AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
     },
 };
 
@@ -429,6 +429,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn browser_url_placeholder(&self) -> String {
         browser::URL_PLACEHOLDER.to_owned()
+    }
+
+    fn pdf_open_mode(&self) -> PdfOpenMode {
+        pdf::open_mode()
     }
 
     fn ghost_text_lines(&self, context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
@@ -771,6 +775,10 @@ extern "C" fn exported_browser_url_placeholder() -> RString {
     UserLibraryImpl.browser_url_placeholder().into()
 }
 
+extern "C" fn exported_pdf_open_mode() -> AbiPdfOpenMode {
+    UserLibraryImpl.pdf_open_mode().into()
+}
+
 extern "C" fn exported_ghost_text_lines(context: AbiGhostTextContext) -> RVec<AbiGhostTextLine> {
     let context = GhostTextContext {
         buffer_id: context.buffer_id,
@@ -973,6 +981,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         ligature_config_v1: exported_ligature_config,
         ghost_text_lines: exported_ghost_text_lines,
         headerline_lines: exported_headerline_lines,
+        pdf_open_mode: exported_pdf_open_mode,
     }
     .leak_into_prefix()
 }

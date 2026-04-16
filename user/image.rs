@@ -5,7 +5,7 @@ use editor_plugin_api::{
 pub const ZOOM_IN_CHORD: &str = "Ctrl+=";
 pub const ZOOM_OUT_CHORD: &str = "Ctrl+-";
 pub const ZOOM_RESET_CHORD: &str = "Ctrl+0";
-pub const TOGGLE_MODE_CHORD: &str = "C-c C-c";
+pub const TOGGLE_MODE_CHORD: &str = "Ctrl+c Ctrl+c";
 
 /// Returns the metadata for the native image-viewer package.
 pub fn package() -> PluginPackage {

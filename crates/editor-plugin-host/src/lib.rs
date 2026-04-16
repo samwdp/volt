@@ -8,7 +8,7 @@ use editor_core::{
 use editor_path::PathPattern;
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilKeyAction,
-    PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
+    PdfOpenMode, PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
     TerminalConfig, WorkspaceRoot,
 };
 pub use editor_plugin_api::{StatuslineContext, UserLibrary};
@@ -213,6 +213,9 @@ impl UserLibrary for NullUserLibrary {
     }
     fn browser_url_placeholder(&self) -> String {
         "https://example.com".to_owned()
+    }
+    fn pdf_open_mode(&self) -> PdfOpenMode {
+        PdfOpenMode::Rendered
     }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
         format!(

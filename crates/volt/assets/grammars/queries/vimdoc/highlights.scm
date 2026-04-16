@@ -59,8 +59,7 @@
 
 (keycode) @string.special
 
-((url) @string.special.url
-  (#set! @string.special.url url @string.special.url))
+(url) @string.special.url
 
 (modeline) @keyword.directive
 

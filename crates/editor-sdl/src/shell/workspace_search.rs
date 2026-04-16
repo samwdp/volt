@@ -6,6 +6,16 @@ use editor_lsp::LspDocumentTextEdits;
 use super::*;
 
 const WORKSPACE_SEARCH_OUTPUT_LIMIT: usize = 48;
+const LSP_CODE_ACTION_KIND_ORDER: [&str; 8] = [
+    "quickfix",
+    "refactor",
+    "refactor.inline",
+    "refactor.extract",
+    "refactor.rewrite",
+    "source",
+    "source.organizeImports",
+    "source.fixAll",
+];
 
 #[derive(Debug, Clone)]
 pub(super) struct SearchPickerData {
@@ -341,15 +351,55 @@ pub(super) fn lsp_code_actions_picker_overlay(
     path: &Path,
     code_actions: &[LspCodeAction],
 ) -> PickerOverlay {
-    let entries = code_actions
-        .iter()
+    let entries = lsp_code_action_sorted_indices(code_actions.iter().map(LspCodeAction::kind))
+        .into_iter()
         .take(SEARCH_PICKER_ITEM_LIMIT)
         .enumerate()
-        .map(|(index, code_action)| {
-            lsp_code_action_picker_entry(workspace_id, buffer_id, path, index, code_action)
+        .map(|(index, action_index)| {
+            lsp_code_action_picker_entry(
+                workspace_id,
+                buffer_id,
+                path,
+                index,
+                &code_actions[action_index],
+            )
         })
         .collect();
+    lsp_code_actions_picker_overlay_from_entries(entries)
+}
+
+fn lsp_code_actions_picker_overlay_from_entries(entries: Vec<PickerEntry>) -> PickerOverlay {
     PickerOverlay::from_entries("Code Actions", entries)
+        .with_result_order(PickerResultOrder::Source)
+}
+
+fn lsp_code_action_sorted_indices<'a>(
+    kinds: impl IntoIterator<Item = Option<&'a str>>,
+) -> Vec<usize> {
+    let mut indexed_kinds = kinds.into_iter().enumerate().collect::<Vec<_>>();
+    indexed_kinds.sort_by_key(|(index, kind)| (lsp_code_action_kind_rank(*kind), *index));
+    indexed_kinds.into_iter().map(|(index, _)| index).collect()
+}
+
+fn lsp_code_action_kind_rank(kind: Option<&str>) -> usize {
+    kind.and_then(lsp_code_action_explicit_kind_rank)
+        .unwrap_or(LSP_CODE_ACTION_KIND_ORDER.len())
+}
+
+fn lsp_code_action_explicit_kind_rank(kind: &str) -> Option<usize> {
+    LSP_CODE_ACTION_KIND_ORDER
+        .iter()
+        .enumerate()
+        .filter(|(_, explicit_kind)| lsp_code_action_kind_matches(kind, explicit_kind))
+        .max_by_key(|(_, explicit_kind)| explicit_kind.len())
+        .map(|(rank, _)| rank)
+}
+
+fn lsp_code_action_kind_matches(kind: &str, explicit_kind: &str) -> bool {
+    kind == explicit_kind
+        || kind
+            .strip_prefix(explicit_kind)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 pub(super) fn lsp_code_actions_status_picker_overlay(
@@ -518,4 +568,54 @@ pub(super) fn workspace_search_char_column(line: &str, byte_offset: usize) -> us
         byte_offset = byte_offset.saturating_sub(1);
     }
     line[..byte_offset].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picker_entry(id: &str, label: &str) -> PickerEntry {
+        PickerEntry {
+            item: PickerItem::new(id, label, label, None::<&str>),
+            action: PickerAction::NoOp,
+        }
+    }
+
+    #[test]
+    fn lsp_code_action_kind_sorting_prefers_specific_matches_and_stays_stable() {
+        let sorted = lsp_code_action_sorted_indices([
+            Some("source.fixAll.eslint"),
+            Some("refactor.move"),
+            Some("quickfix"),
+            Some("source.organizeImports.biome"),
+            Some("source"),
+            Some("refactor.inline.foo"),
+            Some("refactor.rewrite"),
+            Some("refactor"),
+            Some("refactor.extract"),
+            Some("custom"),
+            None,
+        ]);
+
+        assert_eq!(sorted, vec![2, 1, 7, 5, 8, 6, 4, 3, 0, 9, 10]);
+    }
+
+    #[test]
+    fn lsp_code_action_picker_overlay_preserves_sorted_entry_order() {
+        let overlay = lsp_code_actions_picker_overlay_from_entries(vec![
+            picker_entry("z", "zeta"),
+            picker_entry("a", "alpha"),
+            picker_entry("m", "mu"),
+        ]);
+
+        assert_eq!(
+            overlay
+                .session()
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha", "mu"]
+        );
+    }
 }

@@ -19,6 +19,7 @@ use editor_git::parse_status;
 use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
+use editor_plugin_api::PdfOpenMode;
 use editor_plugin_api::abi::{
     AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
     UserLibraryModuleRef,
@@ -318,6 +319,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn browser_url_placeholder(&self) -> String {
         self.module.browser_url_placeholder()().into()
+    }
+
+    fn pdf_open_mode(&self) -> PdfOpenMode {
+        self.module.pdf_open_mode()().into()
     }
 
     fn ghost_text_lines(
@@ -743,7 +748,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     runtime.register_key_binding(
-        "M-x",
+        "Alt+x",
         "ui.command-palette",
         KeymapScope::Global,
         CommandSource::Core,
@@ -916,7 +921,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     runtime.execute_command("workspace.open-scratch")?;
     runtime.execute_command("jobs.compile-self-check")?;
-    runtime.execute_key_binding(&KeymapScope::Global, "M-x")?;
+    runtime.execute_key_binding(&KeymapScope::Global, "Alt+x")?;
     runtime.execute_key_binding(&KeymapScope::Global, "Ctrl+`")?;
     runtime.execute_command("terminal.run-self-check")?;
     runtime.execute_command("dap.start-codelldb")?;

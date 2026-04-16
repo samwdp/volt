@@ -2096,6 +2096,7 @@ fn run_git_push_in_popup_buffer(
             args,
             cwd: root,
             on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+            notify_on_success: true,
         },
     )?;
     Ok(())
@@ -3123,25 +3124,33 @@ pub(super) fn set_directory_prefix(runtime: &mut EditorRuntime) -> Result<(), St
 
 pub(super) fn take_key_sequence(
     runtime: &mut EditorRuntime,
+    scope: &KeymapScope,
 ) -> Result<Option<Vec<String>>, String> {
     const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
     let ui = shell_ui_mut(runtime)?;
-    let tokens = match ui.pending_key_sequence.take() {
-        Some(state) if now.duration_since(state.started_at) <= SEQUENCE_TIMEOUT => {
-            Some(state.tokens)
-        }
+    let state = match ui.pending_key_sequence.take() {
+        Some(state) if now.duration_since(state.started_at) <= SEQUENCE_TIMEOUT => Some(state),
         _ => None,
     };
-    Ok(tokens)
+    match state {
+        Some(state) if &state.scope == scope => Ok(Some(state.tokens)),
+        Some(state) => {
+            ui.pending_key_sequence = Some(state);
+            Ok(None)
+        }
+        None => Ok(None),
+    }
 }
 
 pub(super) fn set_key_sequence(
     runtime: &mut EditorRuntime,
+    scope: KeymapScope,
     tokens: Vec<String>,
 ) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
     ui.pending_key_sequence = Some(KeySequenceState {
+        scope,
         tokens,
         started_at: Instant::now(),
     });

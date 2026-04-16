@@ -7,7 +7,8 @@ use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLogDirection};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, OilDefaults, OilKeyAction,
-    OilKeybindings, PluginBuffer, PluginBufferSections, TerminalConfig, Theme, WorkspaceRoot,
+    OilKeybindings, PdfOpenMode, PluginBuffer, PluginBufferSections, TerminalConfig, Theme,
+    WorkspaceRoot,
 };
 use editor_plugin_host::StatuslineContext;
 use editor_render::horizontal_pane_rects;
@@ -73,6 +74,7 @@ struct HeaderlineTestUserLibrary {
     scrolloff: f64,
     headerline_lines: Vec<String>,
     headerline_requires_scrolled_viewport: bool,
+    pdf_open_mode: PdfOpenMode,
 }
 
 impl Default for HeaderlineTestUserLibrary {
@@ -81,6 +83,7 @@ impl Default for HeaderlineTestUserLibrary {
             scrolloff: 1.0,
             headerline_lines: vec!["fn render(value: usize)".to_owned()],
             headerline_requires_scrolled_viewport: false,
+            pdf_open_mode: PdfOpenMode::Rendered,
         }
     }
 }
@@ -89,6 +92,13 @@ impl HeaderlineTestUserLibrary {
     fn with_scrolloff(scrolloff: f64) -> Self {
         Self {
             scrolloff,
+            ..Self::default()
+        }
+    }
+
+    fn with_pdf_open_mode(pdf_open_mode: PdfOpenMode) -> Self {
+        Self {
+            pdf_open_mode,
             ..Self::default()
         }
     }
@@ -264,6 +274,10 @@ impl UserLibrary for HeaderlineTestUserLibrary {
 
     fn browser_url_placeholder(&self) -> String {
         "https://example.com".to_owned()
+    }
+
+    fn pdf_open_mode(&self) -> PdfOpenMode {
+        self.pdf_open_mode
     }
 
     fn headerline_lines(&self, context: &GhostTextContext<'_>) -> Vec<String> {
@@ -565,12 +579,25 @@ fn pdf_helpers_parse_paths_state_and_render_lines() -> Result<(), String> {
         .set("Rotate", 90);
     state.current_page = 2;
     state.dirty = true;
+    state.render_error = Some("missing renderer".to_owned());
     let lines = pdf_buffer_lines("sample.pdf", Some(&path), &state);
     let body = lines.join("\n");
     assert!(body.contains("Page 2/2"));
     assert!(body.contains("rotation 90°"));
     assert!(body.contains("page two"));
     assert!(body.contains("Modified: yes"));
+    assert!(body.contains("Rendered preview unavailable: missing renderer"));
+
+    state.open_mode = PdfOpenMode::Markdown;
+    let markdown = pdf_buffer_lines("sample.pdf", Some(&path), &state).join("\n");
+    assert!(markdown.contains("# sample.pdf"));
+    assert!(markdown.contains("## Page 1"));
+    assert!(markdown.contains("## Page 2"));
+
+    state.open_mode = PdfOpenMode::Latex;
+    let latex = pdf_buffer_lines("sample.pdf", Some(&path), &state).join("\n");
+    assert!(latex.contains(r"\section*{sample.pdf}"));
+    assert!(latex.contains(r"\subsection*{Page 2}"));
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     Ok(())
@@ -603,6 +630,16 @@ fn berkeley_mono_font() -> Option<&'static [u8]> {
             std::fs::read(path).ok().map(Vec::into_boxed_slice)
         })
         .as_deref()
+}
+
+const BERKELEY_MONO_TEST_CELL_WIDTH: i32 = 11;
+
+fn berkeley_mono_ligature_test_assets() -> Option<(ShapeFace<'static>, RasterFont)> {
+    let bytes = berkeley_mono_font()?;
+    Some((
+        ShapeFace::from_slice(bytes, 0)?,
+        RasterFont::from_bytes(bytes, fontdue::FontSettings::default()).ok()?,
+    ))
 }
 
 fn configure_file_buffer(
@@ -740,7 +777,147 @@ fn same_length_inline_ligatures_stay_layout_safe_on_cell_grid() {
 }
 
 #[test]
-fn contextual_ligature_raster_size_expands_changed_glyphs() {
+fn ascii_ligature_byte_ranges_isolate_inline_operator_in_mixed_text() {
+    let Some((face, raster_font)) = berkeley_mono_ligature_test_assets() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+
+    assert_eq!(
+        ascii_ligature_byte_ranges_with_face(
+            &face,
+            &raster_font,
+            18.0,
+            true,
+            "a => b",
+            BERKELEY_MONO_TEST_CELL_WIDTH,
+        ),
+        vec![2..4]
+    );
+}
+
+#[test]
+fn split_primary_text_by_ligature_ranges_keeps_whole_line_surrounding_text_on_primary_path() {
+    let Some((face, raster_font)) = berkeley_mono_ligature_test_assets() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+    let ligature_ranges = ascii_ligature_byte_ranges_with_face(
+        &face,
+        &raster_font,
+        18.0,
+        true,
+        "a => b",
+        BERKELEY_MONO_TEST_CELL_WIDTH,
+    );
+
+    assert_eq!(
+        split_primary_text_by_ligature_ranges("a => b", &ligature_ranges),
+        vec![
+            PrimaryTextRun {
+                render_mode: PrimaryTextRenderMode::Normal,
+                text: "a ".to_owned(),
+            },
+            PrimaryTextRun {
+                render_mode: PrimaryTextRenderMode::Ligature,
+                text: "=>".to_owned(),
+            },
+            PrimaryTextRun {
+                render_mode: PrimaryTextRenderMode::Normal,
+                text: " b".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn split_primary_text_by_ligature_ranges_respects_preexisting_color_boundaries() {
+    let Some((face, raster_font)) = berkeley_mono_ligature_test_assets() else {
+        eprintln!("skipping: Berkeley Mono test font is unavailable");
+        return;
+    };
+
+    assert_eq!(
+        split_primary_text_by_ligature_ranges(
+            "a ",
+            &ascii_ligature_byte_ranges_with_face(
+                &face,
+                &raster_font,
+                18.0,
+                true,
+                "a ",
+                BERKELEY_MONO_TEST_CELL_WIDTH,
+            ),
+        ),
+        vec![PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Normal,
+            text: "a ".to_owned(),
+        }]
+    );
+    assert_eq!(
+        split_primary_text_by_ligature_ranges(
+            "=>",
+            &ascii_ligature_byte_ranges_with_face(
+                &face,
+                &raster_font,
+                18.0,
+                true,
+                "=>",
+                BERKELEY_MONO_TEST_CELL_WIDTH,
+            ),
+        ),
+        vec![PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Ligature,
+            text: "=>".to_owned(),
+        }]
+    );
+    assert_eq!(
+        split_primary_text_by_ligature_ranges(
+            " b",
+            &ascii_ligature_byte_ranges_with_face(
+                &face,
+                &raster_font,
+                18.0,
+                true,
+                " b",
+                BERKELEY_MONO_TEST_CELL_WIDTH,
+            ),
+        ),
+        vec![PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Normal,
+            text: " b".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn text_texture_cache_keys_keep_same_text_separate_per_color() {
+    let text = "=>".to_owned();
+
+    assert_ne!(
+        TextTextureCacheKey::Primary {
+            text: text.clone(),
+            color: render_color_cache_key(RenderColor::rgba(10, 20, 30, 255)),
+        },
+        TextTextureCacheKey::Primary {
+            text: text.clone(),
+            color: render_color_cache_key(RenderColor::rgba(10, 20, 31, 255)),
+        }
+    );
+    assert_ne!(
+        TextTextureCacheKey::Ligature {
+            text: text.clone(),
+            color: render_color_cache_key(RenderColor::rgba(10, 20, 30, 255)),
+        },
+        TextTextureCacheKey::Ligature {
+            text,
+            color: render_color_cache_key(RenderColor::rgba(10, 20, 31, 255)),
+        }
+    );
+}
+
+#[test]
+fn contextual_ligature_raster_size_keeps_changed_glyphs_at_base_size() {
     let Some(berkeley_mono_font) = berkeley_mono_font() else {
         eprintln!("skipping: Berkeley Mono test font is unavailable");
         return;
@@ -763,9 +940,79 @@ fn contextual_ligature_raster_size_expands_changed_glyphs() {
                         18.0,
                         character,
                         glyph.glyph_id,
-                    ) > 18.0
+                    ) == 18.0
             })
     );
+}
+
+#[test]
+fn contextual_ligature_raster_size_never_upscales_smaller_substitute_glyphs() -> Result<(), String>
+{
+    let font_path = resolve_bundled_icon_font_dir()
+        .map_err(|error| error.to_string())?
+        .join("NFM.ttf");
+    let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
+    let raster_font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())?;
+    let base_pixel_size = 18.0;
+    let icon_characters = [
+        editor_icons::symbols::md::MD_FORMAT_BOLD,
+        editor_icons::symbols::cod::COD_DIFF_ADDED,
+        editor_icons::symbols::dev::DEV_GIT_BRANCH,
+        editor_icons::symbols::fa::FA_CONNECTDEVELOP,
+        editor_icons::symbols::ple::PL_BRANCH,
+    ]
+    .into_iter()
+    .map(|icon| {
+        icon.chars()
+            .next()
+            .ok_or_else(|| "expected icon glyph".to_owned())
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let (nominal_character, substitute_glyph_id) = icon_characters
+        .iter()
+        .copied()
+        .find_map(|nominal_character| {
+            let nominal_metrics = raster_font.metrics(nominal_character, base_pixel_size);
+            if nominal_metrics.width == 0 || nominal_metrics.height == 0 {
+                return None;
+            }
+            let nominal_glyph_id = raster_font.lookup_glyph_index(nominal_character);
+            icon_characters
+                .iter()
+                .copied()
+                .find_map(|substitute_character| {
+                    let substitute_glyph_id = raster_font.lookup_glyph_index(substitute_character);
+                    if substitute_glyph_id == nominal_glyph_id {
+                        return None;
+                    }
+                    let substitute_metrics =
+                        raster_font.metrics_indexed(substitute_glyph_id, base_pixel_size);
+                    if substitute_metrics.width == 0 || substitute_metrics.height == 0 {
+                        return None;
+                    }
+                    let height_scale =
+                        nominal_metrics.height as f32 / substitute_metrics.height as f32;
+                    let width_scale =
+                        nominal_metrics.width as f32 / substitute_metrics.width as f32;
+                    (height_scale.max(width_scale) > 1.0)
+                        .then_some((nominal_character, substitute_glyph_id))
+                })
+        })
+        .ok_or_else(|| {
+            "expected bundled NFM font to contain a smaller substitute glyph".to_owned()
+        })?;
+
+    assert_eq!(
+        adjusted_contextual_ligature_pixel_size(
+            &raster_font,
+            base_pixel_size,
+            nominal_character,
+            substitute_glyph_id,
+        ),
+        base_pixel_size
+    );
+    Ok(())
 }
 
 #[test]
@@ -813,6 +1060,32 @@ fn ligature_shape_cache_stores_layout_results() {
         cache.get_ligature_shape("=>"),
         Some(LigatureShapeCacheValue::Layout(layout))
     );
+}
+
+#[test]
+fn primary_text_run_cache_stores_split_results() {
+    let mut cache: TextTextureCache<'static> = TextTextureCache::new();
+    let runs = vec![
+        PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Normal,
+            text: "a ".to_owned(),
+        },
+        PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Ligature,
+            text: "=>".to_owned(),
+        },
+        PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Normal,
+            text: " b".to_owned(),
+        },
+    ];
+
+    assert!(cache.get_primary_text_runs("a => b").is_none());
+    assert_eq!(
+        cache.insert_primary_text_runs("a => b".to_owned(), runs.clone()),
+        runs
+    );
+    assert_eq!(cache.get_primary_text_runs("a => b"), Some(runs));
 }
 
 #[test]
@@ -919,41 +1192,110 @@ fn composite_alpha_bitmap_preserves_straight_alpha_for_overlaps() {
 }
 
 #[test]
-fn normalize_premultiplied_rgba_surface_restores_rgb_for_partially_transparent_pixels() {
-    let mut surface = Surface::new(1, 1, PixelFormat::RGBA32)
-        .unwrap_or_else(|error| panic!("failed to create surface: {error}"));
-    surface.with_lock_mut(|pixels| {
-        pixels[..4].copy_from_slice(&[64, 32, 16, 64]);
-    });
+fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 24,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let color = RenderColor::rgba(61, 122, 211, 255);
+    let surface =
+        render_primary_text_surface(&fonts, "Volt", color).map_err(|error| error.to_string())?;
+    assert_eq!(surface.pixel_format_enum(), PixelFormat::RGBA32);
+    let width = surface.width() as usize;
+    let height = surface.height() as usize;
+    let pitch = surface.pitch() as usize;
+    let mut partial_alpha_pixels = 0usize;
 
-    let surface = normalize_premultiplied_rgba_surface(surface)
-        .unwrap_or_else(|error| panic!("failed to normalize surface: {error}"));
     surface.with_lock(|pixels| {
-        assert_eq!(&pixels[..4], &[255, 128, 64, 64]);
+        for row in pixels.chunks(pitch).take(height) {
+            let row_pixels = &row[..width.saturating_mul(4)];
+            for rgba in row_pixels.chunks_exact(4) {
+                let alpha = rgba[3];
+                if alpha != 0 && alpha != u8::MAX {
+                    partial_alpha_pixels += 1;
+                    assert_eq!(&rgba[..3], &[color.r, color.g, color.b]);
+                }
+            }
+        }
     });
-}
 
-#[test]
-fn normalize_premultiplied_rgba_surface_clears_rgb_for_fully_transparent_pixels() {
-    let mut surface = Surface::new(1, 1, PixelFormat::RGBA32)
-        .unwrap_or_else(|error| panic!("failed to create surface: {error}"));
-    surface.with_lock_mut(|pixels| {
-        pixels[..4].copy_from_slice(&[15, 25, 35, 0]);
-    });
-
-    let surface = normalize_premultiplied_rgba_surface(surface)
-        .unwrap_or_else(|error| panic!("failed to normalize surface: {error}"));
-    surface.with_lock(|pixels| {
-        assert_eq!(&pixels[..4], &[0, 0, 0, 0]);
-    });
-}
-
-#[test]
-fn collapse_subpixel_bitmap_to_alpha_averages_channels() {
-    assert_eq!(
-        collapse_subpixel_bitmap_to_alpha(2, &[255, 0, 0, 0, 255, 255]),
-        vec![85, 170]
+    assert!(
+        partial_alpha_pixels > 0,
+        "expected antialiased glyph edges with partial alpha coverage"
     );
+    Ok(())
+}
+
+#[test]
+fn compose_ligature_surface_uses_grayscale_glyph_coverage() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 18,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let glyph_id = fonts.primary_raster_font().lookup_glyph_index('/');
+    let pixel_size = decode_raster_px_64(encode_raster_px_64(fonts.primary_pixel_size()));
+    let (metrics, bitmap) = fonts
+        .primary_raster_font()
+        .rasterize_indexed(glyph_id, pixel_size);
+    assert!(metrics.width > 0 && metrics.height > 0);
+    let layout = CachedLigatureLayout {
+        glyphs: vec![CachedLigatureGlyphPlacement {
+            glyph_id,
+            draw_x: 0,
+            draw_y: 0,
+            width: metrics.width as u32,
+            height: metrics.height as u32,
+            raster_px_64: encode_raster_px_64(pixel_size),
+        }],
+        offset_x: 0,
+        offset_y: 0,
+        width: metrics.width as u32,
+        height: metrics.height as u32,
+        advance: metrics.width.max(1) as i32,
+    };
+    let surface = compose_ligature_surface(&fonts, &layout, RenderColor::rgba(10, 20, 30, 255))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "expected composed ligature surface".to_owned())?;
+    let width = metrics.width;
+    let height = metrics.height;
+    let pitch = surface.pitch() as usize;
+    surface.with_lock(|pixels| {
+        for row in 0..height {
+            let row_start = row * pitch;
+            let row_pixels = &pixels[row_start..row_start + width * 4];
+            for col in 0..width {
+                let alpha = bitmap[row * width + col];
+                let pixel_start = col * 4;
+                let expected = if alpha == 0 {
+                    [0, 0, 0, 0]
+                } else {
+                    [10, 20, 30, alpha]
+                };
+                assert_eq!(&row_pixels[pixel_start..pixel_start + 4], &expected);
+            }
+        }
+    });
+    Ok(())
 }
 
 #[test]
@@ -973,6 +1315,17 @@ fn keydown_chord_maps_ctrl_tab() {
 }
 
 #[test]
+fn keydown_chord_maps_enter_variants() {
+    for keycode in [Keycode::Return, Keycode::KpEnter, Keycode::Return2] {
+        assert_eq!(
+            keydown_chord(keycode, ctrl_mod()).as_deref(),
+            Some("Ctrl+Enter")
+        );
+        assert_eq!(keydown_chord(keycode, Mod::NOMOD).as_deref(), Some("Enter"));
+    }
+}
+
+#[test]
 fn keydown_chord_maps_image_zoom_controls() {
     assert_eq!(
         keydown_chord(Keycode::Equals, ctrl_mod()).as_deref(),
@@ -989,10 +1342,54 @@ fn keydown_chord_maps_image_zoom_controls() {
 }
 
 #[test]
+fn keydown_chord_maps_shifted_letter_and_function_key_modifiers() {
+    assert_eq!(
+        keydown_chord(Keycode::F7, Mod::NOMOD).as_deref(),
+        Some("F7")
+    );
+    assert_eq!(
+        keydown_chord(
+            Keycode::F7,
+            ctrl_mod() | alt_mod() | shift_mod() | gui_mod()
+        )
+        .as_deref(),
+        Some("Ctrl+Alt+Shift+Gui+F7")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::H, ctrl_mod() | shift_mod()).as_deref(),
+        Some("Ctrl+Shift+h")
+    );
+}
+
+#[test]
+fn keydown_chord_maps_shifted_printable_aliases() {
+    assert_eq!(
+        keydown_chord(Keycode::Backslash, ctrl_mod() | shift_mod()).as_deref(),
+        Some("Ctrl+|")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::Pipe, ctrl_mod() | shift_mod()).as_deref(),
+        Some("Ctrl+|")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::M, ctrl_mod()).as_deref(),
+        Some("Ctrl+m")
+    );
+    assert_eq!(
+        keydown_chord(Keycode::PageDown, Mod::NOMOD).as_deref(),
+        Some("PageDown")
+    );
+}
+
+#[test]
 fn terminal_key_for_event_maps_special_keys() {
     assert_eq!(
         terminal_key_for_event(Keycode::Tab, Mod::LSHIFTMOD),
         Some(TerminalKey::BackTab)
+    );
+    assert_eq!(
+        terminal_key_for_event(Keycode::Return2, Mod::NOMOD),
+        Some(TerminalKey::Enter)
     );
     assert_eq!(
         terminal_key_for_event(Keycode::C, ctrl_mod()),
@@ -1098,7 +1495,42 @@ fn open_workspace_file_routes_pdf_to_native_buffer() -> Result<(), String> {
     assert_eq!(pdf_state.page_count(), 2);
     assert_eq!(pdf_state.current_page, 1);
     assert!(buffer.is_read_only());
+    assert_eq!(pdf_state.open_mode, PdfOpenMode::Rendered);
+    assert!(buffer.pdf_preview_url().is_none());
+    assert!(!buffer.has_pdf_preview_surface());
+    assert!(
+        pdf_state.render_error.is_some() || buffer.image_state().is_some(),
+        "rendered mode should either render an image or surface a renderer error"
+    );
     assert!(buffer.text.text().contains("hello from page one"));
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn open_workspace_file_honors_markdown_pdf_mode() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(
+        HeaderlineTestUserLibrary::with_pdf_open_mode(PdfOpenMode::Markdown),
+    );
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+            .map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("open-pdf-markdown");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["hello from page one", "hello from page two"])?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let pdf_state = buffer
+        .pdf_state()
+        .ok_or_else(|| "pdf state missing".to_owned())?;
+
+    assert_eq!(pdf_state.open_mode, PdfOpenMode::Markdown);
+    assert_eq!(buffer.language_id(), Some("markdown"));
+    assert!(buffer.image_state().is_none());
+    assert!(buffer.text.text().contains("## Page 1"));
+    assert!(buffer.text.text().contains("## Page 2"));
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     Ok(())
@@ -1590,6 +2022,7 @@ fn pdf_buffers_reload_when_backing_file_changes() -> Result<(), String> {
         .pdf_state()
         .ok_or_else(|| "pdf state missing".to_owned())?;
     assert_eq!(pdf_state.page_count(), 1);
+    assert!(!buffer.has_pdf_preview_surface());
     assert!(buffer.text.text().contains("after reload"));
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
@@ -2409,11 +2842,13 @@ fn render_buffer_headerline_truncates_preserving_tail_scope() -> Result<(), Stri
         scrolloff: 1.0,
         headerline_lines: vec!["abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz".to_owned()],
         headerline_requires_scrolled_viewport: false,
+        ..HeaderlineTestUserLibrary::default()
     };
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
         scrolloff: 1.0,
         headerline_lines: vec!["abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz".to_owned()],
         headerline_requires_scrolled_viewport: false,
+        ..HeaderlineTestUserLibrary::default()
     });
     let mut state =
         ShellState::new_with_user_library(default_error_log_path(), false, user_library)
@@ -2477,6 +2912,7 @@ fn render_buffer_headerline_divider_sits_below_last_headerline_row() -> Result<(
             "fn render(value: usize)".to_owned(),
         ],
         headerline_requires_scrolled_viewport: false,
+        ..HeaderlineTestUserLibrary::default()
     };
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
         scrolloff: 1.0,
@@ -2485,6 +2921,7 @@ fn render_buffer_headerline_divider_sits_below_last_headerline_row() -> Result<(
             "fn render(value: usize)".to_owned(),
         ],
         headerline_requires_scrolled_viewport: false,
+        ..HeaderlineTestUserLibrary::default()
     });
     let mut state =
         ShellState::new_with_user_library(default_error_log_path(), false, user_library)
@@ -2541,11 +2978,13 @@ fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -
         scrolloff: 3.0,
         headerline_lines: vec!["STICKY HEADER".to_owned()],
         headerline_requires_scrolled_viewport: true,
+        ..HeaderlineTestUserLibrary::default()
     };
     let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
         scrolloff: 3.0,
         headerline_lines: vec!["STICKY HEADER".to_owned()],
         headerline_requires_scrolled_viewport: true,
+        ..HeaderlineTestUserLibrary::default()
     });
     let mut state =
         ShellState::new_with_user_library(default_error_log_path(), false, user_library)
@@ -5175,6 +5614,210 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
 }
 
 #[test]
+fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    let active_text = Color::RGB(10, 20, 30);
+    let inactive_text = Color::RGB(40, 50, 60);
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token(
+                    TOKEN_STATUSLINE_ACTIVE,
+                    editor_theme::Color::rgb(active_text.r, active_text.g, active_text.b),
+                )
+                .with_token(
+                    TOKEN_STATUSLINE_INACTIVE,
+                    editor_theme::Color::rgb(inactive_text.r, inactive_text.g, inactive_text.b),
+                ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let render_user_library = HeaderlineTestUserLibrary::default();
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+
+    let mut active_scene = Vec::new();
+    let mut active_target = DrawTarget::Scene(&mut active_scene);
+    render_buffer(
+        &mut active_target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &render_user_library,
+        "test-workspace",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(active_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, color, .. }
+            if *y == layout.statusline_y && *color == to_render_color(active_text)
+    )));
+
+    let mut inactive_scene = Vec::new();
+    let mut inactive_target = DrawTarget::Scene(&mut inactive_scene);
+    render_buffer(
+        &mut inactive_target,
+        buffer,
+        rect,
+        false,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &render_user_library,
+        "test-workspace",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(inactive_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, color, .. }
+            if *y == layout.statusline_y && *color == to_render_color(inactive_text)
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    let active_text = Color::RGB(212, 218, 226);
+    let inactive_text = Color::RGB(148, 154, 164);
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token(
+                    TOKEN_STATUSLINE_ACTIVE,
+                    editor_theme::Color::rgb(10, 20, 30),
+                )
+                .with_token(
+                    TOKEN_STATUSLINE_INACTIVE,
+                    editor_theme::Color::rgb(40, 50, 60),
+                )
+                .with_token(
+                    TOKEN_STATUSLINE_FOREGROUND,
+                    editor_theme::Color::rgb(active_text.r, active_text.g, active_text.b),
+                )
+                .with_token(
+                    TOKEN_STATUSLINE_INACTIVE_FOREGROUND,
+                    editor_theme::Color::rgb(inactive_text.r, inactive_text.g, inactive_text.b),
+                ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let render_user_library = HeaderlineTestUserLibrary::default();
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+
+    let mut active_scene = Vec::new();
+    let mut active_target = DrawTarget::Scene(&mut active_scene);
+    render_buffer(
+        &mut active_target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &render_user_library,
+        "test-workspace",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(active_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, color, .. }
+            if *y == layout.statusline_y && *color == to_render_color(active_text)
+    )));
+
+    let mut inactive_scene = Vec::new();
+    let mut inactive_target = DrawTarget::Scene(&mut inactive_scene);
+    render_buffer(
+        &mut inactive_target,
+        buffer,
+        rect,
+        false,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &render_user_library,
+        "test-workspace",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(inactive_scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { y, color, .. }
+            if *y == layout.statusline_y && *color == to_render_color(inactive_text)
+    )));
+    Ok(())
+}
+
+#[test]
 fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), String> {
     let state = ShellState::new().map_err(|error| error.to_string())?;
     let ui = shell_ui(&state.runtime)?;
@@ -5807,7 +6450,32 @@ fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
 }
 
 #[test]
-fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String> {
+fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    let picker_foreground = Color::RGB(220, 224, 230);
+    let picker_muted = Color::RGB(176, 182, 191);
+    let picker_subtle = Color::RGB(138, 144, 154);
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token(
+                    TOKEN_PICKER_FOREGROUND,
+                    editor_theme::Color::rgb(
+                        picker_foreground.r,
+                        picker_foreground.g,
+                        picker_foreground.b,
+                    ),
+                )
+                .with_token(
+                    TOKEN_PICKER_MUTED,
+                    editor_theme::Color::rgb(picker_muted.r, picker_muted.g, picker_muted.b),
+                )
+                .with_token(
+                    TOKEN_PICKER_SUBTLE,
+                    editor_theme::Color::rgb(picker_subtle.r, picker_subtle.g, picker_subtle.b),
+                ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let _video = sdl_context.video().map_err(|error| error.to_string())?;
     let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
@@ -5826,16 +6494,11 @@ fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String>
         "Projects",
         vec![
             PickerEntry {
-                item: PickerItem::new(
-                    ".config",
-                    ".config",
-                    "git",
-                    Some("C:\\Users\\sam\\.config".to_owned()),
-                ),
+                item: PickerItem::new("alpha", "alpha", "one", None::<String>),
                 action: PickerAction::NoOp,
             },
             PickerEntry {
-                item: PickerItem::new("4coder", "4coder", "git", Some("P:\\4ed".to_owned())),
+                item: PickerItem::new("beta", "beta", "two", None::<String>),
                 action: PickerAction::NoOp,
             },
         ],
@@ -5843,13 +6506,10 @@ fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String>
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
 
-    picker::render_picker_overlay(&mut target, &fonts, &picker, 320, 180, 16, None)
+    picker::render_picker_overlay(&mut target, &fonts, &picker, 640, 360, 16, Some(&registry))
         .map_err(|error| error.to_string())?;
 
-    let popup_background = Color::RGB(15, 16, 20);
-    let foreground = Color::RGBA(215, 221, 232, 255);
-    let expected_muted = blend_color(foreground, popup_background, 0.25);
-
+    let expected_unselected_label = blend_color(picker_foreground, Color::RGB(15, 16, 20), 0.12);
     let text_commands = scene
         .iter()
         .filter_map(|command| match command {
@@ -5860,7 +6520,37 @@ fn render_picker_overlay_uses_higher_contrast_muted_text() -> Result<(), String>
 
     assert!(
         text_commands.iter().any(|(text, color)| {
-            text == "Query > " && *color == to_render_color(expected_muted)
+            text == "Projects" && *color == to_render_color(picker_foreground)
+        }),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    assert!(
+        text_commands
+            .iter()
+            .any(|(text, color)| text == "alpha" && *color == to_render_color(picker_foreground)),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    assert!(
+        text_commands.iter().any(|(text, color)| {
+            text == "beta" && *color == to_render_color(expected_unselected_label)
+        }),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    assert!(
+        text_commands
+            .iter()
+            .any(|(text, color)| text == "Query > " && *color == to_render_color(picker_muted)),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    assert!(
+        text_commands
+            .iter()
+            .any(|(text, color)| text == "two" && *color == to_render_color(picker_muted)),
+        "unexpected picker text colors: {text_commands:?}"
+    );
+    assert!(
+        text_commands.iter().any(|(text, color)| {
+            text == "2 / 2 results" && *color == to_render_color(picker_subtle)
         }),
         "unexpected picker text colors: {text_commands:?}"
     );
@@ -5872,7 +6562,7 @@ fn preferred_primary_font_hinting_matches_transparent_window_policy() {
     if cfg!(target_os = "windows") {
         assert!(matches!(
             preferred_primary_font_hinting(),
-            Some(Hinting::NORMAL)
+            Some(Hinting::NONE)
         ));
     } else {
         assert!(preferred_primary_font_hinting().is_none());
@@ -5962,6 +6652,55 @@ fn scaled_font_size_uses_window_display_scale() {
     assert_eq!(scaled_font_size(18, 2.0), 36.0);
     assert_eq!(scaled_font_size(18, 1.25), 22.5);
     assert_eq!(scaled_font_size(18, -1.0), 18.0);
+}
+
+#[test]
+fn normalized_raster_pixel_size_matches_target_line_height() {
+    let pixel_size = normalized_raster_pixel_size(
+        18.0,
+        24,
+        Some(fontdue::LineMetrics {
+            ascent: 15.0,
+            descent: -5.0,
+            line_gap: 0.0,
+            new_line_size: 20.0,
+        }),
+    );
+
+    assert!((pixel_size - 21.6).abs() < f32::EPSILON);
+}
+
+#[test]
+fn load_font_set_normalizes_icon_raster_sizes_to_primary_line_height() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 18,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let primary_line_height = fonts.primary().height().max(1) as f32;
+
+    for icon_font in fonts.icon_fonts() {
+        let line_metrics = icon_font
+            .raster_font
+            .horizontal_line_metrics(icon_font.pixel_size)
+            .ok_or_else(|| format!("icon font `{}` is missing line metrics", icon_font.name))?;
+        let icon_line_height = line_metrics.ascent - line_metrics.descent;
+        assert!(
+            (icon_line_height - primary_line_height).abs() <= 1.0,
+            "expected icon font `{}` to target line height {primary_line_height}, got {icon_line_height}",
+            icon_font.name,
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -7024,12 +7763,7 @@ fn sync_visible_buffer_layouts_use_split_width_for_vertical_splits() -> Result<(
 
 #[test]
 fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
-    let font_path = resolve_bundled_icon_font_dir()
-        .map_err(|error| error.to_string())?
-        .join("NFM.ttf");
-    let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
-    let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
-        .map_err(|error| error.to_string())?;
+    let font = load_nfm_raster_font()?;
     let material_icon = editor_icons::symbols::md::MD_FORMAT_BOLD
         .chars()
         .next()
@@ -7050,14 +7784,125 @@ fn material_icons_rasterize_from_nfm_with_fontdue() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
+fn load_nfm_raster_font() -> Result<RasterFont, String> {
     let font_path = resolve_bundled_icon_font_dir()
         .map_err(|error| error.to_string())?
         .join("NFM.ttf");
     let bytes = fs::read(&font_path).map_err(|error| error.to_string())?;
-    let font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
-        .map_err(|error| error.to_string())?;
+    RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn icon_glyph_draw_offset_y_uses_icon_line_metrics_when_available() -> Result<(), String> {
+    let font = load_nfm_raster_font()?;
+    let codicon = editor_icons::symbols::cod::COD_DIFF_ADDED
+        .chars()
+        .next()
+        .ok_or_else(|| "codicon glyph missing".to_owned())?;
+    let requested_pixel_size = 18.0;
+    let (raw_metrics, _) = font.rasterize(codicon, requested_pixel_size);
+    let rasterized = rasterize_icon_glyph_for_cell(
+        &font,
+        codicon,
+        requested_pixel_size,
+        raw_metrics.width.max(1) as i32,
+    );
+    let line_metrics = font
+        .horizontal_line_metrics(rasterized.pixel_size)
+        .ok_or_else(|| "icon line metrics missing".to_owned())?;
+    let primary_line_height = (line_metrics.ascent - line_metrics.descent).round() as i32;
+    let synthetic_primary_ascent = line_metrics.ascent.round() as i32 - 2;
+    let expected = (((primary_line_height as f32 - (line_metrics.ascent - line_metrics.descent))
+        * 0.5)
+        + line_metrics.ascent
+        - rasterized.metrics.height as f32
+        - rasterized.metrics.ymin as f32)
+        .round() as i32;
+
+    let draw_offset = icon_glyph_draw_offset_y(
+        &rasterized.metrics,
+        primary_line_height,
+        synthetic_primary_ascent,
+        font.horizontal_line_metrics(rasterized.pixel_size),
+    );
+    let fallback_offset = icon_glyph_draw_offset_y(
+        &rasterized.metrics,
+        primary_line_height,
+        synthetic_primary_ascent,
+        None,
+    );
+
+    assert!((rasterized.pixel_size - requested_pixel_size).abs() < f32::EPSILON);
+    assert_eq!(draw_offset, expected);
+    assert_eq!(
+        fallback_offset,
+        synthetic_primary_ascent - rasterized.metrics.height as i32 - rasterized.metrics.ymin
+    );
+    assert_ne!(draw_offset, fallback_offset);
+    Ok(())
+}
+
+#[test]
+fn icon_glyph_draw_offset_y_centers_width_fitted_icons_in_primary_line_height() -> Result<(), String>
+{
+    let font = load_nfm_raster_font()?;
+    let codicon = editor_icons::symbols::cod::COD_DIFF_ADDED
+        .chars()
+        .next()
+        .ok_or_else(|| "codicon glyph missing".to_owned())?;
+    let requested_pixel_size = 18.0;
+    let requested_line_metrics = font
+        .horizontal_line_metrics(requested_pixel_size)
+        .ok_or_else(|| "requested icon line metrics missing".to_owned())?;
+    let primary_line_height =
+        (requested_line_metrics.ascent - requested_line_metrics.descent).round() as i32;
+    let primary_ascent = requested_line_metrics.ascent.round() as i32;
+    let (raw_metrics, _) = font.rasterize(codicon, requested_pixel_size);
+    let cell_width = (raw_metrics.width / 2).max(1) as i32;
+    let rasterized =
+        rasterize_icon_glyph_for_cell(&font, codicon, requested_pixel_size, cell_width);
+    let fitted_line_metrics = font
+        .horizontal_line_metrics(rasterized.pixel_size)
+        .ok_or_else(|| "fitted icon line metrics missing".to_owned())?;
+    let expected = (((primary_line_height as f32
+        - (fitted_line_metrics.ascent - fitted_line_metrics.descent))
+        * 0.5)
+        + fitted_line_metrics.ascent
+        - rasterized.metrics.height as f32
+        - rasterized.metrics.ymin as f32)
+        .round() as i32;
+
+    let draw_offset = icon_glyph_draw_offset_y(
+        &rasterized.metrics,
+        primary_line_height,
+        primary_ascent,
+        font.horizontal_line_metrics(rasterized.pixel_size),
+    );
+    let fallback_offset = icon_glyph_draw_offset_y(
+        &rasterized.metrics,
+        primary_line_height,
+        primary_ascent,
+        None,
+    );
+    let draw_bottom_margin = primary_line_height - (draw_offset + rasterized.metrics.height as i32);
+    let fallback_bottom_margin =
+        primary_line_height - (fallback_offset + rasterized.metrics.height as i32);
+
+    assert!(raw_metrics.width > cell_width as usize);
+    assert!(rasterized.pixel_size < requested_pixel_size);
+    assert_eq!(draw_offset, expected);
+    assert!(draw_offset >= 0);
+    assert!(draw_bottom_margin >= 0);
+    assert!(
+        (draw_offset - draw_bottom_margin).abs() < (fallback_offset - fallback_bottom_margin).abs()
+    );
+    Ok(())
+}
+
+#[test]
+fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
+    let font = load_nfm_raster_font()?;
     let codicon = editor_icons::symbols::cod::COD_DIFF_ADDED
         .chars()
         .next()
@@ -7065,15 +7910,15 @@ fn codicon_glyphs_fit_inside_one_editor_cell() -> Result<(), String> {
     let requested_pixel_size = 18.0;
     let (raw_metrics, _) = font.rasterize(codicon, requested_pixel_size);
     let cell_width = raw_metrics.width.saturating_sub(1).max(1) as i32;
-    let (fitted_metrics, _) =
+    let rasterized =
         rasterize_icon_glyph_for_cell(&font, codicon, requested_pixel_size, cell_width);
-    let layout = icon_glyph_cell_layout(&fitted_metrics, cell_width);
+    let layout = icon_glyph_cell_layout(&rasterized.metrics, cell_width);
 
     assert!(raw_metrics.width > cell_width as usize);
-    assert!(fitted_metrics.width as i32 <= cell_width);
+    assert!(rasterized.metrics.width as i32 <= cell_width);
     assert_eq!(layout.advance, cell_width);
     assert!(layout.draw_offset_x >= 0);
-    assert!(layout.draw_offset_x + fitted_metrics.width as i32 <= cell_width);
+    assert!(layout.draw_offset_x + rasterized.metrics.width as i32 <= cell_width);
     Ok(())
 }
 
@@ -8702,6 +9547,186 @@ fn execute_vim_command_line_commands_alias_opens_picker() -> Result<(), String> 
 }
 
 #[test]
+fn ctrl_enter_variants_match_manual_lsp_code_action_command() -> Result<(), String> {
+    let root = unique_temp_dir("lsp-code-action-binding");
+    let path = root.join("main.rs");
+    fs::write(
+        &path,
+        "fn main() {\n    let value = 1;\n    let _ = value;\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let manual_title = {
+        let mut state = state_with_user_library()?;
+        open_workspace_from_project(&mut state.runtime, "lsp-code-actions-manual", &root)?;
+        open_workspace_file(&mut state.runtime, &path)?;
+        shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+        state
+            .runtime
+            .execute_command("lsp.code-action")
+            .map_err(|error| error.to_string())?;
+        shell_ui(&state.runtime)?
+            .picker()
+            .map(|picker| picker.session.title().to_owned())
+            .ok_or_else(|| "manual lsp code-action did not open a picker".to_owned())?
+    };
+
+    for (name, keycode) in [
+        ("return", Keycode::Return),
+        ("kp-enter", Keycode::KpEnter),
+        ("return2", Keycode::Return2),
+    ] {
+        let mut state = state_with_user_library()?;
+        open_workspace_from_project(
+            &mut state.runtime,
+            &format!("lsp-code-actions-binding-{name}"),
+            &root,
+        )?;
+        open_workspace_file(&mut state.runtime, &path)?;
+        shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+
+        let binding = state
+            .runtime
+            .keymaps()
+            .get_for_mode(
+                &editor_core::KeymapScope::Workspace,
+                editor_core::KeymapVimMode::Normal,
+                "Ctrl+Enter",
+            )
+            .ok_or_else(|| "Ctrl+Enter workspace binding is missing".to_owned())?;
+        assert_eq!(binding.command_name(), "lsp.code-actions");
+
+        let (render_width, render_height, cell_width, line_height) =
+            markdown_table_event_dimensions();
+        let handled = state
+            .handle_event(
+                Event::KeyDown {
+                    timestamp: 0,
+                    window_id: 0,
+                    keycode: Some(keycode),
+                    scancode: None,
+                    keymod: ctrl_mod(),
+                    repeat: false,
+                    which: 0,
+                    raw: 0,
+                },
+                render_width,
+                render_height,
+                cell_width,
+                line_height,
+            )
+            .map_err(|error| error.to_string())?;
+
+        assert!(!handled);
+        let binding_title = shell_ui(&state.runtime)?
+            .picker()
+            .map(|picker| picker.session.title().to_owned())
+            .ok_or_else(|| format!("Ctrl+Enter variant `{name}` did not open an LSP picker"))?;
+        assert_eq!(binding_title, manual_title);
+    }
+
+    fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn f7_keydown_opens_keybinding_picker_from_user_binding() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let binding = state
+        .runtime
+        .keymaps()
+        .get(&editor_core::KeymapScope::Global, "F7")
+        .ok_or_else(|| "F7 global binding is missing".to_owned())?;
+    assert_eq!(binding.command_name(), "picker.open-keybindings");
+
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::F7),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    let picker_title = shell_ui(&state.runtime)?
+        .picker()
+        .map(|picker| picker.session.title().to_owned())
+        .ok_or_else(|| "F7 binding did not open the keybinding picker".to_owned())?;
+    assert_eq!(picker_title, "Keybindings");
+    Ok(())
+}
+
+#[test]
+fn browser_normal_mode_i_binding_focuses_input_without_inserting_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, BROWSER_BUFFER_NAME, BROWSER_KIND)?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.enter_normal_mode();
+        ui.set_active_vim_target(VimTarget::Buffer);
+    }
+
+    state
+        .handle_text_input("I")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.active_buffer_id(), Some(buffer_id));
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert_eq!(ui.vim().target, VimTarget::Input);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .input_field()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .text(),
+        ""
+    );
+    Ok(())
+}
+
+#[test]
+fn leader_space_o_b_opens_browser_from_normal_mode() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let original_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+
+    state
+        .handle_text_input(" ")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, original_buffer_id);
+
+    state
+        .handle_text_input("o")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, original_buffer_id);
+
+    state
+        .handle_text_input("b")
+        .map_err(|error| error.to_string())?;
+
+    let browser_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert_ne!(browser_buffer_id, original_buffer_id);
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert!(matches!(
+        shell_buffer(&state.runtime, browser_buffer_id)?.kind,
+        BufferKind::Plugin(ref kind) if kind == user::browser::BROWSER_KIND
+    ));
+    Ok(())
+}
+
+#[test]
 fn execute_vim_command_line_substitute_defaults_to_current_line() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_text_test_buffer(
@@ -9214,6 +10239,41 @@ fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
 }
 
 #[test]
+fn browser_sync_plan_excludes_pdf_buffers() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let root = unique_temp_dir("pdf-browser-plan");
+    let path = root.join("sample.pdf");
+    write_test_pdf(&path, &["page one"])?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    let plan = browser_sync_plan(
+        state.ui().map_err(|error| error.to_string())?,
+        None,
+        &*state.user_library,
+        800,
+        400,
+        8,
+        18,
+        Instant::now(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        plan.buffers
+            .iter()
+            .all(|buffer| buffer.buffer_id != buffer_id)
+    );
+    assert!(
+        plan.visible_surfaces
+            .iter()
+            .all(|surface| surface.buffer_id != buffer_id)
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_browser_test_buffer(&mut state)?;
@@ -9570,6 +10630,64 @@ fn repeated_keydown_events_move_the_cursor() -> Result<(), String> {
         shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
         TextPoint::new(0, 2)
     );
+    Ok(())
+}
+
+#[test]
+fn undo_tree_root_cursor_tracks_last_root_cursor_across_undo_redo() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*undo-tree-root-redo*",
+        vec!["alpha".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+
+    buffer.set_cursor(TextPoint::new(0, 5));
+    buffer.insert_text("!");
+    buffer.record_undo_snapshot();
+
+    assert!(buffer.undo_tree_undo());
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 5));
+
+    buffer.set_cursor(TextPoint::new(0, 2));
+    assert!(buffer.undo_tree_redo());
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha!"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 6));
+
+    assert!(buffer.undo_tree_undo());
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 2));
+    Ok(())
+}
+
+#[test]
+fn undo_tree_select_restores_latest_root_cursor_without_changing_child_cursor() -> Result<(), String>
+{
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*undo-tree-root-select*",
+        vec!["alpha".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+
+    buffer.set_cursor(TextPoint::new(0, 5));
+    buffer.insert_text("!");
+    buffer.record_undo_snapshot();
+
+    assert!(buffer.undo_tree_undo());
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 5));
+
+    buffer.set_cursor(TextPoint::new(0, 3));
+    assert!(buffer.undo_tree_select(1));
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha!"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 6));
+
+    assert!(buffer.undo_tree_select(0));
+    assert_eq!(buffer.text.line(0).as_deref(), Some("alpha"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(0, 3));
     Ok(())
 }
 

@@ -1024,6 +1024,7 @@ pub fn package() -> PluginPackage {
         ),
         leader_binding("o b", "browser.open", PluginKeymapScope::Workspace),
         leader_binding("o t", "terminal.popup", PluginKeymapScope::Workspace),
+        leader_binding("o T", "terminal.open", PluginKeymapScope::Workspace),
         leader_binding("o u", "browser.url", PluginKeymapScope::Workspace),
     ];
 

@@ -1045,13 +1045,14 @@ pub(super) fn render_picker_overlay(
         .max(1) as i32;
     let corner_radius = shared_corner_radius(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
-    let foreground = theme_color(
+    let base_foreground = theme_color(
         theme_registry,
         "ui.foreground",
         Color::RGBA(215, 221, 232, 255),
     );
     let is_dark = is_dark_color(base_background);
     let popup_background = theme_color(theme_registry, "ui.picker.background", base_background);
+    let foreground = theme_color(theme_registry, TOKEN_PICKER_FOREGROUND, base_foreground);
     let highlight_background = adjust_color(popup_background, if is_dark { 16 } else { -16 });
     let picker_highlight = theme_color(
         theme_registry,
@@ -1062,8 +1063,17 @@ pub(super) fn render_picker_overlay(
             Color::RGB(110, 170, 255),
         ),
     );
-    let muted = blend_color(foreground, popup_background, 0.25);
-    let subtle = blend_color(foreground, popup_background, 0.4);
+    let muted = theme_color(
+        theme_registry,
+        TOKEN_PICKER_MUTED,
+        blend_color(foreground, popup_background, 0.25),
+    );
+    let list_foreground = blend_color(foreground, popup_background, 0.12);
+    let subtle = theme_color(
+        theme_registry,
+        TOKEN_PICKER_SUBTLE,
+        blend_color(foreground, popup_background, 0.4),
+    );
     // Border using two rounded rectangles (outer border color, inner background)
     fill_overlay_surface_rounded_rect(
         target,
@@ -1184,7 +1194,11 @@ pub(super) fn render_picker_overlay(
             content_left,
             row_y,
             &label,
-            if selected { foreground } else { muted },
+            if selected {
+                foreground
+            } else {
+                list_foreground
+            },
         )?;
         draw_text(target, detail_x, row_y, &detail, muted)?;
     }

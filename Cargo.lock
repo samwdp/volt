@@ -896,6 +896,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tree-sitter-rust",
+ "url",
  "volt-user",
  "window-vibrancy",
  "wry",

@@ -2235,7 +2235,6 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
                 "codeActionLiteralSupport": {
                     "codeActionKind": {
                         "valueSet": [
-                            "",
                             "quickfix",
                             "refactor",
                             "refactor.extract",

@@ -12,7 +12,7 @@ pub const HOOK_LSP_DEFINITION: &str = "lsp.goto-definition";
 pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
 pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
 pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
-pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Enter";
+pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Space";
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
 pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SERVER_CSHARP_LS: &str = "csharp-ls";
@@ -1049,13 +1049,7 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             ["--features", "razor-support,metadata-uris"],
         )
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
-        .with_root_markers([
-            "*.sln",
-            "*.csproj",
-            "global.json",
-            "Directory.Build.props",
-            "Directory.Build.targets",
-        ]),
+        .with_root_markers(["*.sln", "*.csproj"]),
         LanguageServerSpec::new(
             SERVER_TYPESCRIPT_LANGUAGE_SERVER,
             "typescript",
@@ -1619,12 +1613,12 @@ mod tests {
             );
         }
         assert_eq!(package.key_bindings().len(), 1);
-        assert!(
-            package
-                .key_bindings()
-                .iter()
-                .any(|binding| binding.chord() == CODE_ACTIONS_CHORD)
-        );
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == CODE_ACTIONS_CHORD
+                && binding.command_name() == "lsp.code-actions"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
     }
 
     #[test]

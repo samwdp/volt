@@ -1184,6 +1184,32 @@ pub(super) fn render_image_buffer_body(
     Ok(())
 }
 
+pub(super) fn render_pdf_buffer_body(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+) -> Result<(), ShellError> {
+    let window_effects = current_window_effect_settings(theme_registry);
+    let Some(viewport) = image_buffer_viewport_rect(rect, layout) else {
+        return Ok(());
+    };
+    let viewport_background = theme_color(
+        theme_registry,
+        "ui.panel.background",
+        adjust_color(
+            base_background,
+            if is_dark_color(base_background) {
+                4
+            } else {
+                -4
+            },
+        ),
+    );
+    fill_window_surface_rect(target, viewport, viewport_background, window_effects)
+}
+
 pub(super) fn autocomplete_preview_lines(
     entry: Option<&AutocompleteEntry>,
     token: &str,
@@ -1637,10 +1663,27 @@ pub(super) fn render_buffer(
         Color::RGBA(110, 170, 255, 255),
     );
     let statusline_inactive = theme_color(theme_registry, TOKEN_STATUSLINE_INACTIVE, muted);
-    let title_color = if active {
+    let statusline_accent = if active {
         statusline_active
     } else {
         statusline_inactive
+    };
+    let statusline_text_color = if active {
+        theme_color(
+            theme_registry,
+            TOKEN_STATUSLINE_FOREGROUND,
+            statusline_active,
+        )
+    } else {
+        theme_color(
+            theme_registry,
+            TOKEN_STATUSLINE_INACTIVE_FOREGROUND,
+            theme_color(
+                theme_registry,
+                TOKEN_STATUSLINE_FOREGROUND,
+                statusline_inactive,
+            ),
+        )
     };
     let text_color = foreground;
     let cursor = theme_color(theme_registry, "ui.cursor", Color::RGB(110, 170, 255));
@@ -1808,6 +1851,8 @@ pub(super) fn render_buffer(
             cell_width,
             line_height,
         )?;
+    } else if buffer.has_pdf_preview_surface() {
+        render_pdf_buffer_body(target, rect, layout, theme_registry, base_background)?;
     } else if buffer.is_acp_buffer() {
         render_acp_buffer_body(
             target,
@@ -2394,9 +2439,9 @@ pub(super) fn render_buffer(
             statusline_icon_colors
                 .iter()
                 .find_map(|(icon, color)| (*icon == segment).then_some(*color))
-                .unwrap_or(title_color)
+                .unwrap_or(statusline_accent)
         } else {
-            title_color
+            statusline_text_color
         };
         draw_text(target, draw_x, layout.statusline_y, segment, color)?;
         draw_x += monospace_text_width(segment, cell_width) as i32;
@@ -4173,8 +4218,21 @@ pub(super) struct FontRun {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrimaryTextRenderMode {
+    Normal,
+    Ligature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PrimaryTextRun {
+    pub(super) render_mode: PrimaryTextRenderMode,
+    pub(super) text: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ShapedGlyph {
+    pub(super) cluster: usize,
     pub(super) glyph_id: u16,
     pub(super) x_advance: f32,
     pub(super) x_offset: f32,
@@ -4319,6 +4377,7 @@ const TEXT_TEXTURE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 const TEXT_TEXTURE_CACHE_MAX_ENTRY_BYTES: usize = 256 * 1024;
 const TEXT_TEXTURE_CACHE_MAX_ENTRIES: usize = 4096;
 const LIGATURE_SHAPE_CACHE_MAX_ENTRIES: usize = 4096;
+const PRIMARY_TEXT_RUN_CACHE_MAX_ENTRIES: usize = 4096;
 
 type WindowTextureCreator = TextureCreator<WindowContext>;
 
@@ -4514,9 +4573,15 @@ pub(super) struct LigatureShapeCacheEntry {
     last_used: u64,
 }
 
+pub(super) struct PrimaryTextRunCacheEntry {
+    value: Vec<PrimaryTextRun>,
+    last_used: u64,
+}
+
 pub(super) struct TextTextureCache<'texture> {
     entries: HashMap<TextTextureCacheKey, TextTextureCacheEntry<'texture>>,
     ligature_shapes: HashMap<String, LigatureShapeCacheEntry>,
+    primary_text_runs: HashMap<String, PrimaryTextRunCacheEntry>,
     access_tick: u64,
     used_bytes: usize,
 }
@@ -4526,6 +4591,7 @@ impl<'texture> TextTextureCache<'texture> {
         Self {
             entries: HashMap::new(),
             ligature_shapes: HashMap::new(),
+            primary_text_runs: HashMap::new(),
             access_tick: 0,
             used_bytes: 0,
         }
@@ -4534,6 +4600,7 @@ impl<'texture> TextTextureCache<'texture> {
     pub(super) fn clear(&mut self) {
         self.entries.clear();
         self.ligature_shapes.clear();
+        self.primary_text_runs.clear();
         self.access_tick = 0;
         self.used_bytes = 0;
     }
@@ -4601,6 +4668,30 @@ impl<'texture> TextTextureCache<'texture> {
         value
     }
 
+    pub(super) fn get_primary_text_runs(&mut self, text: &str) -> Option<Vec<PrimaryTextRun>> {
+        let last_used = self.next_access_tick();
+        let entry = self.primary_text_runs.get_mut(text)?;
+        entry.last_used = last_used;
+        Some(entry.value.clone())
+    }
+
+    pub(super) fn insert_primary_text_runs(
+        &mut self,
+        text: String,
+        value: Vec<PrimaryTextRun>,
+    ) -> Vec<PrimaryTextRun> {
+        let last_used = self.next_access_tick();
+        self.primary_text_runs.insert(
+            text,
+            PrimaryTextRunCacheEntry {
+                value: value.clone(),
+                last_used,
+            },
+        );
+        self.evict_primary_text_runs();
+        value
+    }
+
     fn next_access_tick(&mut self) -> u64 {
         self.access_tick = self.access_tick.saturating_add(1);
         self.access_tick
@@ -4635,6 +4726,20 @@ impl<'texture> TextTextureCache<'texture> {
                 break;
             };
             self.ligature_shapes.remove(&oldest_key);
+        }
+    }
+
+    fn evict_primary_text_runs(&mut self) {
+        while self.primary_text_runs.len() > PRIMARY_TEXT_RUN_CACHE_MAX_ENTRIES {
+            let Some(oldest_key) = self
+                .primary_text_runs
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.primary_text_runs.remove(&oldest_key);
         }
     }
 }
@@ -4730,8 +4835,16 @@ pub(super) struct IconGlyphRenderStyle<'a> {
     icon_font: &'a IconFont<'a>,
     icon_pixel_size: f32,
     cell_width: i32,
+    primary_line_height: i32,
     primary_ascent: i32,
     color: RenderColor,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RasterizedIconGlyph {
+    pub(super) metrics: fontdue::Metrics,
+    pub(super) bitmap: Vec<u8>,
+    pub(super) pixel_size: f32,
 }
 
 pub(super) fn rasterize_icon_glyph_for_cell(
@@ -4739,7 +4852,7 @@ pub(super) fn rasterize_icon_glyph_for_cell(
     character: char,
     icon_pixel_size: f32,
     cell_width: i32,
-) -> (fontdue::Metrics, Vec<u8>) {
+) -> RasterizedIconGlyph {
     let cell_width = cell_width.max(1) as usize;
     let mut pixel_size = icon_pixel_size.max(1.0);
     let mut rasterized = raster_font.rasterize(character, pixel_size);
@@ -4756,7 +4869,12 @@ pub(super) fn rasterize_icon_glyph_for_cell(
         pixel_size = next_pixel_size;
         rasterized = raster_font.rasterize(character, pixel_size);
     }
-    rasterized
+    let (metrics, bitmap) = rasterized;
+    RasterizedIconGlyph {
+        metrics,
+        bitmap,
+        pixel_size,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4774,6 +4892,29 @@ pub(super) fn icon_glyph_cell_layout(
         draw_offset_x: advance.saturating_sub(metrics.width as i32) / 2,
         advance,
     }
+}
+
+pub(super) fn icon_glyph_draw_offset_y(
+    metrics: &fontdue::Metrics,
+    primary_line_height: i32,
+    primary_ascent: i32,
+    icon_line_metrics: Option<fontdue::LineMetrics>,
+) -> i32 {
+    let fallback = primary_ascent - metrics.height as i32 - metrics.ymin;
+    let Some(line_metrics) = icon_line_metrics else {
+        return fallback;
+    };
+    if !line_metrics.ascent.is_finite() || !line_metrics.descent.is_finite() {
+        return fallback;
+    }
+    let icon_line_height = line_metrics.ascent - line_metrics.descent;
+    if icon_line_height <= f32::EPSILON {
+        return fallback;
+    }
+    (((primary_line_height.max(1) as f32 - icon_line_height) * 0.5) + line_metrics.ascent
+        - metrics.height as f32
+        - metrics.ymin as f32)
+        .round() as i32
 }
 
 pub(super) fn alpha_bitmap_surface(
@@ -4802,11 +4943,7 @@ pub(super) fn alpha_bitmap_surface(
     Ok(surface)
 }
 
-fn unpremultiply_color_channel(channel: u8, alpha: u8) -> u8 {
-    (((u16::from(channel) * 255) + (u16::from(alpha) / 2)) / u16::from(alpha)).min(255) as u8
-}
-
-pub(super) fn normalize_premultiplied_rgba_surface<'surface>(
+fn convert_surface_to_rgba32<'surface>(
     mut surface: Surface<'surface>,
 ) -> Result<Surface<'surface>, ShellError> {
     if surface.pixel_format_enum() != PixelFormat::RGBA32 {
@@ -4814,28 +4951,20 @@ pub(super) fn normalize_premultiplied_rgba_surface<'surface>(
             .convert_format(PixelFormat::RGBA32)
             .map_err(|error| ShellError::Sdl(error.to_string()))?;
     }
-
-    let width = surface.width() as usize;
-    let height = surface.height() as usize;
-    let pitch = surface.pitch() as usize;
-    surface.with_lock_mut(|pixels| {
-        for row in pixels.chunks_mut(pitch).take(height) {
-            let row_pixels = &mut row[..width.saturating_mul(4)];
-            for rgba in row_pixels.chunks_exact_mut(4) {
-                let alpha = rgba[3];
-                match alpha {
-                    0 => rgba[..3].fill(0),
-                    u8::MAX => {}
-                    _ => {
-                        for channel in &mut rgba[..3] {
-                            *channel = unpremultiply_color_channel(*channel, alpha);
-                        }
-                    }
-                }
-            }
-        }
-    });
     Ok(surface)
+}
+
+pub(super) fn render_primary_text_surface(
+    fonts: &FontSet<'_>,
+    text: &str,
+    color: RenderColor,
+) -> Result<Surface<'static>, ShellError> {
+    let surface = fonts
+        .primary()
+        .render(text)
+        .blended(from_render_color(color))
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    convert_surface_to_rgba32(surface)
 }
 
 pub(super) fn composite_alpha_bitmap(
@@ -4884,18 +5013,6 @@ pub(super) fn composite_alpha_bitmap(
     });
 }
 
-pub(super) fn collapse_subpixel_bitmap_to_alpha(width: usize, bitmap: &[u8]) -> Vec<u8> {
-    bitmap
-        .chunks_exact(width * 3)
-        .flat_map(|row| {
-            row.chunks_exact(3).map(|subpixel| {
-                ((u16::from(subpixel[0]) + u16::from(subpixel[1]) + u16::from(subpixel[2]) + 1) / 3)
-                    as u8
-            })
-        })
-        .collect()
-}
-
 pub(super) fn encode_raster_px_64(pixel_size: f32) -> u16 {
     (pixel_size.max(1.0) * 64.0)
         .round()
@@ -4907,28 +5024,14 @@ pub(super) fn decode_raster_px_64(encoded: u16) -> f32 {
 }
 
 pub(super) fn adjusted_contextual_ligature_pixel_size(
-    raster_font: &RasterFont,
+    _raster_font: &RasterFont,
     base_pixel_size: f32,
-    nominal_character: char,
-    ligature_glyph_id: u16,
+    _nominal_character: char,
+    _ligature_glyph_id: u16,
 ) -> f32 {
-    let nominal_glyph_id = raster_font.lookup_glyph_index(nominal_character);
-    if nominal_glyph_id == ligature_glyph_id {
-        return base_pixel_size;
-    }
-    let nominal_metrics = raster_font.metrics(nominal_character, base_pixel_size);
-    let ligature_metrics = raster_font.metrics_indexed(ligature_glyph_id, base_pixel_size);
-    if nominal_metrics.height == 0 || ligature_metrics.height == 0 {
-        return base_pixel_size;
-    }
-    let height_scale = nominal_metrics.height as f32 / ligature_metrics.height as f32;
-    let width_scale = if nominal_metrics.width != 0 && ligature_metrics.width != 0 {
-        nominal_metrics.width as f32 / ligature_metrics.width as f32
-    } else {
-        1.0
-    };
-    let scale = height_scale.max(width_scale).clamp(1.0, 1.25);
-    base_pixel_size * scale
+    // Same-length contextual substitutions stay visually closest to the primary
+    // SDL_ttf path when they are rasterized at the unscaled base size.
+    base_pixel_size
 }
 
 pub(super) fn render_primary_text_texture<'texture>(
@@ -4937,15 +5040,9 @@ pub(super) fn render_primary_text_texture<'texture>(
     text: &str,
     color: RenderColor,
 ) -> Result<RenderedTextTexture<'texture>, ShellError> {
-    let surface = fonts
-        .primary()
-        .render(text)
-        .blended(from_render_color(color))
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    // CONTEXT: SDL_ttf blended glyphs arrive with premultiplied RGB. Uploading
-    // them directly to an SDL texture causes the renderer to multiply alpha
-    // again when the window background itself is translucent.
-    let surface = normalize_premultiplied_rgba_surface(surface)?;
+    // SDL_ttf's blended glyph surfaces already use straight alpha, so upload
+    // them as-is to avoid brightening partially transparent edge pixels.
+    let surface = render_primary_text_surface(fonts, text, color)?;
     let advance = surface.width() as i32;
     let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
     Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance))
@@ -4981,20 +5078,33 @@ pub(super) fn render_icon_glyph_texture<'texture>(
     style: IconGlyphRenderStyle<'_>,
     character: char,
 ) -> Result<RenderedTextTexture<'texture>, ShellError> {
-    let (metrics, bitmap) = rasterize_icon_glyph_for_cell(
+    let rasterized = rasterize_icon_glyph_for_cell(
         &style.icon_font.raster_font,
         character,
         style.icon_pixel_size,
         style.cell_width,
     );
-    let layout = icon_glyph_cell_layout(&metrics, style.cell_width);
-    if metrics.width == 0 || metrics.height == 0 {
+    let layout = icon_glyph_cell_layout(&rasterized.metrics, style.cell_width);
+    if rasterized.metrics.width == 0 || rasterized.metrics.height == 0 {
         return Ok(RenderedTextTexture::empty(layout.advance));
     }
 
-    let surface = alpha_bitmap_surface(metrics.width, metrics.height, &bitmap, style.color)?;
+    let surface = alpha_bitmap_surface(
+        rasterized.metrics.width,
+        rasterized.metrics.height,
+        &rasterized.bitmap,
+        style.color,
+    )?;
     let texture = ManagedTexture::from_surface_nearest(texture_creator, &surface)?;
-    let draw_offset_y = style.primary_ascent - metrics.height as i32 - metrics.ymin;
+    let draw_offset_y = icon_glyph_draw_offset_y(
+        &rasterized.metrics,
+        style.primary_line_height,
+        style.primary_ascent,
+        style
+            .icon_font
+            .raster_font
+            .horizontal_line_metrics(rasterized.pixel_size),
+    );
     Ok(RenderedTextTexture::from_texture(
         texture,
         layout.draw_offset_x,
@@ -5034,6 +5144,7 @@ pub(super) fn shape_ascii_ligature_run_with_face(
         .iter()
         .zip(glyph_buffer.glyph_positions())
         .map(|(info, position)| ShapedGlyph {
+            cluster: info.cluster as usize,
             glyph_id: info.glyph_id as u16,
             x_advance: scale_shaping_units(position.x_advance, pixel_size, units_per_em),
             x_offset: scale_shaping_units(position.x_offset, pixel_size, units_per_em),
@@ -5066,6 +5177,227 @@ pub(super) fn shape_ascii_ligature_run(fonts: &FontSet<'_>, text: &str) -> Optio
         .iter()
         .any(|glyph| glyph.x_offset.abs() > 0.01 || glyph.y_offset.abs() > 0.01);
     (has_substitution || has_positioning).then_some(shaped)
+}
+
+fn glyphs_need_ligature_render_path(
+    text: &str,
+    glyphs: &[ShapedGlyph],
+    source_start: usize,
+    source_end: usize,
+    raster_font: &RasterFont,
+) -> bool {
+    if glyphs.is_empty() || source_start >= source_end {
+        return false;
+    }
+    let source_text = &text[source_start..source_end];
+    let source_char_count = source_text.chars().count();
+    if source_char_count != glyphs.len() {
+        return true;
+    }
+    glyphs
+        .iter()
+        .any(|glyph| glyph.x_offset.abs() > 0.01 || glyph.y_offset.abs() > 0.01)
+        || source_text
+            .chars()
+            .zip(glyphs.iter())
+            .any(|(character, glyph)| raster_font.lookup_glyph_index(character) != glyph.glyph_id)
+}
+
+fn push_ligature_byte_range(ranges: &mut Vec<std::ops::Range<usize>>, start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    if let Some(previous) = ranges.last_mut()
+        && previous.end == start
+    {
+        previous.end = end;
+        return;
+    }
+    ranges.push(start..end);
+}
+
+pub(super) fn ascii_ligature_byte_ranges_with_face(
+    face: &ShapeFace<'_>,
+    raster_font: &RasterFont,
+    pixel_size: f32,
+    ligatures_enabled: bool,
+    text: &str,
+    cell_width: i32,
+) -> Vec<std::ops::Range<usize>> {
+    if !ligatures_enabled || !text.is_ascii() || text.chars().count() < 2 {
+        return Vec::new();
+    }
+    let Some(shaped) =
+        shape_ascii_ligature_run_with_face(face, pixel_size, ligatures_enabled, text)
+    else {
+        return Vec::new();
+    };
+    if !shaped_run_preserves_monospace_layout(text, &shaped, cell_width) {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut glyph_index = 0;
+    while glyph_index < shaped.glyphs.len() {
+        let cluster = shaped.glyphs[glyph_index].cluster.min(text.len());
+        let mut group_end = glyph_index + 1;
+        while group_end < shaped.glyphs.len()
+            && shaped.glyphs[group_end].cluster == shaped.glyphs[glyph_index].cluster
+        {
+            group_end += 1;
+        }
+        let next_cluster = shaped
+            .glyphs
+            .get(group_end)
+            .map(|glyph| glyph.cluster.min(text.len()))
+            .unwrap_or(text.len());
+        let source_start = cluster.min(next_cluster);
+        let source_end = cluster.max(next_cluster);
+        if glyphs_need_ligature_render_path(
+            text,
+            &shaped.glyphs[glyph_index..group_end],
+            source_start,
+            source_end,
+            raster_font,
+        ) {
+            push_ligature_byte_range(&mut ranges, source_start, source_end);
+        }
+        glyph_index = group_end;
+    }
+    ranges
+}
+
+pub(super) fn primary_ligature_byte_ranges(
+    fonts: &FontSet<'_>,
+    text: &str,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut ascii_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii() {
+            if ascii_start.is_none() {
+                ascii_start = Some(index);
+            }
+            continue;
+        }
+        if let Some(start) = ascii_start.take() {
+            ranges.extend(
+                ascii_ligature_byte_ranges_with_face(
+                    fonts.primary_shape_face(),
+                    fonts.primary_raster_font(),
+                    fonts.primary_pixel_size(),
+                    fonts.ligatures_enabled(),
+                    &text[start..index],
+                    fonts.cell_width(),
+                )
+                .into_iter()
+                .map(|range| start + range.start..start + range.end),
+            );
+        }
+    }
+    if let Some(start) = ascii_start {
+        ranges.extend(
+            ascii_ligature_byte_ranges_with_face(
+                fonts.primary_shape_face(),
+                fonts.primary_raster_font(),
+                fonts.primary_pixel_size(),
+                fonts.ligatures_enabled(),
+                &text[start..],
+                fonts.cell_width(),
+            )
+            .into_iter()
+            .map(|range| start + range.start..start + range.end),
+        );
+    }
+    ranges
+}
+
+fn push_primary_text_run(
+    runs: &mut Vec<PrimaryTextRun>,
+    render_mode: PrimaryTextRenderMode,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(previous) = runs.last_mut()
+        && previous.render_mode == render_mode
+    {
+        previous.text.push_str(text);
+        return;
+    }
+    runs.push(PrimaryTextRun {
+        render_mode,
+        text: text.to_owned(),
+    });
+}
+
+pub(super) fn split_primary_text_by_ligature_ranges(
+    text: &str,
+    ligature_ranges: &[std::ops::Range<usize>],
+) -> Vec<PrimaryTextRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if ligature_ranges.is_empty() {
+        return vec![PrimaryTextRun {
+            render_mode: PrimaryTextRenderMode::Normal,
+            text: text.to_owned(),
+        }];
+    }
+
+    let mut runs = Vec::new();
+    let mut cursor = 0;
+    for range in ligature_ranges {
+        let start = clamp_to_char_boundary(text, range.start.min(text.len()));
+        let end = clamp_to_char_boundary(text, range.end.min(text.len()));
+        if cursor < start {
+            push_primary_text_run(
+                &mut runs,
+                PrimaryTextRenderMode::Normal,
+                &text[cursor..start],
+            );
+        }
+        if start < end {
+            push_primary_text_run(
+                &mut runs,
+                PrimaryTextRenderMode::Ligature,
+                &text[start..end],
+            );
+            cursor = end;
+        }
+    }
+    if cursor < text.len() {
+        push_primary_text_run(&mut runs, PrimaryTextRenderMode::Normal, &text[cursor..]);
+    }
+    runs
+}
+
+pub(super) fn split_primary_text_for_ligatures(
+    fonts: &FontSet<'_>,
+    text: &str,
+) -> Vec<PrimaryTextRun> {
+    split_primary_text_by_ligature_ranges(text, &primary_ligature_byte_ranges(fonts, text))
+}
+
+pub(super) fn cached_primary_text_runs<'texture>(
+    text_texture_cache: &mut TextTextureCache<'texture>,
+    text_texture_cache_mode: TextTextureCacheMode,
+    fonts: &FontSet<'_>,
+    text: &str,
+) -> Vec<PrimaryTextRun> {
+    // Scrolling re-renders many of the same visible lines; cache the split so we
+    // do not reshape identical runs before the texture caches can help.
+    if let Some(runs) = text_texture_cache.get_primary_text_runs(text) {
+        return runs;
+    }
+
+    let runs = split_primary_text_for_ligatures(fonts, text);
+    if text_texture_cache_mode.allows_inserts() {
+        text_texture_cache.insert_primary_text_runs(text.to_owned(), runs)
+    } else {
+        runs
+    }
 }
 
 pub(super) fn build_cached_text_layout(
@@ -5182,14 +5514,13 @@ pub(super) fn cached_ligature_layout(
     LigatureShapeCacheValue::Layout(build_cached_text_layout(glyphs, advance))
 }
 
-pub(super) fn render_cached_ligature_texture<'texture>(
-    texture_creator: &'texture WindowTextureCreator,
+pub(super) fn compose_ligature_surface(
     fonts: &FontSet<'_>,
     layout: &CachedLigatureLayout,
     color: RenderColor,
-) -> Result<RenderedTextTexture<'texture>, ShellError> {
+) -> Result<Option<Surface<'static>>, ShellError> {
     if layout.glyphs.is_empty() || layout.width == 0 || layout.height == 0 {
-        return Ok(RenderedTextTexture::empty(layout.advance));
+        return Ok(None);
     }
 
     let mut composed = Surface::new(layout.width, layout.height, PixelFormat::RGBA32)
@@ -5202,10 +5533,12 @@ pub(super) fn render_cached_ligature_texture<'texture>(
             continue;
         }
         let raster_pixel_size = decode_raster_px_64(glyph.raster_px_64);
-        let (_, subpixel_bitmap) = fonts
+        // CONTEXT: fontdue's LCD/subpixel mask assumes channel-local filtering.
+        // Collapsing that back into a single alpha channel changed the apparent
+        // color and weight of ligatures in compositor-backed windows.
+        let (_, bitmap) = fonts
             .primary_raster_font()
-            .rasterize_indexed_subpixel(glyph.glyph_id, raster_pixel_size);
-        let bitmap = collapse_subpixel_bitmap_to_alpha(glyph.width as usize, &subpixel_bitmap);
+            .rasterize_indexed(glyph.glyph_id, raster_pixel_size);
         composite_alpha_bitmap(
             &mut composed,
             glyph.draw_x - layout.offset_x,
@@ -5216,6 +5549,18 @@ pub(super) fn render_cached_ligature_texture<'texture>(
             color,
         );
     }
+    Ok(Some(composed))
+}
+
+pub(super) fn render_cached_ligature_texture<'texture>(
+    texture_creator: &'texture WindowTextureCreator,
+    fonts: &FontSet<'_>,
+    layout: &CachedLigatureLayout,
+    color: RenderColor,
+) -> Result<RenderedTextTexture<'texture>, ShellError> {
+    let Some(composed) = compose_ligature_surface(fonts, layout, color)? else {
+        return Ok(RenderedTextTexture::empty(layout.advance));
+    };
     let texture = ManagedTexture::from_surface(texture_creator, &composed)?;
     Ok(RenderedTextTexture::from_texture(
         texture,
@@ -5289,6 +5634,7 @@ pub(super) fn render_text_with_fonts<'texture>(
         return Ok(());
     }
     let mut draw_x = x;
+    let primary_line_height = fonts.primary().height().max(1);
     let primary_ascent = fonts.primary().ascent();
     let runs = if fonts.icon_fonts().is_empty() || text.is_ascii() {
         vec![FontRun {
@@ -5305,33 +5651,71 @@ pub(super) fn render_text_with_fonts<'texture>(
         }
         match run.role {
             FontRole::Primary => {
-                if let Some(advance) = draw_primary_ligature_texture_if_available(
-                    canvas,
-                    texture_creator,
+                for subrun in cached_primary_text_runs(
                     text_texture_cache,
                     text_texture_cache_mode,
                     fonts,
-                    draw_x,
-                    y,
                     &run.text,
-                    primary_ascent,
-                    color,
-                )? {
+                ) {
+                    let advance = match subrun.render_mode {
+                        PrimaryTextRenderMode::Ligature => {
+                            if let Some(advance) = draw_primary_ligature_texture_if_available(
+                                canvas,
+                                texture_creator,
+                                text_texture_cache,
+                                text_texture_cache_mode,
+                                fonts,
+                                draw_x,
+                                y,
+                                &subrun.text,
+                                primary_ascent,
+                                color,
+                            )? {
+                                advance
+                            } else {
+                                draw_text_texture_with_cache(
+                                    canvas,
+                                    text_texture_cache,
+                                    text_texture_cache_mode,
+                                    TextTextureCacheKey::Primary {
+                                        text: subrun.text.clone(),
+                                        color: color_key,
+                                    },
+                                    || {
+                                        render_primary_text_texture(
+                                            texture_creator,
+                                            fonts,
+                                            &subrun.text,
+                                            color,
+                                        )
+                                    },
+                                    draw_x,
+                                    y,
+                                )?
+                            }
+                        }
+                        PrimaryTextRenderMode::Normal => draw_text_texture_with_cache(
+                            canvas,
+                            text_texture_cache,
+                            text_texture_cache_mode,
+                            TextTextureCacheKey::Primary {
+                                text: subrun.text.clone(),
+                                color: color_key,
+                            },
+                            || {
+                                render_primary_text_texture(
+                                    texture_creator,
+                                    fonts,
+                                    &subrun.text,
+                                    color,
+                                )
+                            },
+                            draw_x,
+                            y,
+                        )?,
+                    };
                     draw_x += advance;
-                    continue;
                 }
-                draw_x += draw_text_texture_with_cache(
-                    canvas,
-                    text_texture_cache,
-                    text_texture_cache_mode,
-                    TextTextureCacheKey::Primary {
-                        text: run.text.clone(),
-                        color: color_key,
-                    },
-                    || render_primary_text_texture(texture_creator, fonts, &run.text, color),
-                    draw_x,
-                    y,
-                )?;
             }
             FontRole::Icon(index) => {
                 let icon_font = fonts.icon_font(index).ok_or_else(|| {
@@ -5339,8 +5723,9 @@ pub(super) fn render_text_with_fonts<'texture>(
                 })?;
                 let style = IconGlyphRenderStyle {
                     icon_font,
-                    icon_pixel_size: fonts.icon_pixel_size(),
+                    icon_pixel_size: icon_font.pixel_size,
                     cell_width: fonts.cell_width(),
+                    primary_line_height,
                     primary_ascent,
                     color,
                 };

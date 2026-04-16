@@ -185,10 +185,61 @@ pub(super) fn apply_browser_location_updates(
     let ui = shell_ui_mut(runtime)?;
     for update in updates {
         if let Some(buffer) = ui.buffer_mut(update.buffer_id) {
-            set_browser_buffer_location(buffer, &update.current_url, false, &*user_library);
+            if buffer.is_pdf_buffer() {
+                buffer.apply_pdf_location_update(&update.current_url);
+            } else {
+                set_browser_buffer_location(buffer, &update.current_url, false, &*user_library);
+            }
         }
     }
     Ok(())
+}
+
+fn buffer_browser_host_url(buffer: &ShellBuffer) -> Option<String> {
+    if buffer_is_browser(&buffer.kind) {
+        return buffer
+            .browser_state
+            .as_ref()
+            .and_then(|browser| browser.current_url.clone());
+    }
+    buffer.pdf_preview_url()
+}
+
+fn buffer_uses_browser_host_surface(buffer: &ShellBuffer) -> bool {
+    buffer_is_browser(&buffer.kind) || buffer.has_pdf_preview_surface()
+}
+
+fn browser_host_viewport_rect(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    cell_width: i32,
+    line_height: i32,
+    command_line_visible: bool,
+) -> Option<BrowserViewportRect> {
+    if buffer_is_browser(&buffer.kind) {
+        return browser_viewport_rect(buffer, rect, cell_width, line_height, command_line_visible);
+    }
+    if !buffer.has_pdf_preview_surface() {
+        return None;
+    }
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        command_line_visible,
+    );
+    let viewport = image_buffer_viewport_rect(rect, layout)?;
+    let x = viewport.x();
+    let y = viewport.y();
+    let width = viewport.width();
+    let height = viewport.height().max(line_height.max(1) as u32) as i32;
+    (width > 0 && height > 0).then_some(BrowserViewportRect {
+        x,
+        y,
+        width,
+        height: height as u32,
+    })
 }
 
 pub(super) fn detect_browser_url(buffer: &ShellBuffer) -> Option<String> {
@@ -287,19 +338,16 @@ pub(super) fn browser_sync_plan(
     let buffers = state
         .buffers
         .iter()
-        .filter(|buffer| buffer_is_browser(&buffer.kind))
+        .filter(|buffer| buffer_uses_browser_host_surface(buffer))
         .map(|buffer| BrowserBufferPlan {
             buffer_id: buffer.id(),
-            current_url: buffer
-                .browser_state
-                .as_ref()
-                .and_then(|browser| browser.current_url.clone()),
+            current_url: buffer_browser_host_url(buffer),
         })
         .collect::<Vec<_>>();
     let overlay_occludes_browsers = state.picker_visible()
         || runtime_popup
             .and_then(|popup| state.buffer(popup.active_buffer))
-            .is_some_and(|buffer| !buffer_is_browser(&buffer.kind));
+            .is_some_and(|buffer| !buffer_uses_browser_host_surface(buffer));
     if overlay_occludes_browsers {
         return Ok(BrowserSyncPlan {
             buffers,
@@ -332,10 +380,10 @@ pub(super) fn browser_sync_plan(
         let Some(buffer) = state.buffer(pane.buffer_id) else {
             continue;
         };
-        if !buffer_is_browser(&buffer.kind) {
+        if !buffer_uses_browser_host_surface(buffer) {
             continue;
         }
-        let Some(rect) = browser_viewport_rect(
+        let Some(rect) = browser_host_viewport_rect(
             buffer,
             PixelRectToRect::rect(
                 pane_rects[pane_index].x,
@@ -362,8 +410,8 @@ pub(super) fn browser_sync_plan(
     }
     if let Some(popup) = runtime_popup
         && let Some(buffer) = state.buffer(popup.active_buffer)
-        && buffer_is_browser(&buffer.kind)
-        && let Some(rect) = browser_viewport_rect(
+        && buffer_uses_browser_host_surface(buffer)
+        && let Some(rect) = browser_host_viewport_rect(
             buffer,
             PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
             cell_width,

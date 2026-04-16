@@ -28,7 +28,7 @@ fn query_asset_root() -> PathBuf {
 /// non-commented lines across all `.scm` files under `root`.
 fn collect_operators(root: &Path) -> BTreeSet<String> {
     let mut operators = BTreeSet::new();
-    visit_scm_files(root, &mut |content| {
+    visit_scm_files(root, &mut |_, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
             // Skip full-line comments (`;`) and empty lines.
@@ -60,7 +60,7 @@ fn collect_operators(root: &Path) -> BTreeSet<String> {
 }
 
 /// Walk `root` recursively, calling `visitor` with the text of each `.scm` file.
-fn visit_scm_files(root: &Path, visitor: &mut impl FnMut(&str)) {
+fn visit_scm_files(root: &Path, visitor: &mut impl FnMut(&Path, &str)) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -73,9 +73,120 @@ fn visit_scm_files(root: &Path, visitor: &mut impl FnMut(&str)) {
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("scm")
             && let Ok(content) = std::fs::read_to_string(&path)
         {
-            visitor(&content);
+            visitor(&path, &content);
         }
     }
+}
+
+fn skip_query_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index = (index + 2).min(bytes.len()),
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_query_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn find_matching_paren(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b';' => index = skip_query_comment(bytes, index),
+            b'"' => index = skip_query_string(bytes, index),
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn query_atoms(query: &str) -> Vec<String> {
+    let bytes = query.as_bytes();
+    let mut atoms = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' | b')' => index += 1,
+            b';' => index = skip_query_comment(bytes, index),
+            b'"' => {
+                let end = skip_query_string(bytes, index);
+                atoms.push(query[index..end].to_string());
+                index = end;
+            }
+            byte if byte.is_ascii_whitespace() => index += 1,
+            _ => {
+                let start = index;
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && !matches!(bytes[index], b'(' | b')' | b';')
+                {
+                    index += 1;
+                }
+                atoms.push(query[start..index].to_string());
+            }
+        }
+    }
+    atoms
+}
+
+fn collect_invalid_capture_valued_set_directives(root: &Path) -> Vec<String> {
+    let mut offenders = Vec::new();
+    visit_scm_files(root, &mut |path, content| {
+        let bytes = content.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b';' => index = skip_query_comment(bytes, index),
+                b'"' => index = skip_query_string(bytes, index),
+                b'(' if bytes[index..].starts_with(b"(#set!") => {
+                    let end = find_matching_paren(bytes, index).unwrap_or(bytes.len());
+                    let directive = &content[index..end];
+                    let atoms = query_atoms(directive);
+                    let value_index = if atoms.get(1).is_some_and(|atom| atom.starts_with('@')) {
+                        3
+                    } else {
+                        2
+                    };
+                    if atoms
+                        .get(value_index)
+                        .is_some_and(|value| value.starts_with('@'))
+                    {
+                        let line = content[..index]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count()
+                            + 1;
+                        offenders.push(format!("{}:{line}: {}", path.display(), directive.trim()));
+                    }
+                    index = end;
+                }
+                _ => index += 1,
+            }
+        }
+    });
+    offenders
 }
 
 /// The full set of predicate operators active (non-commented) in the bundled
@@ -169,8 +280,6 @@ const EXPECTED_SET_KEYS: &[&str] = &[
     "definition.type.scope",
     "definition.var.scope",
     "reference.kind",
-    // capture-target keys (e.g. URL for link concealment)
-    "url",
 ];
 
 #[test]
@@ -183,7 +292,7 @@ fn corpus_set_key_inventory_is_stable() {
     );
 
     let mut found_keys: BTreeSet<String> = BTreeSet::new();
-    visit_scm_files(&root, &mut |content| {
+    visit_scm_files(&root, &mut |_, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with(';') || trimmed.is_empty() {
@@ -236,6 +345,28 @@ fn corpus_set_key_inventory_is_stable() {
         removed_keys.is_empty(),
         "some expected #set! keys no longer appear in the corpus — remove them \
          from EXPECTED_SET_KEYS:\n  removed: {removed_keys:?}"
+    );
+}
+
+/// Tree-sitter only accepts string values for `#set!`; a capture in the value
+/// position (for example `(#set! @_hyperlink url @markup.link.url)`) is rejected
+/// when the query is compiled. Keep this as a static corpus scan so it still
+/// protects grammars that are not installed on the current machine.
+#[test]
+fn corpus_set_directives_do_not_use_capture_values() {
+    let root = query_asset_root();
+    assert!(
+        root.is_dir(),
+        "bundled query asset root not found: {}",
+        root.display()
+    );
+
+    let offenders = collect_invalid_capture_valued_set_directives(&root);
+    assert!(
+        offenders.is_empty(),
+        "bundled query assets contain capture-valued #set! directives, which \
+         tree-sitter rejects at query-parse time:\n  {}",
+        offenders.join("\n  ")
     );
 }
 

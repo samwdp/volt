@@ -468,10 +468,12 @@ PluginAction::emit_hook("lsp.server-start", Some("rust-analyzer"))</code></pre>
     PluginKeymapScope::Global,      // scope
 )</code></pre>
                     <p class="reveal">
-                        Chord strings use <code>Ctrl+</code>, <code>Shift+</code>, <code>Alt+</code>
-                        prefixes (e.g. <code>"Ctrl+Shift+h"</code>).  The shorthand <code>C-</code>
-                        is equivalent to <code>Ctrl+</code> (so <code>"C-c C-c"</code> means press
-                        <code>Ctrl+c</code> twice).
+                        Chord strings use canonical <code>Ctrl+</code>, <code>Alt+</code>,
+                        <code>Shift+</code>, and <code>Gui+</code> prefixes
+                        (e.g. <code>"Ctrl+Shift+h"</code>). Legacy shorthand such as
+                        <code>C-</code> is still accepted and normalized
+                        (<code>"C-c C-c"</code> resolves the same as
+                        <code>"Ctrl+c Ctrl+c"</code>).
                     </p>
 
                     <h4>Scopes</h4>
@@ -665,7 +667,7 @@ fn hook_command(name: &amp;str, description: &amp;str, hook_name: &amp;str) -&gt
 
 pub const BUFFER_NAME: &amp;str = "*calculator*";
 pub const EVALUATE_HANDLER: &amp;str = "calculator.evaluate-buffer";
-pub const EVALUATE_CHORD: &amp;str = "C-c C-c";
+pub const EVALUATE_CHORD: &amp;str = "Ctrl+c Ctrl+c";
 pub const SWITCH_PANE_CHORD: &amp;str = "Ctrl+Tab";
 
 pub fn package() -&gt; PluginPackage {

@@ -166,8 +166,7 @@
 ((hyperlink
   command: _ @function @nospell
   uri: (curly_group_uri
-    (_) @markup.link.url @nospell)) @_hyperlink
-  (#set! @_hyperlink url @markup.link.url))
+    (_) @markup.link.url @nospell)) @_hyperlink)
 
 (glossary_entry_definition
   command: _ @function.macro @nospell

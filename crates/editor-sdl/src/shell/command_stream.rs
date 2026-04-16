@@ -1,16 +1,20 @@
-use super::*;
+use super::{
+    treesitter_install::{TreeSitterInstallState, continue_tree_sitter_install},
+    *,
+};
 use std::{
     io::{BufReader, Read},
     process::Stdio,
     thread,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum StreamedCommandExitAction {
     RefreshGitStatusBuffersAndCloseBuffer,
+    ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct StreamedCommandSpec {
     pub(super) popup_title: String,
     pub(super) buffer_name: String,
@@ -19,9 +23,10 @@ pub(super) struct StreamedCommandSpec {
     pub(super) args: Vec<String>,
     pub(super) cwd: PathBuf,
     pub(super) on_exit: StreamedCommandExitAction,
+    pub(super) notify_on_success: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct StreamedCommandRequest {
     buffer_id: BufferId,
     popup_title: String,
@@ -30,6 +35,7 @@ struct StreamedCommandRequest {
     args: Vec<String>,
     cwd: PathBuf,
     on_exit: StreamedCommandExitAction,
+    notify_on_success: bool,
 }
 
 #[derive(Debug)]
@@ -46,6 +52,7 @@ enum StreamedCommandUpdate {
         exit_code: Option<i32>,
         error: Option<String>,
         on_exit: StreamedCommandExitAction,
+        notify_on_success: bool,
     },
 }
 
@@ -115,11 +122,7 @@ pub(super) fn open_streamed_command_popup(
         .buffer(buffer_id)
         .ok_or_else(|| format!("popup buffer `{buffer_id}` is missing"))?;
     let user_library = shell_user_library(runtime);
-    let shell_buffer = ShellBuffer::from_runtime_buffer(
-        buffer,
-        vec![format!("$ {}", spec.command_label), String::new()],
-        &*user_library,
-    );
+    let shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &*user_library);
     {
         let ui = shell_ui_mut(runtime)?;
         ui.insert_buffer(shell_buffer);
@@ -128,6 +131,19 @@ pub(super) fn open_streamed_command_popup(
         ui.enter_normal_mode();
     }
 
+    if let Err(error) = continue_streamed_command_popup(runtime, buffer_id, spec) {
+        close_popup_buffer_and_restore_focus(runtime, buffer_id)?;
+        return Err(error);
+    }
+    Ok(buffer_id)
+}
+
+pub(super) fn continue_streamed_command_popup(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    spec: StreamedCommandSpec,
+) -> Result<(), String> {
+    append_streamed_command_header(runtime, buffer_id, &spec.command_label)?;
     let request = StreamedCommandRequest {
         buffer_id,
         popup_title: spec.popup_title,
@@ -136,15 +152,11 @@ pub(super) fn open_streamed_command_popup(
         args: spec.args,
         cwd: spec.cwd,
         on_exit: spec.on_exit,
+        notify_on_success: spec.notify_on_success,
     };
-    if let Err(error) = shell_ui_mut(runtime)?
+    shell_ui_mut(runtime)?
         .streamed_command_worker
         .start(request)
-    {
-        close_popup_buffer_and_restore_focus(runtime, buffer_id)?;
-        return Err(error);
-    }
-    Ok(buffer_id)
 }
 
 pub(super) fn refresh_pending_streamed_commands(
@@ -184,6 +196,7 @@ pub(super) fn refresh_pending_streamed_commands(
                 exit_code,
                 error,
                 on_exit,
+                notify_on_success,
             } => {
                 if !shell_ui_mut(runtime)?
                     .streamed_command_worker
@@ -191,21 +204,43 @@ pub(super) fn refresh_pending_streamed_commands(
                 {
                     continue;
                 }
-                shell_ui_mut(runtime)?.apply_notification(
-                    streamed_command_notification(
-                        buffer_id,
-                        &popup_title,
-                        &command_label,
-                        success,
-                        exit_code,
-                        error.as_deref(),
-                    ),
-                    now,
-                );
-                match on_exit {
-                    StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
-                        buffers_to_close.push(buffer_id);
-                        refresh_git_status = true;
+                if !success || notify_on_success {
+                    shell_ui_mut(runtime)?.apply_notification(
+                        streamed_command_notification(
+                            buffer_id,
+                            &popup_title,
+                            &command_label,
+                            success,
+                            exit_code,
+                            error.as_deref(),
+                        ),
+                        now,
+                    );
+                }
+                if success {
+                    match on_exit {
+                        StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
+                            buffers_to_close.push(buffer_id);
+                            refresh_git_status = true;
+                        }
+                        StreamedCommandExitAction::ContinueTreeSitterInstall(state) => {
+                            if let Err(error) =
+                                continue_tree_sitter_install(runtime, buffer_id, *state)
+                            {
+                                append_streamed_command_error(runtime, buffer_id, &error)?;
+                                shell_ui_mut(runtime)?.apply_notification(
+                                    streamed_command_notification(
+                                        buffer_id,
+                                        &popup_title,
+                                        &command_label,
+                                        false,
+                                        None,
+                                        Some(&error),
+                                    ),
+                                    now,
+                                );
+                            }
+                        }
                     }
                 }
                 changed = true;
@@ -256,6 +291,34 @@ fn streamed_command_notification(
     }
 }
 
+fn append_streamed_command_header(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    command_label: &str,
+) -> Result<(), String> {
+    let has_output = shell_buffer(runtime, buffer_id)
+        .map(|buffer| buffer.line_count() > 0)
+        .unwrap_or(false);
+    let mut lines = Vec::with_capacity(if has_output { 3 } else { 2 });
+    if has_output {
+        lines.push(String::new());
+    }
+    lines.push(format!("$ {command_label}"));
+    lines.push(String::new());
+    shell_buffer_mut(runtime, buffer_id)?.append_output_lines(&lines);
+    Ok(())
+}
+
+fn append_streamed_command_error(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    error: &str,
+) -> Result<(), String> {
+    shell_buffer_mut(runtime, buffer_id)?
+        .append_output_lines(&[String::new(), format!("error: {error}")]);
+    Ok(())
+}
+
 fn run_streamed_command(
     request: StreamedCommandRequest,
     updates: Arc<Mutex<Vec<StreamedCommandUpdate>>>,
@@ -268,6 +331,7 @@ fn run_streamed_command(
         args,
         cwd,
         on_exit,
+        notify_on_success,
     } = request;
     let mut command = Command::new(&program);
     command
@@ -291,6 +355,7 @@ fn run_streamed_command(
                     exit_code: None,
                     error: Some(format!("Failed to start process: {error}")),
                     on_exit,
+                    notify_on_success,
                 },
             );
             return;
@@ -325,6 +390,7 @@ fn run_streamed_command(
                 exit_code: status.code(),
                 error: None,
                 on_exit,
+                notify_on_success,
             },
         ),
         Err(error) => push_streamed_command_update(
@@ -339,6 +405,7 @@ fn run_streamed_command(
                     "Failed while waiting for process completion: {error}"
                 )),
                 on_exit,
+                notify_on_success,
             },
         ),
     }

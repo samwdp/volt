@@ -10,6 +10,7 @@ mod pdf;
 mod picker;
 mod render;
 mod terminal;
+mod treesitter_install;
 mod ui_overlays;
 mod workspace_search;
 
@@ -93,9 +94,10 @@ use editor_lsp::{
 use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, PluginBufferSectionUpdate, PluginBufferSections, autocomplete_hooks,
-    browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections, hover_hooks, image_hooks,
-    lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks, terminal_hooks,
+    OilDefaults, OilKeyAction, PdfOpenMode, PluginBufferSectionUpdate, PluginBufferSections,
+    autocomplete_hooks, browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections,
+    hover_hooks, image_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
+    terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -292,7 +294,12 @@ const TOKEN_GIT_STATUS_COMMAND: &str = "git.status.command";
 const TOKEN_GIT_STATUS_MESSAGE: &str = "git.status.message";
 const TOKEN_COMMANDLINE_BACKGROUND: &str = "ui.commandline.background";
 const TOKEN_STATUSLINE_ACTIVE: &str = "ui.statusline.active";
+const TOKEN_STATUSLINE_FOREGROUND: &str = "ui.statusline.foreground";
 const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
+const TOKEN_STATUSLINE_INACTIVE_FOREGROUND: &str = "ui.statusline.inactive.foreground";
+const TOKEN_PICKER_FOREGROUND: &str = "ui.picker.foreground";
+const TOKEN_PICKER_MUTED: &str = "ui.picker.muted";
+const TOKEN_PICKER_SUBTLE: &str = "ui.picker.subtle";
 const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
@@ -448,9 +455,9 @@ impl ThemeReloadState {
 fn preferred_primary_font_hinting() -> Option<Hinting> {
     if cfg!(target_os = "windows") {
         // Transparent compositor surfaces do not preserve ClearType-style
-        // subpixel assumptions, so use grayscale hinting without the harsher
-        // stem snapping that LIGHT introduced in picker text.
-        Some(Hinting::NORMAL)
+        // subpixel assumptions. Keep glyphs unhinted so picker/footer text
+        // stays visually closer to the buffer instead of snapping stems harder.
+        Some(Hinting::NONE)
     } else {
         None
     }
@@ -478,10 +485,26 @@ fn scaled_font_size(font_size: u32, display_scale: f32) -> f32 {
     font_size.max(1) as f32 * normalize_display_scale(display_scale)
 }
 
+fn normalized_raster_pixel_size(
+    requested_pixel_size: f32,
+    target_line_height: i32,
+    line_metrics: Option<fontdue::LineMetrics>,
+) -> f32 {
+    let fallback_pixel_size = requested_pixel_size.max(1.0);
+    let target_line_height = target_line_height.max(1) as f32;
+    line_metrics
+        .map(|metrics| metrics.ascent - metrics.descent)
+        .filter(|height| *height > f32::EPSILON)
+        .map(|height| fallback_pixel_size * target_line_height / height)
+        .filter(|pixel_size| pixel_size.is_finite() && *pixel_size > f32::EPSILON)
+        .unwrap_or(fallback_pixel_size)
+}
+
 struct IconFont<'ttf> {
     name: String,
     font: Font<'ttf>,
     raster_font: RasterFont,
+    pixel_size: f32,
 }
 
 struct FontSetInit<'ttf> {
@@ -490,9 +513,8 @@ struct FontSetInit<'ttf> {
     primary_shape_face: ShapeFace<'static>,
     primary_pixel_size: f32,
     ligatures_enabled: bool,
-    icon_fonts: Vec<(String, Font<'ttf>, RasterFont)>,
+    icon_fonts: Vec<(String, Font<'ttf>, RasterFont, f32)>,
     icon_chars: BTreeSet<char>,
-    icon_pixel_size: f32,
     cell_width: i32,
 }
 
@@ -504,7 +526,6 @@ struct FontSet<'ttf> {
     ligatures_enabled: bool,
     icon_fonts: Vec<IconFont<'ttf>>,
     icon_chars: BTreeSet<char>,
-    icon_pixel_size: f32,
     cell_width: i32,
 }
 
@@ -513,10 +534,11 @@ impl<'ttf> FontSet<'ttf> {
         let icon_fonts = init
             .icon_fonts
             .into_iter()
-            .map(|(name, font, raster_font)| IconFont {
+            .map(|(name, font, raster_font, pixel_size)| IconFont {
                 name,
                 font,
                 raster_font,
+                pixel_size,
             })
             .collect();
         Self {
@@ -527,7 +549,6 @@ impl<'ttf> FontSet<'ttf> {
             ligatures_enabled: init.ligatures_enabled,
             icon_fonts,
             icon_chars: init.icon_chars,
-            icon_pixel_size: init.icon_pixel_size,
             cell_width: init.cell_width.max(1),
         }
     }
@@ -564,10 +585,6 @@ impl<'ttf> FontSet<'ttf> {
 
     fn icon_fonts(&self) -> &[IconFont<'ttf>] {
         &self.icon_fonts
-    }
-
-    fn icon_pixel_size(&self) -> f32 {
-        self.icon_pixel_size
     }
 
     fn cell_width(&self) -> i32 {
@@ -1686,12 +1703,14 @@ fn segment_index_for_column(segments: &[LineWrapSegment], column: usize) -> usiz
 #[derive(Debug, Clone)]
 struct UndoSnapshot {
     text: TextSnapshot,
+    cursor: TextPoint,
 }
 
 impl UndoSnapshot {
     fn from_buffer(buffer: &TextBuffer) -> Self {
         Self {
             text: buffer.snapshot(),
+            cursor: buffer.cursor(),
         }
     }
 
@@ -1703,6 +1722,14 @@ impl UndoSnapshot {
         } else {
             Some(trimmed.to_owned())
         }
+    }
+
+    const fn cursor(&self) -> TextPoint {
+        self.cursor
+    }
+
+    fn set_cursor(&mut self, cursor: TextPoint) {
+        self.cursor = cursor;
     }
 }
 
@@ -1752,6 +1779,15 @@ impl UndoTree {
         self.last_revision = revision;
     }
 
+    fn preserve_root_cursor(&mut self, cursor: TextPoint, revision: u64) {
+        if self.current != 0 || revision != self.last_revision {
+            return;
+        }
+        if let Some(root) = self.nodes.first_mut() {
+            root.snapshot.set_cursor(cursor);
+        }
+    }
+
     fn record_snapshot(&mut self, buffer: &TextBuffer) -> bool {
         let revision = buffer.revision();
         if revision == self.last_revision {
@@ -1790,7 +1826,8 @@ impl UndoTree {
             .map(|node| node.snapshot.clone())
     }
 
-    fn redo(&mut self) -> Option<UndoSnapshot> {
+    fn redo(&mut self, cursor: TextPoint, revision: u64) -> Option<UndoSnapshot> {
+        self.preserve_root_cursor(cursor, revision);
         let next = {
             let node = self.nodes.get(self.current)?;
             node.last_child.or_else(|| node.children.last().copied())
@@ -1801,10 +1838,11 @@ impl UndoTree {
             .map(|node| node.snapshot.clone())
     }
 
-    fn select(&mut self, node_id: usize) -> Option<UndoSnapshot> {
+    fn select(&mut self, node_id: usize, cursor: TextPoint, revision: u64) -> Option<UndoSnapshot> {
         if node_id >= self.nodes.len() {
             return None;
         }
+        self.preserve_root_cursor(cursor, revision);
         if let Some(parent) = self.nodes[node_id].parent
             && let Some(parent_node) = self.nodes.get_mut(parent)
         {
@@ -1839,7 +1877,7 @@ impl UndoTree {
         }
         let indent = "  ".repeat(depth);
         let prefix = if is_current { "* " } else { "  " };
-        let cursor = node.snapshot.text.cursor();
+        let cursor = node.snapshot.cursor();
         let label = if node.parent.is_none() {
             format!(
                 "{indent}{prefix}root line {}, col {}",
@@ -3425,6 +3463,20 @@ impl ShellBuffer {
             || matches!(&self.kind, BufferKind::Plugin(kind) if kind == PDF_BUFFER_KIND)
     }
 
+    fn pdf_preview_url(&self) -> Option<String> {
+        self.pdf_state()
+            .and_then(|state| state.preview_url.as_ref().cloned())
+    }
+
+    fn has_pdf_preview_surface(&self) -> bool {
+        self.pdf_state()
+            .is_some_and(|state| state.preview_url.is_some())
+    }
+
+    fn uses_browser_host_surface(&self) -> bool {
+        buffer_is_browser(&self.kind) || self.has_pdf_preview_surface()
+    }
+
     fn is_rendered_image_buffer(&self) -> bool {
         self.image_state()
             .is_some_and(|state| state.mode == ImageBufferMode::Rendered)
@@ -3460,6 +3512,10 @@ impl ShellBuffer {
             return false;
         }
         state.zoom = next;
+        let zoom = state.zoom;
+        if let Some(pdf_state) = self.pdf_state_mut() {
+            pdf_state.zoom_percent = pdf_zoom_percent_from_scale(zoom);
+        }
         true
     }
 
@@ -3475,6 +3531,10 @@ impl ShellBuffer {
             return false;
         }
         state.zoom = next;
+        let zoom = state.zoom;
+        if let Some(pdf_state) = self.pdf_state_mut() {
+            pdf_state.zoom_percent = pdf_zoom_percent_from_scale(zoom);
+        }
         true
     }
 
@@ -3486,49 +3546,114 @@ impl ShellBuffer {
             return false;
         }
         state.zoom = 1.0;
+        if let Some(pdf_state) = self.pdf_state_mut() {
+            pdf_state.zoom_percent = 100;
+        }
         true
     }
 
-    fn refresh_pdf_preview(&mut self) {
-        let Some(state) = self.pdf_state().cloned() else {
-            return;
-        };
+    fn refresh_pdf_text_snapshot(&mut self) {
         let display_name = self.display_name().to_owned();
         let path = self.path().map(Path::to_path_buf);
-        self.replace_with_lines_preserve_view(pdf_buffer_lines(
-            display_name.as_str(),
-            path.as_deref(),
-            &state,
-        ));
+        let (lines, language_id, anchor_line) = {
+            let Some(state) = self.pdf_state() else {
+                return;
+            };
+            let lines = pdf_buffer_lines(display_name.as_str(), path.as_deref(), state);
+            let language_id = pdf_language_id(state.open_mode);
+            let anchor_line =
+                pdf_navigation_anchor_line(&lines, state.open_mode, state.current_page);
+            (lines, language_id, anchor_line)
+        };
+        self.replace_with_lines_preserve_view(lines);
+        self.set_language_id(language_id);
         if let Some(path) = path {
             self.text.set_path(path);
         }
         self.text.mark_clean();
+        if let Some(anchor_line) = anchor_line {
+            let line = anchor_line.min(self.line_count().saturating_sub(1));
+            self.text.set_cursor(TextPoint::new(line, 0));
+            self.scroll_row = line;
+        }
     }
 
-    fn pdf_next_page(&mut self) -> bool {
+    fn apply_pdf_location_update(&mut self, url: &str) {
+        if let Some(state) = self.pdf_state_mut() {
+            state.preview_url = Some(url.to_owned());
+            if let Some(page) = pdf_preview_page_from_url(url) {
+                state.current_page = page.clamp(1, state.page_count().max(1));
+            }
+        }
+        self.refresh_pdf_text_snapshot();
+    }
+
+    fn refresh_pdf_view(&mut self, write_preview_file: bool) {
+        let buffer_id = self.id;
+        let zoom = self
+            .image_state()
+            .map(|state| state.zoom)
+            .or_else(|| {
+                self.pdf_state()
+                    .map(|state| pdf_zoom_scale(state.zoom_percent))
+            })
+            .unwrap_or(1.0);
+        let rendered = {
+            let Some(state) = self.pdf_state_mut() else {
+                return;
+            };
+            state.zoom_percent = pdf_zoom_percent_from_scale(zoom);
+            match state.open_mode {
+                PdfOpenMode::Rendered => {
+                    match render_pdf_page_image(state, buffer_id, write_preview_file) {
+                        Ok(decoded) => {
+                            state.render_error = None;
+                            Some(decoded)
+                        }
+                        Err(error) => {
+                            state.render_error = Some(error);
+                            None
+                        }
+                    }
+                }
+                PdfOpenMode::Markdown | PdfOpenMode::Latex => {
+                    state.render_error = None;
+                    None
+                }
+            }
+        };
+        self.image_state = rendered.map(|decoded| ImageBufferState {
+            format: ImageBufferFormat::Raster,
+            mode: ImageBufferMode::Rendered,
+            decoded,
+            zoom,
+        });
+        self.refresh_pdf_text_snapshot();
+    }
+
+    fn pdf_next_page(&mut self) -> Result<bool, String> {
         let Some(state) = self.pdf_state_mut() else {
-            return false;
+            return Ok(false);
         };
         let page_count = state.page_count();
         if state.current_page >= page_count {
-            return false;
+            return Ok(false);
         }
         state.current_page += 1;
-        self.refresh_pdf_preview();
-        true
+        self.refresh_pdf_view(false);
+        Ok(true)
     }
 
-    fn pdf_previous_page(&mut self) -> bool {
+    fn pdf_previous_page(&mut self) -> Result<bool, String> {
         let Some(state) = self.pdf_state_mut() else {
-            return false;
+            return Ok(false);
         };
         if state.current_page <= 1 {
-            return false;
+            return Ok(false);
         }
         state.current_page -= 1;
-        self.refresh_pdf_preview();
-        true
+        self.refresh_pdf_view(false);
+        Ok(true)
     }
 
     fn pdf_rotate_clockwise(&mut self) -> Result<bool, String> {
@@ -3553,7 +3678,7 @@ impl ShellBuffer {
             + 90;
         page.set("Rotate", next_rotation.rem_euclid(PDF_ROTATION_FULL_CIRCLE));
         state.dirty = true;
-        self.refresh_pdf_preview();
+        self.refresh_pdf_view(true);
         Ok(true)
     }
 
@@ -3571,7 +3696,7 @@ impl ShellBuffer {
         }
         state.metadata.page_count = state.page_count();
         state.dirty = true;
-        self.refresh_pdf_preview();
+        self.refresh_pdf_view(true);
         Ok(true)
     }
 
@@ -4215,6 +4340,7 @@ impl ShellBuffer {
             self.backing_file_fingerprint = BackingFileFingerprint::read(path).ok();
             self.backing_file_reload_pending = false;
             self.backing_file_check_in_flight = false;
+            self.refresh_pdf_view(true);
             return Ok(());
         }
         self.text.save_to_path(path)?;
@@ -4396,14 +4522,19 @@ impl ShellBuffer {
                 .pdf_state()
                 .map(|state| state.zoom_percent)
                 .unwrap_or(100);
+            let open_mode = self
+                .pdf_state()
+                .map(|state| state.open_mode)
+                .unwrap_or(PdfOpenMode::Rendered);
             let mut state = load_pdf_buffer_state(&path)
                 .map_err(|error| format!("failed to reload `{}`: {error}", path.display()))?;
             state.current_page = current_page;
             state.fit_mode = fit_mode;
             state.zoom_percent = zoom_percent;
+            state.open_mode = open_mode;
             state.clamp_current_page();
             self.pdf_state = Some(state);
-            self.refresh_pdf_preview();
+            self.refresh_pdf_view(true);
             self.backing_file_fingerprint = Some(current_fingerprint);
             self.backing_file_reload_pending = false;
             self.backing_file_check_in_flight = false;
@@ -4620,6 +4751,7 @@ impl ShellBuffer {
     }
 
     fn insert_text(&mut self, text: &str) {
+        self.preserve_root_cursor_before_text_change();
         self.text.insert_text(text);
         self.invalidate_wrap_cache();
     }
@@ -4628,6 +4760,7 @@ impl ShellBuffer {
         let mut changed = false;
         for character in text.chars() {
             if character == '\n' {
+                self.preserve_root_cursor_before_text_change();
                 self.text.insert_newline();
                 changed = true;
                 continue;
@@ -4635,6 +4768,7 @@ impl ShellBuffer {
 
             let point = self.cursor_point();
             let Some(next) = self.point_after(point) else {
+                self.preserve_root_cursor_before_text_change();
                 self.text.insert_text(&character.to_string());
                 changed = true;
                 continue;
@@ -4642,9 +4776,11 @@ impl ShellBuffer {
 
             let current = self.slice(TextRange::new(point, next));
             if current == "\n" {
+                self.preserve_root_cursor_before_text_change();
                 self.text.insert_text(&character.to_string());
                 changed = true;
             } else {
+                self.preserve_root_cursor_before_text_change();
                 self.text
                     .replace(TextRange::new(point, next), &character.to_string());
                 changed = true;
@@ -4656,11 +4792,13 @@ impl ShellBuffer {
     }
 
     fn backspace(&mut self) {
+        self.preserve_root_cursor_before_text_change();
         let _ = self.text.backspace();
         self.invalidate_wrap_cache();
     }
 
     fn delete_forward(&mut self) {
+        self.preserve_root_cursor_before_text_change();
         let _ = self.text.delete_forward();
         self.invalidate_wrap_cache();
     }
@@ -4980,6 +5118,7 @@ impl ShellBuffer {
         let column = self.text.line_len_chars(line).unwrap_or(0);
         self.text
             .set_cursor(editor_buffer::TextPoint::new(line, column));
+        self.preserve_root_cursor_before_text_change();
         self.text.insert_newline();
         self.invalidate_wrap_cache();
     }
@@ -4987,6 +5126,7 @@ impl ShellBuffer {
     fn open_line_above(&mut self) {
         let line = self.cursor_row();
         self.text.set_cursor(editor_buffer::TextPoint::new(line, 0));
+        self.preserve_root_cursor_before_text_change();
         self.text.insert_newline();
         let _ = self.text.move_up();
         self.invalidate_wrap_cache();
@@ -5013,7 +5153,10 @@ impl ShellBuffer {
     }
 
     fn undo_tree_redo(&mut self) -> bool {
-        let Some(snapshot) = self.undo_tree.redo() else {
+        let Some(snapshot) = self
+            .undo_tree
+            .redo(self.text.cursor(), self.text.revision())
+        else {
             return false;
         };
         self.apply_undo_snapshot(&snapshot);
@@ -5021,7 +5164,10 @@ impl ShellBuffer {
     }
 
     fn undo_tree_select(&mut self, node_id: usize) -> bool {
-        let Some(snapshot) = self.undo_tree.select(node_id) else {
+        let Some(snapshot) =
+            self.undo_tree
+                .select(node_id, self.text.cursor(), self.text.revision())
+        else {
             return false;
         };
         self.apply_undo_snapshot(&snapshot);
@@ -5033,11 +5179,13 @@ impl ShellBuffer {
     }
 
     fn delete_range(&mut self, range: TextRange) {
+        self.preserve_root_cursor_before_text_change();
         self.text.delete(range);
         self.invalidate_wrap_cache();
     }
 
     fn replace_range(&mut self, range: TextRange, text: &str) {
+        self.preserve_root_cursor_before_text_change();
         self.text.replace(range, text);
         self.invalidate_wrap_cache();
     }
@@ -5107,8 +5255,9 @@ impl ShellBuffer {
 
     fn apply_undo_snapshot(&mut self, snapshot: &UndoSnapshot) {
         let range = self.full_range();
-        self.replace_range(range, &snapshot.text.text());
-        self.set_cursor(snapshot.text.cursor());
+        self.text.replace(range, &snapshot.text.text());
+        self.invalidate_wrap_cache();
+        self.set_cursor(snapshot.cursor());
         self.undo_tree.update_revision(self.text.revision());
     }
 
@@ -5171,8 +5320,14 @@ impl ShellBuffer {
 
     fn insert_at(&mut self, point: TextPoint, text: &str) {
         self.text.set_cursor(point);
+        self.preserve_root_cursor_before_text_change();
         self.text.insert_text(text);
         self.invalidate_wrap_cache();
+    }
+
+    fn preserve_root_cursor_before_text_change(&mut self) {
+        self.undo_tree
+            .preserve_root_cursor(self.text.cursor(), self.text.revision());
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -6256,6 +6411,7 @@ struct DirectoryPrefixState {
 
 #[derive(Debug, Clone)]
 struct KeySequenceState {
+    scope: KeymapScope,
     tokens: Vec<String>,
     started_at: Instant,
 }
@@ -8075,11 +8231,12 @@ impl ShellState {
                             .map_err(ShellError::Runtime)?;
                     }
                     if mouse_btn == MouseButton::Left {
-                        let kind = shell_buffer(&self.runtime, buffer_id)
-                            .map_err(ShellError::Runtime)?
-                            .kind
-                            .clone();
-                        if !buffer_is_browser(&kind) && !buffer_is_terminal(&kind) {
+                        let (kind, uses_browser_host_surface) = {
+                            let buffer = shell_buffer(&self.runtime, buffer_id)
+                                .map_err(ShellError::Runtime)?;
+                            (buffer.kind.clone(), buffer.uses_browser_host_surface())
+                        };
+                        if !uses_browser_host_surface && !buffer_is_terminal(&kind) {
                             self.begin_mouse_selection(
                                 buffer_id,
                                 pane_rect,
@@ -8163,17 +8320,18 @@ impl ShellState {
                 let scroll_lines = wheel_delta.saturating_mul(MOUSE_WHEEL_SCROLL_LINES);
                 let active_buffer_id =
                     active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-                let active_kind = shell_buffer(&self.runtime, active_buffer_id)
-                    .map_err(ShellError::Runtime)?
-                    .kind
-                    .clone();
+                let (active_kind, active_uses_browser_host_surface) = {
+                    let buffer = shell_buffer(&self.runtime, active_buffer_id)
+                        .map_err(ShellError::Runtime)?;
+                    (buffer.kind.clone(), buffer.uses_browser_host_surface())
+                };
                 if buffer_is_terminal(&active_kind) {
                     scroll_active_terminal_view(
                         &mut self.runtime,
                         TerminalViewportScroll::LineDelta(scroll_lines),
                     )
                     .map_err(ShellError::Runtime)?;
-                } else if !buffer_is_browser(&active_kind) {
+                } else if !active_uses_browser_host_surface {
                     scroll_buffer_viewport_only(
                         shell_buffer_mut(&mut self.runtime, active_buffer_id)
                             .map_err(ShellError::Runtime)?,
@@ -8350,7 +8508,10 @@ impl ShellState {
                 }
 
                 if picker_visible {
-                    if matches!(keycode, Keycode::Return | Keycode::KpEnter) {
+                    if matches!(
+                        keycode,
+                        Keycode::Return | Keycode::KpEnter | Keycode::Return2
+                    ) {
                         self.runtime
                             .execute_command("picker.submit")
                             .map_err(|error| ShellError::Runtime(error.to_string()))?;
@@ -8459,7 +8620,7 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     }
                     Keycode::PageUp => self.active_buffer_mut()?.scroll_by(-page_rows),
-                    Keycode::Return | Keycode::KpEnter
+                    Keycode::Return | Keycode::KpEnter | Keycode::Return2
                         if matches!(input_mode, InputMode::Insert | InputMode::Replace) =>
                     {
                         if self.ui()?.vim().multicursor.is_some() && !active_buffer.has_input {
@@ -8646,20 +8807,9 @@ impl ShellState {
 
     fn queue_suppressed_text_input_for_chord(&mut self, chord: &str) {
         const SUPPRESSED_TEXT_INPUT_WINDOW: Duration = Duration::from_millis(50);
-        let suppressed = match chord {
-            "Ctrl+Space" => Some(" "),
-            _ => chord
-                .strip_prefix("Ctrl+")
-                .filter(|suffix| suffix.len() == 1)
-                .filter(|suffix| {
-                    suffix
-                        .chars()
-                        .all(|character| character.is_ascii_lowercase())
-                }),
-        };
-        if let Some(text) = suppressed {
+        if let Some(text) = suppressed_text_input_for_chord(chord) {
             self.pending_suppressed_text_input = Some(SuppressedTextInput {
-                text: text.to_owned(),
+                text,
                 expires_at: Instant::now() + SUPPRESSED_TEXT_INPUT_WINDOW,
             });
         }
@@ -9386,7 +9536,7 @@ impl ShellState {
         scope: KeymapScope,
         vim_mode: KeymapVimMode,
     ) -> Result<bool, ShellError> {
-        let mut tokens = take_key_sequence(&mut self.runtime)
+        let mut tokens = take_key_sequence(&mut self.runtime, &scope)
             .map_err(ShellError::Runtime)?
             .unwrap_or_default();
         tokens.push(token.to_owned());
@@ -9415,11 +9565,10 @@ impl ShellState {
             .keymaps()
             .has_sequence_prefix_for_mode(&scope, vim_mode, &tokens)
         {
-            set_key_sequence(&mut self.runtime, tokens).map_err(ShellError::Runtime)?;
+            set_key_sequence(&mut self.runtime, scope, tokens).map_err(ShellError::Runtime)?;
             return Ok(true);
         }
 
-        clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
         Ok(false)
     }
 
@@ -9750,6 +9899,37 @@ impl ShellState {
             }
 
             let token = normalize_text_token(&chord);
+            if self.handle_key_sequence(&token, KeymapScope::Global, vim_mode)? {
+                return Ok(());
+            }
+
+            if self
+                .runtime
+                .keymaps()
+                .contains_for_mode(&KeymapScope::Global, vim_mode, &token)
+            {
+                let runtime_surface_before =
+                    active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+                self.runtime
+                    .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, &token)
+                    .map_err(|error| ShellError::Runtime(error.to_string()))?;
+                self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+                self.clear_stale_vim_count()?;
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+
+            let runtime_surface_before =
+                active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+            if self.try_plugin_buffer_keybinding(&token, vim_mode)? {
+                self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+                self.clear_stale_vim_count()?;
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+
             if self.handle_key_sequence(&token, KeymapScope::Workspace, vim_mode)? {
                 return Ok(());
             }
@@ -9762,12 +9942,12 @@ impl ShellState {
             if self
                 .runtime
                 .keymaps()
-                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &token)
             {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
                 self.runtime
-                    .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+                    .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &token)
                     .map_err(|error| ShellError::Runtime(error.to_string()))?;
                 self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                 self.clear_stale_vim_count()?;
@@ -10300,7 +10480,7 @@ impl ShellState {
                 self.ui_mut()?.close_command_line();
                 Ok(true)
             }
-            Keycode::Return | Keycode::KpEnter => {
+            Keycode::Return | Keycode::KpEnter | Keycode::Return2 => {
                 submit_vim_command_line(&mut self.runtime).map_err(ShellError::Runtime)?;
                 Ok(true)
             }
@@ -11926,12 +12106,12 @@ fn load_font_set<'ttf>(
     if let Some(hinting) = preferred_primary_font_hinting() {
         primary.set_hinting(hinting);
     }
-    let primary_pixel_size = primary_raster_font
-        .horizontal_line_metrics(effective_font_size)
-        .map(|metrics| metrics.ascent - metrics.descent)
-        .filter(|height| *height > f32::EPSILON)
-        .map(|height| effective_font_size * primary.height().max(1) as f32 / height)
-        .unwrap_or(effective_font_size);
+    let primary_line_height = primary.height().max(1);
+    let primary_pixel_size = normalized_raster_pixel_size(
+        effective_font_size,
+        primary_line_height,
+        primary_raster_font.horizontal_line_metrics(effective_font_size),
+    );
     let cell_width = primary
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
@@ -11961,7 +12141,12 @@ fn load_font_set<'ttf>(
             let font = ttf
                 .load_font(&path, effective_font_size)
                 .map_err(|error| ShellError::Sdl(error.to_string()))?;
-            Ok((name, font, raster_font))
+            let pixel_size = normalized_raster_pixel_size(
+                effective_font_size,
+                primary_line_height,
+                raster_font.horizontal_line_metrics(effective_font_size),
+            );
+            Ok((name, font, raster_font, pixel_size))
         })
         .collect::<Result<Vec<_>, ShellError>>()?;
     let icon_chars = user_library
@@ -11977,7 +12162,6 @@ fn load_font_set<'ttf>(
         ligatures_enabled: user_library.ligature_config().enabled,
         icon_fonts,
         icon_chars,
-        icon_pixel_size: effective_font_size,
         cell_width,
     });
     validate_bundled_icon_fonts(&fonts, user_library)?;
@@ -23943,10 +24127,7 @@ fn install_tree_sitter_language(
     runtime: &mut EditorRuntime,
     language_id: &str,
 ) -> Result<(), String> {
-    syntax_registry_mut(runtime)?
-        .install_language(language_id)
-        .map_err(|error| error.to_string())?;
-    refresh_workspace_syntax(runtime)
+    treesitter_install::install_tree_sitter_language(runtime, language_id)
 }
 
 fn file_open_detail(path: &Path) -> Option<String> {
@@ -24205,57 +24386,196 @@ fn workspace_relative_path(root: Option<&Path>, path: &Path) -> String {
         .to_string()
 }
 
+#[derive(Clone, Copy)]
+struct ChordModifiers {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    gui: bool,
+}
+
+impl ChordModifiers {
+    fn from_keymod(keymod: Mod) -> Self {
+        Self {
+            ctrl: keymod.intersects(ctrl_mod()),
+            alt: keymod.intersects(alt_mod()),
+            shift: keymod.intersects(shift_mod()),
+            gui: keymod.intersects(gui_mod()),
+        }
+    }
+
+    fn has_non_shift_modifier(self) -> bool {
+        self.ctrl || self.alt || self.gui
+    }
+}
+
+struct KeydownChordToken {
+    key: String,
+    printable: bool,
+    include_shift: bool,
+}
+
+impl KeydownChordToken {
+    fn printable(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            printable: true,
+            include_shift: false,
+        }
+    }
+
+    fn alphabetic(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            printable: true,
+            include_shift: true,
+        }
+    }
+
+    fn special(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            printable: false,
+            include_shift: true,
+        }
+    }
+}
+
 fn keydown_chord(keycode: Keycode, keymod: Mod) -> Option<String> {
-    if keymod.intersects(ctrl_mod()) {
-        return match keycode {
-            Keycode::Equals | Keycode::KpPlus => Some("Ctrl+=".to_owned()),
-            Keycode::Minus | Keycode::KpMinus => Some("Ctrl+-".to_owned()),
-            Keycode::_0 | Keycode::Kp0 => Some("Ctrl+0".to_owned()),
-            Keycode::B => Some("Ctrl+b".to_owned()),
-            Keycode::C => Some("Ctrl+c".to_owned()),
-            Keycode::D => Some("Ctrl+d".to_owned()),
-            Keycode::E => Some("Ctrl+e".to_owned()),
-            Keycode::F => Some("Ctrl+f".to_owned()),
-            Keycode::H => Some("Ctrl+h".to_owned()),
-            Keycode::J => Some("Ctrl+j".to_owned()),
-            Keycode::K => Some("Ctrl+k".to_owned()),
-            Keycode::L => Some("Ctrl+l".to_owned()),
-            Keycode::N => Some("Ctrl+n".to_owned()),
-            Keycode::P => Some("Ctrl+p".to_owned()),
-            Keycode::R => Some("Ctrl+r".to_owned()),
-            Keycode::S => Some("Ctrl+s".to_owned()),
-            Keycode::T => Some("Ctrl+t".to_owned()),
-            Keycode::U => Some("Ctrl+u".to_owned()),
-            Keycode::V => Some("Ctrl+v".to_owned()),
-            Keycode::Y => Some("Ctrl+y".to_owned()),
-            Keycode::Space => Some("Ctrl+Space".to_owned()),
-            Keycode::Grave => Some("Ctrl+`".to_owned()),
-            Keycode::Period | Keycode::KpPeriod => Some("Ctrl+.".to_owned()),
-            Keycode::Return | Keycode::KpEnter => Some("Ctrl+Enter".to_owned()),
-            Keycode::Tab => Some("Ctrl+Tab".to_owned()),
-            _ => None,
+    let modifiers = ChordModifiers::from_keymod(keymod);
+    let token = keydown_chord_token(keycode, modifiers)?;
+    if token.printable && !modifiers.has_non_shift_modifier() {
+        return None;
+    }
+
+    Some(build_keydown_chord(
+        &token.key,
+        ChordModifiers {
+            shift: modifiers.shift && token.include_shift,
+            ..modifiers
+        },
+    ))
+}
+
+fn keydown_chord_token(keycode: Keycode, modifiers: ChordModifiers) -> Option<KeydownChordToken> {
+    let key_name = keycode_name_token(keycode)?;
+    if key_name == "Space" {
+        return Some(KeydownChordToken::printable("Space"));
+    }
+
+    let mut characters = key_name.chars();
+    let character = characters.next()?;
+    if characters.next().is_none() {
+        if character.is_ascii_alphabetic() {
+            return Some(KeydownChordToken::alphabetic(
+                character.to_ascii_lowercase().to_string(),
+            ));
+        }
+        let character = if modifiers.shift {
+            shifted_printable_character(character).unwrap_or(character)
+        } else {
+            character
         };
+        if modifiers.ctrl
+            && matches!(
+                keycode,
+                Keycode::Equals | Keycode::Plus | Keycode::KpEquals | Keycode::KpPlus
+            )
+        {
+            return Some(KeydownChordToken::printable("="));
+        }
+        return Some(KeydownChordToken::printable(character.to_string()));
     }
 
-    if keymod.intersects(alt_mod()) && !keymod.intersects(ctrl_mod() | gui_mod()) {
-        return match keycode {
-            Keycode::X => Some("Alt+x".to_owned()),
-            _ => None,
-        };
+    Some(KeydownChordToken::special(normalize_named_key_token(
+        &key_name,
+    )))
+}
+
+fn build_keydown_chord(key: &str, modifiers: ChordModifiers) -> String {
+    let mut chord = String::new();
+    if modifiers.ctrl {
+        chord.push_str("Ctrl+");
+    }
+    if modifiers.alt {
+        chord.push_str("Alt+");
+    }
+    if modifiers.shift {
+        chord.push_str("Shift+");
+    }
+    if modifiers.gui {
+        chord.push_str("Gui+");
+    }
+    chord.push_str(key);
+    chord
+}
+
+fn keycode_name_token(keycode: Keycode) -> Option<String> {
+    if matches!(
+        keycode,
+        Keycode::ScancodeMask
+            | Keycode::Unknown
+            | Keycode::LCtrl
+            | Keycode::RCtrl
+            | Keycode::LShift
+            | Keycode::RShift
+            | Keycode::LAlt
+            | Keycode::RAlt
+            | Keycode::LGui
+            | Keycode::RGui
+            | Keycode::Mode
+    ) {
+        return None;
     }
 
-    if keymod.intersects(shift_mod()) && matches!(keycode, Keycode::Tab) {
-        return Some("Shift+Tab".to_owned());
+    if matches!(
+        keycode,
+        Keycode::Return | Keycode::KpEnter | Keycode::Return2
+    ) {
+        return Some("Enter".to_owned());
     }
 
-    match keycode {
-        Keycode::F3 => Some("F3".to_owned()),
-        Keycode::F4 => Some("F4".to_owned()),
-        Keycode::F5 => Some("F5".to_owned()),
-        Keycode::F6 => Some("F6".to_owned()),
-        Keycode::Tab => Some("Tab".to_owned()),
-        Keycode::Escape => Some("Escape".to_owned()),
-        Keycode::Return | Keycode::KpEnter => Some("Enter".to_owned()),
+    let mut name = keycode.name();
+    if let Some(stripped) = name.strip_prefix("Keypad ") {
+        name = stripped.to_owned();
+    }
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_owned())
+    }
+}
+
+fn normalize_named_key_token(name: &str) -> String {
+    name.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn shifted_printable_character(character: char) -> Option<char> {
+    match character {
+        '`' => Some('~'),
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        '-' => Some('_'),
+        '=' => Some('+'),
+        '[' => Some('{'),
+        ']' => Some('}'),
+        '\\' => Some('|'),
+        ';' => Some(':'),
+        '\'' => Some('"'),
+        ',' => Some('<'),
+        '.' => Some('>'),
+        '/' => Some('?'),
         _ => None,
     }
 }
@@ -24275,6 +24595,54 @@ fn normalize_text_token(chord: &str) -> String {
     } else {
         chord.to_owned()
     }
+}
+
+fn suppressed_text_input_for_chord(chord: &str) -> Option<String> {
+    let mut remaining = chord;
+    let mut modifiers = ChordModifiers {
+        ctrl: false,
+        alt: false,
+        shift: false,
+        gui: false,
+    };
+
+    if let Some(stripped) = remaining.strip_prefix("Ctrl+") {
+        modifiers.ctrl = true;
+        remaining = stripped;
+    }
+    if let Some(stripped) = remaining.strip_prefix("Alt+") {
+        modifiers.alt = true;
+        remaining = stripped;
+    }
+    if let Some(stripped) = remaining.strip_prefix("Shift+") {
+        modifiers.shift = true;
+        remaining = stripped;
+    }
+    if let Some(stripped) = remaining.strip_prefix("Gui+") {
+        modifiers.gui = true;
+        remaining = stripped;
+    }
+
+    if !modifiers.has_non_shift_modifier() {
+        return None;
+    }
+
+    if remaining == "Space" {
+        return Some(" ".to_owned());
+    }
+
+    let mut characters = remaining.chars();
+    let character = characters.next()?;
+    if characters.next().is_some() {
+        return None;
+    }
+
+    let text = if modifiers.shift && character.is_ascii_lowercase() {
+        character.to_ascii_uppercase().to_string()
+    } else {
+        character.to_string()
+    };
+    Some(text)
 }
 
 fn ctrl_mod() -> Mod {

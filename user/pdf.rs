@@ -1,9 +1,17 @@
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    buffer_kinds, pdf_hooks,
+    PdfOpenMode, PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope,
+    PluginPackage, buffer_kinds, pdf_hooks,
 };
 
 pub const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
+// pub const OPEN_MODE: PdfOpenMode = PdfOpenMode::Rendered;
+pub const OPEN_MODE: PdfOpenMode = PdfOpenMode::Latex;
+// pub const OPEN_MODE: PdfOpenMode = PdfOpenMode::Markdown;
+
+/// Returns the preferred mode for newly opened PDF buffers.
+pub fn open_mode() -> PdfOpenMode {
+    OPEN_MODE
+}
 
 /// Returns the metadata for native PDF commands.
 pub fn package() -> PluginPackage {
@@ -98,5 +106,10 @@ mod tests {
                 .iter()
                 .any(|binding| binding.command_name() == "buffer.save")
         );
+    }
+
+    #[test]
+    fn open_mode_defaults_to_rendered() {
+        assert_eq!(open_mode(), PdfOpenMode::Rendered);
     }
 }
