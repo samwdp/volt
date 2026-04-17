@@ -58,6 +58,8 @@ pub mod proto;
 pub mod python;
 /// R language support and theme mappings.
 pub mod r;
+/// Razor language support and theme mappings.
+pub mod razor;
 /// Ruby language support and theme mappings.
 pub mod ruby;
 /// Rust language support and theme mappings.
@@ -117,6 +119,7 @@ pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
         proto::package(),
         python::package(),
         r::package(),
+        razor::package(),
         ruby::package(),
         rust::package(),
         scala::package(),
@@ -166,6 +169,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         proto::syntax_language(),
         python::syntax_language(),
         r::syntax_language(),
+        razor::syntax_language(),
         ruby::syntax_language(),
         rust::syntax_language(),
         scala::syntax_language(),

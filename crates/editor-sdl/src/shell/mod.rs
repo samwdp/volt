@@ -212,6 +212,7 @@ const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
+const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = "ui.browser.focus-input";
@@ -305,6 +306,12 @@ const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
 const LSP_LOG_BUFFER_PREFIX: &str = "*lsp-log ";
+const LSP_METADATA_BUFFER_KIND: &str = "lsp-metadata";
+const LSP_METADATA_BUFFER_PREFIX: &str = "*lsp-metadata ";
+const CSHARP_LSP_SERVER_ID: &str = "csharp-ls";
+const CSHARP_LANGUAGE_ID: &str = "csharp";
+const CSHARP_METADATA_URI_SCHEME: &str = "csharp:/";
+const CSHARP_SOLUTION_PICKER_TITLE: &str = "Select C# solution";
 const OIL_PREVIEW_KIND: &str = "oil-preview";
 const OIL_HELP_KIND: &str = "oil-help";
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
@@ -320,6 +327,16 @@ const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
 const DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH: usize = 6;
 const BUNDLED_ICON_FONT_SEARCH_DEPTH: usize = 6;
+const CSHARP_SOLUTION_IGNORED_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".vs",
+    "node_modules",
+    "target",
+    "bin",
+    "obj",
+];
 const BUNDLED_ICON_FONT_DIR_CANDIDATES: &[&[&str]] =
     &[&["crates", "volt", "assets", "font"], &["assets", "font"]];
 const BUNDLED_ICON_FONT_FILES: &[&str] = &[
@@ -770,7 +787,10 @@ fn resolved_tab_width(tab_width: usize) -> usize {
 }
 
 fn is_zero_width_display_character(character: char) -> bool {
-    matches!(character as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+    matches!(
+        character as u32,
+        0xFEFF | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+    )
 }
 
 fn display_columns_for_character(character: char, display_col: usize, tab_width: usize) -> usize {
@@ -4178,6 +4198,7 @@ impl ShellBuffer {
 
     fn set_section_lines(&mut self, lines: Vec<SectionRenderLine>) {
         let is_git_status = buffer_is_git_status(&self.kind);
+        let is_directory = buffer_is_directory(&self.kind);
         let mut text_lines = Vec::with_capacity(lines.len());
         let mut meta = Vec::with_capacity(lines.len());
         let mut syntax_lines = BTreeMap::new();
@@ -4185,6 +4206,11 @@ impl ShellBuffer {
             let formatted_line = format_section_line(&line);
             if is_git_status {
                 let spans = git_status_line_spans(&line, &formatted_line);
+                if !spans.is_empty() {
+                    syntax_lines.insert(line_index, spans);
+                }
+            } else if is_directory {
+                let spans = oil_directory_line_spans(&line, &formatted_line);
                 if !spans.is_empty() {
                     syntax_lines.insert(line_index, spans);
                 }
@@ -4199,7 +4225,7 @@ impl ShellBuffer {
         let state = self.ensure_section_state();
         state.lines = meta;
         self.replace_with_lines_preserve_view(text_lines);
-        if is_git_status {
+        if is_git_status || is_directory {
             self.syntax_lines = syntax_lines;
             self.syntax_dirty = false;
             self.last_edit_at = None;
@@ -6140,6 +6166,12 @@ struct ShellPane {
     buffer_id: BufferId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LspLifecycleAction {
+    Start,
+    Restart,
+}
+
 #[derive(Debug, Clone)]
 enum PickerAction {
     NoOp,
@@ -6158,6 +6190,9 @@ enum PickerAction {
     OpenFileLocation {
         path: PathBuf,
         target: TextPoint,
+    },
+    OpenLspLocation {
+        location: LspLocation,
     },
     OpenAcpClient(String),
     CreateWorkspaceFile {
@@ -6209,6 +6244,12 @@ enum PickerAction {
     AcpResolvePermission {
         request_id: u64,
         option_id: String,
+    },
+    SelectCsharpSolution {
+        root: Option<PathBuf>,
+        solution_path: PathBuf,
+        lifecycle: LspLifecycleAction,
+        preferred_server_id: Option<String>,
     },
     CopyToClipboard(String),
 }
@@ -9084,6 +9125,7 @@ impl ShellState {
     }
 
     fn apply_browser_host_events(&mut self, events: &[BrowserHostEvent]) -> Result<(), ShellError> {
+        let now = Instant::now();
         for event in events {
             match event {
                 BrowserHostEvent::FocusParentRequested { .. } => {
@@ -9097,9 +9139,109 @@ impl ShellState {
                         .open_devtools(*buffer_id)
                         .map_err(ShellError::Runtime)?;
                 }
+                BrowserHostEvent::DocumentTitleChanged { buffer_id, title } => {
+                    if let Some(buffer) = self.ui_mut()?.buffer_mut(*buffer_id) {
+                        set_browser_buffer_title(buffer, title.as_deref());
+                    }
+                }
+                BrowserHostEvent::PageLoadStateChanged {
+                    buffer_id,
+                    current_url,
+                    is_loading,
+                } => {
+                    let user_library = shell_user_library(&self.runtime);
+                    if let Some(buffer) = self.ui_mut()?.buffer_mut(*buffer_id) {
+                        set_browser_buffer_location(buffer, current_url, false, &*user_library);
+                        set_browser_buffer_loading(buffer, *is_loading);
+                    }
+                }
+                BrowserHostEvent::DownloadStarted {
+                    buffer_id,
+                    url,
+                    download_path,
+                } => {
+                    let _ = shell_ui_mut(&mut self.runtime)
+                        .map_err(ShellError::Runtime)?
+                        .apply_notification(
+                            NotificationUpdate {
+                                key: Self::browser_download_notification_key(*buffer_id, url),
+                                severity: NotificationSeverity::Info,
+                                title: "Browser download started".to_owned(),
+                                body_lines: Self::browser_download_notification_lines(
+                                    url,
+                                    download_path,
+                                ),
+                                progress: None,
+                                active: true,
+                                action: None,
+                            },
+                            now,
+                        );
+                }
+                BrowserHostEvent::DownloadCompleted {
+                    buffer_id,
+                    url,
+                    download_path,
+                    success,
+                } => {
+                    let _ = shell_ui_mut(&mut self.runtime)
+                        .map_err(ShellError::Runtime)?
+                        .apply_notification(
+                            NotificationUpdate {
+                                key: Self::browser_download_notification_key(*buffer_id, url),
+                                severity: if *success {
+                                    NotificationSeverity::Success
+                                } else {
+                                    NotificationSeverity::Error
+                                },
+                                title: if *success {
+                                    "Browser download finished".to_owned()
+                                } else {
+                                    "Browser download failed".to_owned()
+                                },
+                                body_lines: Self::browser_download_notification_lines(
+                                    url,
+                                    download_path,
+                                ),
+                                progress: None,
+                                active: false,
+                                action: None,
+                            },
+                            now,
+                        );
+                }
+                BrowserHostEvent::NewWindowRequested {
+                    url, popup_seed_id, ..
+                } => {
+                    if let Some(popup_seed_id) = popup_seed_id {
+                        let buffer_id = ensure_browser_popup_buffer(&mut self.runtime, Some(url))
+                            .map_err(ShellError::Runtime)?;
+                        self.browser_host
+                            .attach_popup_seed(*popup_seed_id, buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                    } else {
+                        open_browser_buffer_in_popup(&mut self.runtime, Some(url))
+                            .map_err(ShellError::Runtime)?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    fn browser_download_notification_key(buffer_id: BufferId, url: &str) -> String {
+        format!("browser-download-{buffer_id}-{url}")
+    }
+
+    fn browser_download_notification_lines(
+        url: &str,
+        download_path: &Option<String>,
+    ) -> Vec<String> {
+        let mut lines = vec![url.to_owned()];
+        if let Some(download_path) = download_path {
+            lines.push(download_path.clone());
+        }
+        lines
     }
 
     fn pane_count(&self) -> Result<usize, ShellError> {
@@ -12550,13 +12692,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_BROWSER_OPEN,
+        "Opens the browser buffer in a split pane.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_BROWSER_OPEN_POPUP,
         "Focuses the browser popup after opening it.",
     )?;
     register_hook(
         runtime,
         HOOK_BROWSER_URL,
-        "Detects a URL in the active buffer and opens it in the popup browser.",
+        "Detects a URL in the active buffer and opens it in a split browser buffer.",
     )?;
     register_hook(
         runtime,
@@ -13691,6 +13838,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_BROWSER_OPEN, "shell.browser-open", |_, runtime| {
+            open_browser_buffer_in_split(runtime, None)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(
             HOOK_BROWSER_OPEN_POPUP,
             "shell.browser-open-popup",
@@ -14022,6 +14175,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     open_workspace_file_at(runtime, &path, target)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::OpenLspLocation { location } => {
+                    open_lsp_location(runtime, &location)?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::OpenAcpClient(client_id) => {
                     acp::open_acp_client(runtime, &client_id)?;
                     sync_active_buffer(runtime)?;
@@ -14157,6 +14314,20 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     acp::acp_resolve_permission_option(runtime, request_id, &option_id)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::SelectCsharpSolution {
+                    root,
+                    solution_path,
+                    lifecycle,
+                    preferred_server_id,
+                } => {
+                    resume_lsp_lifecycle_with_selected_csharp_solution(
+                        runtime,
+                        preferred_server_id.as_deref(),
+                        lifecycle,
+                        root.as_deref(),
+                        &solution_path,
+                    )?;
+                }
                 PickerAction::CopyToClipboard(text) => {
                     write_system_clipboard(&text);
                 }
@@ -14280,54 +14451,7 @@ fn start_lsp_for_active_buffer(
     runtime: &mut EditorRuntime,
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
-    let context = active_lsp_buffer_context(runtime)?;
-    let lsp_client = runtime
-        .services()
-        .get::<Arc<LspClientManager>>()
-        .cloned()
-        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    let manager = lsp_client;
-    if let Some(server_id) = preferred_server_id {
-        let supported = manager
-            .registered_server_ids_for_path(&context.path)
-            .into_iter()
-            .any(|registered| registered == server_id);
-        if !supported {
-            return Err(format!(
-                "language server `{server_id}` is not registered for `{}`",
-                context.path.display()
-            ));
-        }
-    } else if !manager.supports_path(&context.path) {
-        return Err(format!(
-            "no language server is registered for `{}`",
-            context.path.display()
-        ));
-    }
-    cancel_lsp_sync_for_path(runtime, &context.path)?;
-    let labels = if let Some(server_id) = preferred_server_id {
-        manager.start_buffer_server(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-            server_id,
-        )
-    } else {
-        manager.sync_buffer(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-        )
-    }
-    .map_err(|error| error.to_string())?;
-    if let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(context.buffer_id) {
-        buffer.set_lsp_enabled(true);
-    }
-    let attached = (!labels.is_empty()).then(|| labels.join(", "));
-    shell_ui_mut(runtime)?.set_attached_lsp_server(context.workspace_id, attached);
-    Ok(())
+    run_lsp_lifecycle_for_active_buffer(runtime, preferred_server_id, LspLifecycleAction::Start)
 }
 
 fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -14354,50 +14478,331 @@ fn restart_lsp_for_active_buffer(
     runtime: &mut EditorRuntime,
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
+    run_lsp_lifecycle_for_active_buffer(runtime, preferred_server_id, LspLifecycleAction::Restart)
+}
+
+fn run_lsp_lifecycle_for_active_buffer(
+    runtime: &mut EditorRuntime,
+    preferred_server_id: Option<&str>,
+    lifecycle: LspLifecycleAction,
+) -> Result<(), String> {
     let context = active_lsp_buffer_context(runtime)?;
     let lsp_client = runtime
         .services()
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    let manager = lsp_client;
+    validate_lsp_server_request(&lsp_client, &context.path, preferred_server_id)?;
+    if maybe_prepare_csharp_lsp_solution_override(
+        runtime,
+        &lsp_client,
+        &context,
+        preferred_server_id,
+        lifecycle,
+    )? {
+        return Ok(());
+    }
+    execute_lsp_lifecycle_for_buffer(
+        runtime,
+        &lsp_client,
+        &context,
+        preferred_server_id,
+        lifecycle,
+    )
+}
+
+fn resume_lsp_lifecycle_with_selected_csharp_solution(
+    runtime: &mut EditorRuntime,
+    preferred_server_id: Option<&str>,
+    lifecycle: LspLifecycleAction,
+    root: Option<&Path>,
+    solution_path: &Path,
+) -> Result<(), String> {
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    lsp_client
+        .set_csharp_solution_path_override(root, solution_path)
+        .map_err(|error| error.to_string())?;
+    let context = active_lsp_buffer_context(runtime)?;
+    validate_lsp_server_request(&lsp_client, &context.path, preferred_server_id)?;
+    execute_lsp_lifecycle_for_buffer(
+        runtime,
+        &lsp_client,
+        &context,
+        preferred_server_id,
+        lifecycle,
+    )
+}
+
+fn validate_lsp_server_request(
+    manager: &LspClientManager,
+    path: &Path,
+    preferred_server_id: Option<&str>,
+) -> Result<(), String> {
     if let Some(server_id) = preferred_server_id {
         let supported = manager
-            .registered_server_ids_for_path(&context.path)
+            .registered_server_ids_for_path(path)
             .into_iter()
             .any(|registered| registered == server_id);
         if !supported {
             return Err(format!(
                 "language server `{server_id}` is not registered for `{}`",
-                context.path.display()
+                path.display()
             ));
         }
-    } else if !manager.supports_path(&context.path) {
+        return Ok(());
+    }
+    if !manager.supports_path(path) {
         return Err(format!(
             "no language server is registered for `{}`",
-            context.path.display()
+            path.display()
         ));
     }
+    Ok(())
+}
+
+fn execute_lsp_lifecycle_for_buffer(
+    runtime: &mut EditorRuntime,
+    manager: &LspClientManager,
+    context: &ActiveLspBufferContext,
+    preferred_server_id: Option<&str>,
+    lifecycle: LspLifecycleAction,
+) -> Result<(), String> {
     cancel_lsp_sync_for_path(runtime, &context.path)?;
-    let labels = manager
-        .restart_buffer(
+    let labels = match (lifecycle, preferred_server_id) {
+        (LspLifecycleAction::Start, Some(server_id)) => manager.start_buffer_server(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+            server_id,
+        ),
+        (LspLifecycleAction::Start, None) => manager.sync_buffer(
+            &context.path,
+            &context.text,
+            context.revision,
+            context.root.as_deref(),
+        ),
+        (LspLifecycleAction::Restart, _) => manager.restart_buffer(
             &context.path,
             &context.text,
             context.revision,
             context.root.as_deref(),
             preferred_server_id,
-        )
-        .map_err(|error| error.to_string())?;
+        ),
+    }
+    .map_err(|error| error.to_string())?;
     let ui = shell_ui_mut(runtime)?;
     if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
         buffer.set_lsp_enabled(true);
-        buffer.set_lsp_diagnostics(Vec::new());
+        if lifecycle == LspLifecycleAction::Restart {
+            buffer.set_lsp_diagnostics(Vec::new());
+        }
     }
     ui.set_attached_lsp_server(
         context.workspace_id,
         (!labels.is_empty()).then(|| labels.join(", ")),
     );
     Ok(())
+}
+
+fn maybe_prepare_csharp_lsp_solution_override(
+    runtime: &mut EditorRuntime,
+    manager: &LspClientManager,
+    context: &ActiveLspBufferContext,
+    preferred_server_id: Option<&str>,
+    lifecycle: LspLifecycleAction,
+) -> Result<bool, String> {
+    if !should_prepare_csharp_lsp_solution_override(manager, &context.path, preferred_server_id) {
+        return Ok(false);
+    }
+    let session_root = manager
+        .planned_server_root_for_path(CSHARP_LSP_SERVER_ID, &context.path, context.root.as_deref())
+        .map_err(|error| error.to_string())?;
+    if manager
+        .has_csharp_solution_path_override(session_root.as_deref())
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    let discovery_root = active_workspace_root(runtime)?.or_else(|| context.root.clone());
+    let solutions = discovery_root
+        .as_deref()
+        .map(discover_workspace_solution_paths)
+        .transpose()?
+        .unwrap_or_default();
+    match solutions.as_slice() {
+        [] => {
+            manager
+                .clear_csharp_solution_path_override(session_root.as_deref())
+                .map_err(|error| error.to_string())?;
+            Ok(false)
+        }
+        [solution_path] => {
+            manager
+                .set_csharp_solution_path_override(session_root.as_deref(), solution_path)
+                .map_err(|error| error.to_string())?;
+            Ok(false)
+        }
+        _ => {
+            let picker = csharp_solution_picker_overlay(
+                discovery_root.as_deref(),
+                session_root.as_deref(),
+                lifecycle,
+                preferred_server_id,
+                &solutions,
+            );
+            shell_ui_mut(runtime)?.set_picker(picker);
+            Ok(true)
+        }
+    }
+}
+
+fn should_prepare_csharp_lsp_solution_override(
+    manager: &LspClientManager,
+    path: &Path,
+    preferred_server_id: Option<&str>,
+) -> bool {
+    match preferred_server_id {
+        Some(server_id) => server_id == CSHARP_LSP_SERVER_ID,
+        None => manager
+            .registered_server_ids_for_path(path)
+            .into_iter()
+            .any(|server_id| server_id == CSHARP_LSP_SERVER_ID),
+    }
+}
+
+fn csharp_solution_picker_overlay(
+    display_root: Option<&Path>,
+    root: Option<&Path>,
+    lifecycle: LspLifecycleAction,
+    preferred_server_id: Option<&str>,
+    solutions: &[PathBuf],
+) -> PickerOverlay {
+    let entries = solutions
+        .iter()
+        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .map(|solution_path| {
+            csharp_solution_picker_entry(
+                display_root,
+                root,
+                lifecycle,
+                preferred_server_id,
+                solution_path,
+            )
+        })
+        .collect();
+    PickerOverlay::from_entries(CSHARP_SOLUTION_PICKER_TITLE, entries)
+        .with_result_order(PickerResultOrder::Source)
+}
+
+fn csharp_solution_picker_entry(
+    display_root: Option<&Path>,
+    root: Option<&Path>,
+    lifecycle: LspLifecycleAction,
+    preferred_server_id: Option<&str>,
+    solution_path: &Path,
+) -> PickerEntry {
+    let relative_path = workspace_relative_path(display_root, solution_path);
+    let label = solution_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| relative_path.clone());
+    PickerEntry {
+        item: PickerItem::new(
+            format!("csharp-solution:{}", solution_path.display()),
+            label,
+            relative_path,
+            Some(solution_path.display().to_string()),
+        ),
+        action: PickerAction::SelectCsharpSolution {
+            root: root.map(Path::to_path_buf),
+            solution_path: solution_path.to_path_buf(),
+            lifecycle,
+            preferred_server_id: preferred_server_id.map(str::to_owned),
+        },
+    }
+}
+
+fn discover_workspace_solution_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut solutions = Vec::new();
+    collect_workspace_solution_paths(root, &mut solutions).map_err(|error| {
+        format!(
+            "failed to scan `{}` for C# solution files: {error}",
+            root.display()
+        )
+    })?;
+    solutions.sort_by(|left, right| {
+        workspace_relative_path(Some(root), left)
+            .to_ascii_lowercase()
+            .cmp(&workspace_relative_path(Some(root), right).to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    Ok(solutions)
+}
+
+fn collect_workspace_solution_paths(root: &Path, solutions: &mut Vec<PathBuf>) -> io::Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if is_skippable_solution_scan_error(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut subdirectories = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if is_skippable_solution_scan_error(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if is_skippable_solution_scan_error(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let entry_path = entry.path();
+        if file_type.is_dir() {
+            if should_descend_solution_search_dir(&entry_path) {
+                subdirectories.push(entry_path);
+            }
+            continue;
+        }
+        if file_type.is_file() && path_has_extension(&entry_path, "sln") {
+            solutions.push(entry_path);
+        }
+    }
+    subdirectories.sort();
+    for directory in subdirectories {
+        collect_workspace_solution_paths(&directory, solutions)?;
+    }
+    Ok(())
+}
+
+fn should_descend_solution_search_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            !CSHARP_SOLUTION_IGNORED_DIR_NAMES
+                .iter()
+                .any(|ignored| name.eq_ignore_ascii_case(ignored))
+        })
+        .unwrap_or(true)
+}
+
+fn is_skippable_solution_scan_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    )
+}
+
+fn path_has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|candidate| candidate.to_str())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
 }
 
 fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -14565,12 +14970,115 @@ fn open_lsp_locations(
         return Err(format!("no {} found at cursor", title.to_ascii_lowercase()));
     };
     if locations.len() == 1 {
-        open_workspace_file_at(runtime, location.path(), location.range().start())?;
+        open_lsp_location(runtime, location)?;
         sync_active_buffer(runtime)?;
         return Ok(());
     }
     let picker = lsp_locations_picker_overlay(runtime, title, &locations);
     shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn open_lsp_location(runtime: &mut EditorRuntime, location: &LspLocation) -> Result<(), String> {
+    if let Some(path) = location.file_path() {
+        return open_workspace_file_at(runtime, path, location.range().start());
+    }
+    if location.uri().starts_with(CSHARP_METADATA_URI_SCHEME) {
+        return open_csharp_metadata_buffer(runtime, location.uri(), location.range().start());
+    }
+    Err(format!(
+        "unsupported LSP location URI `{}` returned by `{}`",
+        location.uri(),
+        location.server_id()
+    ))
+}
+
+fn open_csharp_metadata_buffer(
+    runtime: &mut EditorRuntime,
+    uri: &str,
+    target: TextPoint,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let root =
+        active_lsp_session_root(runtime).or_else(|| active_workspace_root(runtime).ok().flatten());
+    let metadata = lsp_client
+        .csharp_metadata(root.as_deref(), uri)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("csharp metadata content is unavailable for `{uri}`"))?;
+    let source = metadata
+        .get("source")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            format!("csharp metadata response for `{uri}` did not include source text")
+        })?;
+    let buffer_name = lsp_metadata_buffer_name(uri);
+    let buffer_id = ensure_lsp_metadata_buffer(runtime, workspace_id, &buffer_name)?;
+    install_lsp_metadata_buffer(runtime, workspace_id, buffer_id, source, target)?;
+    queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    Ok(())
+}
+
+fn active_lsp_session_root(runtime: &EditorRuntime) -> Option<PathBuf> {
+    active_lsp_buffer_context(runtime)
+        .ok()
+        .and_then(|context| context.root)
+}
+
+fn lsp_metadata_buffer_name(uri: &str) -> String {
+    format!("{LSP_METADATA_BUFFER_PREFIX}{uri}*")
+}
+
+fn ensure_lsp_metadata_buffer(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_name: &str,
+) -> Result<BufferId, String> {
+    let kind = BufferKind::Plugin(LSP_METADATA_BUFFER_KIND.to_owned());
+    if let Some(buffer_id) = find_workspace_named_buffer(runtime, workspace_id, buffer_name, &kind)?
+    {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, buffer_id)
+            .map_err(|error| error.to_string())?;
+        return Ok(buffer_id);
+    }
+    runtime
+        .model_mut()
+        .create_buffer(workspace_id, buffer_name, kind, None)
+        .map_err(|error| error.to_string())
+}
+
+fn install_lsp_metadata_buffer(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    source: &str,
+    target: TextPoint,
+) -> Result<(), String> {
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("LSP metadata buffer `{buffer_id}` is missing"))?;
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer =
+        ShellBuffer::from_text_buffer(buffer, TextBuffer::from_text(source), &*user_library);
+    shell_buffer.set_language_id(Some(CSHARP_LANGUAGE_ID.to_owned()));
+    shell_buffer.set_lsp_enabled(false);
+    shell_buffer.set_lsp_diagnostics(Vec::new());
+    shell_buffer.set_cursor(target);
+    let ui = shell_ui_mut(runtime)?;
+    ui.insert_buffer(shell_buffer);
+    ui.focus_buffer_in_active_pane(buffer_id);
     Ok(())
 }
 
@@ -23481,6 +23989,22 @@ fn find_workspace_file_buffer(
         .map(Buffer::id))
 }
 
+fn find_workspace_named_buffer(
+    runtime: &EditorRuntime,
+    workspace_id: WorkspaceId,
+    name: &str,
+    kind: &BufferKind,
+) -> Result<Option<BufferId>, String> {
+    let workspace = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?;
+    Ok(workspace
+        .buffers()
+        .find(|buffer| buffer.name() == name && buffer.kind() == kind)
+        .map(Buffer::id))
+}
+
 pub(crate) fn switch_runtime_workspace(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -25212,6 +25736,7 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == PDF_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == LSP_METADATA_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_DIFF_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => (true, None),

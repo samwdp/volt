@@ -9,9 +9,13 @@ use editor_dap::DebugAdapterSpec;
 use editor_fs::{DirectoryEntry, DirectoryEntryKind};
 use editor_git::{GitLogEntry, GitStashEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry};
 use editor_icons::{IconFontCategory, IconFontSymbol};
-use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec};
+use editor_lsp::{
+    LanguageServerRootStrategy, LanguageServerSpec, WorkspaceConfiguration,
+    WorkspaceConfigurationValue,
+};
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_theme::{Color, Theme, ThemeOption};
+use serde_json::Number;
 
 use crate::{
     AcpClient, AutocompleteProvider, AutocompleteProviderItem, GhostTextContext, GhostTextLine,
@@ -340,6 +344,178 @@ impl From<AbiLanguageConfiguration> for LanguageConfiguration {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+struct AbiWorkspaceConfigurationEntry {
+    key: RString,
+    value: AbiWorkspaceConfigurationValue,
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+struct AbiFiniteF64 {
+    bits: u64,
+}
+
+impl AbiFiniteF64 {
+    fn new(value: f64) -> Option<Self> {
+        value.is_finite().then_some(Self {
+            bits: value.to_bits(),
+        })
+    }
+
+    fn get(self) -> f64 {
+        f64::from_bits(self.bits)
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+enum AbiWorkspaceConfigurationNumber {
+    SignedInteger(i64),
+    UnsignedInteger(u64),
+    Float(AbiFiniteF64),
+}
+
+impl From<&Number> for AbiWorkspaceConfigurationNumber {
+    fn from(value: &Number) -> Self {
+        if let Some(integer) = value.as_i64() {
+            Self::SignedInteger(integer)
+        } else if let Some(unsigned) = value.as_u64() {
+            Self::UnsignedInteger(unsigned)
+        } else if let Some(float) = value.as_f64().and_then(AbiFiniteF64::new) {
+            Self::Float(float)
+        } else {
+            unreachable!(
+                "serde_json::Number should always be representable as i64, u64, or finite f64"
+            )
+        }
+    }
+}
+
+impl From<AbiWorkspaceConfigurationNumber> for WorkspaceConfigurationValue {
+    fn from(value: AbiWorkspaceConfigurationNumber) -> Self {
+        match value {
+            AbiWorkspaceConfigurationNumber::SignedInteger(value) => Self::integer(value),
+            AbiWorkspaceConfigurationNumber::UnsignedInteger(value) => Self::unsigned(value),
+            AbiWorkspaceConfigurationNumber::Float(value) => match Number::from_f64(value.get()) {
+                Some(number) => Self::Number(number),
+                None => unreachable!("AbiFiniteF64 only stores finite floats"),
+            },
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+enum AbiWorkspaceConfigurationValue {
+    Null,
+    Bool(bool),
+    Number(AbiWorkspaceConfigurationNumber),
+    String(RString),
+    Array(RVec<AbiWorkspaceConfigurationValue>),
+    Object(RVec<AbiWorkspaceConfigurationEntry>),
+}
+
+impl From<&WorkspaceConfigurationValue> for AbiWorkspaceConfigurationValue {
+    fn from(value: &WorkspaceConfigurationValue) -> Self {
+        match value {
+            WorkspaceConfigurationValue::Null => Self::Null,
+            WorkspaceConfigurationValue::Bool(value) => Self::Bool(*value),
+            WorkspaceConfigurationValue::Number(value) => {
+                Self::Number(AbiWorkspaceConfigurationNumber::from(value))
+            }
+            WorkspaceConfigurationValue::String(value) => Self::String(value.clone().into()),
+            WorkspaceConfigurationValue::Array(values) => Self::Array(
+                values
+                    .iter()
+                    .map(AbiWorkspaceConfigurationValue::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            WorkspaceConfigurationValue::Object(values) => Self::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| AbiWorkspaceConfigurationEntry {
+                        key: key.clone().into(),
+                        value: AbiWorkspaceConfigurationValue::from(value),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        }
+    }
+}
+
+impl From<WorkspaceConfigurationValue> for AbiWorkspaceConfigurationValue {
+    fn from(value: WorkspaceConfigurationValue) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<AbiWorkspaceConfigurationValue> for WorkspaceConfigurationValue {
+    fn from(value: AbiWorkspaceConfigurationValue) -> Self {
+        match value {
+            AbiWorkspaceConfigurationValue::Null => Self::Null,
+            AbiWorkspaceConfigurationValue::Bool(value) => Self::Bool(value),
+            AbiWorkspaceConfigurationValue::Number(value) => {
+                WorkspaceConfigurationValue::from(value)
+            }
+            AbiWorkspaceConfigurationValue::String(value) => Self::String(value.into_string()),
+            AbiWorkspaceConfigurationValue::Array(values) => {
+                Self::array(values.into_iter().map(WorkspaceConfigurationValue::from))
+            }
+            AbiWorkspaceConfigurationValue::Object(values) => {
+                Self::object(values.into_iter().map(|entry| {
+                    (
+                        entry.key.into_string(),
+                        WorkspaceConfigurationValue::from(entry.value),
+                    )
+                }))
+            }
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+struct AbiWorkspaceConfiguration {
+    section: ROption<RString>,
+    settings: ROption<AbiWorkspaceConfigurationValue>,
+}
+
+impl From<&WorkspaceConfiguration> for AbiWorkspaceConfiguration {
+    fn from(value: &WorkspaceConfiguration) -> Self {
+        Self {
+            section: value.section().map(RString::from).into(),
+            settings: value
+                .settings()
+                .map(AbiWorkspaceConfigurationValue::from)
+                .into(),
+        }
+    }
+}
+
+impl From<WorkspaceConfiguration> for AbiWorkspaceConfiguration {
+    fn from(value: WorkspaceConfiguration) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<AbiWorkspaceConfiguration> for WorkspaceConfiguration {
+    fn from(value: AbiWorkspaceConfiguration) -> Self {
+        let mut configuration = WorkspaceConfiguration::new();
+        if let Some(section) = value.section.into_option() {
+            configuration = configuration.with_section(section.into_string());
+        }
+        if let Some(settings) = value.settings.into_option() {
+            configuration =
+                configuration.with_settings(WorkspaceConfigurationValue::from(settings));
+        }
+        configuration
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub enum AbiLanguageServerRootStrategy {
@@ -379,6 +555,7 @@ pub struct AbiLanguageServerSpec {
     root_markers: RVec<RString>,
     root_strategy: AbiLanguageServerRootStrategy,
     env: RVec<AbiStringPair>,
+    workspace_configuration: AbiWorkspaceConfiguration,
 }
 
 impl From<LanguageServerSpec> for AbiLanguageServerSpec {
@@ -437,12 +614,14 @@ impl From<LanguageServerSpec> for AbiLanguageServerSpec {
                 .into(),
             root_strategy: value.root_strategy().into(),
             env: env.into(),
+            workspace_configuration: value.workspace_configuration().into(),
         }
     }
 }
 
 impl From<AbiLanguageServerSpec> for LanguageServerSpec {
     fn from(value: AbiLanguageServerSpec) -> Self {
+        let workspace_configuration = WorkspaceConfiguration::from(value.workspace_configuration);
         let mut spec = LanguageServerSpec::new(
             value.id.into_string(),
             value.language_id.into_string(),
@@ -464,6 +643,12 @@ impl From<AbiLanguageServerSpec> for LanguageServerSpec {
         }
         for pair in value.env {
             spec = spec.with_env(pair.key.into_string(), pair.value.into_string());
+        }
+        if let Some(section) = workspace_configuration.section() {
+            spec = spec.with_workspace_configuration_section(section.to_owned());
+        }
+        if let Some(settings) = workspace_configuration.settings() {
+            spec = spec.with_workspace_configuration_settings(settings.clone());
         }
         spec
     }
@@ -1790,5 +1975,93 @@ mod tests {
             round_trip.document_language_ids().get("Dockerfile.*"),
             Some(&"dockerfile".to_owned())
         );
+    }
+
+    #[test]
+    fn abi_language_server_spec_round_trips_workspace_configuration() {
+        let spec = LanguageServerSpec::new("csharp-ls", "csharp", ["cs"], "csharp-ls", ["--stdio"])
+            .with_workspace_configuration(
+                "csharp",
+                LanguageServerSpec::workspace_settings_object([(
+                    "csharp",
+                    LanguageServerSpec::workspace_settings_object([
+                        (
+                            "enableAnalyzersSupport",
+                            editor_lsp::WorkspaceConfigurationValue::from(true),
+                        ),
+                        (
+                            "sdk",
+                            editor_lsp::WorkspaceConfigurationValue::from("dotnet"),
+                        ),
+                        (
+                            "queueDepth",
+                            editor_lsp::WorkspaceConfigurationValue::integer(-7),
+                        ),
+                        (
+                            "workspaceLimit",
+                            editor_lsp::WorkspaceConfigurationValue::unsigned(u64::MAX),
+                        ),
+                        (
+                            "inlayHints",
+                            LanguageServerSpec::workspace_settings_array([
+                                editor_lsp::WorkspaceConfigurationValue::from("types"),
+                                LanguageServerSpec::workspace_settings_null(),
+                            ]),
+                        ),
+                        (
+                            "maxLineLength",
+                            LanguageServerSpec::workspace_settings_float(120.0)
+                                .expect("finite float"),
+                        ),
+                    ]),
+                )]),
+            );
+
+        let round_trip = LanguageServerSpec::from(AbiLanguageServerSpec::from(spec));
+
+        assert_eq!(round_trip.workspace_configuration_section(), Some("csharp"));
+        let csharp = round_trip
+            .workspace_configuration_settings()
+            .and_then(|value| value.as_object())
+            .and_then(|settings| settings.get("csharp"))
+            .and_then(|value| value.as_object())
+            .expect("csharp settings");
+        assert_eq!(
+            csharp
+                .get("enableAnalyzersSupport")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            csharp
+                .get("maxLineLength")
+                .and_then(|value| value.as_number())
+                .and_then(|value| value.as_f64()),
+            Some(120.0)
+        );
+        assert_eq!(
+            csharp
+                .get("queueDepth")
+                .and_then(|value| value.as_number())
+                .and_then(|value| value.as_i64()),
+            Some(-7)
+        );
+        assert_eq!(
+            csharp.get("sdk").and_then(|value| value.as_str()),
+            Some("dotnet")
+        );
+        assert_eq!(
+            csharp
+                .get("workspaceLimit")
+                .and_then(|value| value.as_number())
+                .and_then(|value| value.as_u64()),
+            Some(u64::MAX)
+        );
+        let hints = csharp
+            .get("inlayHints")
+            .and_then(|value| value.as_array())
+            .expect("hint array");
+        assert_eq!(hints[0].as_str(), Some("types"));
+        assert!(hints[1].is_null());
     }
 }

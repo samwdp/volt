@@ -3,7 +3,7 @@ use editor_syntax::LanguageConfiguration;
 
 use super::common::{self, GrammarSourceSpec};
 
-const EXTENSIONS: &[&str] = &["xml", "svg", "xsd", "xslt", "xsl", "rng"];
+const EXTENSIONS: &[&str] = &["xml", "svg", "xsd", "xslt", "xsl", "rng", "csproj"];
 
 /// XML language support and theme mappings.
 pub fn package() -> PluginPackage {

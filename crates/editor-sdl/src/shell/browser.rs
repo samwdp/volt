@@ -12,6 +12,8 @@ impl Default for BrowserBufferState {
         input.set_placeholder(Some("https://example.com".to_owned()));
         Self {
             current_url: None,
+            page_title: None,
+            is_loading: false,
             active_pane: BrowserPane::Input,
             input,
             footer_pane: PluginTextPaneState {
@@ -25,6 +27,8 @@ impl Default for BrowserBufferState {
 #[derive(Debug, Clone)]
 pub(super) struct BrowserBufferState {
     pub(super) current_url: Option<String>,
+    pub(super) page_title: Option<String>,
+    pub(super) is_loading: bool,
     pub(super) active_pane: BrowserPane,
     pub(super) input: InputField,
     pub(super) footer_pane: PluginTextPaneState,
@@ -79,32 +83,129 @@ pub(super) fn open_detected_browser_url(runtime: &mut EditorRuntime) -> Result<(
         );
         return Ok(());
     };
-    open_browser_popup_with_url(runtime, &url)
+    open_browser_buffer_in_split(runtime, Some(&url))
 }
 
-pub(super) fn open_browser_popup_with_url(
+pub(super) fn open_browser_buffer_in_split(
     runtime: &mut EditorRuntime,
-    raw_url: &str,
+    raw_url: Option<&str>,
 ) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
+    let original_pane_id = shell_ui(runtime)?
+        .active_pane_id()
+        .ok_or_else(|| "active pane is missing".to_owned())?;
+    if shell_ui(runtime)?.pane_count() < 2 {
+        split_runtime_pane(runtime, PaneSplitDirection::Vertical)?;
+    }
+    let target_pane_id = shell_ui(runtime)?
+        .panes()
+        .and_then(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.pane_id != original_pane_id)
+                .map(|pane| pane.pane_id)
+        })
+        .ok_or_else(|| "split browser pane is missing".to_owned())?;
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, target_pane_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_pane(target_pane_id);
     let buffer_id = runtime
         .model_mut()
-        .create_popup_buffer(
+        .create_buffer(
             workspace_id,
             BROWSER_BUFFER_NAME,
             BufferKind::Plugin(BROWSER_KIND.to_owned()),
             None,
         )
         .map_err(|error| error.to_string())?;
+    {
+        let user_library = shell_user_library(runtime);
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_buffer(
+            buffer_id,
+            BROWSER_BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            &*user_library,
+        );
+        ui.focus_buffer_in_active_pane(buffer_id);
+    }
+    if let Some(url) = raw_url {
+        navigate_browser_buffer(runtime, buffer_id, url)?;
+    }
+    focus_browser_input_section(runtime)
+}
+
+pub(super) fn open_browser_buffer_in_popup(
+    runtime: &mut EditorRuntime,
+    raw_url: Option<&str>,
+) -> Result<(), String> {
+    let buffer_id = ensure_browser_popup_buffer(runtime, raw_url)?;
+    if let Some(url) = raw_url {
+        navigate_browser_buffer(runtime, buffer_id, url)?;
+    }
+    enter_insert_mode_for_input_buffer(runtime, buffer_id)
+}
+
+pub(super) fn ensure_browser_popup_buffer(
+    runtime: &mut EditorRuntime,
+    display_url: Option<&str>,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let existing_popup_browser = active_runtime_popup(runtime)?.and_then(|popup| {
+        runtime
+            .model()
+            .workspace(workspace_id)
+            .ok()
+            .and_then(|workspace| workspace.buffer(popup.active_buffer))
+            .and_then(|buffer| {
+                matches!(buffer.kind(), BufferKind::Plugin(kind) if kind == BROWSER_KIND)
+                    .then_some(popup.active_buffer)
+            })
+    });
+    let buffer_id = if let Some(buffer_id) = existing_popup_browser {
+        buffer_id
+    } else {
+        runtime
+            .model_mut()
+            .create_popup_buffer(
+                workspace_id,
+                BROWSER_BUFFER_NAME,
+                BufferKind::Plugin(BROWSER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?
+    };
     runtime
         .model_mut()
         .open_popup_buffer(workspace_id, "Browser", buffer_id)
         .map_err(|error| error.to_string())?;
-    focus_active_browser_popup(runtime)?;
-    navigate_browser_buffer(runtime, buffer_id, raw_url)
+    {
+        let user_library = shell_user_library(runtime);
+        let ui = shell_ui_mut(runtime)?;
+        ui.ensure_popup_buffer(
+            buffer_id,
+            BROWSER_BUFFER_NAME,
+            BufferKind::Plugin(BROWSER_KIND.to_owned()),
+            &*user_library,
+        );
+        ui.set_popup_buffer(buffer_id);
+        ui.set_popup_focus(true);
+        if let Some(url) = display_url {
+            let url = normalize_browser_url(url);
+            if let Some(buffer) = ui.buffer_mut(buffer_id) {
+                set_browser_buffer_location(buffer, &url, false, &*user_library);
+            }
+        }
+    }
+    Ok(buffer_id)
 }
 
 pub(super) fn focus_active_browser_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -145,10 +246,30 @@ pub(super) fn focus_active_browser_popup(runtime: &mut EditorRuntime) -> Result<
     enter_insert_mode_for_input_buffer(runtime, popup.active_buffer)
 }
 
-pub(super) fn browser_buffer_display_name(current_url: Option<&str>) -> String {
-    match current_url {
-        Some(url) => format!("{} {url}", BROWSER_BUFFER_NAME),
-        None => BROWSER_BUFFER_NAME.to_owned(),
+fn refresh_browser_buffer_display_name(buffer: &mut ShellBuffer) {
+    let Some(state) = buffer.browser_state.as_ref() else {
+        return;
+    };
+    buffer.name = browser_buffer_display_name(
+        state.page_title.as_deref(),
+        state.current_url.as_deref(),
+        state.is_loading,
+    );
+}
+
+pub(super) fn browser_buffer_display_name(
+    page_title: Option<&str>,
+    current_url: Option<&str>,
+    is_loading: bool,
+) -> String {
+    let label = page_title
+        .filter(|title| !title.trim().is_empty())
+        .or(current_url.filter(|url| !url.trim().is_empty()));
+    match (label, is_loading) {
+        (Some(label), true) => format!("{BROWSER_BUFFER_NAME} [loading] {label}"),
+        (Some(label), false) => format!("{BROWSER_BUFFER_NAME} {label}"),
+        (None, true) => format!("{BROWSER_BUFFER_NAME} [loading]"),
+        (None, false) => BROWSER_BUFFER_NAME.to_owned(),
     }
 }
 
@@ -164,7 +285,6 @@ pub(super) fn set_browser_buffer_location(
     let changed = state.current_url.as_deref() != Some(url);
     if changed {
         state.current_url = Some(url.to_owned());
-        buffer.name = browser_buffer_display_name(Some(url));
         buffer.replace_with_lines(user_library.browser_buffer_lines(Some(url)));
     }
     if let Some(state) = buffer.browser_state.as_mut() {
@@ -174,6 +294,31 @@ pub(super) fn set_browser_buffer_location(
         state
             .footer_pane
             .replace_lines(vec![user_library.browser_input_hint(Some(url))], true);
+    }
+    refresh_browser_buffer_display_name(buffer);
+}
+
+pub(super) fn set_browser_buffer_title(buffer: &mut ShellBuffer, title: Option<&str>) {
+    let state = buffer
+        .browser_state
+        .get_or_insert_with(BrowserBufferState::default);
+    let title = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned);
+    if state.page_title != title {
+        state.page_title = title;
+        refresh_browser_buffer_display_name(buffer);
+    }
+}
+
+pub(super) fn set_browser_buffer_loading(buffer: &mut ShellBuffer, is_loading: bool) {
+    let state = buffer
+        .browser_state
+        .get_or_insert_with(BrowserBufferState::default);
+    if state.is_loading != is_loading {
+        state.is_loading = is_loading;
+        refresh_browser_buffer_display_name(buffer);
     }
 }
 
@@ -319,6 +464,27 @@ pub(super) fn browser_state_for_kind(
         .footer_pane
         .replace_lines(vec![user_library.browser_input_hint(None)], true);
     Some(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_buffer_display_name_prefers_title() {
+        assert_eq!(
+            browser_buffer_display_name(Some("Volt Docs"), Some("https://example.com"), false),
+            "*browser* Volt Docs"
+        );
+    }
+
+    #[test]
+    fn browser_buffer_display_name_marks_loading_state() {
+        assert_eq!(
+            browser_buffer_display_name(None, Some("https://example.com"), true),
+            "*browser* [loading] https://example.com"
+        );
+    }
 }
 
 #[expect(

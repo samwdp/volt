@@ -1,4 +1,21 @@
+use super::git::{leading_indent_bytes, push_span_bytes, split_icon_prefixed_content};
 use super::*;
+
+const TOKEN_OIL_HEADER: &str = "oil.header";
+const TOKEN_OIL_DIRECTORY: &str = "oil.directory";
+const TOKEN_OIL_DIRECTORY_CONFIG: &str = "oil.directory.config";
+const TOKEN_OIL_DIRECTORY_GIT: &str = "oil.directory.git";
+const TOKEN_OIL_DIRECTORY_GITHUB: &str = "oil.directory.github";
+const TOKEN_OIL_DIRECTORY_NODE: &str = "oil.directory.node";
+const TOKEN_OIL_FILE: &str = "oil.file";
+const TOKEN_OIL_FILE_ARCHIVE: &str = "oil.file.archive";
+const TOKEN_OIL_FILE_CODE: &str = "oil.file.code";
+const TOKEN_OIL_FILE_CONFIG: &str = "oil.file.config";
+const TOKEN_OIL_FILE_DOCUMENT: &str = "oil.file.document";
+const TOKEN_OIL_FILE_GIT: &str = "oil.file.git";
+const TOKEN_OIL_FILE_IMAGE: &str = "oil.file.image";
+const TOKEN_OIL_FILE_LOCK: &str = "oil.file.lock";
+const TOKEN_OIL_FILE_MEDIA: &str = "oil.file.media";
 
 pub(super) type DirectorySortMode = editor_plugin_api::OilSortMode;
 
@@ -133,6 +150,131 @@ pub(super) fn directory_entry_at_cursor(
         .ok_or_else(|| "directory entry not found".to_owned())
 }
 
+pub(super) fn oil_directory_line_spans(
+    line: &SectionRenderLine,
+    formatted_line: &str,
+) -> Vec<LineSyntaxSpan> {
+    let mut spans = Vec::new();
+    let indent_bytes = leading_indent_bytes(formatted_line);
+    let trimmed = &formatted_line[indent_bytes..];
+    if trimmed.is_empty() {
+        return spans;
+    }
+    match &line.kind {
+        SectionRenderLineKind::Header { .. } => {
+            push_span_bytes(
+                &mut spans,
+                formatted_line,
+                indent_bytes,
+                indent_bytes + trimmed.len(),
+                TOKEN_OIL_HEADER,
+            );
+        }
+        SectionRenderLineKind::Item => {
+            let token = line
+                .action
+                .as_ref()
+                .and_then(|action| action.detail())
+                .map(|detail| oil_entry_theme_token(Path::new(detail), line.text.ends_with('/')))
+                .unwrap_or(TOKEN_OIL_FILE);
+            let (icon_bounds, content_start, content) =
+                split_icon_prefixed_content(trimmed).unwrap_or((None, 0, trimmed));
+            if let Some((icon_start, icon_end)) = icon_bounds {
+                push_span_bytes(
+                    &mut spans,
+                    formatted_line,
+                    indent_bytes + icon_start,
+                    indent_bytes + icon_end,
+                    token,
+                );
+            }
+            push_span_bytes(
+                &mut spans,
+                formatted_line,
+                indent_bytes + content_start,
+                indent_bytes + content_start + content.len(),
+                token,
+            );
+        }
+        SectionRenderLineKind::Spacer => {}
+    }
+    spans
+}
+
+fn oil_entry_theme_token(path: &Path, is_directory: bool) -> &'static str {
+    if is_directory {
+        return oil_directory_theme_token(path);
+    }
+    oil_file_theme_token(path)
+}
+
+fn oil_directory_theme_token(path: &Path) -> &'static str {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match file_name.as_str() {
+        ".git" => TOKEN_OIL_DIRECTORY_GIT,
+        ".github" => TOKEN_OIL_DIRECTORY_GITHUB,
+        "node_modules" => TOKEN_OIL_DIRECTORY_NODE,
+        ".cargo" | ".config" | ".vscode" => TOKEN_OIL_DIRECTORY_CONFIG,
+        _ => TOKEN_OIL_DIRECTORY,
+    }
+}
+
+fn oil_file_theme_token(path: &Path) -> &'static str {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match file_name.as_str() {
+        "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" => {
+            return TOKEN_OIL_FILE_LOCK;
+        }
+        ".gitignore" | ".gitattributes" | ".gitmodules" => {
+            return TOKEN_OIL_FILE_GIT;
+        }
+        "cargo.toml" | "dockerfile" | "docker-compose.yml" | "docker-compose.yaml" | "makefile" => {
+            return TOKEN_OIL_FILE_CONFIG;
+        }
+        "license" | "license.md" | "copying" | "readme" | "readme.md" | "readme.txt" => {
+            return TOKEN_OIL_FILE_DOCUMENT;
+        }
+        _ => {}
+    }
+
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") | Some("c") | Some("h") | Some("cs") | Some("cc") | Some("cpp")
+        | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") | Some("go") | Some("java")
+        | Some("py") | Some("pyi") | Some("pyw") | Some("js") | Some("mjs") | Some("cjs")
+        | Some("jsx") | Some("ts") | Some("tsx") | Some("sh") | Some("bash") | Some("zsh")
+        | Some("fish") | Some("ps1") | Some("bat") | Some("cmd") => TOKEN_OIL_FILE_CODE,
+        Some("json") | Some("jsonc") | Some("yaml") | Some("yml") | Some("toml") | Some("ini")
+        | Some("cfg") | Some("conf") | Some("env") => TOKEN_OIL_FILE_CONFIG,
+        Some("md") | Some("markdown") | Some("txt") | Some("pdf") | Some("html") | Some("htm")
+        | Some("css") | Some("scss") | Some("less") | Some("xml") | Some("csv") => {
+            TOKEN_OIL_FILE_DOCUMENT
+        }
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("svg")
+        | Some("ico") | Some("bmp") | Some("tif") | Some("tiff") => TOKEN_OIL_FILE_IMAGE,
+        Some("zip") | Some("7z") | Some("gz") | Some("xz") | Some("rar") | Some("tar") => {
+            TOKEN_OIL_FILE_ARCHIVE
+        }
+        Some("mp3") | Some("wav") | Some("ogg") | Some("mp4") | Some("mov") | Some("mkv") => {
+            TOKEN_OIL_FILE_MEDIA
+        }
+        Some("lock") => TOKEN_OIL_FILE_LOCK,
+        _ => TOKEN_OIL_FILE,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DirectoryLine {
     pub(super) label: String,
@@ -140,7 +282,7 @@ pub(super) struct DirectoryLine {
     pub(super) is_dir: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DirectoryEditAction {
     CreateFile(PathBuf),
     CreateDir(PathBuf),
@@ -196,9 +338,9 @@ pub(super) fn parse_directory_line(
 
 #[cfg(test)]
 mod directory_line_tests {
-    use super::parse_directory_line;
+    use super::*;
     use editor_plugin_host::NullUserLibrary;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn parse_directory_line_strips_file_icons() {
@@ -220,6 +362,61 @@ mod directory_line_tests {
         assert_eq!(parsed.label, "src/");
         assert_eq!(parsed.rel_path, PathBuf::from("src"));
         assert!(parsed.is_dir);
+    }
+
+    #[test]
+    fn parse_directory_line_strips_repeated_icons() {
+        let icon = editor_icons::symbols::seti::SETI_C_SHARP;
+        let line = format!("{icon} {icon} {icon} {icon} Program.cs");
+        let user_library = NullUserLibrary;
+        let parsed = parse_directory_line(&line, &user_library)
+            .expect("repeated icon-prefixed file line should parse");
+        assert_eq!(parsed.label, "Program.cs");
+        assert_eq!(parsed.rel_path, PathBuf::from("Program.cs"));
+        assert!(!parsed.is_dir);
+    }
+
+    #[test]
+    fn repeated_icons_do_not_turn_existing_entries_into_renames() {
+        let root = PathBuf::from("workspace");
+        let icon = editor_icons::symbols::seti::SETI_C_SHARP;
+        let before = vec!["DateRange.cs".to_owned(), "Program.cs".to_owned()];
+        let after = vec![
+            format!("{icon} {icon} {icon} {icon} DateRange.cs"),
+            format!("{icon} {icon} {icon} {icon} Program.cs"),
+            "test.razor".to_owned(),
+        ];
+        let user_library = NullUserLibrary;
+        let actions = directory_edit_actions(&root, &before, &after, &user_library)
+            .expect("repeated icons should be stripped before diffing");
+        assert_eq!(
+            actions,
+            vec![DirectoryEditAction::CreateFile(root.join("test.razor"))]
+        );
+    }
+
+    #[test]
+    fn oil_theme_tokens_follow_entry_kind() {
+        assert_eq!(
+            oil_directory_theme_token(Path::new(".git")),
+            TOKEN_OIL_DIRECTORY_GIT
+        );
+        assert_eq!(
+            oil_file_theme_token(Path::new("Cargo.toml")),
+            TOKEN_OIL_FILE_CONFIG
+        );
+        assert_eq!(
+            oil_file_theme_token(Path::new("Program.cs")),
+            TOKEN_OIL_FILE_CODE
+        );
+        assert_eq!(
+            oil_file_theme_token(Path::new("logo.png")),
+            TOKEN_OIL_FILE_IMAGE
+        );
+        assert_eq!(
+            oil_file_theme_token(Path::new("archive.zip")),
+            TOKEN_OIL_FILE_ARCHIVE
+        );
     }
 }
 

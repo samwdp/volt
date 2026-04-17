@@ -12,6 +12,7 @@ use std::{
 use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
 use editor_path::{PathMatcher, PathPattern, normalize_extension};
+use serde_json::{Number, Value};
 
 pub use client::{
     LspClientError, LspClientManager, LspCodeAction, LspCompletionItem, LspCompletionKind,
@@ -85,6 +86,279 @@ impl Diagnostic {
     }
 }
 
+/// Workspace configuration metadata carried from declarative server specs into planned sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkspaceConfiguration {
+    section: Option<String>,
+    settings: Option<WorkspaceConfigurationValue>,
+}
+
+impl WorkspaceConfiguration {
+    /// Creates an empty workspace configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the configuration section queried for this server.
+    pub fn with_section(mut self, section: impl Into<String>) -> Self {
+        self.section = normalize_optional_string(section.into());
+        self
+    }
+
+    /// Sets the server-specific workspace settings payload.
+    pub fn with_settings(mut self, settings: impl Into<WorkspaceConfigurationValue>) -> Self {
+        self.settings = Some(settings.into());
+        self
+    }
+
+    /// Returns the workspace configuration section, if one is declared.
+    pub fn section(&self) -> Option<&str> {
+        self.section.as_deref()
+    }
+
+    /// Returns the workspace settings payload, if one is declared.
+    pub fn settings(&self) -> Option<&WorkspaceConfigurationValue> {
+        self.settings.as_ref()
+    }
+
+    /// Returns the workspace settings payload as a JSON value.
+    pub fn settings_json(&self) -> Option<Value> {
+        self.settings.as_ref().map(Value::from)
+    }
+
+    /// Returns whether both the section and settings are absent.
+    pub fn is_empty(&self) -> bool {
+        self.section.is_none() && self.settings.is_none()
+    }
+}
+
+/// Recursive JSON-like workspace configuration value stored in declarative LSP specs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceConfigurationValue {
+    Null,
+    Bool(bool),
+    Number(Number),
+    String(String),
+    Array(Vec<WorkspaceConfigurationValue>),
+    Object(BTreeMap<String, WorkspaceConfigurationValue>),
+}
+
+impl WorkspaceConfigurationValue {
+    /// Creates a null configuration value.
+    pub const fn null() -> Self {
+        Self::Null
+    }
+
+    /// Creates an integer configuration value.
+    pub fn integer(value: i64) -> Self {
+        Self::Number(value.into())
+    }
+
+    /// Creates an unsigned integer configuration value.
+    pub fn unsigned(value: u64) -> Self {
+        Self::Number(value.into())
+    }
+
+    /// Creates a floating-point configuration value when the input is finite.
+    pub fn float(value: f64) -> Option<Self> {
+        Number::from_f64(value).map(Self::Number)
+    }
+
+    /// Parses a JSON number string into a configuration value.
+    pub fn from_number_text(value: impl AsRef<str>) -> Option<Self> {
+        value.as_ref().parse::<Number>().ok().map(Self::Number)
+    }
+
+    /// Creates an array configuration value.
+    pub fn array<I>(values: I) -> Self
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        Self::Array(values.into_iter().collect())
+    }
+
+    /// Creates an object configuration value.
+    pub fn object<I, K>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Self)>,
+        K: Into<String>,
+    {
+        let mut object = BTreeMap::new();
+        for (key, value) in entries {
+            object.insert(key.into(), value);
+        }
+        Self::Object(object)
+    }
+
+    /// Returns true when the value is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+
+    /// Returns the inner boolean when this value is a bool.
+    pub const fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner number when this value is numeric.
+    pub fn as_number(&self) -> Option<&Number> {
+        match self {
+            Self::Number(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner string when this value is textual.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner array when this value is an array.
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner object when this value is an object.
+    pub fn as_object(&self) -> Option<&BTreeMap<String, Self>> {
+        match self {
+            Self::Object(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Converts this value into a JSON value.
+    pub fn to_json_value(&self) -> Value {
+        Value::from(self)
+    }
+}
+
+impl From<bool> for WorkspaceConfigurationValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for WorkspaceConfigurationValue {
+    fn from(value: i64) -> Self {
+        Self::integer(value)
+    }
+}
+
+impl From<u64> for WorkspaceConfigurationValue {
+    fn from(value: u64) -> Self {
+        Self::unsigned(value)
+    }
+}
+
+impl From<Number> for WorkspaceConfigurationValue {
+    fn from(value: Number) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<String> for WorkspaceConfigurationValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for WorkspaceConfigurationValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl<T> From<Vec<T>> for WorkspaceConfigurationValue
+where
+    T: Into<WorkspaceConfigurationValue>,
+{
+    fn from(value: Vec<T>) -> Self {
+        Self::Array(value.into_iter().map(Into::into).collect())
+    }
+}
+
+impl<K, V> From<BTreeMap<K, V>> for WorkspaceConfigurationValue
+where
+    K: Into<String> + Ord,
+    V: Into<WorkspaceConfigurationValue>,
+{
+    fn from(value: BTreeMap<K, V>) -> Self {
+        Self::Object(
+            value
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+        )
+    }
+}
+
+impl From<&WorkspaceConfigurationValue> for Value {
+    fn from(value: &WorkspaceConfigurationValue) -> Self {
+        match value {
+            WorkspaceConfigurationValue::Null => Self::Null,
+            WorkspaceConfigurationValue::Bool(value) => Self::Bool(*value),
+            WorkspaceConfigurationValue::Number(value) => Self::Number(value.clone()),
+            WorkspaceConfigurationValue::String(value) => Self::String(value.clone()),
+            WorkspaceConfigurationValue::Array(values) => {
+                Self::Array(values.iter().map(Value::from).collect())
+            }
+            WorkspaceConfigurationValue::Object(values) => Self::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Value::from(value)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<WorkspaceConfigurationValue> for Value {
+    fn from(value: WorkspaceConfigurationValue) -> Self {
+        match value {
+            WorkspaceConfigurationValue::Null => Self::Null,
+            WorkspaceConfigurationValue::Bool(value) => Self::Bool(value),
+            WorkspaceConfigurationValue::Number(value) => Self::Number(value),
+            WorkspaceConfigurationValue::String(value) => Self::String(value),
+            WorkspaceConfigurationValue::Array(values) => {
+                Self::Array(values.into_iter().map(Value::from).collect())
+            }
+            WorkspaceConfigurationValue::Object(values) => Self::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, Value::from(value)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<Value> for WorkspaceConfigurationValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => Self::Null,
+            Value::Bool(value) => Self::Bool(value),
+            Value::Number(value) => Self::Number(value),
+            Value::String(value) => Self::String(value),
+            Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
+            Value::Object(values) => Self::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, WorkspaceConfigurationValue::from(value)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// Declarative language-server specification compiled into the editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageServerSpec {
@@ -99,6 +373,7 @@ pub struct LanguageServerSpec {
     root_markers: Vec<String>,
     root_strategy: LanguageServerRootStrategy,
     env: Vec<(String, String)>,
+    workspace_configuration: WorkspaceConfiguration,
     path_matcher: PathMatcher,
 }
 
@@ -138,6 +413,7 @@ impl LanguageServerSpec {
             root_markers: Vec::new(),
             root_strategy: LanguageServerRootStrategy::Workspace,
             env: Vec::new(),
+            workspace_configuration: WorkspaceConfiguration::default(),
             path_matcher: PathMatcher::from_parts(
                 &file_extensions,
                 [] as [&str; 0],
@@ -185,6 +461,61 @@ impl LanguageServerSpec {
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
         self
+    }
+
+    /// Sets the workspace configuration section used for server-specific settings.
+    pub fn with_workspace_configuration_section(mut self, section: impl Into<String>) -> Self {
+        self.workspace_configuration = self.workspace_configuration.with_section(section);
+        self
+    }
+
+    /// Sets the server-specific workspace settings payload.
+    pub fn with_workspace_configuration_settings(
+        mut self,
+        settings: impl Into<WorkspaceConfigurationValue>,
+    ) -> Self {
+        self.workspace_configuration = self.workspace_configuration.with_settings(settings);
+        self
+    }
+
+    /// Sets both the workspace configuration section and settings payload.
+    pub fn with_workspace_configuration(
+        mut self,
+        section: impl Into<String>,
+        settings: impl Into<WorkspaceConfigurationValue>,
+    ) -> Self {
+        self.workspace_configuration = self
+            .workspace_configuration
+            .with_section(section)
+            .with_settings(settings);
+        self
+    }
+
+    /// Creates a workspace settings object without importing the underlying value type.
+    pub fn workspace_settings_object<I, K>(entries: I) -> WorkspaceConfigurationValue
+    where
+        I: IntoIterator<Item = (K, WorkspaceConfigurationValue)>,
+        K: Into<String>,
+    {
+        WorkspaceConfigurationValue::object(entries)
+    }
+
+    /// Creates a workspace settings array without importing the underlying value type.
+    pub fn workspace_settings_array<I>(values: I) -> WorkspaceConfigurationValue
+    where
+        I: IntoIterator<Item = WorkspaceConfigurationValue>,
+    {
+        WorkspaceConfigurationValue::array(values)
+    }
+
+    /// Creates a null workspace setting value.
+    pub const fn workspace_settings_null() -> WorkspaceConfigurationValue {
+        WorkspaceConfigurationValue::Null
+    }
+
+    /// Creates a floating-point workspace setting value when the input is finite.
+    pub fn workspace_settings_float(value: f64) -> Option<WorkspaceConfigurationValue> {
+        WorkspaceConfigurationValue::float(value)
     }
 
     /// Returns the server identifier.
@@ -273,6 +604,26 @@ impl LanguageServerSpec {
         &self.env
     }
 
+    /// Returns the declared workspace configuration.
+    pub fn workspace_configuration(&self) -> &WorkspaceConfiguration {
+        &self.workspace_configuration
+    }
+
+    /// Returns the workspace configuration section, if one is declared.
+    pub fn workspace_configuration_section(&self) -> Option<&str> {
+        self.workspace_configuration.section()
+    }
+
+    /// Returns the workspace settings payload, if one is declared.
+    pub fn workspace_configuration_settings(&self) -> Option<&WorkspaceConfigurationValue> {
+        self.workspace_configuration.settings()
+    }
+
+    /// Returns the workspace settings payload as a JSON value.
+    pub fn workspace_configuration_settings_json(&self) -> Option<Value> {
+        self.workspace_configuration.settings_json()
+    }
+
     /// Returns whether this server should attach to the provided path.
     pub fn matches_path(&self, path: &Path) -> bool {
         self.path_match_score(path).is_some()
@@ -322,6 +673,7 @@ pub struct LanguageServerSession {
     document_language_ids: BTreeMap<String, String>,
     root: Option<PathBuf>,
     launch: JobSpec,
+    workspace_configuration: WorkspaceConfiguration,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -334,6 +686,34 @@ impl LanguageServerSession {
     /// Returns the language identifier.
     pub fn language_id(&self) -> &str {
         &self.language_id
+    }
+
+    /// Sets the workspace configuration section used for this planned session.
+    pub fn with_workspace_configuration_section(mut self, section: impl Into<String>) -> Self {
+        self.workspace_configuration = self.workspace_configuration.with_section(section);
+        self
+    }
+
+    /// Sets the workspace settings payload used for this planned session.
+    pub fn with_workspace_configuration_settings(
+        mut self,
+        settings: impl Into<WorkspaceConfigurationValue>,
+    ) -> Self {
+        self.workspace_configuration = self.workspace_configuration.with_settings(settings);
+        self
+    }
+
+    /// Sets both the workspace configuration section and settings payload.
+    pub fn with_workspace_configuration(
+        mut self,
+        section: impl Into<String>,
+        settings: impl Into<WorkspaceConfigurationValue>,
+    ) -> Self {
+        self.workspace_configuration = self
+            .workspace_configuration
+            .with_section(section)
+            .with_settings(settings);
+        self
     }
 
     /// Returns the document language id that should be sent for a file path.
@@ -361,6 +741,26 @@ impl LanguageServerSession {
     /// Returns accumulated diagnostics.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns the declared workspace configuration for this planned session.
+    pub fn workspace_configuration(&self) -> &WorkspaceConfiguration {
+        &self.workspace_configuration
+    }
+
+    /// Returns the workspace configuration section, if one is declared.
+    pub fn workspace_configuration_section(&self) -> Option<&str> {
+        self.workspace_configuration.section()
+    }
+
+    /// Returns the workspace settings payload, if one is declared.
+    pub fn workspace_configuration_settings(&self) -> Option<&WorkspaceConfigurationValue> {
+        self.workspace_configuration.settings()
+    }
+
+    /// Returns the workspace settings payload as a JSON value.
+    pub fn workspace_configuration_settings_json(&self) -> Option<Value> {
+        self.workspace_configuration.settings_json()
     }
 
     /// Replaces the diagnostic set.
@@ -530,6 +930,7 @@ impl LanguageServerRegistry {
             document_language_ids: spec.document_language_ids.clone(),
             launch: spec.launch_job(root.clone()),
             root,
+            workspace_configuration: spec.workspace_configuration.clone(),
             diagnostics: Vec::new(),
         })
     }
@@ -552,6 +953,7 @@ impl LanguageServerRegistry {
             document_language_ids: spec.document_language_ids.clone(),
             launch: spec.launch_job(root.clone()),
             root,
+            workspace_configuration: spec.workspace_configuration.clone(),
             diagnostics: Vec::new(),
         })
     }
@@ -619,6 +1021,15 @@ where
         }
     }
     normalized
+}
+
+fn normalize_optional_string(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 fn document_language_id_for_path<'a>(
@@ -739,10 +1150,11 @@ mod tests {
     };
 
     use editor_buffer::{TextPoint, TextRange};
+    use serde_json::json;
 
     use super::{
         Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerRootStrategy,
-        LanguageServerSpec,
+        LanguageServerSpec, WorkspaceConfigurationValue,
     };
 
     fn rust_analyzer() -> LanguageServerSpec {
@@ -904,6 +1316,153 @@ mod tests {
         assert_eq!(session.launch().program(), "rust-analyzer");
         assert_eq!(session.launch().args(), ["--stdio"]);
         assert_eq!(session.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn workspace_configuration_value_round_trips_through_json() {
+        let value = WorkspaceConfigurationValue::from(json!({
+            "csharp": {
+                "format.enable": true,
+                "maxLineLength": 120.0,
+                "inlayHints": ["types", null],
+            }
+        }));
+
+        assert_eq!(
+            value.to_json_value(),
+            json!({
+                "csharp": {
+                    "format.enable": true,
+                    "maxLineLength": 120.0,
+                    "inlayHints": ["types", null],
+                }
+            })
+        );
+
+        let csharp = value
+            .as_object()
+            .and_then(|settings| settings.get("csharp"))
+            .and_then(WorkspaceConfigurationValue::as_object)
+            .expect("csharp object");
+        assert_eq!(
+            csharp
+                .get("format.enable")
+                .and_then(WorkspaceConfigurationValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            csharp
+                .get("maxLineLength")
+                .and_then(WorkspaceConfigurationValue::as_number)
+                .and_then(serde_json::Number::as_f64),
+            Some(120.0)
+        );
+        let hints = csharp
+            .get("inlayHints")
+            .and_then(WorkspaceConfigurationValue::as_array)
+            .expect("hint array");
+        assert_eq!(hints[0].as_str(), Some("types"));
+        assert!(hints[1].is_null());
+    }
+
+    #[test]
+    fn language_server_spec_exposes_workspace_configuration_builders() {
+        let spec = LanguageServerSpec::new(
+            "csharp-ls",
+            "csharp",
+            ["cs"],
+            "csharp-ls",
+            ["--features", "razor-support,metadata-uris"],
+        )
+        .with_workspace_configuration_section("csharp")
+        .with_workspace_configuration_settings(
+            LanguageServerSpec::workspace_settings_object([(
+                "csharp",
+                LanguageServerSpec::workspace_settings_object([
+                    (
+                        "enableAnalyzersSupport",
+                        WorkspaceConfigurationValue::from(true),
+                    ),
+                    (
+                        "inlayHints",
+                        LanguageServerSpec::workspace_settings_array([
+                            WorkspaceConfigurationValue::from("types"),
+                            LanguageServerSpec::workspace_settings_null(),
+                        ]),
+                    ),
+                    (
+                        "maxLineLength",
+                        LanguageServerSpec::workspace_settings_float(120.0).expect("finite float"),
+                    ),
+                ]),
+            )]),
+        );
+
+        assert_eq!(spec.workspace_configuration().section(), Some("csharp"));
+        assert_eq!(spec.workspace_configuration_section(), Some("csharp"));
+        assert_eq!(
+            spec.workspace_configuration_settings_json(),
+            Some(json!({
+                "csharp": {
+                    "enableAnalyzersSupport": true,
+                    "inlayHints": ["types", null],
+                    "maxLineLength": 120.0,
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn prepared_session_carries_workspace_configuration_from_spec() {
+        let mut registry = LanguageServerRegistry::new();
+        must(
+            registry.register(
+                LanguageServerSpec::new(
+                    "csharp-ls",
+                    "csharp",
+                    ["cs"],
+                    "csharp-ls",
+                    ["--features", "razor-support,metadata-uris"],
+                )
+                .with_workspace_configuration(
+                    "csharp",
+                    LanguageServerSpec::workspace_settings_object([(
+                        "csharp",
+                        LanguageServerSpec::workspace_settings_object([
+                            (
+                                "enableAnalyzersSupport",
+                                WorkspaceConfigurationValue::from(true),
+                            ),
+                            ("sdk", WorkspaceConfigurationValue::from("dotnet")),
+                        ]),
+                    )]),
+                ),
+            ),
+        );
+
+        let session = must(registry.prepare_session("csharp-ls", Some(PathBuf::from("P:\\volt"))));
+
+        assert_eq!(session.workspace_configuration().section(), Some("csharp"));
+        assert_eq!(session.workspace_configuration_section(), Some("csharp"));
+        assert_eq!(
+            session.workspace_configuration_settings_json(),
+            Some(json!({
+                "csharp": {
+                    "enableAnalyzersSupport": true,
+                    "sdk": "dotnet",
+                }
+            }))
+        );
+
+        let overridden = session.with_workspace_configuration_settings(
+            LanguageServerSpec::workspace_settings_object([("logging", true.into())]),
+        );
+        assert_eq!(
+            overridden.workspace_configuration_settings_json(),
+            Some(json!({
+                "logging": true,
+            }))
+        );
     }
 
     #[test]

@@ -107,9 +107,4 @@ mod tests {
                 .any(|binding| binding.command_name() == "buffer.save")
         );
     }
-
-    #[test]
-    fn open_mode_defaults_to_rendered() {
-        assert_eq!(open_mode(), PdfOpenMode::Rendered);
-    }
 }

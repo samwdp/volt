@@ -19,3 +19,4 @@ editor-icons = { path = "../../crates/editor-icons" }
 editor-lsp = { path = "../../crates/editor-lsp" }
 editor-syntax = { path = "../../crates/editor-syntax" }
 editor-theme = { path = "../../crates/editor-theme" }
+serde_json = "1.0.149"

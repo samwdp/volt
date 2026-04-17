@@ -7,7 +7,7 @@
 //! and uses the bundled `markdown-inline/highlights.scm` query; this is the
 //! explicit regression guard requested for that language pair.
 #![allow(unused_crate_dependencies)]
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use editor_buffer::TextBuffer;
 use editor_syntax::{
@@ -44,6 +44,26 @@ fn user_grammars_root() -> PathBuf {
         .join("..")
         .join("user")
         .join("lang")
+        .join("grammars")
+}
+
+fn default_grammars_root() -> PathBuf {
+    if let Some(path) = env::var_os("VOLT_GRAMMAR_DIR").map(PathBuf::from) {
+        return path;
+    }
+
+    let base = if cfg!(target_os = "windows") {
+        env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("APPDATA"))
+            .map(PathBuf::from)
+    } else {
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+    };
+
+    base.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("volt")
         .join("grammars")
 }
 
@@ -235,6 +255,35 @@ fn markdown_config() -> LanguageConfiguration {
     .with_additional_highlight_languages(["markdown-inline"])
 }
 
+fn razor_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "razor",
+        ["cshtml", "razor"],
+        GrammarSource::new(
+            "https://github.com/tris203/tree-sitter-razor",
+            ".",
+            "src",
+            "tree-sitter-razor",
+            "tree_sitter_razor",
+        ),
+        [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+    )
+}
+
+fn razor_grammar_available() -> bool {
+    let install_root = default_grammars_root();
+    install_root
+        .join("tree-sitter-razor")
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-razor.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-razor.dylib"
+        } else {
+            "libtree-sitter-razor.so"
+        })
+        .exists()
+}
+
 /// The bundled `markdown-inline/highlights.scm` must compile against the
 /// pre-built grammar DLL and not return a query compilation error.
 ///
@@ -301,6 +350,35 @@ fn markdown_and_inline_merged_highlight_compiles() {
     let snapshot = must(registry.highlight_buffer_for_language("markdown", &buffer));
     assert_eq!(snapshot.language_id, "markdown");
     assert!(!snapshot.has_errors);
+}
+
+#[test]
+fn razor_bundled_highlights_query_compiles() {
+    let install_root = default_grammars_root();
+    if !razor_grammar_available() {
+        eprintln!(
+            "SKIP: razor grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(razor_config()));
+
+    let buffer = TextBuffer::from_text("<div>@await WorkAsync()</div>\n");
+    let snapshot = must(registry.highlight_buffer_for_language("razor", &buffer));
+    assert_eq!(snapshot.language_id, "razor");
+    assert!(!snapshot.has_errors);
+    assert!(
+        snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.capture_name == "keyword.coroutine"),
+        "expected @await to produce a keyword.coroutine span, got {:?}",
+        snapshot.highlight_spans
+    );
 }
 
 #[test]

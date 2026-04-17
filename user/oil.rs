@@ -229,15 +229,14 @@ pub fn directory_entry_display_label(entry: &DirectoryEntry) -> String {
 
 /// Removes a leading oil icon prefix from an editable line if one is present.
 pub fn strip_entry_icon_prefix(label: &str) -> &str {
-    let trimmed = label.trim_start();
-    let Some((maybe_icon, rest)) = trimmed.split_once(' ') else {
-        return trimmed;
-    };
-    if is_oil_icon(maybe_icon) {
-        rest.trim_start()
-    } else {
-        trimmed
+    let mut trimmed = label.trim_start();
+    while let Some((maybe_icon, rest)) = trimmed.split_once(' ') {
+        if !is_oil_icon(maybe_icon) {
+            break;
+        }
+        trimmed = rest.trim_start();
     }
+    trimmed
 }
 
 fn directory_entry_display_label_from_parts(
@@ -456,6 +455,14 @@ mod tests {
             crate::icon_font::symbols::seti::CUSTOM_TOML
         );
         assert_eq!(strip_entry_icon_prefix(&label), "Cargo.toml");
+        let repeated = format!(
+            "{} {} {} {} Cargo.toml",
+            crate::icon_font::symbols::seti::CUSTOM_TOML,
+            crate::icon_font::symbols::seti::CUSTOM_TOML,
+            crate::icon_font::symbols::seti::CUSTOM_TOML,
+            crate::icon_font::symbols::seti::CUSTOM_TOML
+        );
+        assert_eq!(strip_entry_icon_prefix(&repeated), "Cargo.toml");
         assert_eq!(strip_entry_icon_prefix("plain.txt"), "plain.txt");
     }
 

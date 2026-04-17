@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -45,6 +46,9 @@ const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CODE_ACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
+const CSHARP_SERVER_ID: &str = "csharp-ls";
+const CSHARP_WORKSPACE_SECTION: &str = "csharp";
+const CSHARP_METADATA_REQUEST_METHOD: &str = "csharp/metadata";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -205,14 +209,23 @@ impl LspSignatureHelpContents {
 pub struct LspLocation {
     server_id: String,
     path: PathBuf,
+    file_path: Option<PathBuf>,
+    uri: String,
     range: TextRange,
 }
 
 impl LspLocation {
-    fn new(server_id: impl Into<String>, path: PathBuf, range: TextRange) -> Self {
+    fn from_uri(server_id: impl Into<String>, uri: impl Into<String>, range: TextRange) -> Self {
+        let uri = uri.into();
+        let file_path = file_uri_to_path(&uri);
+        let path = file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(uri.clone()));
         Self {
             server_id: server_id.into(),
             path,
+            file_path,
+            uri,
             range,
         }
     }
@@ -223,6 +236,18 @@ impl LspLocation {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub fn is_file_path(&self) -> bool {
+        self.file_path.is_some()
     }
 
     pub const fn range(&self) -> TextRange {
@@ -702,6 +727,7 @@ pub struct LspClientManager {
 struct LspClientState {
     sessions: BTreeMap<SessionKey, Arc<LspSessionHandle>>,
     tracked_buffers: BTreeMap<PathBuf, TrackedBufferState>,
+    settings_overrides: BTreeMap<SessionKey, Value>,
     start_failures: BTreeMap<SessionKey, String>,
 }
 
@@ -718,6 +744,84 @@ struct TrackedBufferState {
     sessions: BTreeSet<SessionKey>,
 }
 
+#[derive(Debug, Clone)]
+struct SessionWorkspaceConfiguration {
+    section: Option<String>,
+    base_settings: Option<Value>,
+    runtime_override: Option<Value>,
+    csharp_solution_fallback: Option<String>,
+}
+
+impl SessionWorkspaceConfiguration {
+    fn new(session: &LanguageServerSession, runtime_override: Option<Value>) -> Self {
+        let section = workspace_configuration_section_for_session(session).map(str::to_owned);
+        Self {
+            base_settings: normalized_workspace_configuration_settings(
+                section.as_deref(),
+                session.workspace_configuration_settings_json(),
+            ),
+            runtime_override: normalized_workspace_configuration_settings(
+                section.as_deref(),
+                runtime_override,
+            ),
+            csharp_solution_fallback: csharp_solution_path_fallback(
+                session.server_id(),
+                session.root().map(PathBuf::as_path),
+            ),
+            section,
+        }
+    }
+
+    fn response_for_request(&self, params: Option<&Value>) -> Value {
+        let Some(items) = params
+            .and_then(|params| params.get("items"))
+            .and_then(Value::as_array)
+        else {
+            return Value::Array(Vec::new());
+        };
+        Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    if configuration_item_section(item) == self.section.as_deref() {
+                        self.effective_settings().unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn set_runtime_override(&mut self, runtime_override: Option<Value>) -> bool {
+        let previous = self.effective_settings();
+        self.runtime_override =
+            normalized_workspace_configuration_settings(self.section.as_deref(), runtime_override);
+        self.effective_settings() != previous
+    }
+
+    fn did_change_configuration_payload(&self, include_null_section: bool) -> Option<Value> {
+        match (self.section.as_deref(), self.effective_settings()) {
+            (Some(section), Some(settings)) => {
+                Some(wrap_workspace_configuration_settings(section, settings))
+            }
+            (Some(section), None) if include_null_section => {
+                Some(wrap_workspace_configuration_settings(section, Value::Null))
+            }
+            (None, Some(settings)) => Some(settings),
+            _ => None,
+        }
+    }
+
+    fn effective_settings(&self) -> Option<Value> {
+        effective_workspace_configuration_settings(
+            self.base_settings.as_ref(),
+            self.runtime_override.as_ref(),
+            self.csharp_solution_fallback.as_deref(),
+        )
+    }
+}
+
 struct LspSessionHandle {
     key: SessionKey,
     session: LanguageServerSession,
@@ -725,6 +829,7 @@ struct LspSessionHandle {
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingResponseMap,
     diagnostics: DiagnosticsByPath,
+    workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
     transport_log: TransportLog,
     next_request_id: AtomicU64,
     next_progress_token: AtomicU64,
@@ -782,6 +887,80 @@ impl LspClientManager {
             .unwrap_or_default()
     }
 
+    pub fn set_server_settings_override(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        settings: Value,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_settings_override(server_id, root, |_| Some(settings))
+    }
+
+    pub fn clear_server_settings_override(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_settings_override(server_id, root, |_| None)
+    }
+
+    pub fn set_csharp_solution_path_override(
+        &self,
+        root: Option<&Path>,
+        solution_path: &Path,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_settings_override(CSHARP_SERVER_ID, root, |current| {
+            with_csharp_solution_path_override(current, solution_path)
+        })
+    }
+
+    pub fn clear_csharp_solution_path_override(
+        &self,
+        root: Option<&Path>,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_settings_override(CSHARP_SERVER_ID, root, |current| {
+            without_csharp_solution_path_override(current)
+        })
+    }
+
+    pub fn has_csharp_solution_path_override(
+        &self,
+        root: Option<&Path>,
+    ) -> Result<bool, LspClientError> {
+        self.server_settings_override_contains_key(
+            CSHARP_SERVER_ID,
+            root,
+            Some(CSHARP_WORKSPACE_SECTION),
+            "solutionPathOverride",
+        )
+    }
+
+    pub fn planned_server_root_for_path(
+        &self,
+        server_id: &str,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Result<Option<PathBuf>, LspClientError> {
+        self.registry
+            .prepare_session_for_path(server_id, path, workspace_root)
+            .map(|session| session.root().cloned())
+            .map_err(Into::into)
+    }
+
+    pub fn csharp_metadata(
+        &self,
+        root: Option<&Path>,
+        uri: &str,
+    ) -> Result<Option<Value>, LspClientError> {
+        if !is_csharp_metadata_uri(uri) {
+            return Ok(None);
+        }
+        let Some(session) = self.live_session_for_server(CSHARP_SERVER_ID, root)? else {
+            return Ok(None);
+        };
+        session.csharp_metadata(uri)
+    }
+
     pub fn needs_sync(&self, path: &Path, revision: u64) -> bool {
         let Ok(state) = self.state.lock() else {
             return false;
@@ -810,6 +989,122 @@ impl LspClientManager {
         servers
             .into_iter()
             .any(|server| !failed_server_ids.contains(server.id()))
+    }
+
+    fn update_server_settings_override<F>(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        update: F,
+    ) -> Result<bool, LspClientError>
+    where
+        F: FnOnce(Option<Value>) -> Option<Value>,
+    {
+        let key = SessionKey {
+            server_id: server_id.to_owned(),
+            root: root.map(Path::to_path_buf),
+        };
+        let (session, updated_override) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            let current = state.settings_overrides.get(&key).cloned();
+            let updated_override = update(current.clone());
+            if current == updated_override {
+                return Ok(false);
+            }
+            match &updated_override {
+                Some(settings) => {
+                    state
+                        .settings_overrides
+                        .insert(key.clone(), settings.clone());
+                }
+                None => {
+                    state.settings_overrides.remove(&key);
+                }
+            }
+            (state.sessions.get(&key).cloned(), updated_override)
+        };
+        if let Some(session) = session {
+            session.set_runtime_settings_override(updated_override.clone())?;
+        }
+        Ok(true)
+    }
+
+    fn server_settings_override_contains_key(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        section: Option<&str>,
+        key: &str,
+    ) -> Result<bool, LspClientError> {
+        let session_key = SessionKey {
+            server_id: server_id.to_owned(),
+            root: root.map(Path::to_path_buf),
+        };
+        let settings = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?
+            .settings_overrides
+            .get(&session_key)
+            .cloned();
+        Ok(settings_contains_key(
+            normalized_workspace_configuration_settings(section, settings).as_ref(),
+            key,
+        ))
+    }
+
+    fn live_session_for_server(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<Option<Arc<LspSessionHandle>>, LspClientError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        if let Some(root) = root {
+            let key = SessionKey {
+                server_id: server_id.to_owned(),
+                root: Some(root.to_path_buf()),
+            };
+            let disconnected = state
+                .sessions
+                .get(&key)
+                .map(|session| session.is_disconnected())
+                .unwrap_or(false);
+            if disconnected {
+                state.sessions.remove(&key);
+                return Ok(None);
+            }
+            return Ok(state.sessions.get(&key).cloned());
+        }
+
+        let mut live_sessions = Vec::new();
+        let mut stale_keys = Vec::new();
+        for (key, session) in &state.sessions {
+            if key.server_id != server_id {
+                continue;
+            }
+            if session.is_disconnected() {
+                stale_keys.push(key.clone());
+                continue;
+            }
+            live_sessions.push(Arc::clone(session));
+        }
+        for key in stale_keys {
+            state.sessions.remove(&key);
+        }
+
+        match live_sessions.len() {
+            0 => Ok(None),
+            1 => Ok(live_sessions.into_iter().next()),
+            _ => Err(LspClientError::Protocol(format!(
+                "multiple live `{server_id}` sessions matched the request; provide a workspace root"
+            ))),
+        }
     }
 
     pub fn sync_buffer(
@@ -1175,7 +1470,7 @@ impl LspClientManager {
                 server_id: session.server_id().to_owned(),
                 root: session.root().cloned(),
             };
-            let existing = {
+            let (existing, runtime_override, start_failed) = {
                 let mut state = self
                     .state
                     .lock()
@@ -1191,27 +1486,22 @@ impl LspClientManager {
                         state.sessions.remove(&key);
                     }
                 }
-                if let Some(session) = state.sessions.get(&key) {
-                    Some(Arc::clone(session))
-                } else {
-                    None
-                }
+                (
+                    state.sessions.get(&key).cloned(),
+                    state.settings_overrides.get(&key).cloned(),
+                    state.start_failures.contains_key(&key),
+                )
             };
             if let Some(existing) = existing {
                 handles.push(existing);
                 continue;
             }
-            {
-                let state = self
-                    .state
-                    .lock()
-                    .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
-                if state.start_failures.contains_key(&key) {
-                    continue;
-                }
+            if start_failed {
+                continue;
             }
             match LspSessionHandle::start(
                 session,
+                runtime_override,
                 Arc::clone(&self.transport_log),
                 Arc::clone(&self.notifications),
             ) {
@@ -1264,6 +1554,7 @@ impl LspClientManager {
 impl LspSessionHandle {
     fn start(
         session: LanguageServerSession,
+        runtime_override: Option<Value>,
         transport_log: TransportLog,
         notifications: NotificationLog,
     ) -> Result<Arc<Self>, LspClientError> {
@@ -1304,6 +1595,10 @@ impl LspSessionHandle {
         let writer = Arc::new(Mutex::new(stdin));
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
         let diagnostics = Arc::new(Mutex::new(BTreeMap::new()));
+        let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
+            &session,
+            runtime_override,
+        )));
         let disconnected = Arc::new(AtomicBool::new(false));
         let pid = child.id();
         let handle = Arc::new(Self {
@@ -1313,6 +1608,7 @@ impl LspSessionHandle {
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             diagnostics: Arc::clone(&diagnostics),
+            workspace_configuration: Arc::clone(&workspace_configuration),
             transport_log: Arc::clone(&transport_log),
             next_request_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
@@ -1345,6 +1641,7 @@ impl LspSessionHandle {
             writer,
             pending,
             diagnostics,
+            workspace_configuration,
             disconnected,
             transport_log,
             Arc::clone(&notifications),
@@ -1395,7 +1692,7 @@ impl LspSessionHandle {
             process_id: Some(std::process::id()),
             root_path: None,
             root_uri,
-            initialization_options: None,
+            initialization_options: initialization_options_for_server(self.server_id()),
             capabilities,
             trace: Some(TraceValue::Off),
             workspace_folders,
@@ -1408,6 +1705,12 @@ impl LspSessionHandle {
         };
         let _ = self.request_typed::<Initialize>(initialize_params)?;
         self.notify_typed::<Initialized>(InitializedParams {})?;
+        if let Some(settings) = self.workspace_configuration_notification_payload(false)? {
+            self.notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": settings }),
+            )?;
+        }
         Ok(())
     }
 
@@ -1444,6 +1747,56 @@ impl LspSessionHandle {
         self.notify_typed::<DidCloseTextDocument>(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
         })
+    }
+
+    fn set_runtime_settings_override(
+        &self,
+        runtime_override: Option<Value>,
+    ) -> Result<(), LspClientError> {
+        let payload = {
+            let mut workspace_configuration =
+                self.workspace_configuration.lock().map_err(|_| {
+                    LspClientError::Protocol(
+                        "LSP workspace configuration mutex poisoned".to_owned(),
+                    )
+                })?;
+            if !workspace_configuration.set_runtime_override(runtime_override) {
+                return Ok(());
+            }
+            workspace_configuration.did_change_configuration_payload(true)
+        };
+        if let Some(settings) = payload {
+            self.notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": settings }),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn csharp_metadata(&self, uri: &str) -> Result<Option<Value>, LspClientError> {
+        if !is_csharp_server(self.server_id()) || !is_csharp_metadata_uri(uri) {
+            return Ok(None);
+        }
+        let response = self.request(
+            CSHARP_METADATA_REQUEST_METHOD,
+            csharp_metadata_request_params(uri),
+        )?;
+        parse_csharp_metadata_response(uri, &response)
+    }
+
+    fn workspace_configuration_notification_payload(
+        &self,
+        include_null_section: bool,
+    ) -> Result<Option<Value>, LspClientError> {
+        self.workspace_configuration
+            .lock()
+            .map_err(|_| {
+                LspClientError::Protocol("LSP workspace configuration mutex poisoned".to_owned())
+            })
+            .map(|workspace_configuration| {
+                workspace_configuration.did_change_configuration_payload(include_null_section)
+            })
     }
 
     fn hover(
@@ -1733,6 +2086,7 @@ fn spawn_reader_thread(
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingResponseMap,
     diagnostics: DiagnosticsByPath,
+    workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
     disconnected: Arc<AtomicBool>,
     transport_log: TransportLog,
     notifications: NotificationLog,
@@ -1770,7 +2124,15 @@ fn spawn_reader_thread(
                 continue;
             };
             if object.contains_key("method") && object.contains_key("id") {
-                let response = server_request_response(object.get("method"), object.get("params"));
+                let workspace_configuration = workspace_configuration
+                    .lock()
+                    .ok()
+                    .map(|workspace_configuration| workspace_configuration.clone());
+                let response = server_request_response(
+                    object.get("method"),
+                    object.get("params"),
+                    workspace_configuration.as_ref(),
+                );
                 let id = object.get("id").cloned().unwrap_or(Value::Null);
                 let response_message = json!({
                     "jsonrpc": "2.0",
@@ -2286,6 +2648,206 @@ fn request_timeout_for_method(method: &str) -> Duration {
     }
 }
 
+fn normalize_configuration_section(section: Option<&str>) -> Option<&str> {
+    section.map(str::trim).filter(|section| !section.is_empty())
+}
+
+fn workspace_configuration_section_for_session(session: &LanguageServerSession) -> Option<&str> {
+    normalize_configuration_section(session.workspace_configuration_section())
+        .or_else(|| is_csharp_server(session.server_id()).then_some(CSHARP_WORKSPACE_SECTION))
+}
+
+fn normalized_workspace_configuration_settings(
+    section: Option<&str>,
+    settings: Option<Value>,
+) -> Option<Value> {
+    let settings = settings?;
+    let Some(section) = normalize_configuration_section(section) else {
+        return Some(settings);
+    };
+    match settings {
+        Value::Object(mut object) => object.remove(section).or(Some(Value::Object(object))),
+        other => Some(other),
+    }
+}
+
+fn effective_workspace_configuration_settings(
+    base_settings: Option<&Value>,
+    runtime_override: Option<&Value>,
+    csharp_solution_fallback: Option<&str>,
+) -> Option<Value> {
+    let mut settings = match (base_settings, runtime_override) {
+        (Some(base_settings), Some(runtime_override)) => {
+            Some(merge_json_values(base_settings, runtime_override))
+        }
+        (Some(base_settings), None) => Some(base_settings.clone()),
+        (None, Some(runtime_override)) => Some(runtime_override.clone()),
+        (None, None) => None,
+    };
+    if let Some(solution_path) = csharp_solution_fallback
+        && !settings_contains_key(settings.as_ref(), "solutionPathOverride")
+    {
+        let fallback = json!({ "solutionPathOverride": solution_path });
+        settings = Some(match settings.take() {
+            Some(settings) => merge_json_values(&settings, &fallback),
+            None => fallback,
+        });
+    }
+    settings
+}
+
+fn settings_contains_key(settings: Option<&Value>, key: &str) -> bool {
+    match settings {
+        Some(Value::Object(settings)) => settings.contains_key(key),
+        Some(_) => false,
+        None => false,
+    }
+}
+
+fn merge_json_values(base: &Value, override_value: &Value) -> Value {
+    match (base, override_value) {
+        (Value::Object(base), Value::Object(override_value)) => {
+            let mut merged = base.clone();
+            for (key, override_value) in override_value {
+                let merged_value = merged
+                    .get(key)
+                    .map(|base_value| merge_json_values(base_value, override_value))
+                    .unwrap_or_else(|| override_value.clone());
+                merged.insert(key.clone(), merged_value);
+            }
+            Value::Object(merged)
+        }
+        _ => override_value.clone(),
+    }
+}
+
+fn workspace_configuration_null_response(params: Option<&Value>) -> Value {
+    let item_count = params
+        .and_then(|params| params.get("items"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    Value::Array((0..item_count).map(|_| Value::Null).collect())
+}
+
+fn configuration_item_section(item: &Value) -> Option<&str> {
+    normalize_configuration_section(item.get("section").and_then(Value::as_str))
+}
+
+fn wrap_workspace_configuration_settings(section: &str, settings: Value) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(section.to_owned(), settings);
+    Value::Object(object)
+}
+
+fn with_csharp_solution_path_override(
+    current: Option<Value>,
+    solution_path: &Path,
+) -> Option<Value> {
+    let override_value = json!({
+        "solutionPathOverride": solution_path.display().to_string(),
+    });
+    Some(
+        match normalized_workspace_configuration_settings(Some(CSHARP_WORKSPACE_SECTION), current) {
+            Some(current) => merge_json_values(&current, &override_value),
+            None => override_value,
+        },
+    )
+}
+
+fn without_csharp_solution_path_override(current: Option<Value>) -> Option<Value> {
+    let current =
+        normalized_workspace_configuration_settings(Some(CSHARP_WORKSPACE_SECTION), current)?;
+    let Value::Object(mut current) = current else {
+        return Some(current);
+    };
+    current.remove("solutionPathOverride");
+    (!current.is_empty()).then_some(Value::Object(current))
+}
+
+fn csharp_solution_path_fallback(server_id: &str, root: Option<&Path>) -> Option<String> {
+    is_csharp_server(server_id)
+        .then(|| resolve_single_solution_path(root))
+        .flatten()
+        .map(|solution_path| solution_path.display().to_string())
+}
+
+fn resolve_single_solution_path(root: Option<&Path>) -> Option<PathBuf> {
+    let root = root?;
+    if path_is_solution(root) {
+        return Some(root.to_path_buf());
+    }
+    let mut solutions = fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path_is_solution(path))
+        .collect::<Vec<_>>();
+    (solutions.len() == 1).then(|| solutions.pop()).flatten()
+}
+
+fn path_is_solution(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sln"))
+}
+
+fn is_csharp_server(server_id: &str) -> bool {
+    server_id == CSHARP_SERVER_ID
+}
+
+fn is_csharp_metadata_uri(uri: &str) -> bool {
+    uri.starts_with("csharp:/")
+}
+
+fn initialization_options_for_server(server_id: &str) -> Option<Value> {
+    is_csharp_server(server_id).then_some(json!({
+        "experimental": {
+            "csharp": {
+                "metadataUris": true,
+            }
+        }
+    }))
+}
+
+fn csharp_metadata_request_params(uri: &str) -> Value {
+    json!({
+        "textDocument": {
+            "uri": uri,
+        }
+    })
+}
+
+fn parse_csharp_metadata_response(
+    uri: &str,
+    value: &Value,
+) -> Result<Option<Value>, LspClientError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(source) = value.as_str() {
+        return Ok(Some(json!({
+            "uri": uri,
+            "source": source,
+        })));
+    }
+    let Some(metadata) = value.as_object() else {
+        return Err(LspClientError::Protocol(
+            "failed to decode csharp metadata response: expected an object".to_owned(),
+        ));
+    };
+    let mut metadata = metadata.clone();
+    metadata
+        .entry("uri".to_owned())
+        .or_insert_with(|| Value::String(uri.to_owned()));
+    if !metadata.contains_key("source")
+        && let Some(source) = metadata.get("text").cloned()
+    {
+        metadata.insert("source".to_owned(), source);
+    }
+    Ok(Some(Value::Object(metadata)))
+}
+
 fn session_lifecycle_notification(
     server_id: &str,
     root: Option<&Path>,
@@ -2468,16 +3030,15 @@ fn parse_show_message_notification(server_id: &str, params: &Value) -> Option<Ls
     ))
 }
 
-fn server_request_response(method: Option<&Value>, params: Option<&Value>) -> Value {
+fn server_request_response(
+    method: Option<&Value>,
+    params: Option<&Value>,
+    workspace_configuration: Option<&SessionWorkspaceConfiguration>,
+) -> Value {
     match method.and_then(Value::as_str) {
-        Some("workspace/configuration") => {
-            let item_count = params
-                .and_then(|params| params.get("items"))
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
-            Value::Array((0..item_count).map(|_| Value::Null).collect())
-        }
+        Some("workspace/configuration") => workspace_configuration
+            .map(|workspace_configuration| workspace_configuration.response_for_request(params))
+            .unwrap_or_else(|| workspace_configuration_null_response(params)),
         Some("workspace/workspaceFolders") => Value::Array(Vec::new()),
         Some("client/registerCapability")
         | Some("client/unregisterCapability")
@@ -2962,19 +3523,17 @@ fn char_to_byte_offset(text: &str, char_index: usize) -> Option<usize> {
 }
 
 fn location_from_lsp(server_id: &str, location: &Location) -> Option<LspLocation> {
-    let path = file_uri_to_path(location.uri.as_str())?;
-    Some(LspLocation::new(
+    Some(LspLocation::from_uri(
         server_id,
-        path,
+        location.uri.to_string(),
         text_range_from_lsp_range(&location.range),
     ))
 }
 
 fn location_from_link(server_id: &str, link: &LocationLink) -> Option<LspLocation> {
-    let path = file_uri_to_path(link.target_uri.as_str())?;
-    Some(LspLocation::new(
+    Some(LspLocation::from_uri(
         server_id,
-        path,
+        link.target_uri.to_string(),
         text_range_from_lsp_range(&link.target_selection_range),
     ))
 }
@@ -3028,14 +3587,14 @@ fn unsupported_lsp_request(error: &LspClientError) -> bool {
 
 fn sort_locations(locations: &mut Vec<LspLocation>) {
     locations.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
+        left.uri
+            .cmp(&right.uri)
             .then_with(|| left.range.start().line.cmp(&right.range.start().line))
             .then_with(|| left.range.start().column.cmp(&right.range.start().column))
             .then_with(|| left.range.end().line.cmp(&right.range.end().line))
             .then_with(|| left.range.end().column.cmp(&right.range.end().column))
     });
-    locations.dedup_by(|left, right| left.path == right.path && left.range == right.range);
+    locations.dedup_by(|left, right| left.uri == right.uri && left.range == right.range);
 }
 
 fn parse_completion_response(server_id: &str, value: &Value) -> Vec<LspCompletionItem> {
@@ -3442,6 +4001,213 @@ mod tests {
     }
 
     #[test]
+    fn workspace_configuration_settings_unwrap_matching_section() {
+        assert_eq!(
+            normalized_workspace_configuration_settings(
+                Some("csharp"),
+                Some(json!({
+                    "csharp": {
+                        "solutionPathOverride": r"P:\volt\Volt.sln",
+                    }
+                })),
+            ),
+            Some(json!({
+                "solutionPathOverride": r"P:\volt\Volt.sln",
+            }))
+        );
+    }
+
+    #[test]
+    fn workspace_configuration_requests_return_matching_section_settings() {
+        let workspace_configuration = SessionWorkspaceConfiguration {
+            section: Some("csharp".to_owned()),
+            base_settings: Some(json!({
+                "formatting": {
+                    "organizeImports": true,
+                    "useTabs": false,
+                }
+            })),
+            runtime_override: Some(json!({
+                "solutionPathOverride": r"P:\volt\Volt.sln",
+                "formatting": {
+                    "useTabs": true,
+                }
+            })),
+            csharp_solution_fallback: None,
+        };
+
+        let response = server_request_response(
+            Some(&Value::String("workspace/configuration".to_owned())),
+            Some(&json!({
+                "items": [
+                    { "section": "csharp" },
+                    { "section": "other" },
+                    {}
+                ]
+            })),
+            Some(&workspace_configuration),
+        );
+
+        assert_eq!(
+            response,
+            json!([
+                {
+                    "formatting": {
+                        "organizeImports": true,
+                        "useTabs": true,
+                    },
+                    "solutionPathOverride": r"P:\volt\Volt.sln",
+                },
+                null,
+                null
+            ])
+        );
+        assert_eq!(
+            workspace_configuration.did_change_configuration_payload(false),
+            Some(json!({
+                "csharp": {
+                    "formatting": {
+                        "organizeImports": true,
+                        "useTabs": true,
+                    },
+                    "solutionPathOverride": r"P:\volt\Volt.sln",
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn workspace_configuration_requests_support_unsectioned_settings() {
+        let workspace_configuration = SessionWorkspaceConfiguration {
+            section: None,
+            base_settings: Some(json!({
+                "featureFlag": true,
+            })),
+            runtime_override: Some(json!({
+                "featureFlag": false,
+                "verbosity": "debug",
+            })),
+            csharp_solution_fallback: None,
+        };
+
+        let response = server_request_response(
+            Some(&Value::String("workspace/configuration".to_owned())),
+            Some(&json!({
+                "items": [
+                    {},
+                    { "section": "other" }
+                ]
+            })),
+            Some(&workspace_configuration),
+        );
+
+        assert_eq!(
+            response,
+            json!([
+                {
+                    "featureFlag": false,
+                    "verbosity": "debug",
+                },
+                null
+            ])
+        );
+    }
+
+    #[test]
+    fn csharp_solution_fallback_applies_when_settings_are_scalar() {
+        let workspace_configuration = SessionWorkspaceConfiguration {
+            section: Some("csharp".to_owned()),
+            base_settings: Some(Value::Bool(true)),
+            runtime_override: None,
+            csharp_solution_fallback: Some(r"P:\volt\Volt.sln".to_owned()),
+        };
+
+        let response = server_request_response(
+            Some(&Value::String("workspace/configuration".to_owned())),
+            Some(&json!({
+                "items": [
+                    { "section": "csharp" },
+                    { "section": "other" }
+                ]
+            })),
+            Some(&workspace_configuration),
+        );
+
+        assert_eq!(
+            response,
+            json!([
+                {
+                    "solutionPathOverride": r"P:\volt\Volt.sln",
+                },
+                null
+            ])
+        );
+        assert_eq!(
+            workspace_configuration.did_change_configuration_payload(false),
+            Some(json!({
+                "csharp": {
+                    "solutionPathOverride": r"P:\volt\Volt.sln",
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn csharp_metadata_request_params_use_text_document_uri() {
+        assert_eq!(
+            csharp_metadata_request_params("csharp:/metadata/Volt/Program"),
+            json!({
+                "textDocument": {
+                    "uri": "csharp:/metadata/Volt/Program",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn csharp_metadata_response_normalizes_source_text() {
+        let metadata = parse_csharp_metadata_response(
+            "csharp:/metadata/Volt/Program",
+            &json!({
+                "projectName": "Volt",
+                "assemblyName": "Volt",
+                "symbolName": "Program",
+                "text": "public class Program {}",
+            }),
+        )
+        .expect("metadata response")
+        .expect("metadata");
+
+        assert_eq!(
+            metadata.get("uri"),
+            Some(&Value::String("csharp:/metadata/Volt/Program".to_owned()))
+        );
+        assert_eq!(
+            metadata.get("source"),
+            Some(&Value::String("public class Program {}".to_owned()))
+        );
+        assert_eq!(
+            metadata.get("projectName"),
+            Some(&Value::String("Volt".to_owned()))
+        );
+    }
+
+    #[test]
+    fn csharp_initialization_options_enable_metadata_uris() {
+        assert_eq!(
+            initialization_options_for_server(CSHARP_SERVER_ID),
+            Some(json!({
+                "experimental": {
+                    "csharp": {
+                        "metadataUris": true,
+                    }
+                }
+            }))
+        );
+        assert_eq!(initialization_options_for_server("rust-analyzer"), None);
+    }
+
+    #[test]
     fn formatting_parser_maps_text_edits() {
         let response = json!([
             {
@@ -3481,6 +4247,13 @@ mod tests {
         let locations = parse_definition_response("rust-analyzer", &response).expect("locations");
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].server_id(), "rust-analyzer");
+        assert_eq!(locations[0].uri(), "file:///P:/volt/src/lib.rs");
+        assert!(locations[0].is_file_path());
+        assert!(
+            locations[0]
+                .file_path()
+                .is_some_and(|path| path.ends_with(Path::new("src").join("lib.rs")))
+        );
         assert!(
             locations[0]
                 .path()
@@ -3488,6 +4261,29 @@ mod tests {
         );
         assert_eq!(locations[0].range().start(), TextPoint::new(11, 4));
         assert_eq!(locations[0].range().end(), TextPoint::new(11, 10));
+    }
+
+    #[test]
+    fn definition_parser_preserves_uri_backed_locations() {
+        let response = json!([
+            {
+                "uri": "csharp:/metadata/Volt/Program",
+                "range": {
+                    "start": { "line": 5, "character": 1 },
+                    "end": { "line": 5, "character": 12 }
+                }
+            }
+        ]);
+
+        let locations = parse_reference_response("csharp-ls", &response).expect("locations");
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].uri(), "csharp:/metadata/Volt/Program");
+        assert!(!locations[0].is_file_path());
+        assert_eq!(locations[0].file_path(), None);
+        assert_eq!(
+            locations[0].path().as_os_str().to_string_lossy(),
+            "csharp:/metadata/Volt/Program"
+        );
     }
 
     #[test]
@@ -3925,6 +4721,134 @@ mod tests {
 
         assert!(manager.session_labels_for_path(&path).is_empty());
         assert!(!manager.has_live_sessions_for_path(&path));
+    }
+
+    #[test]
+    fn csharp_solution_path_override_api_merges_and_clears_runtime_overrides() {
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        let root = Path::new(r"P:\volt");
+        let key = SessionKey {
+            server_id: CSHARP_SERVER_ID.to_owned(),
+            root: Some(root.to_path_buf()),
+        };
+
+        assert!(
+            !manager
+                .has_csharp_solution_path_override(Some(root))
+                .expect("query solution override")
+        );
+        assert!(
+            manager
+                .set_server_settings_override(
+                    CSHARP_SERVER_ID,
+                    Some(root),
+                    json!({ "logging": true })
+                )
+                .expect("set override")
+        );
+        assert!(
+            !manager
+                .has_csharp_solution_path_override(Some(root))
+                .expect("query solution override")
+        );
+        assert!(
+            manager
+                .set_csharp_solution_path_override(Some(root), Path::new(r"P:\volt\Volt.sln"))
+                .expect("set solution override")
+        );
+        assert!(
+            manager
+                .has_csharp_solution_path_override(Some(root))
+                .expect("query solution override")
+        );
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .expect("state lock")
+                .settings_overrides
+                .get(&key),
+            Some(&json!({
+                "logging": true,
+                "solutionPathOverride": r"P:\volt\Volt.sln",
+            }))
+        );
+
+        assert!(
+            manager
+                .clear_csharp_solution_path_override(Some(root))
+                .expect("clear solution override")
+        );
+        assert!(
+            !manager
+                .has_csharp_solution_path_override(Some(root))
+                .expect("query solution override")
+        );
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .expect("state lock")
+                .settings_overrides
+                .get(&key),
+            Some(&json!({
+                "logging": true,
+            }))
+        );
+
+        assert!(
+            manager
+                .clear_server_settings_override(CSHARP_SERVER_ID, Some(root))
+                .expect("clear override")
+        );
+        assert!(
+            !manager
+                .state
+                .lock()
+                .expect("state lock")
+                .settings_overrides
+                .contains_key(&key)
+        );
+    }
+
+    #[test]
+    fn planned_server_root_for_path_matches_prepared_csharp_session_root() {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("volt-csharp-root-{unique}"));
+        let project_dir = root.join("src").join("App");
+        fs::create_dir_all(&project_dir).expect("create project directory");
+        fs::write(root.join("Volt.sln"), "").expect("write solution");
+        fs::write(project_dir.join("App.csproj"), "").expect("write project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("write source file");
+
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(
+                crate::LanguageServerSpec::new(
+                    CSHARP_SERVER_ID,
+                    "csharp",
+                    ["cs"],
+                    "csharp-ls",
+                    std::iter::empty::<&str>(),
+                )
+                .with_root_strategy(crate::LanguageServerRootStrategy::MarkersOrWorkspace)
+                .with_root_markers(["*.sln", "*.csproj"]),
+            )
+            .expect("register csharp server");
+        let manager = LspClientManager::new(registry);
+
+        assert_eq!(
+            manager
+                .planned_server_root_for_path(CSHARP_SERVER_ID, &file_path, Some(root.as_path()))
+                .expect("plan csharp session root"),
+            Some(project_dir.clone())
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]

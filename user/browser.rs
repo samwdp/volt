@@ -21,12 +21,8 @@ pub fn package() -> PluginPackage {
     .with_commands(vec![
         PluginCommand::new(
             "browser.open",
-            "Opens the browser buffer in the active pane.",
-            vec![PluginAction::open_buffer(
-                BUFFER_NAME,
-                BROWSER_KIND,
-                None::<&str>,
-            )],
+            "Opens the browser buffer in a split pane alongside the active buffer.",
+            vec![PluginAction::emit_hook(browser_hooks::OPEN, None::<&str>)],
         ),
         PluginCommand::new(
             "browser.open-popup",
@@ -38,7 +34,7 @@ pub fn package() -> PluginPackage {
         ),
         PluginCommand::new(
             "browser.url",
-            "Detects a URL in the current buffer and opens it in the popup browser.",
+            "Detects a URL in the current buffer and opens it in a split browser buffer.",
             vec![PluginAction::emit_hook(HOOK_BROWSER_URL, None::<&str>)],
         ),
         PluginCommand::new(
@@ -85,7 +81,7 @@ pub fn buffer_lines(url: Option<&str>) -> Vec<String> {
             String::new(),
             "Once a page loads, click inside it to interact directly in the buffer body.".to_owned(),
             "Press F12 or Ctrl+Shift+I to open DevTools.".to_owned(),
-            "Use browser.open for a full buffer or browser.open-popup/browser.url for popup browsing."
+            "Use browser.open/browser.url for split browsing or browser.open-popup for popup browsing."
                 .to_owned(),
         ],
     }

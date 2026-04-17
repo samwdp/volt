@@ -265,15 +265,14 @@ impl UserLibrary for NullUserLibrary {
 }
 
 fn strip_icon_prefix<'a>(label: &'a str, symbols: &[editor_icons::IconFontSymbol]) -> &'a str {
-    let trimmed = label.trim_start();
-    let Some((maybe_icon, rest)) = trimmed.split_once(' ') else {
-        return trimmed;
-    };
-    if symbols.iter().any(|symbol| symbol.glyph == maybe_icon) {
-        rest.trim_start()
-    } else {
-        trimmed
+    let mut trimmed = label.trim_start();
+    while let Some((maybe_icon, rest)) = trimmed.split_once(' ') {
+        if !symbols.iter().any(|symbol| symbol.glyph == maybe_icon) {
+            break;
+        }
+        trimmed = rest.trim_start();
     }
+    trimmed
 }
 
 /// Foundation metadata describing the current host configuration.

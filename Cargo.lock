@@ -838,6 +838,7 @@ dependencies = [
  "editor-lsp",
  "editor-syntax",
  "editor-theme",
+ "serde_json",
 ]
 
 [[package]]
@@ -898,7 +899,9 @@ dependencies = [
  "tree-sitter-rust",
  "url",
  "volt-user",
+ "webview2-com",
  "window-vibrancy",
+ "windows-core",
  "wry",
 ]
 

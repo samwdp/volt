@@ -1,4 +1,4 @@
-; inherits: c_sharp
+; inherits: csharp
 
 ([
   (html_comment)

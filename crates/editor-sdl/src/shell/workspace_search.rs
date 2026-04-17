@@ -2,6 +2,7 @@ use std::io::{BufRead as _, BufReader, Read as _};
 use std::process::Stdio;
 
 use editor_lsp::LspDocumentTextEdits;
+use url::Url;
 
 use super::*;
 
@@ -317,32 +318,72 @@ pub(super) fn lsp_location_picker_entry(
     workspace_root: Option<&Path>,
     location: &LspLocation,
 ) -> PickerEntry {
-    let path = location.path().to_path_buf();
     let target = location.range().start();
-    let relative_path = workspace_relative_path(workspace_root, &path);
     let line_number = target.line + 1;
     let column = target.column + 1;
-    let preview = TextBuffer::load_from_path(&path)
-        .ok()
-        .and_then(|buffer| buffer.line(target.line))
-        .map(|line| line.trim().to_owned())
-        .filter(|line| !line.is_empty());
-    let label = preview
-        .clone()
-        .unwrap_or_else(|| format!("{relative_path}:{line_number}"));
-    let detail = format!(
-        "{relative_path} | Ln {line_number}, Col {column} | {}",
-        location.server_id()
-    );
+    let (label, detail, preview) = if let Some(path) = location.file_path() {
+        let relative_path = workspace_relative_path(workspace_root, path);
+        let preview = TextBuffer::load_from_path(path)
+            .ok()
+            .and_then(|buffer| buffer.line(target.line))
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty());
+        let label = preview
+            .clone()
+            .unwrap_or_else(|| format!("{relative_path}:{line_number}"));
+        let detail = format!(
+            "{relative_path} | Ln {line_number}, Col {column} | {}",
+            location.server_id()
+        );
+        let preview = preview.or_else(|| Some(path.display().to_string()));
+        (label, detail, preview)
+    } else {
+        let uri_label = lsp_location_uri_label(location.uri());
+        let detail = format!(
+            "{} | Ln {line_number}, Col {column} | {}",
+            lsp_location_uri_detail(location.uri()),
+            location.server_id()
+        );
+        (uri_label, detail, Some(location.uri().to_owned()))
+    };
     PickerEntry {
         item: PickerItem::new(
-            format!("lsp:{}:{}:{}", path.display(), line_number, column),
+            format!("lsp:{}:{}:{}", location.uri(), line_number, column),
             label,
             detail,
-            Some(path.display().to_string()),
+            preview,
         ),
-        action: PickerAction::OpenFileLocation { path, target },
+        action: PickerAction::OpenLspLocation {
+            location: location.clone(),
+        },
     }
+}
+
+fn lsp_location_uri_label(uri: &str) -> String {
+    Url::parse(uri)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+                .map(str::to_owned)
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| uri.to_owned())
+}
+
+fn lsp_location_uri_detail(uri: &str) -> String {
+    Url::parse(uri)
+        .ok()
+        .map(|parsed| {
+            let path = parsed.path().trim_start_matches('/');
+            if path.is_empty() {
+                format!("{}:/", parsed.scheme())
+            } else {
+                format!("{}:/{}", parsed.scheme(), path)
+            }
+        })
+        .unwrap_or_else(|| uri.to_owned())
 }
 
 pub(super) fn lsp_code_actions_picker_overlay(

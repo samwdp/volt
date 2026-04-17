@@ -2489,6 +2489,18 @@ fn line_char_map_treats_variation_selectors_as_zero_width() {
 }
 
 #[test]
+fn line_char_map_treats_byte_order_marks_as_zero_width() {
+    let line = "\u{feff}<Project";
+    let char_map = LineCharMap::new(line);
+
+    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 8);
+    assert_eq!(
+        char_map.display_text_for_range(line, 0, line.chars().count()),
+        "<Project"
+    );
+}
+
+#[test]
 fn line_char_map_cursor_anchor_skips_variation_selectors() {
     let line = "⚛️x";
     let char_map = LineCharMap::new(line);
@@ -2532,6 +2544,72 @@ fn draw_buffer_text_omits_variation_selectors_from_scene_text() -> Result<(), St
             color: to_render_color(default_color),
         },]
     );
+    Ok(())
+}
+
+#[test]
+fn draw_buffer_text_omits_byte_order_mark_from_scene_text() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let line = "\u{feff}<Project";
+    let char_map = LineCharMap::new(line);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "<Project".to_owned(),
+            color: to_render_color(default_color),
+        },]
+    );
+    Ok(())
+}
+
+#[test]
+fn draw_buffer_text_skips_lines_that_only_contain_byte_order_marks() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let line = "\u{feff}";
+    let char_map = LineCharMap::new(line);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.is_empty());
     Ok(())
 }
 
@@ -7959,6 +8037,14 @@ fn strip_zero_width_display_characters_removes_variation_selectors() {
 }
 
 #[test]
+fn strip_zero_width_display_characters_removes_byte_order_marks() {
+    assert_eq!(
+        strip_zero_width_display_characters("\u{feff}<Project Sdk=\"Microsoft.NET.Sdk\">").as_ref(),
+        "<Project Sdk=\"Microsoft.NET.Sdk\">"
+    );
+}
+
+#[test]
 fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     state
@@ -8638,7 +8724,13 @@ fn browser_location_updates_rename_buffer_with_current_url() -> Result<(), Strin
         .buffer(buffer_id)
         .ok_or_else(|| "browser shell buffer missing".to_owned())?;
     assert_eq!(buffer.display_name(), "*browser* https://docs.rs/volt");
-    assert!(buffer.text.text().contains("https://docs.rs/volt"));
+    assert_eq!(
+        buffer
+            .browser_state
+            .as_ref()
+            .and_then(|browser| browser.current_url.as_deref()),
+        Some("https://docs.rs/volt")
+    );
     Ok(())
 }
 
@@ -9716,9 +9808,11 @@ fn leader_space_o_b_opens_browser_from_normal_mode() -> Result<(), String> {
         .handle_text_input("b")
         .map_err(|error| error.to_string())?;
 
+    let ui = shell_ui(&state.runtime)?;
     let browser_buffer_id = active_shell_buffer_id(&state.runtime)?;
     assert_ne!(browser_buffer_id, original_buffer_id);
-    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert_eq!(ui.pane_count(), 2);
+    assert_eq!(ui.input_mode(), InputMode::Insert);
     assert!(matches!(
         shell_buffer(&state.runtime, browser_buffer_id)?.kind,
         BufferKind::Plugin(ref kind) if kind == user::browser::BROWSER_KIND
@@ -10210,8 +10304,8 @@ fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
         state.ui().map_err(|error| error.to_string())?,
         None,
         &*state.user_library,
-        800,
-        400,
+        480,
+        180,
         8,
         18,
         Instant::now(),
@@ -10300,9 +10394,10 @@ fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), Stri
 }
 
 #[test]
-fn browser_sync_plan_hides_surfaces_when_notifications_overlap() -> Result<(), String> {
+fn browser_sync_plan_avoids_notification_overlays() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_browser_test_buffer(&mut state)?;
+    let now = Instant::now();
     state
         .ui_mut()
         .map_err(|error| error.to_string())?
@@ -10311,11 +10406,18 @@ fn browser_sync_plan_hides_surfaces_when_notifications_overlap() -> Result<(), S
                 "progress",
                 NotificationSeverity::Info,
                 "LSP · rust-analyzer",
-                &["Indexing workspace", "Scanning project"],
+                &[
+                    "Indexing workspace",
+                    "Scanning project files",
+                    "Resolving dependencies",
+                    "Refreshing diagnostics",
+                    "Updating symbol cache",
+                    "Preparing semantic tokens",
+                ],
                 Some(32),
                 true,
             ),
-            Instant::now(),
+            now,
         );
 
     let plan = browser_sync_plan(
@@ -10323,15 +10425,28 @@ fn browser_sync_plan_hides_surfaces_when_notifications_overlap() -> Result<(), S
         None,
         &*state.user_library,
         800,
-        400,
+        260,
         8,
         18,
-        Instant::now(),
+        now,
     )
     .map_err(|error| error.to_string())?;
+    let notifications = state
+        .ui()
+        .map_err(|error| error.to_string())?
+        .visible_notifications(now);
+    let notification_rects = notification_overlay_layouts(&notifications, 800, 260, 8, 18)
+        .into_iter()
+        .map(|layout| layout.rect)
+        .collect::<Vec<_>>();
 
     assert_eq!(plan.buffers.len(), 1);
-    assert!(plan.visible_surfaces.is_empty());
+    assert!(!notification_rects.is_empty());
+    assert!(plan.visible_surfaces.iter().all(|surface| {
+        notification_rects
+            .iter()
+            .all(|overlay| !rects_intersect(browser_viewport_rect_rect(surface.rect), *overlay))
+    }));
     Ok(())
 }
 
@@ -10369,7 +10484,7 @@ fn detect_browser_url_uses_cursor_hit_or_single_line_url() -> Result<(), String>
 }
 
 #[test]
-fn browser_url_command_opens_popup_browser_with_detected_url() -> Result<(), String> {
+fn browser_url_command_opens_split_browser_with_detected_url() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     state
         .active_buffer_mut()
@@ -10382,14 +10497,22 @@ fn browser_url_command_opens_popup_browser_with_detected_url() -> Result<(), Str
 
     open_detected_browser_url(&mut state.runtime)?;
 
-    let popup = active_runtime_popup(&state.runtime)?
-        .ok_or_else(|| "browser popup was not opened".to_owned())?;
-    let buffer = shell_ui(&state.runtime)?
-        .buffer(popup.active_buffer)
-        .ok_or_else(|| "browser popup buffer missing".to_owned())?;
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.pane_count(), 2);
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser split buffer missing".to_owned())?;
     assert!(buffer_is_browser(&buffer.kind));
-    assert!(buffer.text.text().contains("https://example.com/docs"));
-    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .and_then(|state| state.current_url.as_deref()),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(ui.input_mode(), InputMode::Insert);
     Ok(())
 }
 
@@ -10452,6 +10575,40 @@ fn browser_host_focus_parent_event_returns_to_normal_mode() -> Result<(), String
     assert_eq!(
         state.ui().map_err(|error| error.to_string())?.input_mode(),
         InputMode::Normal
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_host_new_window_event_routes_into_browser_popup() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::NewWindowRequested {
+            buffer_id,
+            url: "https://example.com/oauth/callback?code=test".to_owned(),
+            popup_seed_id: None,
+        }])
+        .map_err(|error| error.to_string())?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "browser popup was not opened from new-window event".to_owned())?;
+    let ui = shell_ui(&state.runtime)?;
+    let popup_buffer = ui
+        .buffer(popup.active_buffer)
+        .ok_or_else(|| "popup browser buffer missing".to_owned())?;
+    assert!(ui.popup_focus);
+    assert!(matches!(
+        popup_buffer.kind,
+        BufferKind::Plugin(ref kind) if kind == user::browser::BROWSER_KIND
+    ));
+    assert_eq!(
+        popup_buffer
+            .browser_state
+            .as_ref()
+            .and_then(|browser| browser.current_url.as_deref()),
+        Some("https://example.com/oauth/callback?code=test")
     );
     Ok(())
 }

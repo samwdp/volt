@@ -69,6 +69,23 @@ transparent = "#00000000"
 "ui.panel.background" = "pallet.background"
 "ui.panel.header.background" = "pallet.surface"
 
+# Oil directory buffer
+"oil.header" = "pallet.orange"
+"oil.directory" = "pallet.blue"
+"oil.directory.config" = "pallet.yellow"
+"oil.directory.git" = "pallet.red"
+"oil.directory.github" = "pallet.purple"
+"oil.directory.node" = "pallet.green"
+"oil.file" = "pallet.foreground"
+"oil.file.archive" = "pallet.orange"
+"oil.file.code" = "pallet.blue"
+"oil.file.config" = "pallet.yellow"
+"oil.file.document" = "pallet.foreground"
+"oil.file.git" = "pallet.red"
+"oil.file.image" = "pallet.purple"
+"oil.file.lock" = "pallet.red"
+"oil.file.media" = "pallet.aqua"
+
 # Git status
 "git.status.section.header" = "pallet.orange"
 "git.status.section.count" = "pallet.foreground-subtle"

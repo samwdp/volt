@@ -48,6 +48,11 @@ indent = 2
 format_on_save = false
 use_tabs = false
 
+[langs.razor]
+indent = 2
+format_on_save = false
+use_tabs = false
+
 [langs.javascript]
 indent = 2
 format_on_save = false

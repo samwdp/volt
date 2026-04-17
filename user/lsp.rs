@@ -135,7 +135,7 @@ pub fn package() -> PluginPackage {
         ),
         hook_command(
             "lsp.start-csharp-ls",
-            "Starts csharp-ls for the active C# file.",
+            "Starts csharp-ls for the active C# or Razor file.",
             HOOK_LSP_START,
             Some(SERVER_CSHARP_LS),
         ),
@@ -401,6 +401,18 @@ pub fn package() -> PluginPackage {
             "lsp.auto-start-csharp",
             "lsp.start",
             Some(".cs"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-razor",
+            "lsp.start",
+            Some(".razor"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-cshtml",
+            "lsp.start",
+            Some(".cshtml"),
         ),
         PluginHookBinding::new(
             "buffer.file-open",
@@ -1044,12 +1056,38 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
         LanguageServerSpec::new(
             SERVER_CSHARP_LS,
             "csharp",
-            ["cs"],
+            ["cs", "razor", "cshtml"],
             "csharp-ls",
-            ["--features", "razor-support,metadata-uris"],
+            std::iter::empty::<&str>(),
         )
+        .with_document_language_ids([("razor", "razor"), ("cshtml", "razor")])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
-        .with_root_markers(["*.sln", "*.csproj"]),
+        .with_root_markers(["*.sln", "*.csproj"])
+        .with_workspace_configuration(
+            "csharp",
+            LanguageServerSpec::workspace_settings_object([
+                ("logLevel", "info".into()),
+                ("applyFormattingOptions", false.into()),
+                ("analyzersEnabled", true.into()),
+                ("useMetadataUris", true.into()),
+                ("razorSupport", true.into()),
+                (
+                    "solutionPathOverride",
+                    LanguageServerSpec::workspace_settings_null(),
+                ),
+                ("locale", LanguageServerSpec::workspace_settings_null()),
+                (
+                    "debug",
+                    LanguageServerSpec::workspace_settings_object([
+                        (
+                            "solutionLoadDelay",
+                            LanguageServerSpec::workspace_settings_null(),
+                        ),
+                        ("debugMode", false.into()),
+                    ]),
+                ),
+            ]),
+        ),
         LanguageServerSpec::new(
             SERVER_TYPESCRIPT_LANGUAGE_SERVER,
             "typescript",
@@ -1449,7 +1487,7 @@ mod tests {
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
         assert_eq!(package.commands().len(), 45);
-        assert_eq!(package.hook_bindings().len(), 107);
+        assert_eq!(package.hook_bindings().len(), 109);
         assert_eq!(servers.len(), 36);
         for expected in [
             SERVER_RUST_ANALYZER,
@@ -1501,8 +1539,17 @@ mod tests {
 
         let csharp = server_by_id(&servers, SERVER_CSHARP_LS);
         assert_eq!(
-            csharp.args().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["--features", "razor-support,metadata-uris"]
+            string_values(csharp.file_extensions()),
+            vec!["cs", "razor", "cshtml"]
+        );
+        assert!(csharp.args().is_empty());
+        assert_eq!(
+            csharp.document_language_ids().get("razor"),
+            Some(&"razor".to_owned())
+        );
+        assert_eq!(
+            csharp.document_language_ids().get("cshtml"),
+            Some(&"razor".to_owned())
         );
 
         let typescript = server_by_id(&servers, SERVER_TYPESCRIPT_LANGUAGE_SERVER);
@@ -1725,6 +1772,8 @@ mod tests {
             ".xslt",
             ".xsl",
             ".rng",
+            ".razor",
+            ".cshtml",
             "Makefile",
             "GNUmakefile",
             "makefile",
@@ -2025,5 +2074,81 @@ mod tests {
         );
         assert_eq!(xml.program(), "xml-language-server");
         assert_eq!(string_values(xml.args()), vec!["--stdio"]);
+    }
+
+    #[test]
+    fn csharp_server_uses_workspace_configuration_for_metadata_uris() {
+        let servers = language_servers();
+        let csharp = server_by_id(&servers, SERVER_CSHARP_LS);
+
+        assert_eq!(csharp.workspace_configuration_section(), Some("csharp"));
+        let settings = csharp
+            .workspace_configuration_settings()
+            .expect("csharp workspace settings");
+        let settings = settings.as_object().expect("csharp settings object");
+        assert_eq!(
+            settings.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "analyzersEnabled",
+                "applyFormattingOptions",
+                "debug",
+                "locale",
+                "logLevel",
+                "razorSupport",
+                "solutionPathOverride",
+                "useMetadataUris",
+            ]
+        );
+        assert_eq!(
+            settings.get("logLevel").and_then(|value| value.as_str()),
+            Some("info")
+        );
+        assert_eq!(
+            settings
+                .get("applyFormattingOptions")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            settings
+                .get("analyzersEnabled")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            settings
+                .get("useMetadataUris")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            settings
+                .get("razorSupport")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            settings
+                .get("solutionPathOverride")
+                .is_some_and(|value| value.is_null())
+        );
+        assert!(settings.get("locale").is_some_and(|value| value.is_null()));
+        let debug = settings
+            .get("debug")
+            .and_then(|value| value.as_object())
+            .expect("csharp debug settings");
+        assert_eq!(
+            debug.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["debugMode", "solutionLoadDelay"]
+        );
+        assert_eq!(
+            debug.get("debugMode").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(
+            debug
+                .get("solutionLoadDelay")
+                .is_some_and(|value| value.is_null())
+        );
     }
 }
