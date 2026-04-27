@@ -144,6 +144,7 @@ pub(super) fn render_shell_state(
             theme_registry,
             cell_width,
             line_height,
+            typing_active,
         )?;
     }
 
@@ -164,6 +165,7 @@ pub(super) fn render_shell_state(
             theme_registry,
             cell_width,
             line_height,
+            typing_active,
         )?;
     }
 
@@ -289,6 +291,7 @@ pub(super) fn render_autocomplete_overlay(
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
+    typing_active: bool,
 ) -> Result<(), ShellError> {
     let Some(buffer) = state.buffer(autocomplete.buffer_id) else {
         return Ok(());
@@ -300,6 +303,7 @@ pub(super) fn render_autocomplete_overlay(
         theme_registry,
         cell_width,
         line_height,
+        typing_active,
     ) else {
         return Ok(());
     };
@@ -452,6 +456,7 @@ pub(super) fn render_hover_overlay(
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
+    typing_active: bool,
 ) -> Result<(), ShellError> {
     let Some(buffer) = state.buffer(hover.buffer_id) else {
         return Ok(());
@@ -466,6 +471,7 @@ pub(super) fn render_hover_overlay(
         theme_registry,
         cell_width,
         line_height,
+        typing_active,
     )
     .unwrap_or_else(|| {
         fallback_overlay_anchor(
@@ -1101,8 +1107,9 @@ fn buffer_visible_headerline_lines(
     buffer: &ShellBuffer,
     user_library: &dyn UserLibrary,
     visible_rows: usize,
+    typing_active: bool,
 ) -> Vec<String> {
-    buffer_context_overlay_snapshot(buffer, true, false, user_library)
+    buffer_context_overlay_snapshot(buffer, true, typing_active, user_library)
         .map(|snapshot| visible_headerline_lines(snapshot.headerline_lines, visible_rows))
         .unwrap_or_default()
 }
@@ -1408,6 +1415,7 @@ pub(super) fn buffer_cursor_screen_anchor(
     theme_registry: Option<&ThemeRegistry>,
     cell_width: i32,
     line_height: i32,
+    typing_active: bool,
 ) -> Option<CursorScreenAnchor> {
     let cell_width = cell_width.max(1);
     let layout = buffer_footer_layout_with_command_line(
@@ -1418,7 +1426,8 @@ pub(super) fn buffer_cursor_screen_anchor(
         user_library.commandline_enabled(),
     );
     let headerline_rows =
-        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows).len();
+        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, typing_active)
+            .len();
     let body_y = layout.body_y + headerline_rows as i32 * line_height;
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let fringe_width = cell_width;
@@ -1485,6 +1494,7 @@ pub(super) fn buffer_point_at_screen(
     cell_width: i32,
     line_height: i32,
     clamp_body: bool,
+    typing_active: bool,
 ) -> Option<TextPoint> {
     let line_height = line_height.max(1);
     let layout = buffer_footer_layout_with_command_line(
@@ -1495,7 +1505,8 @@ pub(super) fn buffer_point_at_screen(
         user_library.commandline_enabled(),
     );
     let headerline_rows =
-        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows).len();
+        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, typing_active)
+            .len();
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let body_top = layout.body_y + headerline_rows as i32 * line_height;
     let body_height = visible_rows as i32 * line_height;

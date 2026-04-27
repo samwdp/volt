@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -26,6 +26,7 @@ use agent_client_protocol::{
     WriteTextFileResponse,
 };
 use async_trait::async_trait;
+use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
 use tokio::{
@@ -46,6 +47,396 @@ fn configure_background_command(_command: &mut Command) {
     {
         _command.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundCommandPipes {
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
+}
+
+impl BackgroundCommandPipes {
+    const ACP_CLIENT: Self = Self {
+        stdin: true,
+        stdout: true,
+        stderr: true,
+    };
+
+    const TERMINAL: Self = Self {
+        stdin: false,
+        stdout: true,
+        stderr: true,
+    };
+}
+
+async fn spawn_background_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    pipes: BackgroundCommandPipes,
+) -> std::io::Result<tokio::process::Child> {
+    let mut spawn_result = build_background_command(program, args, cwd, env, pipes, None).spawn();
+
+    let should_retry = matches!(
+        &spawn_result,
+        Err(error) if background_spawn_should_retry(error)
+    );
+    if should_retry {
+        for candidate in background_command_candidates(program, env, None) {
+            spawn_result =
+                build_background_command(&candidate, args, cwd, env, pipes, None).spawn();
+            match &spawn_result {
+                Ok(_) => break,
+                Err(error) if background_spawn_should_retry(error) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    let should_retry = matches!(
+        &spawn_result,
+        Err(error) if background_spawn_should_retry(error)
+    );
+    if should_retry && let Some(launch_env) = refreshed_launch_environment(cwd).await {
+        for candidate in background_command_candidates(program, env, Some(&launch_env)) {
+            spawn_result =
+                build_background_command(&candidate, args, cwd, env, pipes, Some(&launch_env))
+                    .spawn();
+            match &spawn_result {
+                Ok(_) => break,
+                Err(error) if background_spawn_should_retry(error) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    spawn_result
+}
+
+fn build_background_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    pipes: BackgroundCommandPipes,
+    launch_env: Option<&[(String, String)]>,
+) -> Command {
+    let (program, args) = supervised_command_if_resolved(
+        program,
+        args,
+        env,
+        launch_env,
+        ProcessSupervisionMode::Background,
+    );
+    let mut command = Command::new(&program);
+    configure_background_command(&mut command);
+    command.args(&args);
+    apply_background_pipes(&mut command, pipes);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if let Some(launch_env) = launch_env {
+        apply_launch_environment(&mut command, env, launch_env);
+    } else {
+        apply_command_environment(&mut command, env);
+    }
+    command
+}
+
+fn apply_background_pipes(command: &mut Command, pipes: BackgroundCommandPipes) {
+    if pipes.stdin {
+        command.stdin(std::process::Stdio::piped());
+    }
+    if pipes.stdout {
+        command.stdout(std::process::Stdio::piped());
+    }
+    if pipes.stderr {
+        command.stderr(std::process::Stdio::piped());
+    }
+}
+
+fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+fn apply_launch_environment(
+    command: &mut Command,
+    env: &[(String, String)],
+    launch_env: &[(String, String)],
+) {
+    for (key, value) in launch_env {
+        command.env(key, value);
+    }
+    apply_command_environment(command, env);
+}
+
+fn background_command_candidates(
+    program: &str,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    if Path::new(program).components().count() != 1 {
+        return Vec::new();
+    }
+
+    let Some(path_value) = environment_value(env, launch_env, "PATH") else {
+        return Vec::new();
+    };
+
+    let names = background_command_names(program, env, launch_env);
+    let mut candidates = Vec::new();
+    for directory in path_value
+        .split(path_list_separator())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        for name in &names {
+            let candidate = Path::new(directory).join(name);
+            if is_launch_candidate(&candidate) {
+                let candidate = candidate.to_string_lossy().into_owned();
+                if !candidates.iter().any(|existing| existing == &candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn background_command_names(
+    program: &str,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if Path::new(program).extension().is_some() {
+            return vec![program.to_owned()];
+        }
+
+        let mut names = windows_command_extensions(env, launch_env)
+            .into_iter()
+            .map(|extension| format!("{program}{extension}"))
+            .collect::<Vec<_>>();
+        names.push(program.to_owned());
+        names.dedup();
+        names
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (env, launch_env);
+        vec![program.to_owned()]
+    }
+}
+
+fn environment_value(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+    key: &str,
+) -> Option<String> {
+    explicit_environment_value(env, key)
+        .cloned()
+        .or_else(|| launch_env.and_then(|vars| explicit_environment_value(vars, key).cloned()))
+        .or_else(|| std::env::var(key).ok())
+}
+
+fn explicit_environment_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a String> {
+    env.iter().find_map(|(entry_key, value)| {
+        #[cfg(windows)]
+        {
+            entry_key.eq_ignore_ascii_case(key).then_some(value)
+        }
+        #[cfg(not(windows))]
+        {
+            (entry_key == key).then_some(value)
+        }
+    })
+}
+
+#[cfg(windows)]
+fn windows_command_extensions(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    environment_value(env, launch_env, "PATHEXT")
+        .map(|value| {
+            value
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".com", ".exe", ".bat", ".cmd"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+#[cfg(windows)]
+fn path_list_separator() -> char {
+    ';'
+}
+
+#[cfg(not(windows))]
+fn path_list_separator() -> char {
+    ':'
+}
+
+#[cfg(windows)]
+fn is_launch_candidate(candidate: &Path) -> bool {
+    candidate.is_file()
+}
+
+#[cfg(not(windows))]
+fn is_launch_candidate(candidate: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    candidate
+        .metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn background_spawn_should_retry(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
+}
+
+#[cfg(not(windows))]
+fn background_spawn_should_retry(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+#[cfg(windows)]
+async fn refreshed_launch_environment(cwd: Option<&Path>) -> Option<Vec<(String, String)>> {
+    let system_root = env::var_os("SystemRoot")
+        .or_else(|| env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let powershell = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let script = r#"
+$machine = [Environment]::GetEnvironmentVariables('Machine')
+$user = [Environment]::GetEnvironmentVariables('User')
+$result = @{}
+foreach ($key in $machine.Keys) {
+    $name = [string]$key
+    $result[$name] = [Environment]::ExpandEnvironmentVariables([string]$machine[$key])
+}
+foreach ($key in $user.Keys) {
+    $name = [string]$key
+    $value = [Environment]::ExpandEnvironmentVariables([string]$user[$key])
+    if ($name -ieq 'Path' -and $result.ContainsKey('Path')) {
+        if ([string]::IsNullOrEmpty($value)) {
+            continue
+        }
+        if ([string]::IsNullOrEmpty([string]$result['Path'])) {
+            $result['Path'] = $value
+        } else {
+            $result['Path'] = '{0};{1}' -f $result['Path'], $value
+        }
+        continue
+    }
+    $result[$name] = $value
+}
+$result.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value }
+"#;
+
+    let mut command = Command::new(powershell);
+    configure_background_command(&mut command);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().await.ok()?;
+    output.status.success().then_some(())?;
+    parse_line_environment(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn refreshed_launch_environment(cwd: Option<&Path>) -> Option<Vec<(String, String)>> {
+    let shell = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+    let shell_name = shell
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let shell_args: &[&str] = match shell_name.as_str() {
+        "bash" | "zsh" | "fish" | "ksh" | "mksh" => &["-l", "-c", "env -0"],
+        _ => &["-c", "env -0"],
+    };
+
+    let mut command = Command::new(shell);
+    configure_background_command(&mut command);
+    command
+        .args(shell_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().await.ok()?;
+    output.status.success().then_some(())?;
+    parse_nul_environment(&output.stdout)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+async fn refreshed_launch_environment(_cwd: Option<&Path>) -> Option<Vec<(String, String)>> {
+    None
+}
+
+#[cfg(windows)]
+fn parse_line_environment(output: &str) -> Option<Vec<(String, String)>> {
+    let vars = output
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (!key.is_empty()).then_some((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn parse_nul_environment(output: &[u8]) -> Option<Vec<(String, String)>> {
+    let vars = output
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            if entry.is_empty() {
+                return None;
+            }
+            let line = String::from_utf8_lossy(entry);
+            let (key, value) = line.split_once('=')?;
+            (!key.is_empty()).then_some((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    (!vars.is_empty()).then_some(vars)
 }
 
 pub(super) fn init_acp_manager(runtime: &mut EditorRuntime) -> Result<(), ShellError> {
@@ -2587,23 +2978,20 @@ async fn connect_acp_client(
     workspace_root: PathBuf,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let mut command = Command::new(&config.command);
-    configure_background_command(&mut command);
-    command.args(&config.args);
-    if let Some(cwd) = config.cwd.as_ref() {
-        command.current_dir(cwd);
-    } else {
-        command.current_dir(&workspace_root);
-    }
-    for (key, value) in &config.env {
-        command.env(key, value);
-    }
-    command.stdin(std::process::Stdio::piped());
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start ACP client: {error}"))?;
+    let cwd = config
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or(workspace_root.as_path());
+    let mut child = spawn_background_command(
+        &config.command,
+        &config.args,
+        Some(cwd),
+        &config.env,
+        BackgroundCommandPipes::ACP_CLIENT,
+    )
+    .await
+    .map_err(|error| format!("failed to start ACP client: {error}"))?;
     let stdin = child
         .stdin
         .take()
@@ -3156,20 +3544,20 @@ impl Client for AcpClient {
         &self,
         args: CreateTerminalRequest,
     ) -> agent_client_protocol::Result<CreateTerminalResponse> {
-        let mut command = Command::new(args.command);
-        configure_background_command(&mut command);
-        command.args(args.args);
-        if let Some(cwd) = args.cwd.as_ref() {
-            command.current_dir(cwd);
-        }
-        for variable in args.env {
-            command.env(variable.name, variable.value);
-        }
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        let env = args
+            .env
+            .iter()
+            .map(|variable| (variable.name.clone(), variable.value.clone()))
+            .collect::<Vec<_>>();
+        let mut child = spawn_background_command(
+            &args.command,
+            &args.args,
+            args.cwd.as_deref().map(Path::new),
+            &env,
+            BackgroundCommandPipes::TERMINAL,
+        )
+        .await
+        .map_err(|error| Error::internal_error().data(error.to_string()))?;
         let output = Rc::new(RefCell::new(String::new()));
         let exit_status = Rc::new(RefCell::new(None));
         if let Some(stdout) = child.stdout.take() {

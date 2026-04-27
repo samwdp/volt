@@ -1,21 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, Sender},
-    },
+    sync::mpsc::{self, Receiver, Sender},
+    time::{Duration, Instant},
 };
 
 use editor_core::BufferId;
 use sdl3::video::Window;
 #[cfg(target_os = "windows")]
-use windows_core::AgileReference;
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-use wry::http::{HeaderMap, HeaderValue, header::USER_AGENT};
-#[cfg(target_os = "windows")]
-use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
+use wry::WebViewBuilderExtWindows;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BrowserBufferPlan {
@@ -66,21 +59,9 @@ pub(crate) enum BrowserHostEvent {
         current_url: String,
         is_loading: bool,
     },
-    DownloadStarted {
-        buffer_id: BufferId,
-        url: String,
-        download_path: Option<String>,
-    },
-    DownloadCompleted {
-        buffer_id: BufferId,
-        url: String,
-        download_path: Option<String>,
-        success: bool,
-    },
     NewWindowRequested {
         buffer_id: BufferId,
         url: String,
-        popup_seed_id: Option<u64>,
     },
 }
 
@@ -161,23 +142,6 @@ impl BrowserHostService {
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
             Ok(Vec::new())
-        }
-    }
-
-    pub(crate) fn attach_popup_seed(
-        &mut self,
-        popup_seed_id: u64,
-        buffer_id: BufferId,
-    ) -> Result<(), String> {
-        #[cfg(target_os = "windows")]
-        {
-            self.inner.attach_popup_seed(popup_seed_id, buffer_id)
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (popup_seed_id, buffer_id);
-            Ok(())
         }
     }
 }
@@ -284,15 +248,6 @@ const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 const BROWSER_DEFAULT_WEBVIEW2_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn browser_request_headers() -> Result<HeaderMap, String> {
-    let mut headers = HeaderMap::new();
-    let user_agent = HeaderValue::from_str(BROWSER_USER_AGENT)
-        .map_err(|error| format!("invalid browser user agent header: {error}"))?;
-    headers.insert(USER_AGENT, user_agent);
-    Ok(headers)
-}
-
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn allow_browser_drag_drop(_event: wry::DragDropEvent) -> bool {
     false
 }
@@ -301,16 +256,6 @@ fn allow_browser_drag_drop(_event: wry::DragDropEvent) -> bool {
 fn optional_non_empty_text(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn download_path_string(path: &Path) -> Option<String> {
-    (!path.as_os_str().is_empty()).then(|| path.to_string_lossy().into_owned())
-}
-
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn optional_download_path_string(path: Option<PathBuf>) -> Option<String> {
-    path.and_then(|path| download_path_string(&path))
 }
 
 #[cfg(target_os = "windows")]
@@ -363,11 +308,8 @@ fn browser_host_event_for_ipc(buffer_id: BufferId, body: &str) -> Option<Browser
     }
 }
 
-#[cfg(target_os = "windows")]
-struct PopupSeedReservation {
-    popup_seed_id: u64,
-    popup_webview_ref: AgileReference<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2>,
-}
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+const BROWSER_NAVIGATION_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 struct DesktopBrowserHostService {
@@ -376,12 +318,6 @@ struct DesktopBrowserHostService {
     event_rx: Receiver<BrowserHostEvent>,
     instances: BTreeMap<BufferId, BrowserInstance>,
     web_context: wry::WebContext,
-    #[cfg(target_os = "windows")]
-    popup_seed_instances: BTreeMap<u64, BrowserInstance>,
-    #[cfg(target_os = "windows")]
-    popup_seed_reservations: Arc<Mutex<BTreeMap<BufferId, PopupSeedReservation>>>,
-    #[cfg(target_os = "windows")]
-    next_popup_seed_id: u64,
     #[cfg(target_os = "linux")]
     gtk_initialized: bool,
 }
@@ -396,12 +332,6 @@ impl DesktopBrowserHostService {
             event_rx,
             instances: BTreeMap::new(),
             web_context: wry::WebContext::new(None),
-            #[cfg(target_os = "windows")]
-            popup_seed_instances: BTreeMap::new(),
-            #[cfg(target_os = "windows")]
-            popup_seed_reservations: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(target_os = "windows")]
-            next_popup_seed_id: 1,
             #[cfg(target_os = "linux")]
             gtk_initialized: false,
         }
@@ -471,8 +401,6 @@ impl DesktopBrowserHostService {
             }
             keep
         });
-        #[cfg(target_os = "windows")]
-        self.discard_orphaned_popup_seeds(&known_ids);
 
         for (buffer_id, surface) in &visible_surfaces {
             if self.instances.contains_key(buffer_id) {
@@ -486,19 +414,11 @@ impl DesktopBrowserHostService {
                 current_url,
                 self.event_tx.clone(),
                 &mut self.web_context,
-                #[cfg(target_os = "windows")]
-                Arc::clone(&self.popup_seed_reservations),
             ) {
                 Ok(instance) => instance,
                 Err(error) => return Err(self.disable(error)),
             };
             self.instances.insert(*buffer_id, instance);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            for buffer_id in visible_surfaces.keys().copied().collect::<Vec<_>>() {
-                self.ensure_popup_seed(window, buffer_id)?;
-            }
         }
 
         let mut location_updates = Vec::new();
@@ -561,92 +481,18 @@ impl DesktopBrowserHostService {
         }
         Ok(events)
     }
-
-    #[cfg(target_os = "windows")]
-    fn discard_orphaned_popup_seeds(&mut self, known_ids: &BTreeSet<BufferId>) {
-        let removed_seed_ids = {
-            let Ok(mut reservations) = self.popup_seed_reservations.lock() else {
-                return;
-            };
-            let removed_buffers = reservations
-                .keys()
-                .copied()
-                .filter(|buffer_id| !known_ids.contains(buffer_id))
-                .collect::<Vec<_>>();
-            removed_buffers
-                .into_iter()
-                .filter_map(|buffer_id| reservations.remove(&buffer_id))
-                .map(|reservation| reservation.popup_seed_id)
-                .collect::<Vec<_>>()
-        };
-        for popup_seed_id in removed_seed_ids {
-            self.popup_seed_instances.remove(&popup_seed_id);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn ensure_popup_seed(&mut self, window: &Window, buffer_id: BufferId) -> Result<(), String> {
-        let has_reservation = self
-            .popup_seed_reservations
-            .lock()
-            .map_err(|_| "popup seed reservations lock is poisoned".to_owned())?
-            .contains_key(&buffer_id);
-        if has_reservation {
-            return Ok(());
-        }
-        let Some(parent_instance) = self.instances.get(&buffer_id) else {
-            return Ok(());
-        };
-        let popup_seed_id = self.next_popup_seed_id;
-        self.next_popup_seed_id = self.next_popup_seed_id.saturating_add(1);
-        let popup_instance =
-            BrowserInstance::new_windows_popup_seed(popup_seed_id, window, parent_instance)?;
-        let popup_webview_ref =
-            AgileReference::new(&popup_instance.webview.webview()).map_err(|error| {
-                format!("failed to create linked popup seed `{popup_seed_id}`: {error}")
-            })?;
-        let reservation = PopupSeedReservation {
-            popup_seed_id,
-            popup_webview_ref,
-        };
-        self.popup_seed_instances
-            .insert(popup_seed_id, popup_instance);
-        self.popup_seed_reservations
-            .lock()
-            .map_err(|_| "popup seed reservations lock is poisoned".to_owned())?
-            .insert(buffer_id, reservation);
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn attach_popup_seed(&mut self, popup_seed_id: u64, buffer_id: BufferId) -> Result<(), String> {
-        {
-            let mut reservations = self
-                .popup_seed_reservations
-                .lock()
-                .map_err(|_| "popup seed reservations lock is poisoned".to_owned())?;
-            let parent_buffer_id = reservations.iter().find_map(|(buffer_id, reservation)| {
-                (reservation.popup_seed_id == popup_seed_id).then_some(*buffer_id)
-            });
-            if let Some(parent_buffer_id) = parent_buffer_id {
-                reservations.remove(&parent_buffer_id);
-            }
-        }
-        let Some(instance) = self.popup_seed_instances.remove(&popup_seed_id) else {
-            return Err(format!("popup seed `{popup_seed_id}` is missing"));
-        };
-        self.instances.insert(buffer_id, instance);
-        Ok(())
-    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 struct BrowserInstance {
     webview: wry::WebView,
-    last_requested_url: Option<String>,
+    desired_url: Option<String>,
     last_reported_url: Option<String>,
+    last_navigation_attempt_url: Option<String>,
+    last_navigation_attempt_at: Option<Instant>,
     last_bounds: BrowserViewportRect,
     visible: bool,
+    showing_home: bool,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -658,15 +504,10 @@ impl BrowserInstance {
         current_url: Option<&str>,
         event_tx: Sender<BrowserHostEvent>,
         web_context: &mut wry::WebContext,
-        #[cfg(target_os = "windows")] popup_seed_reservations: Arc<
-            Mutex<BTreeMap<BufferId, PopupSeedReservation>>,
-        >,
     ) -> Result<Self, String> {
         let ipc_event_tx = event_tx.clone();
         let title_event_tx = event_tx.clone();
         let page_load_event_tx = event_tx.clone();
-        let download_started_event_tx = event_tx.clone();
-        let download_completed_event_tx = event_tx.clone();
         let new_window_event_tx = event_tx;
         let builder = wry::WebViewBuilder::new_with_web_context(web_context)
             .with_visible(true)
@@ -695,54 +536,12 @@ impl BrowserInstance {
                     });
                 }
             })
-            .with_download_started_handler(move |url, path| {
-                let _ = download_started_event_tx.send(BrowserHostEvent::DownloadStarted {
-                    buffer_id,
-                    url,
-                    download_path: download_path_string(path),
-                });
-                true
-            })
-            .with_download_completed_handler(move |url, path, success| {
-                let _ = download_completed_event_tx.send(BrowserHostEvent::DownloadCompleted {
-                    buffer_id,
-                    url,
-                    download_path: optional_download_path_string(path),
-                    success,
-                });
-            })
             .with_new_window_req_handler(move |url, _features| {
-                #[cfg(target_os = "windows")]
-                {
-                    let reservation = popup_seed_reservations
-                        .lock()
-                        .ok()
-                        .and_then(|mut reservations| reservations.remove(&buffer_id));
-                    if let Some(reservation) = reservation {
-                        if let Ok(webview) = reservation.popup_webview_ref.resolve() {
-                            let _ =
-                                new_window_event_tx.send(BrowserHostEvent::NewWindowRequested {
-                                    buffer_id,
-                                    url,
-                                    popup_seed_id: Some(reservation.popup_seed_id),
-                                });
-                            wry::NewWindowResponse::Create { webview }
-                        } else {
-                            wry::NewWindowResponse::Allow
-                        }
-                    } else {
-                        wry::NewWindowResponse::Allow
-                    }
+                if let Some(url) = optional_non_empty_text(&url) {
+                    let _ = new_window_event_tx
+                        .send(BrowserHostEvent::NewWindowRequested { buffer_id, url });
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = new_window_event_tx.send(BrowserHostEvent::NewWindowRequested {
-                        buffer_id,
-                        url,
-                        popup_seed_id: None,
-                    });
-                    wry::NewWindowResponse::Deny
-                }
+                wry::NewWindowResponse::Deny
             })
             .with_ipc_handler(move |request| {
                 if let Some(event) = browser_host_event_for_ipc(buffer_id, request.body()) {
@@ -761,75 +560,27 @@ impl BrowserInstance {
         #[cfg(target_os = "macos")]
         let builder = builder.with_accept_first_mouse(true);
         let webview = match current_url {
-            Some(url) => builder
-                .with_url_and_headers(url, browser_request_headers()?)
-                .build_as_child(window),
+            Some(url) => builder.with_url(url).build_as_child(window),
             None => builder.with_html(BROWSER_HOME_HTML).build_as_child(window),
         }
         .map_err(|error| format!("failed to create embedded browser: {error}"))?;
+        webview.focus_parent().map_err(|error| {
+            format!("failed to restore parent focus after browser creation: {error}")
+        })?;
         Ok(Self {
             webview,
-            last_requested_url: current_url.map(str::to_owned),
-            last_reported_url: current_url.map(str::to_owned),
+            desired_url: current_url.map(str::to_owned),
+            last_reported_url: None,
+            last_navigation_attempt_url: current_url.map(str::to_owned),
+            last_navigation_attempt_at: current_url.map(|_| Instant::now()),
             last_bounds: bounds,
             visible: true,
+            showing_home: current_url.is_none(),
         })
     }
 
     fn open_devtools(&self) {
         self.webview.open_devtools();
-    }
-
-    #[cfg(target_os = "windows")]
-    fn new_windows_popup_seed(
-        popup_seed_id: u64,
-        window: &Window,
-        parent_instance: &BrowserInstance,
-    ) -> Result<Self, String> {
-        let builder = wry::WebViewBuilder::new()
-            .with_visible(false)
-            .with_bounds(to_wry_rect(BrowserViewportRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            }))
-            .with_devtools(true)
-            .with_hotkeys_zoom(true)
-            .with_back_forward_navigation_gestures(true)
-            .with_autoplay(true)
-            .with_clipboard(true)
-            .with_user_agent(BROWSER_USER_AGENT)
-            .with_navigation_handler(|_| true)
-            .with_drag_drop_handler(allow_browser_drag_drop)
-            .with_initialization_script(BROWSER_WEBVIEW_INIT_SCRIPT)
-            .with_environment(parent_instance.webview.environment())
-            .with_browser_accelerator_keys(false);
-        let builder = if let Some(additional_args) = browser_additional_args() {
-            builder.with_additional_browser_args(additional_args)
-        } else {
-            builder
-        };
-        let webview = builder
-            .with_html(BROWSER_HOME_HTML)
-            .build_as_child(window)
-            .map_err(|error| {
-                format!(
-                    "failed to create popup seed `{popup_seed_id}` for embedded browser: {error}"
-                )
-            })?;
-        Ok(Self {
-            webview,
-            last_requested_url: None,
-            last_reported_url: None,
-            last_bounds: BrowserViewportRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            visible: false,
-        })
     }
 
     fn sync(
@@ -852,35 +603,7 @@ impl BrowserInstance {
                         .map_err(|error| format!("failed to show embedded browser: {error}"))?;
                     self.visible = true;
                 }
-                if self.last_requested_url.as_deref() != current_url {
-                    match current_url {
-                        Some(url) => {
-                            self.webview
-                                .load_url_with_headers(url, browser_request_headers()?)
-                                .map_err(|error| {
-                                    format!(
-                                        "failed to navigate embedded browser to `{url}`: {error}"
-                                    )
-                                })?;
-                        }
-                        None => {
-                            self.webview.load_html(BROWSER_HOME_HTML).map_err(|error| {
-                                format!("failed to load embedded browser welcome page: {error}")
-                            })?;
-                        }
-                    }
-                    self.last_requested_url = current_url.map(str::to_owned);
-                }
-                if let Ok(url) = self.webview.url()
-                    && !url.trim().is_empty()
-                    && self.last_reported_url.as_deref() != Some(url.as_str())
-                {
-                    self.last_reported_url = Some(url.clone());
-                    location_updates.push(BrowserLocationUpdate {
-                        buffer_id: surface.buffer_id,
-                        current_url: url,
-                    });
-                }
+                self.sync_navigation(surface.buffer_id, current_url, location_updates)?;
             }
             None => {
                 if self.visible {
@@ -894,6 +617,81 @@ impl BrowserInstance {
         }
         Ok(())
     }
+
+    fn sync_navigation(
+        &mut self,
+        buffer_id: BufferId,
+        desired_url: Option<&str>,
+        location_updates: &mut Vec<BrowserLocationUpdate>,
+    ) -> Result<(), String> {
+        if self.desired_url.as_deref() != desired_url {
+            self.desired_url = desired_url.map(str::to_owned);
+            self.last_navigation_attempt_url = None;
+            self.last_navigation_attempt_at = None;
+        }
+        match desired_url {
+            Some(url) => {
+                if self.last_reported_url.as_deref() != Some(url)
+                    && browser_navigation_retry_required(
+                        Some(url),
+                        self.last_reported_url.as_deref(),
+                        self.last_navigation_attempt_url.as_deref(),
+                        self.last_navigation_attempt_at
+                            .map(|attempt| attempt.elapsed()),
+                    )
+                {
+                    self.webview.load_url(url).map_err(|error| {
+                        format!("failed to navigate embedded browser to `{url}`: {error}")
+                    })?;
+                    self.last_navigation_attempt_url = Some(url.to_owned());
+                    self.last_navigation_attempt_at = Some(Instant::now());
+                }
+                self.showing_home = false;
+            }
+            None => {
+                if !self.showing_home {
+                    self.webview.load_html(BROWSER_HOME_HTML).map_err(|error| {
+                        format!("failed to load embedded browser welcome page: {error}")
+                    })?;
+                    self.last_navigation_attempt_url = None;
+                    self.last_navigation_attempt_at = None;
+                    self.last_reported_url = None;
+                    self.showing_home = true;
+                }
+            }
+        }
+        if desired_url.is_some()
+            && let Ok(url) = self.webview.url()
+            && let Some(url) = optional_non_empty_text(&url)
+            && self.last_reported_url.as_deref() != Some(url.as_str())
+        {
+            self.last_reported_url = Some(url.clone());
+            location_updates.push(BrowserLocationUpdate {
+                buffer_id,
+                current_url: url,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn browser_navigation_retry_required(
+    desired_url: Option<&str>,
+    reported_url: Option<&str>,
+    last_attempt_url: Option<&str>,
+    last_attempt_age: Option<Duration>,
+) -> bool {
+    let Some(desired_url) = desired_url else {
+        return false;
+    };
+    if reported_url == Some(desired_url) {
+        return false;
+    }
+    if last_attempt_url != Some(desired_url) {
+        return true;
+    }
+    last_attempt_age.is_none_or(|age| age >= BROWSER_NAVIGATION_RETRY_INTERVAL)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -980,25 +778,16 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_headers_include_custom_user_agent() {
-        let headers = browser_request_headers().expect("browser request headers should build");
-        assert_eq!(
-            headers
-                .get(USER_AGENT)
-                .and_then(|value| value.to_str().ok()),
-            Some(BROWSER_USER_AGENT)
-        );
+    fn browser_user_agent_header_is_valid() {
+        let user_agent = wry::http::HeaderValue::from_str(BROWSER_USER_AGENT)
+            .expect("browser user agent should be valid");
+        assert_eq!(user_agent.to_str().ok(), Some(BROWSER_USER_AGENT));
     }
 
     #[test]
     fn optional_non_empty_text_trims_blank_values() {
         assert_eq!(optional_non_empty_text("  Volt  "), Some("Volt".to_owned()));
         assert_eq!(optional_non_empty_text("   "), None);
-    }
-
-    #[test]
-    fn optional_download_path_string_ignores_missing_path() {
-        assert_eq!(optional_download_path_string(None), None);
     }
 
     #[cfg(target_os = "windows")]
@@ -1026,5 +815,41 @@ mod tests {
         assert!(args.contains(BROWSER_DEFAULT_WEBVIEW2_ARGS));
         assert!(args.contains("--remote-debugging-port=0"));
         assert!(!args.contains("--disable-web-security"));
+    }
+
+    #[test]
+    fn browser_navigation_retry_is_required_for_new_targets() {
+        assert!(browser_navigation_retry_required(
+            Some("https://example.com"),
+            None,
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn browser_navigation_retry_waits_for_retry_interval() {
+        assert!(!browser_navigation_retry_required(
+            Some("https://example.com"),
+            None,
+            Some("https://example.com"),
+            Some(Duration::from_millis(200)),
+        ));
+        assert!(browser_navigation_retry_required(
+            Some("https://example.com"),
+            None,
+            Some("https://example.com"),
+            Some(Duration::from_millis(600)),
+        ));
+    }
+
+    #[test]
+    fn browser_navigation_retry_stops_after_target_url_is_reported() {
+        assert!(!browser_navigation_retry_required(
+            Some("https://example.com"),
+            Some("https://example.com"),
+            Some("https://example.com"),
+            Some(Duration::from_millis(600)),
+        ));
     }
 }

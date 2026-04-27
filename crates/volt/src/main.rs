@@ -30,6 +30,7 @@ use editor_syntax::SyntaxRegistry;
 use editor_terminal::TerminalSession;
 use editor_theme::ThemeRegistry;
 
+mod process_supervisor;
 #[cfg(test)]
 mod standalone_user;
 #[cfg(test)]
@@ -451,7 +452,12 @@ fn load_user_library() -> Arc<dyn UserLibrary> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let options = parse_launch_options(std::env::args().skip(1))?;
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if process_supervisor::maybe_run(&args)? {
+        return Ok(());
+    }
+
+    let options = parse_launch_options(args)?;
     let user_library = load_user_library();
     match options.mode {
         LaunchMode::ShellDemo => {

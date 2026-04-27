@@ -33,6 +33,11 @@ indent = 2
 format_on_save = false
 use_tabs = false
 
+[langs.diff]
+indent = 2
+format_on_save = false
+use_tabs = false
+
 [langs.gitcommit]
 indent = 4
 format_on_save = false

@@ -1,6 +1,7 @@
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::process::Stdio;
 
+use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use editor_lsp::LspDocumentTextEdits;
 use url::Url;
 
@@ -109,10 +110,17 @@ pub(super) fn run_search_command(
     command: &str,
     args: &[String],
 ) -> Result<String, String> {
-    let mut process = Command::new(command);
+    let (program, args) = supervised_command_if_resolved(
+        command,
+        args,
+        &[],
+        None,
+        ProcessSupervisionMode::Background,
+    );
+    let mut process = Command::new(&program);
     configure_background_command(&mut process);
     let mut child = process
-        .args(args)
+        .args(&args)
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

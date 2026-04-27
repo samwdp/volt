@@ -16,6 +16,8 @@ pub mod cpp;
 pub mod csharp;
 /// CSS language support and theme mappings.
 pub mod css;
+/// Diff language support and theme mappings.
+pub mod diff;
 /// Elixir language support and theme mappings.
 pub mod elixir;
 /// Git commit language support and theme mappings.
@@ -146,6 +148,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         cpp::syntax_language(),
         csharp::syntax_language(),
         css::syntax_language(),
+        diff::syntax_language(),
         elixir::syntax_language(),
         gitcommit::syntax_language(),
         go::syntax_language(),

@@ -1,9 +1,10 @@
 #![doc = r#"Asynchronous job scheduling, process supervision, and compilation task coordination."#]
 
 use std::{
+    env,
     error::Error,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -29,6 +30,192 @@ fn configure_background_command(_command: &mut Command) {
 
         _command.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+/// Environment variable used to advertise the Volt executable that can supervise child processes.
+pub const PROCESS_SUPERVISOR_EXE_ENV: &str = "VOLT_PROCESS_SUPERVISOR_EXE";
+
+/// Hidden flag used to run the Volt executable in child-process supervision mode.
+pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
+
+const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
+
+/// Controls how the supervised child should be launched on the current platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSupervisionMode {
+    /// The child should stay hidden from the desktop shell when possible.
+    Background,
+    /// The child is interactive and should inherit the caller's visible terminal/PTY state.
+    Interactive,
+}
+
+/// Resolves a launchable command path using the effective environment when possible.
+pub fn resolve_command_path(
+    program: &str,
+    explicit_env: &[(String, String)],
+    base_env: Option<&[(String, String)]>,
+) -> Option<String> {
+    if Path::new(program).components().count() != 1 {
+        return Some(program.to_owned());
+    }
+
+    let path_value = environment_value(explicit_env, base_env, "PATH")?;
+    let names = command_candidate_names(program, explicit_env, base_env);
+    for directory in path_value
+        .split(path_list_separator())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        for name in &names {
+            let candidate = Path::new(directory).join(name);
+            if is_launch_candidate(&candidate) {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Wraps a command with Volt's parent-death supervisor when the target program can be resolved.
+pub fn supervised_command_if_resolved(
+    program: &str,
+    args: &[String],
+    explicit_env: &[(String, String)],
+    base_env: Option<&[(String, String)]>,
+    mode: ProcessSupervisionMode,
+) -> (String, Vec<String>) {
+    let Some(program) = resolve_command_path(program, explicit_env, base_env) else {
+        return (program.to_owned(), args.to_vec());
+    };
+    supervised_command(&program, args, mode)
+}
+
+/// Wraps a command with Volt's parent-death supervisor when the runtime advertises one.
+pub fn supervised_command(
+    program: &str,
+    args: &[String],
+    mode: ProcessSupervisionMode,
+) -> (String, Vec<String>) {
+    let supervisor_exe = env::var_os(PROCESS_SUPERVISOR_EXE_ENV)
+        .map(PathBuf::from)
+        .or_else(default_process_supervisor_executable);
+    let Some(supervisor_exe) = supervisor_exe else {
+        return (program.to_owned(), args.to_vec());
+    };
+
+    let mut supervised_args = vec![
+        PROCESS_SUPERVISOR_FLAG.to_owned(),
+        std::process::id().to_string(),
+    ];
+    if matches!(mode, ProcessSupervisionMode::Background) {
+        supervised_args.push(PROCESS_SUPERVISOR_BACKGROUND_FLAG.to_owned());
+    }
+    supervised_args.push("--".to_owned());
+    supervised_args.push(program.to_owned());
+    supervised_args.extend(args.iter().cloned());
+
+    (
+        supervisor_exe.to_string_lossy().into_owned(),
+        supervised_args,
+    )
+}
+
+fn default_process_supervisor_executable() -> Option<PathBuf> {
+    let current_exe = env::current_exe().ok()?;
+    let stem = current_exe.file_stem()?.to_str()?;
+    (stem == "volt").then_some(current_exe)
+}
+
+fn environment_value(
+    explicit_env: &[(String, String)],
+    base_env: Option<&[(String, String)]>,
+    key: &str,
+) -> Option<String> {
+    lookup_env_value(explicit_env, key)
+        .map(str::to_owned)
+        .or_else(|| base_env.and_then(|env| lookup_env_value(env, key).map(str::to_owned)))
+        .or_else(|| env::var(key).ok())
+}
+
+fn lookup_env_value<'a>(env_pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    #[cfg(windows)]
+    {
+        env_pairs
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        env_pairs
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+fn command_candidate_names(
+    program: &str,
+    explicit_env: &[(String, String)],
+    base_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if Path::new(program).extension().is_some() {
+            return vec![program.to_owned()];
+        }
+
+        let mut names = windows_command_extensions(explicit_env, base_env)
+            .into_iter()
+            .map(|extension| format!("{program}{extension}"))
+            .collect::<Vec<_>>();
+        names.push(program.to_owned());
+        names.dedup();
+        names
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (explicit_env, base_env);
+        vec![program.to_owned()]
+    }
+}
+
+#[cfg(windows)]
+fn windows_command_extensions(
+    explicit_env: &[(String, String)],
+    base_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    environment_value(explicit_env, base_env, "PATHEXT")
+        .map(|value| {
+            value
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".com", ".exe", ".bat", ".cmd"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+fn path_list_separator() -> char {
+    #[cfg(windows)]
+    {
+        ';'
+    }
+    #[cfg(not(windows))]
+    {
+        ':'
+    }
+}
+
+fn is_launch_candidate(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Classifies the type of work a process represents.
@@ -384,9 +571,19 @@ fn build_job_command(
     #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
     #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
 ) -> Command {
-    let mut command = Command::new(program);
+    let (program, args) = supervised_command_if_resolved(
+        program,
+        spec.args(),
+        spec.env(),
+        #[cfg(windows)]
+        fnm_env,
+        #[cfg(not(windows))]
+        None,
+        ProcessSupervisionMode::Background,
+    );
+    let mut command = Command::new(&program);
     configure_background_command(&mut command);
-    command.args(spec.args());
+    command.args(&args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     if let Some(cwd) = spec.cwd() {
@@ -416,34 +613,13 @@ fn windows_launch_program_candidates(program: &str) -> Vec<String> {
     }
 
     let mut candidates = Vec::new();
-    for extension in windows_command_extensions() {
+    for extension in windows_command_extensions(&[], None) {
         let candidate = format!("{program}{extension}");
         if candidate != program && !candidates.iter().any(|existing| existing == &candidate) {
             candidates.push(candidate);
         }
     }
     candidates
-}
-
-#[cfg(windows)]
-fn windows_command_extensions() -> Vec<String> {
-    std::env::var("PATHEXT")
-        .ok()
-        .map(|value| {
-            value
-                .split(';')
-                .map(str::trim)
-                .filter(|extension| !extension.is_empty())
-                .map(|extension| extension.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-        })
-        .filter(|extensions| !extensions.is_empty())
-        .unwrap_or_else(|| {
-            [".com", ".exe", ".bat", ".cmd"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        })
 }
 
 #[cfg(windows)]

@@ -2113,7 +2113,7 @@ mod tests {
             settings
                 .get("analyzersEnabled")
                 .and_then(|value| value.as_bool()),
-            Some(false)
+            Some(true)
         );
         assert_eq!(
             settings

@@ -14,6 +14,7 @@ use std::{
 };
 
 use editor_buffer::{TextPoint, TextRange};
+use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use lsp_types::{
     ClientCapabilities, ClientInfo, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
     CompletionParams, Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
@@ -2266,10 +2267,20 @@ fn build_lsp_command(
     #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
     #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
 ) -> Command {
-    let mut command = Command::new(program);
+    let (program, args) = supervised_command_if_resolved(
+        program,
+        args,
+        env,
+        #[cfg(windows)]
+        fnm_env,
+        #[cfg(not(windows))]
+        None,
+        ProcessSupervisionMode::Background,
+    );
+    let mut command = Command::new(&program);
     configure_lsp_command(&mut command);
     command
-        .args(args)
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

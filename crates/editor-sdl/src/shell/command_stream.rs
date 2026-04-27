@@ -2,6 +2,7 @@ use super::{
     treesitter_install::{TreeSitterInstallState, continue_tree_sitter_install},
     *,
 };
+use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use std::{
     io::{BufReader, Read},
     process::Stdio,
@@ -333,6 +334,13 @@ fn run_streamed_command(
         on_exit,
         notify_on_success,
     } = request;
+    let (program, args) = supervised_command_if_resolved(
+        &program,
+        &args,
+        &[],
+        None,
+        ProcessSupervisionMode::Background,
+    );
     let mut command = Command::new(&program);
     command
         .args(&args)

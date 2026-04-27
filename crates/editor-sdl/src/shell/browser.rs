@@ -12,6 +12,7 @@ impl Default for BrowserBufferState {
         input.set_placeholder(Some("https://example.com".to_owned()));
         Self {
             current_url: None,
+            requested_url: None,
             page_title: None,
             is_loading: false,
             active_pane: BrowserPane::Input,
@@ -27,6 +28,7 @@ impl Default for BrowserBufferState {
 #[derive(Debug, Clone)]
 pub(super) struct BrowserBufferState {
     pub(super) current_url: Option<String>,
+    pub(super) requested_url: Option<String>,
     pub(super) page_title: Option<String>,
     pub(super) is_loading: bool,
     pub(super) active_pane: BrowserPane,
@@ -54,8 +56,23 @@ pub(super) fn navigate_browser_buffer(
     let url = normalize_browser_url(raw_url);
     let user_library = shell_user_library(runtime);
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    set_browser_buffer_location(buffer, &url, true, &*user_library);
+    request_browser_buffer_navigation(buffer, &url, true, &*user_library);
     Ok(())
+}
+
+pub(super) fn submit_browser_input(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let text = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(input) = buffer.input_field() else {
+            return Ok(());
+        };
+        input.text().trim().to_owned()
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    navigate_browser_buffer(runtime, buffer_id, &text)
 }
 
 pub(super) fn normalize_browser_url(raw_url: &str) -> String {
@@ -252,8 +269,38 @@ fn refresh_browser_buffer_display_name(buffer: &mut ShellBuffer) {
     };
     buffer.name = browser_buffer_display_name(
         state.page_title.as_deref(),
-        state.current_url.as_deref(),
+        browser_display_url(state),
         state.is_loading,
+    );
+}
+
+fn browser_display_url(state: &BrowserBufferState) -> Option<&str> {
+    state
+        .requested_url
+        .as_deref()
+        .or(state.current_url.as_deref())
+}
+
+fn refresh_browser_buffer_text(
+    buffer: &mut ShellBuffer,
+    user_library: &dyn UserLibrary,
+    clear_input: bool,
+) {
+    let display_url = buffer
+        .browser_state
+        .as_ref()
+        .and_then(browser_display_url)
+        .map(str::to_owned);
+    buffer.replace_with_lines(user_library.browser_buffer_lines(display_url.as_deref()));
+    let Some(state) = buffer.browser_state.as_mut() else {
+        return;
+    };
+    if clear_input {
+        state.input.clear();
+    }
+    state.footer_pane.replace_lines(
+        vec![user_library.browser_input_hint(display_url.as_deref())],
+        true,
     );
 }
 
@@ -273,6 +320,24 @@ pub(super) fn browser_buffer_display_name(
     }
 }
 
+pub(super) fn request_browser_buffer_navigation(
+    buffer: &mut ShellBuffer,
+    url: &str,
+    clear_input: bool,
+    user_library: &dyn UserLibrary,
+) {
+    let state = buffer
+        .browser_state
+        .get_or_insert_with(BrowserBufferState::default);
+    if state.requested_url.as_deref() != Some(url) {
+        state.requested_url = Some(url.to_owned());
+        state.page_title = None;
+    }
+    state.is_loading = true;
+    refresh_browser_buffer_text(buffer, user_library, clear_input);
+    refresh_browser_buffer_display_name(buffer);
+}
+
 pub(super) fn set_browser_buffer_location(
     buffer: &mut ShellBuffer,
     url: &str,
@@ -282,20 +347,30 @@ pub(super) fn set_browser_buffer_location(
     let state = buffer
         .browser_state
         .get_or_insert_with(BrowserBufferState::default);
-    let changed = state.current_url.as_deref() != Some(url);
-    if changed {
-        state.current_url = Some(url.to_owned());
-        buffer.replace_with_lines(user_library.browser_buffer_lines(Some(url)));
-    }
-    if let Some(state) = buffer.browser_state.as_mut() {
-        if clear_input {
-            state.input.clear();
-        }
-        state
-            .footer_pane
-            .replace_lines(vec![user_library.browser_input_hint(Some(url))], true);
-    }
+    state.current_url = Some(url.to_owned());
+    state.requested_url = Some(url.to_owned());
+    refresh_browser_buffer_text(buffer, user_library, clear_input);
     refresh_browser_buffer_display_name(buffer);
+}
+
+pub(super) fn apply_browser_page_load_state(
+    buffer: &mut ShellBuffer,
+    url: &str,
+    is_loading: bool,
+    user_library: &dyn UserLibrary,
+) {
+    let state = buffer
+        .browser_state
+        .get_or_insert_with(BrowserBufferState::default);
+    let can_commit_request =
+        state.requested_url.is_none() || state.requested_url.as_deref() == Some(url);
+    if can_commit_request {
+        state.current_url = Some(url.to_owned());
+        state.requested_url = Some(url.to_owned());
+        state.is_loading = is_loading;
+        refresh_browser_buffer_text(buffer, user_library, false);
+        refresh_browser_buffer_display_name(buffer);
+    }
 }
 
 pub(super) fn set_browser_buffer_title(buffer: &mut ShellBuffer, title: Option<&str>) {
@@ -308,16 +383,6 @@ pub(super) fn set_browser_buffer_title(buffer: &mut ShellBuffer, title: Option<&
         .map(str::to_owned);
     if state.page_title != title {
         state.page_title = title;
-        refresh_browser_buffer_display_name(buffer);
-    }
-}
-
-pub(super) fn set_browser_buffer_loading(buffer: &mut ShellBuffer, is_loading: bool) {
-    let state = buffer
-        .browser_state
-        .get_or_insert_with(BrowserBufferState::default);
-    if state.is_loading != is_loading {
-        state.is_loading = is_loading;
         refresh_browser_buffer_display_name(buffer);
     }
 }
@@ -342,10 +407,12 @@ pub(super) fn apply_browser_location_updates(
 
 fn buffer_browser_host_url(buffer: &ShellBuffer) -> Option<String> {
     if buffer_is_browser(&buffer.kind) {
-        return buffer
-            .browser_state
-            .as_ref()
-            .and_then(|browser| browser.current_url.clone());
+        return buffer.browser_state.as_ref().and_then(|browser| {
+            browser
+                .requested_url
+                .clone()
+                .or_else(|| browser.current_url.clone())
+        });
     }
     buffer.pdf_preview_url()
 }
@@ -483,6 +550,19 @@ mod tests {
         assert_eq!(
             browser_buffer_display_name(None, Some("https://example.com"), true),
             "*browser* [loading] https://example.com"
+        );
+    }
+
+    #[test]
+    fn browser_display_url_prefers_requested_navigation() {
+        let state = BrowserBufferState {
+            current_url: Some("https://volt.test/current".to_owned()),
+            requested_url: Some("https://volt.test/requested".to_owned()),
+            ..BrowserBufferState::default()
+        };
+        assert_eq!(
+            browser_display_url(&state),
+            Some("https://volt.test/requested")
         );
     }
 }

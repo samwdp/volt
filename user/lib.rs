@@ -1260,7 +1260,7 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 44);
+        assert!(languages.len() >= 45);
         let ids = languages
             .iter()
             .map(|language| language.id())
@@ -1272,6 +1272,7 @@ mod tests {
         assert!(ids.contains(&"csharp"));
         assert!(ids.contains(&"cpp"));
         assert!(ids.contains(&"css"));
+        assert!(ids.contains(&"diff"));
         assert!(ids.contains(&"elixir"));
         assert!(ids.contains(&"gitcommit"));
         assert!(ids.contains(&"go"));
@@ -1357,6 +1358,10 @@ mod tests {
         assert_eq!(
             language_extensions(&languages, "css"),
             Some(vec!["css".to_owned()])
+        );
+        assert_eq!(
+            language_extensions(&languages, "diff"),
+            Some(vec!["diff".to_owned(), "patch".to_owned()])
         );
         assert_eq!(
             language_extensions(&languages, "elixir"),
@@ -1536,6 +1541,7 @@ mod tests {
                 "xslt".to_owned(),
                 "xsl".to_owned(),
                 "rng".to_owned(),
+                "csproj".to_owned(),
             ])
         );
         assert_eq!(

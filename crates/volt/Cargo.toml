@@ -26,7 +26,11 @@ editor-syntax = { path = "../editor-syntax" }
 editor-terminal = { path = "../editor-terminal" }
 editor-theme = { path = "../editor-theme" }
 editor-icons = { path = "../editor-icons" }
+sysinfo = "0.37.2"
 user = { package = "volt-user", path = "../../user" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process"] }
 
 [build-dependencies]
 toml = "0.8.23"

@@ -1142,6 +1142,13 @@ pub(super) fn git_view_lines_or_error(
     }
 }
 
+fn git_view_language_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        GIT_DIFF_KIND => Some("diff"),
+        _ => None,
+    }
+}
+
 pub(super) fn open_git_view_buffer(
     runtime: &mut EditorRuntime,
     kind: &str,
@@ -1149,13 +1156,13 @@ pub(super) fn open_git_view_buffer(
     view: GitViewState,
 ) -> Result<(), String> {
     let lines = git_view_lines_or_error(runtime, &view);
-    let existing = shell_ui(runtime)
-        .ok()
-        .and_then(|ui| find_shell_buffer_by_kind(ui, kind));
     let workspace_id = runtime
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
+    let buffer_kind = BufferKind::Plugin(kind.to_owned());
+    let language_id = git_view_language_id(kind).map(str::to_owned);
+    let existing = find_workspace_named_buffer(runtime, workspace_id, name, &buffer_kind)?;
     if let Some(existing) = existing {
         runtime
             .model_mut()
@@ -1163,20 +1170,21 @@ pub(super) fn open_git_view_buffer(
             .map_err(|error| error.to_string())?;
         let ui = shell_ui_mut(runtime)?;
         ui.focus_buffer_in_active_pane(existing);
-        let buffer = shell_buffer_mut(runtime, existing)?;
-        buffer.set_git_view(view);
-        buffer.replace_with_lines(lines);
+        {
+            let buffer = shell_buffer_mut(runtime, existing)?;
+            buffer.set_git_view(view);
+            buffer.replace_with_lines(lines);
+            buffer.set_language_id(language_id.clone());
+        }
+        if language_id.is_some() {
+            queue_buffer_syntax_refresh(runtime, existing)?;
+        }
         return Ok(());
     }
 
     let buffer_id = runtime
         .model_mut()
-        .create_buffer(
-            workspace_id,
-            name,
-            BufferKind::Plugin(kind.to_owned()),
-            None,
-        )
+        .create_buffer(workspace_id, name, buffer_kind, None)
         .map_err(|error| error.to_string())?;
     let buffer = runtime
         .model()
@@ -1187,9 +1195,13 @@ pub(super) fn open_git_view_buffer(
     let user_library = shell_user_library(runtime);
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &*user_library);
     shell_buffer.set_git_view(view);
+    shell_buffer.set_language_id(language_id.clone());
     let ui = shell_ui_mut(runtime)?;
     ui.insert_buffer(shell_buffer);
     ui.focus_buffer_in_active_pane(buffer_id);
+    if language_id.is_some() {
+        queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    }
     Ok(())
 }
 
@@ -1199,9 +1211,20 @@ pub(super) fn apply_git_view(
     view: GitViewState,
 ) -> Result<(), String> {
     let lines = git_view_lines_or_error(runtime, &view);
-    let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    buffer.set_git_view(view);
-    buffer.replace_with_lines(lines);
+    let refresh_syntax = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let language_id = match &buffer.kind {
+            BufferKind::Plugin(kind) if kind == GIT_DIFF_KIND => Some("diff".to_owned()),
+            _ => None,
+        };
+        buffer.set_git_view(view);
+        buffer.replace_with_lines(lines);
+        buffer.set_language_id(language_id.clone());
+        language_id.is_some()
+    };
+    if refresh_syntax {
+        queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    }
     Ok(())
 }
 
@@ -3227,6 +3250,27 @@ pub(super) fn toggle_git_section(runtime: &mut EditorRuntime) -> Result<bool, St
         state.collapsed.toggle(&section_id);
     }
     apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
+    Ok(true)
+}
+
+pub(super) fn handle_git_status_tab(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let meta = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer_is_git_status(&buffer.kind) {
+            return Ok(false);
+        }
+        buffer
+            .section_line_meta(buffer.cursor_point().line)
+            .cloned()
+    };
+    if matches!(
+        meta.as_ref().map(|meta| &meta.kind),
+        Some(SectionRenderLineKind::Header { .. })
+    ) {
+        return toggle_git_section(runtime);
+    }
+    diff_git_dwim(runtime, buffer_id, meta.as_ref(), "")?;
     Ok(true)
 }
 

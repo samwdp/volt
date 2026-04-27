@@ -17,7 +17,10 @@ use sdl3::video::WindowFlags;
 use std::{
     collections::BTreeMap,
     env, fs,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -74,6 +77,7 @@ struct HeaderlineTestUserLibrary {
     scrolloff: f64,
     headerline_lines: Vec<String>,
     headerline_requires_scrolled_viewport: bool,
+    headerline_call_count: Arc<AtomicUsize>,
     pdf_open_mode: PdfOpenMode,
 }
 
@@ -83,6 +87,7 @@ impl Default for HeaderlineTestUserLibrary {
             scrolloff: 1.0,
             headerline_lines: vec!["fn render(value: usize)".to_owned()],
             headerline_requires_scrolled_viewport: false,
+            headerline_call_count: Arc::new(AtomicUsize::new(0)),
             pdf_open_mode: PdfOpenMode::Rendered,
         }
     }
@@ -101,6 +106,10 @@ impl HeaderlineTestUserLibrary {
             pdf_open_mode,
             ..Self::default()
         }
+    }
+
+    fn headerline_call_count(&self) -> usize {
+        self.headerline_call_count.load(Ordering::Relaxed)
     }
 }
 
@@ -281,6 +290,7 @@ impl UserLibrary for HeaderlineTestUserLibrary {
     }
 
     fn headerline_lines(&self, context: &GhostTextContext<'_>) -> Vec<String> {
+        self.headerline_call_count.fetch_add(1, Ordering::Relaxed);
         if self.headerline_requires_scrolled_viewport && context.viewport_top_line == 0 {
             return Vec::new();
         }
@@ -1440,6 +1450,77 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
     assert_eq!(shell_buffer(&state.runtime, buffer_id)?.line_count(), 1);
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_open_parent_command_uses_parent_root() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("oil-open-parent");
+    let child = root.join("nested");
+    std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+
+    open_workspace_from_project(&mut state.runtime, "oil-parent", &root)?;
+    open_oil_directory(&mut state.runtime, child)?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    state
+        .runtime
+        .execute_command("oil.open-parent")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .directory_state()
+            .ok_or_else(|| "directory state missing".to_owned())?
+            .root,
+        root
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_open_directory_is_scoped_per_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("oil-workspace-first");
+    let second_root = unique_temp_dir("oil-workspace-second");
+
+    let first_workspace = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    open_oil_directory(&mut state.runtime, first_root.clone())?;
+    let first_buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    let second_workspace = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    open_oil_directory(&mut state.runtime, second_root.clone())?;
+    let second_buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    assert_ne!(first_workspace, second_workspace);
+    assert_ne!(first_buffer_id, second_buffer_id);
+    assert_eq!(
+        shell_buffer(&state.runtime, first_buffer_id)?
+            .directory_state()
+            .ok_or_else(|| "first oil directory state missing".to_owned())?
+            .root,
+        first_root
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, second_buffer_id)?
+            .directory_state()
+            .ok_or_else(|| "second oil directory state missing".to_owned())?
+            .root,
+        second_root
+    );
+
+    switch_runtime_workspace(&mut state.runtime, first_workspace)?;
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, first_buffer_id);
+
+    switch_runtime_workspace(&mut state.runtime, second_workspace)?;
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, second_buffer_id);
+
+    std::fs::remove_dir_all(&first_root).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&second_root).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -3198,6 +3279,58 @@ fn ensure_visible_scrolloff_keeps_cursor_off_top_edge() -> Result<(), String> {
 }
 
 #[test]
+fn ensure_visible_builds_wrap_cache_for_large_buffers() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let lines = (0..(LARGE_BUFFER_WRAP_CACHE_LINE_THRESHOLD + 2))
+        .map(|index| {
+            if index % 7 == 0 {
+                "abcdef".to_owned()
+            } else {
+                "abcde".to_owned()
+            }
+        })
+        .collect();
+    let buffer_id = install_text_test_buffer(&mut state, "*large-wrap-cache*", lines)?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.set_viewport_lines(20);
+    buffer.set_cursor(TextPoint::new(10, 0));
+    buffer.ensure_visible(20, 5, 4, 0, 0);
+
+    let cache = buffer
+        .wrap_cache
+        .as_ref()
+        .ok_or_else(|| "wrap cache was not built for large buffer".to_owned())?;
+    assert_eq!(
+        cache.max_scroll_row(20),
+        buffer.max_scroll_row_for_wrapped_rows(20, 5, 4)
+    );
+    Ok(())
+}
+
+#[test]
+fn single_line_insert_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*single-line-wrap-edit*",
+        vec!["abcde".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    let cache = WrapRowCache::build(buffer, 5, 4);
+    buffer.wrap_cache = Some(cache);
+    buffer.set_cursor(TextPoint::new(0, 5));
+
+    buffer.insert_text("f");
+
+    let cache = buffer
+        .wrap_cache
+        .as_ref()
+        .ok_or_else(|| "wrap cache was cleared after single-line insert".to_owned())?;
+    assert_eq!(cache.prefix_rows, vec![0, 2, 3]);
+    Ok(())
+}
+
+#[test]
 fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result<(), String> {
     let render_width = 640;
     let render_height = 360;
@@ -3237,6 +3370,7 @@ fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result
         state.runtime.services().get::<ThemeRegistry>(),
         cell_width,
         line_height,
+        false,
     )
     .ok_or_else(|| "buffer cursor screen anchor was missing".to_owned())?;
     let cursor_body_row = ((anchor.y - layout.body_y) / line_height) as usize;
@@ -3247,6 +3381,42 @@ fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result
             .saturating_sub(1)
             .saturating_sub(expected_scrolloff)
     );
+    Ok(())
+}
+
+#[test]
+fn sync_visible_buffer_layouts_reuses_headerline_snapshot_while_typing() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let user_library = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*typing-headerline-cache*",
+        vec!["alpha".to_owned()],
+    )?;
+
+    let before = user_library.headerline_call_count();
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+    let after_first = user_library.headerline_call_count();
+    assert!(after_first > before);
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+    }
+    state.last_text_input_at = Some(Instant::now());
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(user_library.headerline_call_count(), after_first);
     Ok(())
 }
 
@@ -4060,6 +4230,7 @@ fn screen_point_for_buffer_point(
             state.runtime.services().get::<ThemeRegistry>(),
             cell_width,
             line_height,
+            false,
         )
         .ok_or_else(|| "buffer cursor screen anchor was missing".to_owned())?
     };
@@ -4083,6 +4254,22 @@ fn git_status_line_for_action_detail(
                 == Some(detail)
         })
         .ok_or_else(|| format!("git status line for `{detail}` and `{action_id}` was not found"))
+}
+
+fn git_status_header_line(
+    state: &ShellState,
+    buffer_id: BufferId,
+    section_id: &str,
+) -> Result<usize, String> {
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    (0..buffer.line_count())
+        .find(|line_index| {
+            buffer.section_line_meta(*line_index).is_some_and(|meta| {
+                meta.section_id == section_id
+                    && matches!(meta.kind, SectionRenderLineKind::Header { .. })
+            })
+        })
+        .ok_or_else(|| format!("git status header line for section `{section_id}` was not found"))
 }
 
 fn set_git_status_visual_line_selection(
@@ -4987,6 +5174,150 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
     assert!(unstaged.is_empty());
     assert!(untracked.is_empty());
 
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_tab_on_unstaged_file_opens_diff_buffer() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-tab-unstaged")?;
+    std::fs::write(repo.join("alpha.txt"), "before\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "add alpha"])?;
+    std::fs::write(repo.join("alpha.txt"), "after\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let status_buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha_line = git_status_line_for_action_detail(
+        &state,
+        status_buffer_id,
+        GIT_ACTION_STAGE_FILE,
+        "alpha.txt",
+    )?;
+    shell_buffer_mut(&mut state.runtime, status_buffer_id)?
+        .set_cursor(TextPoint::new(alpha_line, 0));
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::Tab, Mod::NOMOD)
+            .map_err(|error| error.to_string())?
+    );
+
+    let diff_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let diff_buffer = shell_buffer(&state.runtime, diff_buffer_id)?;
+    assert_ne!(diff_buffer_id, status_buffer_id);
+    assert!(matches!(
+        &diff_buffer.kind,
+        BufferKind::Plugin(kind) if kind == GIT_DIFF_KIND
+    ));
+    assert_eq!(diff_buffer.language_id(), Some("diff"));
+    assert!((0..diff_buffer.line_count()).any(|line_index| {
+        diff_buffer
+            .text
+            .line(line_index)
+            .unwrap_or_default()
+            .contains("diff --git")
+    }));
+    assert!((0..diff_buffer.line_count()).any(|line_index| {
+        diff_buffer
+            .text
+            .line(line_index)
+            .unwrap_or_default()
+            .contains("alpha.txt")
+    }));
+
+    drop(state);
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_tab_on_staged_file_opens_diff_buffer() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-tab-staged")?;
+    std::fs::write(repo.join("alpha.txt"), "before\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "add alpha"])?;
+    std::fs::write(repo.join("alpha.txt"), "after\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+
+    let mut state = state_with_user_library()?;
+    let status_buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let alpha_line = git_status_line_for_action_detail(
+        &state,
+        status_buffer_id,
+        GIT_ACTION_UNSTAGE_FILE,
+        "alpha.txt",
+    )?;
+    shell_buffer_mut(&mut state.runtime, status_buffer_id)?
+        .set_cursor(TextPoint::new(alpha_line, 0));
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::Tab, Mod::NOMOD)
+            .map_err(|error| error.to_string())?
+    );
+
+    let diff_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let diff_buffer = shell_buffer(&state.runtime, diff_buffer_id)?;
+    assert_ne!(diff_buffer_id, status_buffer_id);
+    assert!(matches!(
+        &diff_buffer.kind,
+        BufferKind::Plugin(kind) if kind == GIT_DIFF_KIND
+    ));
+    assert_eq!(diff_buffer.language_id(), Some("diff"));
+    assert!((0..diff_buffer.line_count()).any(|line_index| {
+        diff_buffer
+            .text
+            .line(line_index)
+            .unwrap_or_default()
+            .contains("diff --git")
+    }));
+    assert!((0..diff_buffer.line_count()).any(|line_index| {
+        diff_buffer
+            .text
+            .line(line_index)
+            .unwrap_or_default()
+            .contains("alpha.txt")
+    }));
+
+    drop(state);
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_tab_on_header_still_toggles_section() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-tab-header")?;
+    std::fs::write(repo.join("alpha.txt"), "before\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "add alpha"])?;
+    std::fs::write(repo.join("alpha.txt"), "after\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let header_line = git_status_header_line(&state, buffer_id, GIT_SECTION_UNSTAGED)?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(header_line, 0));
+    assert!(
+        !shell_buffer(&state.runtime, buffer_id)?
+            .section_state()
+            .is_some_and(|state| state.collapsed.is_collapsed(GIT_SECTION_UNSTAGED))
+    );
+
+    assert!(
+        state
+            .try_runtime_keybinding(Keycode::Tab, Mod::NOMOD)
+            .map_err(|error| error.to_string())?
+    );
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
+    assert!(
+        buffer
+            .section_state()
+            .is_some_and(|state| state.collapsed.is_collapsed(GIT_SECTION_UNSTAGED))
+    );
+
+    drop(state);
     std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -6398,6 +6729,7 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
         Some(&registry),
         8,
         16,
+        false,
     )
     .map_err(|error| error.to_string())?;
 
@@ -6488,6 +6820,7 @@ fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
         Some(&registry),
         8,
         16,
+        false,
     )
     .map_err(|error| error.to_string())?;
 
@@ -7819,6 +8152,7 @@ fn sync_visible_buffer_layouts_use_split_width_for_vertical_splits() -> Result<(
         state.runtime.services().get::<ThemeRegistry>(),
         cell_width,
         line_height,
+        false,
     );
 
     state
@@ -7833,6 +8167,7 @@ fn sync_visible_buffer_layouts_use_split_width_for_vertical_splits() -> Result<(
         state.runtime.services().get::<ThemeRegistry>(),
         cell_width,
         line_height,
+        false,
     );
     assert!(before_sync.is_none());
     assert!(after_sync.is_some());
@@ -8437,7 +8772,7 @@ fn index_syntax_lines_converts_byte_columns_after_variation_selector() {
 }
 
 #[test]
-fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
+fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;
     {
@@ -8459,11 +8794,16 @@ fn browser_buffer_submit_tracks_current_url() -> Result<(), String> {
         .browser_state
         .as_ref()
         .ok_or_else(|| "browser state missing".to_owned())?;
+    assert_eq!(state.current_url.as_deref(), None);
     assert_eq!(
-        state.current_url.as_deref(),
+        state.requested_url.as_deref(),
         Some("https://example.com/docs")
     );
-    assert_eq!(buffer.display_name(), "*browser* https://example.com/docs");
+    assert!(state.is_loading);
+    assert_eq!(
+        buffer.display_name(),
+        "*browser* [loading] https://example.com/docs"
+    );
     Ok(())
 }
 
@@ -8731,6 +9071,136 @@ fn browser_location_updates_rename_buffer_with_current_url() -> Result<(), Strin
             .and_then(|browser| browser.current_url.as_deref()),
         Some("https://docs.rs/volt")
     );
+    Ok(())
+}
+
+#[test]
+fn browser_page_load_event_commits_current_url_and_clears_loading() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        request_browser_buffer_navigation(
+            buffer,
+            "https://example.com/docs",
+            false,
+            &*user_library,
+        );
+    }
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::PageLoadStateChanged {
+            buffer_id,
+            current_url: "https://example.com/docs".to_owned(),
+            is_loading: false,
+        }])
+        .map_err(|error| error.to_string())?;
+
+    let browser = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?
+        .browser_state
+        .as_ref()
+        .ok_or_else(|| "browser state missing".to_owned())?;
+    assert_eq!(
+        browser.current_url.as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(
+        browser.requested_url.as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert!(!browser.is_loading);
+    Ok(())
+}
+
+#[test]
+fn browser_page_load_event_does_not_clobber_a_newer_requested_navigation() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        request_browser_buffer_navigation(buffer, "https://example.com/old", false, &*user_library);
+        request_browser_buffer_navigation(buffer, "https://example.com/new", false, &*user_library);
+    }
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::PageLoadStateChanged {
+            buffer_id,
+            current_url: "https://example.com/old".to_owned(),
+            is_loading: false,
+        }])
+        .map_err(|error| error.to_string())?;
+
+    let browser = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?
+        .browser_state
+        .as_ref()
+        .ok_or_else(|| "browser state missing".to_owned())?;
+    assert_eq!(browser.current_url.as_deref(), None);
+    assert_eq!(
+        browser.requested_url.as_deref(),
+        Some("https://example.com/new")
+    );
+    assert!(browser.is_loading);
+    Ok(())
+}
+
+#[test]
+fn browser_page_load_event_accepts_redirect_after_location_sync() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+        request_browser_buffer_navigation(
+            buffer,
+            "https://example.com/start",
+            false,
+            &*user_library,
+        );
+    }
+
+    apply_browser_location_updates(
+        &mut state.runtime,
+        &[BrowserLocationUpdate {
+            buffer_id,
+            current_url: "https://example.com/redirected#section".to_owned(),
+        }],
+    )?;
+
+    state
+        .apply_browser_host_events(&[BrowserHostEvent::PageLoadStateChanged {
+            buffer_id,
+            current_url: "https://example.com/redirected#section".to_owned(),
+            is_loading: false,
+        }])
+        .map_err(|error| error.to_string())?;
+
+    let browser = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?
+        .browser_state
+        .as_ref()
+        .ok_or_else(|| "browser state missing".to_owned())?;
+    assert_eq!(
+        browser.current_url.as_deref(),
+        Some("https://example.com/redirected#section")
+    );
+    assert_eq!(
+        browser.requested_url.as_deref(),
+        Some("https://example.com/redirected#section")
+    );
+    assert!(!browser.is_loading);
     Ok(())
 }
 
@@ -9084,6 +9554,54 @@ fn format_current_line_indent_uses_syntax_queries_for_closing_braces() -> Result
             .as_deref(),
         Some("    }")
     );
+    Ok(())
+}
+
+#[test]
+fn format_current_line_indent_skips_cold_syntax_parse_for_large_buffers() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    syntax_registry_mut(&mut state.runtime)?
+        .register(
+            editor_syntax::LanguageConfiguration::new(
+                "rust-test-large-indent",
+                ["rs"],
+                rust_test_language,
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                [editor_syntax::CaptureThemeMapping::new(
+                    "keyword",
+                    "syntax.keyword",
+                )],
+            )
+            .with_extra_indent_query(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../volt/assets/grammars/queries/rust/indents.scm"
+            ))),
+        )
+        .map_err(|error| error.to_string())?;
+    let buffer_id = install_scratch_test_buffer(&mut state, "*rust-large-indent*")?;
+    let mut lines = vec![String::new(); LARGE_BUFFER_SYNC_INDENT_LINE_THRESHOLD + 4];
+    lines[0] = "fn main() {".to_owned();
+    lines[1] = "    if true {".to_owned();
+    lines[2] = String::new();
+    lines[3] = "    }".to_owned();
+    lines[4] = "}".to_owned();
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(lines);
+        buffer.set_language_id(Some("rust-test-large-indent".to_owned()));
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+
+    format_current_line_indent(&mut state.runtime, buffer_id, 4, false)?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(2)
+            .as_deref(),
+        Some("        ")
+    );
+    assert!(shell_ui(&state.runtime)?.indent_parse_sessions.is_empty());
     Ok(())
 }
 
@@ -9784,6 +10302,102 @@ fn browser_normal_mode_i_binding_focuses_input_without_inserting_text() -> Resul
             .ok_or_else(|| "browser input field missing".to_owned())?
             .text(),
         ""
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_insert_mode_enter_binding_submits_current_url() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, BROWSER_BUFFER_NAME, BROWSER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_browser_input();
+        buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .set_text("example.com/docs");
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .and_then(|state| state.requested_url.as_deref()),
+        Some("https://example.com/docs")
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_insert_mode_ctrl_enter_binding_submits_current_url() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, BROWSER_BUFFER_NAME, BROWSER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_browser_input();
+        buffer
+            .input_field_mut()
+            .ok_or_else(|| "browser input field missing".to_owned())?
+            .set_text("example.com/docs");
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: ctrl_mod(),
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .and_then(|state| state.requested_url.as_deref()),
+        Some("https://example.com/docs")
     );
     Ok(())
 }
@@ -10509,10 +11123,11 @@ fn browser_url_command_opens_split_browser_with_detected_url() -> Result<(), Str
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.current_url.as_deref()),
+            .and_then(|state| state.requested_url.as_deref()),
         Some("https://example.com/docs")
     );
     assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert_eq!(ui.vim().target, VimTarget::Input);
     Ok(())
 }
 
@@ -10588,7 +11203,6 @@ fn browser_host_new_window_event_routes_into_browser_popup() -> Result<(), Strin
         .apply_browser_host_events(&[BrowserHostEvent::NewWindowRequested {
             buffer_id,
             url: "https://example.com/oauth/callback?code=test".to_owned(),
-            popup_seed_id: None,
         }])
         .map_err(|error| error.to_string())?;
 
@@ -10607,7 +11221,7 @@ fn browser_host_new_window_event_routes_into_browser_popup() -> Result<(), Strin
         popup_buffer
             .browser_state
             .as_ref()
-            .and_then(|browser| browser.current_url.as_deref()),
+            .and_then(|browser| browser.requested_url.as_deref()),
         Some("https://example.com/oauth/callback?code=test")
     );
     Ok(())

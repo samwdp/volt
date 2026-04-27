@@ -36,6 +36,7 @@ impl AcpClientConfig {
 /// Returns ACP client configurations compiled into the user package.
 pub fn clients() -> Vec<AcpClientConfig> {
     vec![
+        AcpClientConfig::new("codex", "Codex (ACP)", "codex-acp", &[]),
         AcpClientConfig::new(
             "copilot",
             "GitHub Copilot (ACP)",

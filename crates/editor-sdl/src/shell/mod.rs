@@ -216,6 +216,7 @@ const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = "ui.browser.focus-input";
+const HOOK_BROWSER_SUBMIT: &str = "ui.browser.submit";
 const HOOK_TERMINAL_OPEN_POPUP: &str = terminal_hooks::OPEN_POPUP;
 const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
@@ -1045,6 +1046,10 @@ fn syntax_indent_for_buffer(
         let ui = shell_ui_mut(runtime)?;
         ui.take_indent_parse_session(buffer_id)
     };
+    let has_parse_session = parse_session.is_some();
+    if !has_parse_session && text.line_count() >= LARGE_BUFFER_SYNC_INDENT_LINE_THRESHOLD {
+        return Ok(None);
+    }
     let columns = syntax_registry_mut(runtime)
         .ok()
         .and_then(|registry| {
@@ -3131,6 +3136,15 @@ struct WrapRowCache {
     prefix_rows: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WrapCacheInlineEdit {
+    line_index: usize,
+    old_row_count: usize,
+}
+
+const LARGE_BUFFER_WRAP_CACHE_LINE_THRESHOLD: usize = 2_048;
+const LARGE_BUFFER_SYNC_INDENT_LINE_THRESHOLD: usize = 2_048;
+
 impl WrapRowCache {
     fn build(buffer: &ShellBuffer, wrap_cols: usize, indent_size: usize) -> Self {
         let line_count = buffer.line_count();
@@ -3151,6 +3165,48 @@ impl WrapRowCache {
             indent_size,
             line_count,
             prefix_rows,
+        }
+    }
+
+    fn max_scroll_row(&self, visible_rows: usize) -> usize {
+        if self.line_count == 0 {
+            return 0;
+        }
+        let visible_rows = visible_rows.max(1);
+        let total_rows = self.prefix_rows.last().copied().unwrap_or(0);
+        if total_rows <= visible_rows {
+            return 0;
+        }
+        let threshold = total_rows.saturating_sub(visible_rows);
+        self.prefix_rows
+            .partition_point(|&value| value <= threshold)
+            .saturating_sub(1)
+            .min(self.line_count.saturating_sub(1))
+    }
+
+    fn adjust_for_line_row_delta(
+        &mut self,
+        line_index: usize,
+        old_row_count: usize,
+        new_row_count: usize,
+    ) {
+        if old_row_count == new_row_count {
+            return;
+        }
+        let affected = self
+            .prefix_rows
+            .iter_mut()
+            .skip(line_index.saturating_add(1));
+        if new_row_count > old_row_count {
+            let delta = new_row_count.saturating_sub(old_row_count);
+            for prefix in affected {
+                *prefix = prefix.saturating_add(delta);
+            }
+        } else {
+            let delta = old_row_count.saturating_sub(new_row_count);
+            for prefix in affected {
+                *prefix = prefix.saturating_sub(delta);
+            }
         }
     }
 
@@ -4497,6 +4553,61 @@ impl ShellBuffer {
         self.wrap_cache = None;
     }
 
+    fn prepare_wrap_cache_inline_edit(&self, line_index: usize) -> Option<WrapCacheInlineEdit> {
+        let cache = self.wrap_cache.as_ref()?;
+        if !cache.matches(cache.wrap_cols, cache.indent_size, self.line_count()) {
+            return None;
+        }
+        let line = self.text.line(line_index)?;
+        Some(WrapCacheInlineEdit {
+            line_index,
+            old_row_count: line_wrap_row_count(&line, cache.wrap_cols, cache.indent_size),
+        })
+    }
+
+    fn apply_wrap_cache_inline_edit(&mut self, edit: Option<WrapCacheInlineEdit>) {
+        let Some(edit) = edit else {
+            return;
+        };
+        let (wrap_cols, indent_size, cached_line_count) = match self.wrap_cache.as_ref() {
+            Some(cache) => (cache.wrap_cols, cache.indent_size, cache.line_count),
+            None => return,
+        };
+        if cached_line_count != self.line_count() {
+            self.wrap_cache = None;
+            return;
+        }
+        let line = self.text.line(edit.line_index).unwrap_or_default();
+        let new_row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+        if let Some(cache) = self.wrap_cache.as_mut() {
+            cache.adjust_for_line_row_delta(edit.line_index, edit.old_row_count, new_row_count);
+        }
+    }
+
+    fn refresh_wrap_cache(
+        &mut self,
+        wrap_cols: usize,
+        indent_size: usize,
+        line_count: usize,
+        distance: usize,
+        threshold: usize,
+    ) {
+        let cache_valid = self
+            .wrap_cache
+            .as_ref()
+            .map(|cache| cache.matches(wrap_cols, indent_size, line_count))
+            .unwrap_or(false);
+        if !cache_valid {
+            self.wrap_cache = None;
+        }
+        if self.wrap_cache.is_none()
+            && line_count > 0
+            && (line_count >= LARGE_BUFFER_WRAP_CACHE_LINE_THRESHOLD || distance >= threshold)
+        {
+            self.wrap_cache = Some(WrapRowCache::build(self, wrap_cols, indent_size));
+        }
+    }
+
     fn set_syntax_error(&mut self, error: Option<String>) {
         self.syntax_error = error;
     }
@@ -4777,12 +4888,22 @@ impl ShellBuffer {
     }
 
     fn insert_text(&mut self, text: &str) {
+        let wrap_edit = (!text.contains('\n'))
+            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
+            .flatten();
         self.preserve_root_cursor_before_text_change();
         self.text.insert_text(text);
-        self.invalidate_wrap_cache();
+        if text.contains('\n') {
+            self.invalidate_wrap_cache();
+        } else {
+            self.apply_wrap_cache_inline_edit(wrap_edit);
+        }
     }
 
     fn replace_mode_text(&mut self, text: &str) {
+        let wrap_edit = (!text.contains('\n'))
+            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
+            .flatten();
         let mut changed = false;
         for character in text.chars() {
             if character == '\n' {
@@ -4813,20 +4934,46 @@ impl ShellBuffer {
             }
         }
         if changed {
-            self.invalidate_wrap_cache();
+            if text.contains('\n') {
+                self.invalidate_wrap_cache();
+            } else {
+                self.apply_wrap_cache_inline_edit(wrap_edit);
+            }
         }
     }
 
     fn backspace(&mut self) {
+        let single_line_edit = self.cursor_col() > 0;
+        let wrap_edit = single_line_edit
+            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
+            .flatten();
         self.preserve_root_cursor_before_text_change();
-        let _ = self.text.backspace();
-        self.invalidate_wrap_cache();
+        if self.text.backspace() {
+            if single_line_edit {
+                self.apply_wrap_cache_inline_edit(wrap_edit);
+            } else {
+                self.invalidate_wrap_cache();
+            }
+        }
     }
 
     fn delete_forward(&mut self) {
+        let current = self.cursor_point();
+        let single_line_edit = self
+            .point_after(current)
+            .map(|next| self.slice(TextRange::new(current, next)) != "\n")
+            .unwrap_or(false);
+        let wrap_edit = single_line_edit
+            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
+            .flatten();
         self.preserve_root_cursor_before_text_change();
-        let _ = self.text.delete_forward();
-        self.invalidate_wrap_cache();
+        if self.text.delete_forward() {
+            if single_line_edit {
+                self.apply_wrap_cache_inline_edit(wrap_edit);
+            } else {
+                self.invalidate_wrap_cache();
+            }
+        }
     }
 
     fn move_left(&mut self) -> bool {
@@ -5588,10 +5735,6 @@ impl ShellBuffer {
             self.scroll_row = 0;
             return;
         }
-        let max_scroll_row =
-            self.max_scroll_row_for_wrapped_rows(content_rows, wrap_cols, indent_size);
-        self.scroll_row = self.scroll_row.min(max_scroll_row);
-
         let cursor_col = self.cursor_col();
         let cursor_line = self.text.line(cursor_row).unwrap_or_default();
         let cursor_segments = wrap_line_segments_for_line(&cursor_line, wrap_cols, indent_size);
@@ -5600,16 +5743,15 @@ impl ShellBuffer {
         let line_count = self.line_count();
         let distance = cursor_row.abs_diff(self.scroll_row);
         let threshold = content_rows.saturating_mul(4).max(256);
-        let cache_valid = match self.wrap_cache.as_ref() {
-            Some(cache) => cache.matches(wrap_cols, indent_size, line_count),
-            None => false,
-        };
-        if !cache_valid {
-            self.wrap_cache = None;
-        }
-        if self.wrap_cache.is_none() && distance >= threshold {
-            self.wrap_cache = Some(WrapRowCache::build(self, wrap_cols, indent_size));
-        }
+        self.refresh_wrap_cache(wrap_cols, indent_size, line_count, distance, threshold);
+        let max_scroll_row = self
+            .wrap_cache
+            .as_ref()
+            .map(|cache| cache.max_scroll_row(content_rows))
+            .unwrap_or_else(|| {
+                self.max_scroll_row_for_wrapped_rows(content_rows, wrap_cols, indent_size)
+            });
+        self.scroll_row = self.scroll_row.min(max_scroll_row);
 
         if let Some(cache) = self.wrap_cache.as_ref() {
             let base = cache
@@ -8143,6 +8285,10 @@ impl ShellState {
         self.last_text_input_profile.take()
     }
 
+    fn note_text_edit_activity(&mut self) {
+        self.last_text_input_at = Some(Instant::now());
+    }
+
     fn secondary_refresh_deferred_for_typing(&self, now: Instant) -> bool {
         secondary_refresh_deferred_for_typing(self.last_text_input_at, now)
     }
@@ -8934,6 +9080,7 @@ impl ShellState {
                 cell_width,
                 line_height,
                 false,
+                false,
             )
         };
         let Some(point) = point else {
@@ -8989,6 +9136,7 @@ impl ShellState {
                 cell_width,
                 line_height,
                 true,
+                false,
             )
         };
         let Some(point) = point else {
@@ -9125,7 +9273,6 @@ impl ShellState {
     }
 
     fn apply_browser_host_events(&mut self, events: &[BrowserHostEvent]) -> Result<(), ShellError> {
-        let now = Instant::now();
         for event in events {
             match event {
                 BrowserHostEvent::FocusParentRequested { .. } => {
@@ -9151,97 +9298,21 @@ impl ShellState {
                 } => {
                     let user_library = shell_user_library(&self.runtime);
                     if let Some(buffer) = self.ui_mut()?.buffer_mut(*buffer_id) {
-                        set_browser_buffer_location(buffer, current_url, false, &*user_library);
-                        set_browser_buffer_loading(buffer, *is_loading);
+                        apply_browser_page_load_state(
+                            buffer,
+                            current_url,
+                            *is_loading,
+                            &*user_library,
+                        );
                     }
                 }
-                BrowserHostEvent::DownloadStarted {
-                    buffer_id,
-                    url,
-                    download_path,
-                } => {
-                    let _ = shell_ui_mut(&mut self.runtime)
-                        .map_err(ShellError::Runtime)?
-                        .apply_notification(
-                            NotificationUpdate {
-                                key: Self::browser_download_notification_key(*buffer_id, url),
-                                severity: NotificationSeverity::Info,
-                                title: "Browser download started".to_owned(),
-                                body_lines: Self::browser_download_notification_lines(
-                                    url,
-                                    download_path,
-                                ),
-                                progress: None,
-                                active: true,
-                                action: None,
-                            },
-                            now,
-                        );
-                }
-                BrowserHostEvent::DownloadCompleted {
-                    buffer_id,
-                    url,
-                    download_path,
-                    success,
-                } => {
-                    let _ = shell_ui_mut(&mut self.runtime)
-                        .map_err(ShellError::Runtime)?
-                        .apply_notification(
-                            NotificationUpdate {
-                                key: Self::browser_download_notification_key(*buffer_id, url),
-                                severity: if *success {
-                                    NotificationSeverity::Success
-                                } else {
-                                    NotificationSeverity::Error
-                                },
-                                title: if *success {
-                                    "Browser download finished".to_owned()
-                                } else {
-                                    "Browser download failed".to_owned()
-                                },
-                                body_lines: Self::browser_download_notification_lines(
-                                    url,
-                                    download_path,
-                                ),
-                                progress: None,
-                                active: false,
-                                action: None,
-                            },
-                            now,
-                        );
-                }
-                BrowserHostEvent::NewWindowRequested {
-                    url, popup_seed_id, ..
-                } => {
-                    if let Some(popup_seed_id) = popup_seed_id {
-                        let buffer_id = ensure_browser_popup_buffer(&mut self.runtime, Some(url))
-                            .map_err(ShellError::Runtime)?;
-                        self.browser_host
-                            .attach_popup_seed(*popup_seed_id, buffer_id)
-                            .map_err(ShellError::Runtime)?;
-                    } else {
-                        open_browser_buffer_in_popup(&mut self.runtime, Some(url))
-                            .map_err(ShellError::Runtime)?;
-                    }
+                BrowserHostEvent::NewWindowRequested { url, .. } => {
+                    open_browser_buffer_in_popup(&mut self.runtime, Some(url))
+                        .map_err(ShellError::Runtime)?;
                 }
             }
         }
         Ok(())
-    }
-
-    fn browser_download_notification_key(buffer_id: BufferId, url: &str) -> String {
-        format!("browser-download-{buffer_id}-{url}")
-    }
-
-    fn browser_download_notification_lines(
-        url: &str,
-        download_path: &Option<String>,
-    ) -> Vec<String> {
-        let mut lines = vec![url.to_owned()];
-        if let Some(download_path) = download_path {
-            lines.push(download_path.clone());
-        }
-        lines
     }
 
     fn pane_count(&self) -> Result<usize, ShellError> {
@@ -9779,7 +9850,7 @@ impl ShellState {
             return Ok(());
         }
         if self.text_input_activates_typing_budget()? {
-            self.last_text_input_at = Some(Instant::now());
+            self.note_text_edit_activity();
         }
         self.last_text_input_profile = None;
         let profile_started = self.typing_profiler.as_ref().map(|_| Instant::now());
@@ -10747,6 +10818,17 @@ impl ShellState {
             return Ok(true);
         }
 
+        if !picker_visible
+            && !in_text_insert_mode
+            && chord == "Tab"
+            && handle_git_status_tab(&mut self.runtime).map_err(ShellError::Runtime)?
+        {
+            self.queue_suppressed_text_input_for_chord(&chord);
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
         if !picker_visible && !in_text_insert_mode && chord == "Tab" {
             let handled = {
                 let buffer_id =
@@ -11066,6 +11148,7 @@ impl ShellState {
         cell_width: i32,
         line_height: i32,
     ) -> Result<(), ShellError> {
+        let typing_active = self.typing_refresh_budget_active(Instant::now());
         let command_line_visible = shell_user_library(&self.runtime).commandline_enabled();
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
@@ -11134,7 +11217,7 @@ impl ShellState {
                 let is_acp = buffer.is_acp_buffer();
                 let has_plugin_sections = buffer.has_plugin_sections();
                 let reserved_top_rows = if active && !is_acp && !has_plugin_sections {
-                    buffer_context_overlay_snapshot(buffer, true, false, &*user_library)
+                    buffer_context_overlay_snapshot(buffer, true, typing_active, &*user_library)
                         .map(|snapshot| {
                             visible_headerline_lines(snapshot.headerline_lines, visible_rows).len()
                         })
@@ -11222,7 +11305,13 @@ impl ShellState {
         refresh_pending_file_reloads(&mut self.runtime, now, false).map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_syntax(&mut self) -> Result<SyntaxRefreshStats, ShellError> {
+    fn refresh_pending_syntax(
+        &mut self,
+        typing_active: bool,
+    ) -> Result<SyntaxRefreshStats, ShellError> {
+        if typing_active {
+            return Ok(SyntaxRefreshStats::default());
+        }
         self.active_buffer_mut()?.ensure_visible_syntax_window();
         refresh_pending_syntax(&mut self.runtime).map_err(ShellError::Runtime)
     }
@@ -11557,6 +11646,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     let profiled_event = typing_frame
                         .as_ref()
                         .map(|_| TypingEventMetadata::from_event(&event));
+                    let active_buffer_revision_before = active_buffer_revision_key(&state.runtime);
                     let event_started = typing_frame.as_ref().map(|_| Instant::now());
                     match state.handle_event(
                         event,
@@ -11569,7 +11659,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         Ok(false) => {}
                         Err(error) => state.record_shell_error("shell.handle-event", error),
                     }
-                    if matches!(profiled_event, Some(TypingEventMetadata::TextInput { .. })) {
+                    let active_buffer_revision_after = active_buffer_revision_key(&state.runtime);
+                    let buffer_text_edited = matches!(
+                        (active_buffer_revision_before, active_buffer_revision_after),
+                        (Some((before_id, before_revision)), Some((after_id, after_revision)))
+                            if before_id == after_id && before_revision != after_revision
+                    );
+                    if buffer_text_edited {
+                        state.note_text_edit_activity();
+                    }
+                    if buffer_text_edited
+                        || matches!(profiled_event, Some(TypingEventMetadata::TextInput { .. }))
+                    {
                         frame_text_input_events = frame_text_input_events.saturating_add(1);
                     }
                     if let Some(frame) = typing_frame.as_mut()
@@ -11706,7 +11807,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     frame.terminal_refresh = terminal_refresh_started.elapsed();
                 }
                 let syntax_refresh_started = Instant::now();
-                let syntax_stats = match state.refresh_pending_syntax() {
+                let syntax_stats = match state.refresh_pending_syntax(typing_refresh_budget_active)
+                {
                     Ok(stats) => stats,
                     Err(error) => {
                         state.record_shell_error("shell.syntax-refresh", error);
@@ -12709,6 +12811,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_BROWSER_FOCUS_INPUT,
         "Focuses the browser input section.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_SUBMIT,
+        "Submits the active browser URL prompt.",
     )?;
     register_hook(
         runtime,
@@ -13913,7 +14020,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_OIL_OPEN_PARENT,
             "shell.oil-open-parent",
             |_, runtime| {
-                let root = oil_default_root(runtime)?;
+                let root = oil_parent_root(runtime)?;
                 open_oil_directory(runtime, root)?;
                 Ok(())
             },
@@ -13942,6 +14049,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_INPUT_SUBMIT, "shell.input-submit", |_, runtime| {
             submit_input_buffer(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_BROWSER_SUBMIT, "shell.browser-submit", |_, runtime| {
+            browser::submit_browser_input(runtime)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -15505,6 +15618,12 @@ fn active_buffer_event_context(
         is_plugin_evaluatable: plugin_evaluatable_kind(&buffer.kind, runtime),
         is_compilation: buffer_is_compilation(&buffer.kind),
     })
+}
+
+fn active_buffer_revision_key(runtime: &EditorRuntime) -> Option<(BufferId, u64)> {
+    let buffer_id = active_shell_buffer_id(runtime).ok()?;
+    let revision = shell_buffer(runtime, buffer_id).ok()?.text.revision();
+    Some((buffer_id, revision))
 }
 
 fn active_lsp_buffer_context(runtime: &EditorRuntime) -> Result<ActiveLspBufferContext, String> {
@@ -20175,7 +20294,7 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         return acp::submit_acp_prompt(runtime, buffer_id, &prompt, &text);
     }
     if buffer_is_browser(&kind) {
-        return navigate_browser_buffer(runtime, buffer_id, &text);
+        return browser::submit_browser_input(runtime);
     }
     if buffer_is_compilation(&kind) {
         return run_compile_command_in_buffer(runtime, buffer_id, &text);
@@ -22444,15 +22563,19 @@ fn find_shell_buffer_by_kind(ui: &ShellUiState, kind: &str) -> Option<BufferId> 
     })
 }
 
-fn find_oil_buffer(ui: &ShellUiState) -> Option<BufferId> {
-    ui.buffers.iter().find_map(|buffer| {
-        if matches!(&buffer.kind, BufferKind::Directory) && buffer.display_name() == OIL_BUFFER_NAME
-        {
-            Some(buffer.id())
-        } else {
-            None
-        }
-    })
+fn find_oil_buffer(runtime: &EditorRuntime, workspace_id: WorkspaceId) -> Option<BufferId> {
+    runtime
+        .model()
+        .workspace(workspace_id)
+        .ok()?
+        .buffers()
+        .find_map(|buffer| {
+            if matches!(buffer.kind(), BufferKind::Directory) && buffer.name() == OIL_BUFFER_NAME {
+                Some(buffer.id())
+            } else {
+                None
+            }
+        })
 }
 
 fn active_shell_buffer_path(runtime: &EditorRuntime) -> Result<Option<PathBuf>, String> {
@@ -22500,7 +22623,7 @@ fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), 
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let existing = shell_ui(runtime).ok().and_then(find_oil_buffer);
+    let existing = find_oil_buffer(runtime, workspace_id);
     let buffer_id = if let Some(existing) = existing {
         runtime
             .model_mut()
@@ -25673,15 +25796,8 @@ fn initial_lsp_log_lines(server_id: &str) -> Vec<String> {
 
 fn initial_scratch_lines() -> Vec<String> {
     vec![
-        "Volt SDL shell is now driven by the compiled user packages.".to_owned(),
-        "NORMAL mode is loaded from user/vim.rs out of the box.".to_owned(),
-        "The shell starts in the default workspace and renders its statusline from user/statusline.rs.".to_owned(),
-        "Use h/j/k/l to move, w to jump forward by word, and : to open the command picker.".to_owned(),
-        "Press i to enter INSERT mode, then type directly into the active buffer.".to_owned(),
-        "F3 opens the command picker and F4 opens the buffer picker through user/picker.rs.".to_owned(),
-        "F5 toggles the docked popup window and F6 opens a searchable keybinding picker.".to_owned(),
-        "Inside a picker use Ctrl-n and Ctrl-p to move, Enter to run, and Escape to close.".to_owned(),
-        "F2 splits the layout, Tab changes panes, Ctrl+` opens the terminal buffer, and Ctrl+q quits.".to_owned(),
+        "This buffer is for text that is not saved".to_owned(),
+        "To create a file, visit it with ‘CTRL .’ and enter text in its buffer.".to_owned(),
     ]
 }
 

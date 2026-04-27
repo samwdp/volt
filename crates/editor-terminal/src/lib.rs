@@ -1243,6 +1243,8 @@ fn terminal_tty_options(config: &LiveTerminalConfig) -> TtyOptions {
     );
 
     TtyOptions {
+        // PTY-backed terminals must spawn the real shell directly; wrapping them in the
+        // supervisor binary on Windows breaks ConPTY embedding and opens a separate window.
         shell: Some(TtyShell::new(config.program.clone(), config.args.clone())),
         working_directory: config.cwd.clone(),
         drain_on_exit: true,

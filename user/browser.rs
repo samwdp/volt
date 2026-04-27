@@ -7,9 +7,10 @@ use editor_plugin_api::{
 pub const BROWSER_KIND: &str = "browser";
 pub const BUFFER_NAME: &str = "*browser*";
 pub const HOOK_BROWSER_URL: &str = "ui.browser.url";
+pub const HOOK_BROWSER_SUBMIT: &str = "ui.browser.submit";
 pub const URL_PROMPT: &str = "URL > ";
 pub const URL_PLACEHOLDER: &str = "https://example.com";
-pub const INPUT_HINT: &str = "Ctrl+Enter navigate · F12 devtools · click page to browse";
+pub const INPUT_HINT: &str = "Enter/Ctrl+Enter navigate · F12 devtools · click page to browse";
 
 /// Returns the metadata for the browser buffer package.
 pub fn package() -> PluginPackage {
@@ -45,11 +46,24 @@ pub fn package() -> PluginPackage {
                 None::<&str>,
             )],
         ),
+        PluginCommand::new(
+            "browser.navigate",
+            "Navigates the browser using the current URL prompt text.",
+            vec![PluginAction::emit_hook(HOOK_BROWSER_SUBMIT, None::<&str>)],
+        ),
     ])
     .with_buffers(vec![
         PluginBuffer::new(BROWSER_KIND, Vec::<String>::new()).with_key_bindings(vec![
             PluginKeyBinding::new("I", "browser.focus-input", PluginKeymapScope::Workspace)
                 .with_vim_mode(PluginVimMode::Normal),
+            PluginKeyBinding::new("Enter", "browser.navigate", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Insert),
+            PluginKeyBinding::new(
+                "Ctrl+Enter",
+                "browser.navigate",
+                PluginKeymapScope::Workspace,
+            )
+            .with_vim_mode(PluginVimMode::Insert),
         ]),
     ])
 }
@@ -63,10 +77,7 @@ pub fn buffer_lines(url: Option<&str>) -> Vec<String> {
             String::new(),
             "Click inside the page viewport to interact with the embedded browser.".to_owned(),
             "Press F12 or Ctrl+Shift+I to open DevTools.".to_owned(),
-            format!(
-                "{} Use the URL prompt below and press Ctrl+Enter to navigate again.",
-                cod::COD_DEBUG_START
-            ),
+            format!("{} Use the URL prompt below and press Enter or Ctrl+Enter to navigate again.", cod::COD_DEBUG_START),
             format!(
                 "{} Click the footer prompt area to return keyboard input to Volt's URL box.",
                 cod::COD_OPEN_PREVIEW
@@ -75,7 +86,7 @@ pub fn buffer_lines(url: Option<&str>) -> Vec<String> {
         None => vec![
             format!("{} Browser buffer", cod::COD_BROWSER),
             format!(
-                "{} Enter a URL in the prompt below and press Ctrl+Enter.",
+                "{} Enter a URL in the prompt below and press Enter or Ctrl+Enter.",
                 md::MD_LINK_VARIANT
             ),
             String::new(),
@@ -138,11 +149,11 @@ mod tests {
     fn input_hint_includes_current_url_when_present() {
         assert_eq!(
             input_hint(Some("https://example.com")),
-            "current https://example.com · Ctrl+Enter navigate · F12 devtools · click page to browse"
+            "current https://example.com · Enter/Ctrl+Enter navigate · F12 devtools · click page to browse"
         );
         assert_eq!(
             input_hint(None),
-            "Ctrl+Enter navigate · F12 devtools · click page to browse"
+            "Enter/Ctrl+Enter navigate · F12 devtools · click page to browse"
         );
     }
 }
