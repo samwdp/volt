@@ -2582,6 +2582,18 @@ fn line_char_map_treats_byte_order_marks_as_zero_width() {
 }
 
 #[test]
+fn line_char_map_renders_escape_as_caret_notation() {
+    let line = "\u{1b}[31m";
+    let char_map = LineCharMap::new(line);
+
+    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 6);
+    assert_eq!(
+        char_map.display_text_for_range(line, 0, line.chars().count()),
+        "^[[31m"
+    );
+}
+
+#[test]
 fn line_char_map_cursor_anchor_skips_variation_selectors() {
     let line = "⚛️x";
     let char_map = LineCharMap::new(line);
@@ -2622,6 +2634,43 @@ fn draw_buffer_text_omits_variation_selectors_from_scene_text() -> Result<(), St
             x: 0,
             y: 0,
             text: "⚛".to_owned(),
+            color: to_render_color(default_color),
+        },]
+    );
+    Ok(())
+}
+
+#[test]
+fn draw_buffer_text_renders_escape_controls_as_caret_notation() -> Result<(), String> {
+    let default_color = Color::RGB(240, 240, 240);
+    let line = "\u{1b}[31mSet-PSReadLineOption";
+    let char_map = LineCharMap::new(line);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    draw_buffer_text(
+        &mut target,
+        0,
+        0,
+        line,
+        LineWrapSegment {
+            start_col: 0,
+            end_col: line.chars().count(),
+        },
+        &char_map,
+        None,
+        None,
+        default_color,
+        8,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "^[[31mSet-PSReadLineOption".to_owned(),
             color: to_render_color(default_color),
         },]
     );
@@ -5203,6 +5252,30 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
     assert!(unstaged.is_empty());
     assert!(untracked.is_empty());
 
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_status_focus_refresh_reuses_recent_snapshot() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-focus-refresh-cache")?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let (_, _, untracked_before) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert!(untracked_before.is_empty());
+
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+
+    refresh_git_status_if_active_if_due(&mut state.runtime)?;
+    let (_, _, untracked_throttled) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert!(untracked_throttled.is_empty());
+
+    refresh_git_status_buffer(&mut state.runtime, buffer_id)?;
+    let (_, _, untracked_after) = git_status_snapshot_paths(&state, buffer_id)?;
+    assert_eq!(untracked_after, BTreeSet::from(["beta.txt".to_owned()]));
+
+    drop(state);
     std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
     Ok(())
 }

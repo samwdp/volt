@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Stdio;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GitFringeKind {
@@ -708,6 +709,27 @@ pub(super) fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Resul
     refresh_git_status_buffer(runtime, buffer_id)
 }
 
+pub(super) fn refresh_git_status_if_active_if_due(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_git_status(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let now = Instant::now();
+    if !shell_buffer(runtime, buffer_id)?.git_status_refresh_due(&root, now) {
+        return Ok(());
+    }
+    refresh_git_status_buffer_for_root(runtime, buffer_id, &root, now)
+}
+
 pub(super) fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_ids = {
         let ui = shell_ui(runtime)?;
@@ -734,14 +756,25 @@ pub(super) fn refresh_git_status_buffer(
             return Err(error);
         }
     };
-    let snapshot = match git_status_snapshot(runtime, &root) {
+    refresh_git_status_buffer_for_root(runtime, buffer_id, &root, Instant::now())
+}
+
+fn refresh_git_status_buffer_for_root(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    root: &Path,
+    now: Instant,
+) -> Result<(), String> {
+    let snapshot = match git_status_snapshot(runtime, root) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             set_git_status_error(runtime, buffer_id, &error)?;
             return Err(error);
         }
     };
-    apply_git_status_snapshot(runtime, buffer_id, snapshot)
+    apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
+    shell_buffer_mut(runtime, buffer_id)?.mark_git_status_refreshed(root, now);
+    Ok(())
 }
 
 pub(super) fn set_git_status_error(
@@ -1112,8 +1145,7 @@ pub(super) fn git_view_lines(
 ) -> Result<Vec<String>, String> {
     let root = git_root(runtime)?;
     let args = view.args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = git_command_output_allow_exit_codes(
-        runtime,
+    let output = git_read_command_output_allow_exit_codes(
         &root,
         &view.label,
         &args,
@@ -2137,11 +2169,10 @@ pub(super) fn pull_git_remote_branch(
 }
 
 pub(super) fn git_branch_list(
-    runtime: &mut EditorRuntime,
+    _runtime: &mut EditorRuntime,
     root: &Path,
 ) -> Result<Vec<String>, String> {
-    let output = git_command_output(
-        runtime,
+    let output = git_read_command_output(
         root,
         "branch --format",
         &["branch", "--format=%(refname:short)"],
@@ -2158,12 +2189,11 @@ pub(super) fn git_branch_list(
 }
 
 pub(super) fn git_commit_list(
-    runtime: &mut EditorRuntime,
+    _runtime: &mut EditorRuntime,
     root: &Path,
     limit: usize,
 ) -> Result<Vec<GitLogEntry>, String> {
-    let output = git_command_output(
-        runtime,
+    let output = git_read_command_output(
         root,
         "log --oneline",
         &["log", "-n", &limit.to_string(), "--oneline"],
@@ -3575,9 +3605,7 @@ pub(super) fn git_command_output_background(
     args: &[&str],
     allowed_exit_codes: &[i32],
 ) -> Option<String> {
-    let mut command = Command::new("git");
-    configure_background_command(&mut command);
-    let output = command.args(args).current_dir(root).output().ok()?;
+    let output = run_direct_git_command(root, args).ok()?;
     let exit_code = output.status.code()?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
         return None;
@@ -3638,57 +3666,62 @@ pub(super) fn git_command_output_owned(
     git_command_output(runtime, root, label, &refs)
 }
 
-pub(super) fn git_command_output_allow_exit_codes(
-    runtime: &mut EditorRuntime,
+fn git_read_command_output(root: &Path, label: &str, args: &[&str]) -> Result<String, String> {
+    git_read_command_output_allow_exit_codes(root, label, args, &[0])
+}
+
+fn git_read_command_output_optional(root: &Path, label: &str, args: &[&str]) -> Option<String> {
+    git_read_command_output(root, label, args).ok()
+}
+
+fn git_read_command_output_allow_exit_codes(
     root: &Path,
     label: &str,
     args: &[&str],
     allowed_exit_codes: &[i32],
 ) -> Result<String, String> {
-    let spec = JobSpec::command(
-        label,
-        "git",
-        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-    )
-    .with_cwd(root.to_path_buf());
-    let manager = runtime
-        .services()
-        .get::<Mutex<JobManager>>()
-        .ok_or_else(|| "job manager service missing".to_owned())?;
-    let mut manager = manager
-        .lock()
-        .map_err(|_| "job manager lock poisoned".to_owned())?;
-    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
-    drop(manager);
-    let result = handle.wait().map_err(|error| error.to_string())?;
-    let exit_code = result.exit_code().ok_or_else(|| {
+    let output = run_direct_git_command(root, args)?;
+    let exit_code = output.status.code().ok_or_else(|| {
         format!(
             "git {label} failed to return an exit code: {}",
-            result.transcript()
+            command_output_transcript(&output)
         )
     })?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
-        return Err(format!("git {label} failed: {}", result.transcript()));
+        return Err(format!(
+            "git {label} failed: {}",
+            command_output_transcript(&output)
+        ));
     }
-    Ok(result.stdout().to_owned())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub(super) fn git_command_output_optional(
-    runtime: &mut EditorRuntime,
-    root: &Path,
-    label: &str,
-    args: &[&str],
-) -> Option<String> {
-    git_command_output(runtime, root, label, args).ok()
+fn run_direct_git_command(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    command
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("failed to run git {:?}: {error}", args))
 }
 
-pub(super) fn git_dir_path(runtime: &mut EditorRuntime, root: &Path) -> Option<PathBuf> {
-    let output = git_command_output_optional(
-        runtime,
-        root,
-        "rev-parse --git-dir",
-        &["rev-parse", "--git-dir"],
-    )?;
+fn command_output_transcript(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.is_empty() {
+        stdout.into_owned()
+    } else if stdout.is_empty() {
+        stderr.into_owned()
+    } else {
+        format!("{stdout}{stderr}")
+    }
+}
+
+pub(super) fn git_dir_path(_runtime: &mut EditorRuntime, root: &Path) -> Option<PathBuf> {
+    let output =
+        git_read_command_output_optional(root, "rev-parse --git-dir", &["rev-parse", "--git-dir"])?;
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return None;
@@ -3705,43 +3738,31 @@ pub(super) fn git_status_snapshot(
     runtime: &mut EditorRuntime,
     root: &Path,
 ) -> Result<GitStatusSnapshot, String> {
-    let status_output = git_command_output(
-        runtime,
+    let status_output = git_read_command_output(
         root,
         "status --short --branch",
         &["status", "--short", "--branch"],
     )?;
     let status = parse_status(&status_output).map_err(|error| error.to_string())?;
 
-    let head_exists = git_command_output_optional(
-        runtime,
+    let recent_output = git_read_command_output_optional(
         root,
-        "rev-parse --verify HEAD",
-        &["rev-parse", "--verify", "HEAD"],
+        "log --oneline",
+        &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
     )
-    .is_some();
-    let head = if head_exists {
-        let head_output = git_command_output(
-            runtime,
-            root,
-            "log -1 --oneline",
-            &["log", "-1", "--oneline"],
-        )?;
-        parse_log_oneline(&head_output).into_iter().next()
-    } else {
-        None
-    };
+    .unwrap_or_default();
+    let recent = parse_log_oneline(&recent_output);
+    let head = recent.first().cloned();
+    let head_exists = head.is_some();
 
-    let upstream = git_command_output_optional(
-        runtime,
+    let upstream = git_read_command_output_optional(
         root,
         "rev-parse --abbrev-ref @{upstream}",
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
     )
     .map(|value| value.trim().to_owned())
     .filter(|value| !value.is_empty());
-    let push_remote = git_command_output_optional(
-        runtime,
+    let push_remote = git_read_command_output_optional(
         root,
         "rev-parse --abbrev-ref @{push}",
         &["rev-parse", "--abbrev-ref", "@{push}"],
@@ -3749,40 +3770,39 @@ pub(super) fn git_status_snapshot(
     .map(|value| value.trim().to_owned())
     .filter(|value| !value.is_empty());
 
-    let stash_output = git_command_output_optional(runtime, root, "stash list", &["stash", "list"])
+    let stash_output = git_read_command_output_optional(root, "stash list", &["stash", "list"])
         .unwrap_or_default();
     let stashes = parse_stash_list(&stash_output);
 
     let unpulled = if head_exists && upstream.is_some() {
-        let output = git_command_output(
-            runtime,
+        let output = git_read_command_output(
             root,
             "log --oneline ..@{upstream}",
-            &["log", "--oneline", "..@{upstream}"],
+            &[
+                "log",
+                "-n",
+                &GIT_LOG_LIMIT.to_string(),
+                "--oneline",
+                "..@{upstream}",
+            ],
         )?;
         parse_log_oneline(&output)
     } else {
         Vec::new()
     };
     let unpushed = if head_exists && upstream.is_some() {
-        let output = git_command_output(
-            runtime,
+        let output = git_read_command_output(
             root,
             "log --oneline @{upstream}..",
-            &["log", "--oneline", "@{upstream}.."],
+            &[
+                "log",
+                "-n",
+                &GIT_LOG_LIMIT.to_string(),
+                "--oneline",
+                "@{upstream}..",
+            ],
         )?;
         parse_log_oneline(&output)
-    } else {
-        Vec::new()
-    };
-    let recent = if head_exists {
-        let recent_output = git_command_output(
-            runtime,
-            root,
-            "log --oneline",
-            &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
-        )?;
-        parse_log_oneline(&recent_output)
     } else {
         Vec::new()
     };
@@ -3803,10 +3823,10 @@ pub(super) fn git_status_snapshot(
 }
 
 pub(super) fn git_remote_list(
-    runtime: &mut EditorRuntime,
+    _runtime: &mut EditorRuntime,
     root: &Path,
 ) -> Result<Vec<String>, String> {
-    let output = git_command_output(runtime, root, "remote", &["remote"])?;
+    let output = git_read_command_output(root, "remote", &["remote"])?;
     let mut remotes = output
         .lines()
         .map(str::trim)

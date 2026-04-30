@@ -382,6 +382,7 @@ const LSP_SYNC_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const TYPING_EVENT_BATCH_LIMIT: usize = 24;
 const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
 const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const GIT_STATUS_BUFFER_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 const SYNTAX_WINDOW_MIN_LINES: usize = 256;
@@ -769,14 +770,16 @@ impl LineCharMap {
                 .copied()
                 .unwrap_or(line.len());
             let text = &line[start_byte..end_byte];
-            if text == "\t" {
-                rendered.push_str(&" ".repeat(self.display_cols_between(column, column + 1)));
-            } else if text
-                .chars()
-                .next()
-                .is_some_and(is_zero_width_display_character)
-            {
+            let Some(character) = text.chars().next() else {
                 continue;
+            };
+            if character == '\t' {
+                rendered.push_str(&" ".repeat(self.display_cols_between(column, column + 1)));
+            } else if is_zero_width_display_character(character) {
+                continue;
+            } else if let Some(caret) = ascii_control_caret_notation(character) {
+                rendered.push('^');
+                rendered.push(caret);
             } else {
                 rendered.push_str(text);
             }
@@ -796,6 +799,16 @@ fn is_zero_width_display_character(character: char) -> bool {
     )
 }
 
+fn ascii_control_caret_notation(character: char) -> Option<char> {
+    match character {
+        '\0'..='\u{1f}' if character != '\t' && character != '\n' => {
+            char::from_u32(character as u32 + 0x40)
+        }
+        '\u{7f}' => Some('?'),
+        _ => None,
+    }
+}
+
 fn display_columns_for_character(character: char, display_col: usize, tab_width: usize) -> usize {
     if is_zero_width_display_character(character) {
         0
@@ -806,6 +819,8 @@ fn display_columns_for_character(character: char, display_col: usize, tab_width:
         } else {
             tab_width - remainder
         }
+    } else if ascii_control_caret_notation(character).is_some() {
+        2
     } else {
         1
     }
@@ -2406,6 +2421,8 @@ pub(crate) struct ShellBuffer {
     pdf_state: Option<PdfBufferState>,
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
+    git_status_root: Option<PathBuf>,
+    git_status_last_refresh_at: Option<Instant>,
     git_view: Option<GitViewState>,
     git_fringe: Option<GitFringeState>,
     git_fringe_dirty: bool,
@@ -3248,6 +3265,8 @@ impl ShellBuffer {
             pdf_state: None,
             acp_state: None,
             git_snapshot: None,
+            git_status_root: None,
+            git_status_last_refresh_at: None,
             git_view: None,
             git_fringe: None,
             git_fringe_dirty: false,
@@ -3311,6 +3330,8 @@ impl ShellBuffer {
             pdf_state: None,
             acp_state: None,
             git_snapshot: None,
+            git_status_root: None,
+            git_status_last_refresh_at: None,
             git_view: None,
             git_fringe,
             git_fringe_dirty,
@@ -3376,6 +3397,8 @@ impl ShellBuffer {
             pdf_state: None,
             acp_state: None,
             git_snapshot: None,
+            git_status_root: None,
+            git_status_last_refresh_at: None,
             git_view: None,
             git_fringe: None,
             git_fringe_dirty: false,
@@ -4186,6 +4209,20 @@ impl ShellBuffer {
 
     fn set_git_snapshot(&mut self, snapshot: GitStatusSnapshot) {
         self.git_snapshot = Some(snapshot);
+    }
+
+    fn git_status_refresh_due(&self, root: &Path, now: Instant) -> bool {
+        self.git_snapshot.is_none()
+            || self.git_status_root.as_deref() != Some(root)
+            || self
+                .git_status_last_refresh_at
+                .map(|last| now.duration_since(last) >= GIT_STATUS_BUFFER_REFRESH_INTERVAL)
+                .unwrap_or(true)
+    }
+
+    fn mark_git_status_refreshed(&mut self, root: &Path, now: Instant) {
+        self.git_status_root = Some(root.to_path_buf());
+        self.git_status_last_refresh_at = Some(now);
     }
 
     fn git_view(&self) -> Option<&GitViewState> {
@@ -14212,7 +14249,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
             shell_ui_mut(runtime)?.close_autocomplete();
-            refresh_git_status_if_active(runtime)?;
+            refresh_git_status_if_active_if_due(runtime)?;
             ensure_directory_buffer(runtime)?;
             Ok(())
         })
@@ -14223,7 +14260,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.buffer-switch",
             |_, runtime| {
                 shell_ui_mut(runtime)?.close_autocomplete();
-                refresh_git_status_if_active(runtime)?;
+                refresh_git_status_if_active_if_due(runtime)?;
                 ensure_directory_buffer(runtime)?;
                 Ok(())
             },

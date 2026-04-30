@@ -3138,17 +3138,14 @@ pub(super) fn render_text_panel(
     for line_index in scroll_row.min(line_count.saturating_sub(1))..line_count {
         let line = text.line(line_index).unwrap_or_default();
         let line_len = text.line_len_chars(line_index).unwrap_or(0);
+        let char_map = LineCharMap::new(&line);
         let selection_range = visual_selection.and_then(|selection_state| {
             selection_columns_for_visual(selection_state, line_index, line_len)
         });
         let yank_range = yank_flash.and_then(|selection_state| {
             selection_columns_for_visual(selection_state, line_index, line_len)
         });
-        let segments = wrap_line_segments(
-            &LineCharMap::new(&line),
-            pane_layout.wrap_cols,
-            pane_layout.wrap_cols,
-        );
+        let segments = wrap_line_segments(&char_map, pane_layout.wrap_cols, pane_layout.wrap_cols);
         for segment in &segments {
             if visual_row >= pane_layout.visible_rows {
                 break;
@@ -3158,12 +3155,14 @@ pub(super) fn render_text_panel(
                 let start = selection_start.max(segment.start_col);
                 let end = selection_end.min(segment.end_col);
                 if start < end {
+                    let start_display = char_map.display_cols_between(segment.start_col, start);
+                    let width_display = char_map.display_cols_between(start, end);
                     fill_rect(
                         target,
                         PixelRectToRect::rect(
-                            body_x + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            body_x + (start_display as i32 * cell_width),
                             y,
-                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            (width_display as i32 * cell_width) as u32,
                             line_height.max(1) as u32,
                         ),
                         selection,
@@ -3174,12 +3173,14 @@ pub(super) fn render_text_panel(
                 let start = selection_start.max(segment.start_col);
                 let end = selection_end.min(segment.end_col);
                 if start < end {
+                    let start_display = char_map.display_cols_between(segment.start_col, start);
+                    let width_display = char_map.display_cols_between(start, end);
                     fill_rect(
                         target,
                         PixelRectToRect::rect(
-                            body_x + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                            body_x + (start_display as i32 * cell_width),
                             y,
-                            (end.saturating_sub(start) as i32 * cell_width) as u32,
+                            (width_display as i32 * cell_width) as u32,
                             line_height.max(1) as u32,
                         ),
                         yank_flash_color,
@@ -3189,15 +3190,17 @@ pub(super) fn render_text_panel(
             if cursor_screen.is_none()
                 && let Some(cursor_point) = cursor_point
                 && cursor_point.line == line_index
-                && cursor_point.column >= segment.start_col
-                && cursor_point.column <= segment.end_col
+                && char_map.cursor_anchor_col(cursor_point.column) >= segment.start_col
+                && char_map.cursor_anchor_col(cursor_point.column) <= segment.end_col
             {
+                let cursor_col = char_map.cursor_anchor_col(cursor_point.column);
                 cursor_screen = Some((
                     visual_row,
-                    cursor_point.column.saturating_sub(segment.start_col),
+                    char_map.display_cols_between(segment.start_col, cursor_col),
                 ));
             }
-            let rendered = acp_slice_chars(&line, segment.start_col, segment.end_col);
+            let rendered =
+                char_map.display_text_for_range(&line, segment.start_col, segment.end_col);
             draw_text(target, body_x, y, &rendered, foreground)?;
             visual_row = visual_row.saturating_add(1);
         }
