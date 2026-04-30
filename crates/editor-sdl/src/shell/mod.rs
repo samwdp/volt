@@ -89,7 +89,7 @@ use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
     LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction, LspFormattingOptions,
     LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot,
-    LspTextEdit,
+    LspTextEdit, LspWorkspaceDiagnostic,
 };
 use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
@@ -15145,6 +15145,48 @@ fn goto_lsp_implementation(runtime: &mut EditorRuntime) -> Result<(), String> {
     )
 }
 
+fn lsp_diagnostics_for_active_workspace(
+    runtime: &EditorRuntime,
+    diagnostics: Vec<LspWorkspaceDiagnostic>,
+) -> Result<Vec<LspWorkspaceDiagnostic>, String> {
+    let active_root = active_workspace_root(runtime)?;
+    let active_buffer_paths = {
+        let ui = shell_ui(runtime)?;
+        ui.active_workspace_buffer_ids()
+            .into_iter()
+            .flatten()
+            .filter_map(|buffer_id| ui.buffer(*buffer_id))
+            .filter_map(|buffer| buffer.path().map(Path::to_path_buf))
+            .collect::<HashSet<_>>()
+    };
+    let mut filtered = Vec::new();
+    for diagnostic in diagnostics {
+        let resolved_root = workspace_root_for_path(runtime, diagnostic.path())?;
+        if lsp_diagnostic_belongs_to_workspace(
+            active_root.as_deref(),
+            resolved_root.as_deref(),
+            &active_buffer_paths,
+            diagnostic.path(),
+        ) {
+            filtered.push(diagnostic);
+        }
+    }
+    Ok(filtered)
+}
+
+fn lsp_diagnostic_belongs_to_workspace(
+    active_root: Option<&Path>,
+    resolved_root: Option<&Path>,
+    active_buffer_paths: &HashSet<PathBuf>,
+    diagnostic_path: &Path,
+) -> bool {
+    active_buffer_paths.contains(diagnostic_path)
+        || matches!(
+            (active_root, resolved_root),
+            (Some(active_root), Some(resolved_root)) if resolved_root == active_root
+        )
+}
+
 fn open_lsp_diagnostics(runtime: &mut EditorRuntime) -> Result<(), String> {
     let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
         let picker = lsp_diagnostics_status_picker_overlay(
@@ -15155,7 +15197,8 @@ fn open_lsp_diagnostics(runtime: &mut EditorRuntime) -> Result<(), String> {
         shell_ui_mut(runtime)?.set_picker(picker);
         return Ok(());
     };
-    let diagnostics = lsp_client.workspace_diagnostics();
+    let diagnostics =
+        lsp_diagnostics_for_active_workspace(runtime, lsp_client.workspace_diagnostics())?;
     if diagnostics.is_empty() {
         let picker = lsp_diagnostics_status_picker_overlay(
             "No diagnostics available",
@@ -15171,6 +15214,47 @@ fn open_lsp_diagnostics(runtime: &mut EditorRuntime) -> Result<(), String> {
     let picker = lsp_diagnostics_picker_overlay(runtime, &diagnostics);
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
+}
+
+#[cfg(test)]
+mod lsp_diagnostic_scope_tests {
+    use super::*;
+
+    #[test]
+    fn lsp_diagnostic_scope_matches_active_workspace_root() {
+        let active_root = Some(Path::new("P:\\volt"));
+        let active_buffer_paths = HashSet::new();
+        assert!(lsp_diagnostic_belongs_to_workspace(
+            active_root,
+            Some(Path::new("P:\\volt")),
+            &active_buffer_paths,
+            Path::new("P:\\volt\\src\\main.rs"),
+        ));
+        assert!(!lsp_diagnostic_belongs_to_workspace(
+            active_root,
+            Some(Path::new("P:\\volt\\nested")),
+            &active_buffer_paths,
+            Path::new("P:\\volt\\nested\\src\\main.rs"),
+        ));
+    }
+
+    #[test]
+    fn lsp_diagnostic_scope_keeps_active_workspace_buffers_without_root() {
+        let diagnostic_path = PathBuf::from("scratch.rs");
+        let active_buffer_paths = HashSet::from([diagnostic_path.clone()]);
+        assert!(lsp_diagnostic_belongs_to_workspace(
+            None,
+            None,
+            &active_buffer_paths,
+            &diagnostic_path,
+        ));
+        assert!(!lsp_diagnostic_belongs_to_workspace(
+            None,
+            None,
+            &HashSet::new(),
+            Path::new("other.rs"),
+        ));
+    }
 }
 
 fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
