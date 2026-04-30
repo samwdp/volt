@@ -84,6 +84,7 @@ enum LaunchMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LaunchOptions {
     mode: LaunchMode,
+    show_fps_overlay: bool,
     profile_input_latency: bool,
 }
 
@@ -462,6 +463,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match options.mode {
         LaunchMode::ShellDemo => {
             let summary = run_demo_shell(ShellConfig {
+                show_fps_overlay: options.show_fps_overlay,
                 profile_input_latency: options.profile_input_latency,
                 user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
@@ -473,6 +475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let summary = run_demo_shell(ShellConfig {
                 hidden: true,
                 frame_limit: Some(1),
+                show_fps_overlay: options.show_fps_overlay,
                 profile_input_latency: options.profile_input_latency,
                 user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
@@ -481,6 +484,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         LaunchMode::BootstrapDemo => {
+            if options.show_fps_overlay {
+                return Err("`--fps` is only supported with shell modes".into());
+            }
             if options.profile_input_latency {
                 return Err("`--profile-input` is only supported with shell modes".into());
             }
@@ -1047,6 +1053,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
     let mut mode = LaunchMode::ShellDemo;
     let mut explicit_mode = false;
+    let mut show_fps_overlay = false;
     let mut profile_input_latency = false;
 
     for arg in args {
@@ -1075,9 +1082,12 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
             "--profile-input" | "--profile-typing" => {
                 profile_input_latency = true;
             }
+            "--fps" => {
+                show_fps_overlay = true;
+            }
             other => {
                 return Err(format!(
-                    "unknown mode `{other}`; expected `--shell-demo`, `--shell-hidden`, `--bootstrap-demo`, `--profile-input`, or `--profile-typing`"
+                    "unknown mode `{other}`; expected `--shell-demo`, `--shell-hidden`, `--bootstrap-demo`, `--fps`, `--profile-input`, or `--profile-typing`"
                 ));
             }
         }
@@ -1085,6 +1095,7 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
 
     Ok(LaunchOptions {
         mode,
+        show_fps_overlay,
         profile_input_latency,
     })
 }
@@ -1143,6 +1154,7 @@ mod tests {
             options,
             LaunchOptions {
                 mode: LaunchMode::ShellDemo,
+                show_fps_overlay: false,
                 profile_input_latency: false,
             }
         );
@@ -1157,7 +1169,22 @@ mod tests {
             options,
             LaunchOptions {
                 mode: LaunchMode::ShellHidden,
+                show_fps_overlay: false,
                 profile_input_latency: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_launch_options_accepts_fps_overlay() {
+        let options = parse_launch_options(["--fps".to_owned()])
+            .expect("fps flag should be accepted for shell launch");
+        assert_eq!(
+            options,
+            LaunchOptions {
+                mode: LaunchMode::ShellDemo,
+                show_fps_overlay: true,
+                profile_input_latency: false,
             }
         );
     }

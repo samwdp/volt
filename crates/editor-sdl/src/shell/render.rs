@@ -14,6 +14,7 @@ pub(super) fn render_shell_state(
     theme_registry: Option<&ThemeRegistry>,
     width: u32,
     height: u32,
+    fps_overlay: Option<&FpsOverlaySnapshot>,
     cell_width: i32,
     line_height: i32,
     ascent: i32,
@@ -76,9 +77,17 @@ pub(super) fn render_shell_state(
             let multicursor = state.multicursor_for_buffer(buffer.id(), active).cloned();
             let yank_flash = state.yank_flash(buffer.id(), now);
             let command_line = active.then(|| state.command_line()).flatten();
-            render_buffer(
+            let view_state = if active {
+                buffer.view_state()
+            } else {
+                state
+                    .buffer_view_state(pane.pane_id, buffer.id())
+                    .unwrap_or_else(|| buffer.view_state())
+            };
+            render_buffer_with_view_state(
                 target,
                 buffer,
+                view_state,
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 active,
                 visual_range,
@@ -191,7 +200,109 @@ pub(super) fn render_shell_state(
         line_height,
         now,
     )?;
+    render_fps_overlay(
+        target,
+        width,
+        theme_registry,
+        fps_overlay,
+        cell_width,
+        line_height,
+    )?;
 
+    Ok(())
+}
+
+fn frame_time_to_fps(frame_time: Duration) -> f64 {
+    if frame_time.is_zero() {
+        0.0
+    } else {
+        1.0 / frame_time.as_secs_f64()
+    }
+}
+
+fn format_fps_overlay_text(snapshot: &FpsOverlaySnapshot) -> String {
+    format!(
+        "FPS {:>5.1}  frame {:>5.2}ms  max {:>5.2}ms",
+        frame_time_to_fps(snapshot.average_frame_time),
+        snapshot.latest_frame_time.as_secs_f64() * 1_000.0,
+        snapshot.worst_frame_time.as_secs_f64() * 1_000.0,
+    )
+}
+
+fn render_fps_overlay(
+    target: &mut DrawTarget<'_>,
+    width: u32,
+    theme_registry: Option<&ThemeRegistry>,
+    fps_overlay: Option<&FpsOverlaySnapshot>,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let Some(snapshot) = fps_overlay else {
+        return Ok(());
+    };
+    let window_effects = current_window_effect_settings(theme_registry);
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let base_foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let background = theme_color(
+        theme_registry,
+        "ui.fps.background",
+        adjust_color(base_background, if is_dark { 18 } else { -18 }),
+    );
+    let border = theme_color(
+        theme_registry,
+        "ui.fps.border",
+        adjust_color(base_background, if is_dark { 30 } else { -30 }),
+    );
+    let accent = if snapshot.average_frame_time <= FRAME_PACING_TARGET_120FPS {
+        theme_color(
+            theme_registry,
+            "ui.fps.good",
+            Color::RGBA(95, 196, 122, 255),
+        )
+    } else if snapshot.average_frame_time <= FRAME_PACING_TARGET_120FPS + Duration::from_millis(4) {
+        theme_color(
+            theme_registry,
+            "ui.fps.warn",
+            Color::RGBA(236, 191, 74, 255),
+        )
+    } else {
+        theme_color(theme_registry, "ui.fps.bad", Color::RGBA(224, 97, 97, 255))
+    };
+    let text = format_fps_overlay_text(snapshot);
+    let panel_width = monospace_text_width(&text, cell_width) + 24;
+    let panel_height = line_height.max(1) as u32 + 16;
+    let rect = PixelRectToRect::rect(
+        width as i32 - panel_width as i32 - 12,
+        12,
+        panel_width,
+        panel_height,
+    );
+    let inner_rect = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        rect.height().saturating_sub(2),
+    );
+    fill_overlay_surface_rounded_rect(target, rect, 10, border, window_effects)?;
+    fill_overlay_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
+    fill_overlay_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + 1,
+            rect.y() + 1,
+            5,
+            rect.height().saturating_sub(2),
+        ),
+        4,
+        accent,
+        window_effects,
+    )?;
+    draw_text(target, rect.x() + 14, rect.y() + 8, &text, base_foreground)?;
     Ok(())
 }
 
@@ -243,6 +354,7 @@ pub(super) fn render_runtime_popup_overlay(
     )?;
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
+        let view_state = buffer.view_state();
         let input_mode = state.input_mode_for_buffer(buffer.id(), popup_focus);
         let vim_targets_input =
             state.vim_target_for_buffer(buffer.id(), popup_focus) == VimTarget::Input;
@@ -251,9 +363,10 @@ pub(super) fn render_runtime_popup_overlay(
             .multicursor_for_buffer(buffer.id(), popup_focus)
             .cloned();
         let yank_flash = state.yank_flash(buffer.id(), now);
-        render_buffer(
+        render_buffer_with_view_state(
             target,
             buffer,
+            view_state,
             popup_rect,
             popup_focus,
             visual_range,
@@ -1627,10 +1740,66 @@ pub(super) fn collect_wrapped_lines(
     lines
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_buffer(
     target: &mut DrawTarget<'_>,
     buffer: &ShellBuffer,
+    rect: Rect,
+    active: bool,
+    visual_selection: Option<VisualSelection>,
+    multicursor: Option<&MulticursorState>,
+    yank_flash: Option<VisualSelection>,
+    input_mode: InputMode,
+    vim_targets_input: bool,
+    recording_macro: Option<char>,
+    command_line: Option<&CommandLineOverlay>,
+    command_line_row_visible: bool,
+    user_library: &dyn UserLibrary,
+    workspace_name: &str,
+    lsp_server: Option<&str>,
+    lsp_workspace_loaded: bool,
+    acp_connected: bool,
+    git_summary: Option<&GitSummarySnapshot>,
+    theme_registry: Option<&ThemeRegistry>,
+    typing_active: bool,
+    cell_width: i32,
+    line_height: i32,
+    ascent: i32,
+) -> Result<(), ShellError> {
+    render_buffer_with_view_state(
+        target,
+        buffer,
+        buffer.view_state(),
+        rect,
+        active,
+        visual_selection,
+        multicursor,
+        yank_flash,
+        input_mode,
+        vim_targets_input,
+        recording_macro,
+        command_line,
+        command_line_row_visible,
+        user_library,
+        workspace_name,
+        lsp_server,
+        lsp_workspace_loaded,
+        acp_connected,
+        git_summary,
+        theme_registry,
+        typing_active,
+        cell_width,
+        line_height,
+        ascent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_buffer_with_view_state(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    view_state: BufferViewState,
     rect: Rect,
     active: bool,
     visual_selection: Option<VisualSelection>,
@@ -1754,12 +1923,15 @@ pub(super) fn render_buffer(
             .and_then(TerminalRenderSnapshot::cursor)
     })
     .flatten();
+    let cursor_row = view_state.cursor.line;
+    let cursor_col = view_state.cursor.column;
+    let scroll_row = view_state.scroll_row;
     let statusline_line = terminal_cursor
         .map(|cursor| cursor.row() as usize + 1)
-        .unwrap_or(buffer.cursor_row() + 1);
+        .unwrap_or(cursor_row + 1);
     let statusline_column = terminal_cursor
         .map(|cursor| cursor.col() as usize + 1)
-        .unwrap_or(buffer.cursor_col() + 1);
+        .unwrap_or(cursor_col + 1);
     let statusline_context = HostStatuslineContext {
         vim_mode: statusline_mode_label(input_mode, multicursor.is_some()),
         recording_macro,
@@ -1896,9 +2068,10 @@ pub(super) fn render_buffer(
             base_background,
         )?;
     } else if buffer.has_plugin_sections() {
-        render_plugin_section_buffer_body(
+        render_plugin_section_buffer_body_with_view_state(
             target,
             buffer,
+            view_state,
             rect,
             layout,
             active,
@@ -1922,8 +2095,6 @@ pub(super) fn render_buffer(
         let line_number_width = cell_width * 5;
         let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
-        let cursor_row = buffer.cursor_row();
-        let cursor_col = buffer.cursor_col();
         let context_overlay =
             buffer_context_overlay_snapshot(buffer, active, typing_active, user_library);
         let headerline_lines = context_overlay
@@ -1938,13 +2109,8 @@ pub(super) fn render_buffer(
         let headerline_rows = headerline_lines.len();
         let body_y = layout.body_y + headerline_rows as i32 * line_height;
         let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
-        let wrapped_lines = collect_wrapped_lines(
-            buffer,
-            buffer.scroll_row,
-            visible_rows,
-            wrap_cols,
-            indent_size,
-        );
+        let wrapped_lines =
+            collect_wrapped_lines(buffer, scroll_row, visible_rows, wrap_cols, indent_size);
         let mut cursor_row_on_screen = None;
         let mut cursor_col_on_screen = None;
         let mut cursor_indent_cols = 0usize;
@@ -2707,10 +2873,58 @@ pub(super) fn plugin_section_buffer_layout(
     Some(PluginSectionLayout { panes })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_plugin_section_buffer_body(
     target: &mut DrawTarget<'_>,
     buffer: &ShellBuffer,
+    rect: Rect,
+    layout: BufferFooterLayout,
+    active: bool,
+    visual_selection: Option<VisualSelection>,
+    yank_flash: Option<VisualSelection>,
+    input_mode: InputMode,
+    theme_registry: Option<&ThemeRegistry>,
+    base_background: Color,
+    foreground: Color,
+    muted: Color,
+    border_color: Color,
+    selection: Color,
+    yank_flash_color: Color,
+    cursor: Color,
+    cursor_roundness: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    render_plugin_section_buffer_body_with_view_state(
+        target,
+        buffer,
+        buffer.view_state(),
+        rect,
+        layout,
+        active,
+        visual_selection,
+        yank_flash,
+        input_mode,
+        theme_registry,
+        base_background,
+        foreground,
+        muted,
+        border_color,
+        selection,
+        yank_flash_color,
+        cursor,
+        cursor_roundness,
+        cell_width,
+        line_height,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_plugin_section_buffer_body_with_view_state(
+    target: &mut DrawTarget<'_>,
+    buffer: &ShellBuffer,
+    base_view_state: BufferViewState,
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
@@ -2777,8 +2991,8 @@ pub(super) fn render_plugin_section_buffer_body(
         let (text, scroll_row, cursor_point, title, pane_mode) = if index == 0 {
             (
                 &buffer.text,
-                buffer.scroll_row,
-                (state.active_section == 0).then_some(buffer.text.cursor()),
+                base_view_state.scroll_row,
+                (state.active_section == 0).then_some(base_view_state.cursor),
                 state.base_title.as_str(),
                 if state.base_writable {
                     input_mode

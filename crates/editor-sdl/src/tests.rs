@@ -186,6 +186,45 @@ fn vim_counts_operators_and_text_objects_work() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn vim_word_actions_at_line_end_preserve_newline() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+
+    set_active_buffer_text(&mut state, "alpha beta\ngamma")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+    state.handle_text_input("d")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.active_buffer_mut()?.text.text(), "alpha \ngamma");
+
+    set_active_buffer_text(&mut state, "alpha beta\ngamma")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+    state.handle_text_input("c")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    state.handle_text_input("delta")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "alpha delta\ngamma");
+
+    set_active_buffer_text(&mut state, "alpha beta\ngamma")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+    state.handle_text_input("d")?;
+    state.handle_text_input("a")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.active_buffer_mut()?.text.text(), "alpha\ngamma");
+
+    set_active_buffer_text(&mut state, "alpha beta\ngamma")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 6));
+    state.handle_text_input("c")?;
+    state.handle_text_input("a")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    state.handle_text_input("delta")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert_eq!(state.active_buffer_mut()?.text.text(), "alphadelta\ngamma");
+
+    Ok(())
+}
+
+#[test]
 fn vim_visual_mode_and_find_repeats_work() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("bananas");

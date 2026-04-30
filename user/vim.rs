@@ -688,7 +688,8 @@ pub fn package() -> PluginPackage {
         ),
         normal_binding("\\", "pane.split-vertical", PluginKeymapScope::Workspace),
         normal_binding("|", "pane.split-horizontal", PluginKeymapScope::Workspace),
-        normal_binding("-", "oil.open-parent", PluginKeymapScope::Workspace),
+        normal_binding("-", "oil.open-directory", PluginKeymapScope::Workspace),
+        normal_binding("_", "oil.open-parent", PluginKeymapScope::Workspace),
         normal_binding("*", "vim.search-word-forward", PluginKeymapScope::Workspace),
         normal_binding(
             "#",
@@ -1011,6 +1012,7 @@ pub fn package() -> PluginPackage {
             "picker.open-icon-fonts",
             PluginKeymapScope::Workspace,
         ),
+        leader_binding("s d", "lsp.diagnostics", PluginKeymapScope::Workspace),
         leader_binding("s g", "workspace.search", PluginKeymapScope::Workspace),
         // Workspace
         leader_binding("p n", "workspace.new", PluginKeymapScope::Workspace),
@@ -1089,6 +1091,12 @@ mod tests {
                 .any(|binding| binding.chord() == "g i"
                     && binding.command_name() == "lsp.implementation")
         );
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Space s d"
+                && binding.command_name() == "lsp.diagnostics"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
     }
 
     #[test]

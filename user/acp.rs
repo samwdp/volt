@@ -4,6 +4,7 @@ use editor_plugin_api::{
 };
 
 pub const ACP_BUFFER_KIND: &str = "acp";
+pub const PI_ACP_LOCATION: &str = "P:/pi-acp/dist/index.js";
 
 #[derive(Debug, Clone)]
 pub struct AcpClientConfig {
@@ -44,7 +45,7 @@ pub fn clients() -> Vec<AcpClientConfig> {
             &["--acp", "--stdio", "--yolo"],
         ),
         AcpClientConfig::new("opencode", "OpenCode (ACP)", "opencode", &["acp"]),
-        AcpClientConfig::new("pi", "Pi (ACP)", "npx", &["pi-acp"]),
+        AcpClientConfig::new("pi", "Pi (ACP)", "node", &[PI_ACP_LOCATION]),
     ]
 }
 

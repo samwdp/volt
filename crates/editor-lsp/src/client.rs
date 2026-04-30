@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerSession, LspError,
+    LspWorkspaceDiagnostic,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
@@ -1207,6 +1208,40 @@ impl LspClientManager {
                 diagnostic.severity() as u8,
             )
         });
+        diagnostics
+    }
+
+    pub fn workspace_diagnostics(&self) -> Vec<LspWorkspaceDiagnostic> {
+        let sessions = self
+            .state
+            .lock()
+            .map(|state| state.sessions.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut diagnostics = Vec::new();
+        for session in sessions {
+            if session.is_disconnected() {
+                continue;
+            }
+            let server_id = session.key.server_id.clone();
+            let snapshot = session
+                .diagnostics
+                .lock()
+                .map(|diagnostics_by_path| {
+                    let mut entries = Vec::new();
+                    for (path, path_diagnostics) in diagnostics_by_path.iter() {
+                        for diagnostic in path_diagnostics {
+                            entries.push(LspWorkspaceDiagnostic::new(
+                                server_id.clone(),
+                                path.clone(),
+                                diagnostic.clone(),
+                            ));
+                        }
+                    }
+                    entries
+                })
+                .unwrap_or_default();
+            diagnostics.extend(snapshot);
+        }
         diagnostics
     }
 
@@ -4732,6 +4767,139 @@ mod tests {
 
         assert!(manager.session_labels_for_path(&path).is_empty());
         assert!(!manager.has_live_sessions_for_path(&path));
+    }
+
+    #[cfg(windows)]
+    fn spawn_inert_child() -> (Child, ChildStdin) {
+        let mut child = Command::new("cmd")
+            .args(["/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn inert child");
+        let stdin = child.stdin.take().expect("child stdin");
+        (child, stdin)
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_inert_child() -> (Child, ChildStdin) {
+        let mut child = Command::new("sh")
+            .args(["-c", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn inert child");
+        let stdin = child.stdin.take().expect("child stdin");
+        (child, stdin)
+    }
+
+    fn test_session_handle(
+        server_id: &str,
+        path: &Path,
+        diagnostics_by_path: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    ) -> Arc<LspSessionHandle> {
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                server_id,
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register test server");
+        let session = registry
+            .prepare_session_for_path(server_id, path, None)
+            .expect("prepare test session");
+        let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
+            &session, None,
+        )));
+        let (child, writer) = spawn_inert_child();
+        Arc::new(LspSessionHandle {
+            key: SessionKey {
+                server_id: server_id.to_owned(),
+                root: None,
+            },
+            session,
+            child: Mutex::new(child),
+            writer: Arc::new(Mutex::new(writer)),
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
+            workspace_configuration,
+            transport_log: Arc::new(Mutex::new(LspTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
+            next_request_id: AtomicU64::new(1),
+            next_progress_token: AtomicU64::new(1),
+            disconnected: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[test]
+    fn workspace_diagnostics_collect_entries_across_live_sessions() {
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        let lib_path = PathBuf::from("src").join("lib.rs");
+        let main_path = PathBuf::from("src").join("main.rs");
+        let error = Diagnostic::new(
+            "rustc",
+            "cannot find value `missing` in this scope",
+            DiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(4, 2), TextPoint::new(4, 9)),
+        );
+        let warning = Diagnostic::new(
+            "rustc",
+            "unused variable: `value`",
+            DiagnosticSeverity::Warning,
+            TextRange::new(TextPoint::new(7, 4), TextPoint::new(7, 9)),
+        );
+        let info = Diagnostic::new(
+            "biome",
+            "formatting suggestion",
+            DiagnosticSeverity::Information,
+            TextRange::new(TextPoint::new(1, 0), TextPoint::new(1, 6)),
+        );
+
+        let rust_session = test_session_handle(
+            "rust-analyzer",
+            &lib_path,
+            BTreeMap::from([
+                (lib_path.clone(), vec![error.clone()]),
+                (main_path.clone(), vec![warning.clone()]),
+            ]),
+        );
+        let biome_session = test_session_handle(
+            "biome",
+            &main_path,
+            BTreeMap::from([(main_path.clone(), vec![info.clone()])]),
+        );
+
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state
+                .sessions
+                .insert(rust_session.key.clone(), Arc::clone(&rust_session));
+            state
+                .sessions
+                .insert(biome_session.key.clone(), Arc::clone(&biome_session));
+        }
+
+        let diagnostics = manager.workspace_diagnostics();
+        assert_eq!(diagnostics.len(), 3);
+        assert!(diagnostics.iter().any(|entry| {
+            entry.server_id() == "rust-analyzer"
+                && entry.path() == lib_path.as_path()
+                && entry.diagnostic() == &error
+        }));
+        assert!(diagnostics.iter().any(|entry| {
+            entry.server_id() == "rust-analyzer"
+                && entry.path() == main_path.as_path()
+                && entry.diagnostic() == &warning
+        }));
+        assert!(diagnostics.iter().any(|entry| {
+            entry.server_id() == "biome"
+                && entry.path() == main_path.as_path()
+                && entry.diagnostic() == &info
+        }));
     }
 
     #[test]

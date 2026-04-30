@@ -353,8 +353,10 @@ fn is_oil_icon(glyph: &str) -> bool {
             | crate::icon_font::symbols::seti::CUSTOM_DEFAULT
             | crate::icon_font::symbols::seti::CUSTOM_TOML
             | crate::icon_font::symbols::seti::SETI_C
+            | crate::icon_font::symbols::seti::SETI_C_SHARP
             | crate::icon_font::symbols::seti::SETI_CONFIG
             | crate::icon_font::symbols::seti::SETI_CPP
+            | crate::icon_font::symbols::seti::SETI_CSS
             | crate::icon_font::symbols::seti::SETI_CSV
             | crate::icon_font::symbols::seti::SETI_DOCKER
             | crate::icon_font::symbols::seti::SETI_GIT
@@ -455,6 +457,7 @@ mod tests {
             crate::icon_font::symbols::seti::CUSTOM_TOML
         );
         assert_eq!(strip_entry_icon_prefix(&label), "Cargo.toml");
+
         let repeated = format!(
             "{} {} {} {} Cargo.toml",
             crate::icon_font::symbols::seti::CUSTOM_TOML,
@@ -463,6 +466,25 @@ mod tests {
             crate::icon_font::symbols::seti::CUSTOM_TOML
         );
         assert_eq!(strip_entry_icon_prefix(&repeated), "Cargo.toml");
+
+        let repeated_csharp = format!(
+            "{} {} {} {} test1.cs",
+            crate::icon_font::symbols::seti::SETI_C_SHARP,
+            crate::icon_font::symbols::seti::SETI_C_SHARP,
+            crate::icon_font::symbols::seti::SETI_C_SHARP,
+            crate::icon_font::symbols::seti::SETI_C_SHARP
+        );
+        assert_eq!(strip_entry_icon_prefix(&repeated_csharp), "test1.cs");
+
+        let repeated_css = format!(
+            "{} {} {} {} site.css",
+            crate::icon_font::symbols::seti::SETI_CSS,
+            crate::icon_font::symbols::seti::SETI_CSS,
+            crate::icon_font::symbols::seti::SETI_CSS,
+            crate::icon_font::symbols::seti::SETI_CSS
+        );
+        assert_eq!(strip_entry_icon_prefix(&repeated_css), "site.css");
+
         assert_eq!(strip_entry_icon_prefix("plain.txt"), "plain.txt");
     }
 

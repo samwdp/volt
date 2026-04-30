@@ -31,7 +31,7 @@ mod tests;
 use std::{
     any::Any,
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -239,6 +239,7 @@ const HOOK_LSP_LOG: &str = lsp_hooks::LOG;
 const HOOK_LSP_DEFINITION: &str = lsp_hooks::DEFINITION;
 const HOOK_LSP_REFERENCES: &str = lsp_hooks::REFERENCES;
 const HOOK_LSP_IMPLEMENTATION: &str = lsp_hooks::IMPLEMENTATION;
+const HOOK_LSP_DIAGNOSTICS: &str = lsp_hooks::DIAGNOSTICS;
 const HOOK_LSP_CODE_ACTIONS: &str = lsp_hooks::CODE_ACTIONS;
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
@@ -374,6 +375,7 @@ const TYPING_PROFILE_LOG_FILE_NAME: &str = "typing-profile.log";
 const TYPING_PROFILE_MAX_FRAMES: usize = 10_000;
 const TYPING_PROFILE_SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(8);
 const FRAME_PACING_TARGET_120FPS: Duration = Duration::from_nanos(8_333_333);
+const FPS_OVERLAY_HISTORY_FRAMES: usize = 120;
 const FRAME_PACING_YIELD_THRESHOLD: Duration = Duration::from_millis(1);
 const FRAME_PACING_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const LSP_SYNC_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
@@ -4359,6 +4361,20 @@ impl ShellBuffer {
             .unwrap_or_else(|| self.text.cursor())
     }
 
+    fn view_state(&self) -> BufferViewState {
+        BufferViewState {
+            cursor: self.cursor_point(),
+            scroll_row: self.scroll_row,
+        }
+    }
+
+    fn restore_view_state(&mut self, view_state: BufferViewState) {
+        self.set_cursor(view_state.cursor);
+        self.scroll_row = view_state
+            .scroll_row
+            .min(self.line_count().saturating_sub(1));
+    }
+
     fn line_count(&self) -> usize {
         if let Some(pane) = self.active_aux_text_pane_state() {
             return pane.line_count();
@@ -4839,6 +4855,10 @@ impl ShellBuffer {
 
     fn full_syntax_window(&self) -> Option<SyntaxLineWindow> {
         SyntaxLineWindow::new(0, self.line_count())
+    }
+
+    fn worker_syntax_window(&self) -> Option<SyntaxLineWindow> {
+        self.full_syntax_window()
     }
 
     fn desired_syntax_window(&self) -> Option<SyntaxLineWindow> {
@@ -6302,10 +6322,41 @@ enum GitResetMode {
     Keep,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferViewState {
+    cursor: TextPoint,
+    scroll_row: usize,
+}
+
+#[derive(Debug, Clone)]
 struct ShellPane {
     pane_id: PaneId,
     buffer_id: BufferId,
+    buffer_views: BTreeMap<BufferId, BufferViewState>,
+}
+
+impl ShellPane {
+    fn new(pane_id: PaneId, buffer_id: BufferId, view_state: BufferViewState) -> Self {
+        let mut buffer_views = BTreeMap::new();
+        buffer_views.insert(buffer_id, view_state);
+        Self {
+            pane_id,
+            buffer_id,
+            buffer_views,
+        }
+    }
+
+    fn view_state(&self, buffer_id: BufferId) -> Option<BufferViewState> {
+        self.buffer_views.get(&buffer_id).copied()
+    }
+
+    fn store_view_state(&mut self, buffer_id: BufferId, view_state: BufferViewState) {
+        self.buffer_views.insert(buffer_id, view_state);
+    }
+
+    fn remove_view_state(&mut self, buffer_id: BufferId) {
+        self.buffer_views.remove(&buffer_id);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6571,15 +6622,17 @@ impl ShellWorkspaceView {
     fn new(
         primary_pane_id: PaneId,
         primary_buffer_id: BufferId,
+        primary_view_state: BufferViewState,
         split_buffer_id: BufferId,
         buffer_ids: Vec<BufferId>,
     ) -> Self {
         Self {
             buffer_ids,
-            panes: vec![ShellPane {
-                pane_id: primary_pane_id,
-                buffer_id: primary_buffer_id,
-            }],
+            panes: vec![ShellPane::new(
+                primary_pane_id,
+                primary_buffer_id,
+                primary_view_state,
+            )],
             active_pane: 0,
             split_buffer_id,
             split_direction: None,
@@ -6643,6 +6696,7 @@ impl ShellUiState {
         secondary: ShellBuffer,
         split_buffer_id: BufferId,
     ) -> Self {
+        let primary_view_state = primary.view_state();
         let primary_buffer_id = primary.id();
         let secondary_buffer_id = secondary.id();
         let mut workspace_views = BTreeMap::new();
@@ -6651,6 +6705,7 @@ impl ShellUiState {
             ShellWorkspaceView::new(
                 primary_pane_id,
                 primary_buffer_id,
+                primary_view_state,
                 split_buffer_id,
                 vec![primary_buffer_id, secondary_buffer_id],
             ),
@@ -6950,11 +7005,13 @@ impl ShellUiState {
     }
 
     fn switch_workspace(&mut self, workspace_id: WorkspaceId) {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if self.active_workspace != workspace_id {
             self.previous_workspace = Some(self.active_workspace);
             self.active_workspace = workspace_id;
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.close_picker();
         self.close_command_line();
@@ -6970,6 +7027,7 @@ impl ShellUiState {
         secondary: ShellBuffer,
         split_buffer_id: BufferId,
     ) {
+        let primary_view_state = primary.view_state();
         let primary_buffer_id = primary.id();
         let secondary_buffer_id = secondary.id();
         self.insert_buffer(primary);
@@ -6979,6 +7037,7 @@ impl ShellUiState {
             ShellWorkspaceView::new(
                 primary_pane_id,
                 primary_buffer_id,
+                primary_view_state,
                 split_buffer_id,
                 vec![primary_buffer_id, secondary_buffer_id],
             ),
@@ -7001,6 +7060,7 @@ impl ShellUiState {
         }
         if self.active_workspace == workspace_id {
             self.active_workspace = self.default_workspace;
+            self.restore_active_pane_view_state();
             self.restore_active_buffer_vim_state();
         }
     }
@@ -7038,13 +7098,58 @@ impl ShellUiState {
             .map(|pane| pane.pane_id)
     }
 
+    fn active_pane_buffer(&self) -> Option<(PaneId, BufferId)> {
+        self.workspace_view()
+            .and_then(|view| view.panes.get(view.active_pane))
+            .map(|pane| (pane.pane_id, pane.buffer_id))
+    }
+
+    fn buffer_view_state(&self, pane_id: PaneId, buffer_id: BufferId) -> Option<BufferViewState> {
+        let fallback = self.buffer(buffer_id).map(ShellBuffer::view_state);
+        let Some(view) = self.workspace_view() else {
+            return fallback;
+        };
+        let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
+            return fallback;
+        };
+        pane.view_state(buffer_id).or(fallback)
+    }
+
+    fn persist_active_pane_view_state(&mut self) {
+        let Some((pane_id, buffer_id)) = self.active_pane_buffer() else {
+            return;
+        };
+        let Some(view_state) = self.buffer(buffer_id).map(ShellBuffer::view_state) else {
+            return;
+        };
+        if let Some(view) = self.workspace_view_mut()
+            && let Some(pane) = view.panes.iter_mut().find(|pane| pane.pane_id == pane_id)
+        {
+            pane.store_view_state(buffer_id, view_state);
+        }
+    }
+
+    fn restore_active_pane_view_state(&mut self) {
+        let Some((pane_id, buffer_id)) = self.active_pane_buffer() else {
+            return;
+        };
+        let Some(view_state) = self.buffer_view_state(pane_id, buffer_id) else {
+            return;
+        };
+        if let Some(buffer) = self.buffer_mut(buffer_id) {
+            buffer.restore_view_state(view_state);
+        }
+    }
+
     fn focus_pane(&mut self, pane_id: PaneId) {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if let Some(view) = self.workspace_view_mut()
             && let Some(index) = view.panes.iter().position(|pane| pane.pane_id == pane_id)
         {
             view.active_pane = index;
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.close_command_line();
         self.close_autocomplete();
@@ -7112,6 +7217,7 @@ impl ShellUiState {
             .find(|buffer| buffer.id() == buffer_id)
             .and_then(shell_buffer_watch_path);
         if !removed_active_buffer {
+            self.persist_active_pane_view_state();
             self.persist_active_buffer_vim_state();
         }
         self.buffers.retain(|buffer| buffer.id() != buffer_id);
@@ -7129,6 +7235,7 @@ impl ShellUiState {
                         view.split_buffer_id = fallback;
                     }
                     for pane in view.panes.iter_mut() {
+                        pane.remove_view_state(buffer_id);
                         if pane.buffer_id == buffer_id {
                             pane.buffer_id = fallback;
                         }
@@ -7140,6 +7247,7 @@ impl ShellUiState {
             }
         }
         if removed_active_buffer {
+            self.restore_active_pane_view_state();
             self.restore_active_buffer_vim_state();
         }
     }
@@ -7378,6 +7486,7 @@ impl ShellUiState {
     }
 
     fn focus_buffer_in_active_pane(&mut self, buffer_id: BufferId) {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if self.buffers.iter().any(|buffer| buffer.id() == buffer_id)
             && let Some(view) = self.workspace_view_mut()
@@ -7388,6 +7497,7 @@ impl ShellUiState {
             }
             pane.buffer_id = buffer_id;
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
     }
 
@@ -7399,18 +7509,28 @@ impl ShellUiState {
     }
 
     fn split_pane(&mut self, pane_id: PaneId, buffer_id: BufferId, direction: PaneSplitDirection) {
+        self.persist_active_pane_view_state();
+        let initial_view_state = self
+            .buffer(buffer_id)
+            .map(ShellBuffer::view_state)
+            .unwrap_or(BufferViewState {
+                cursor: TextPoint::default(),
+                scroll_row: 0,
+            });
         if let Some(view) = self.workspace_view_mut()
             && view.panes.len() == 1
         {
             if !view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.push(buffer_id);
             }
-            view.panes.push(ShellPane { pane_id, buffer_id });
+            view.panes
+                .push(ShellPane::new(pane_id, buffer_id, initial_view_state));
             view.split_direction = Some(direction);
         }
     }
 
     fn close_pane(&mut self, pane_id: PaneId) {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if let Some(view) = self.workspace_view_mut()
             && view.panes.len() > 1
@@ -7426,6 +7546,7 @@ impl ShellUiState {
                 view.active_pane = view.active_pane.min(view.panes.len().saturating_sub(1));
             }
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.close_autocomplete();
         self.close_hover();
@@ -7458,6 +7579,7 @@ impl ShellUiState {
     }
 
     fn shift_active_pane(&mut self, delta: isize) -> Option<PaneId> {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
@@ -7467,11 +7589,13 @@ impl ShellUiState {
             let next = (view.active_pane as isize + delta).rem_euclid(pane_count);
             view.active_pane = next as usize;
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.active_pane_id()
     }
 
     fn cycle_active_pane(&mut self) -> Option<PaneId> {
+        self.persist_active_pane_view_state();
         self.persist_active_buffer_vim_state();
         if !self.picker_visible()
             && let Some(view) = self.workspace_view_mut()
@@ -7479,6 +7603,7 @@ impl ShellUiState {
         {
             view.active_pane = (view.active_pane + 1) % view.panes.len();
         }
+        self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.active_pane_id()
     }
@@ -8097,6 +8222,53 @@ struct ShellVisualRefreshKey {
     notification_revision: u64,
     notification_deadline: Option<Instant>,
     yank_flash_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FpsOverlaySnapshot {
+    latest_frame_time: Duration,
+    average_frame_time: Duration,
+    worst_frame_time: Duration,
+}
+
+#[derive(Debug, Default)]
+struct FpsOverlayState {
+    recent_frame_times: VecDeque<Duration>,
+    total_recent_frame_time_nanos: u128,
+    worst_frame_time: Duration,
+}
+
+impl FpsOverlayState {
+    fn snapshot(&self) -> Option<FpsOverlaySnapshot> {
+        if self.recent_frame_times.is_empty() {
+            return None;
+        }
+        let average_frame_time_nanos =
+            self.total_recent_frame_time_nanos / self.recent_frame_times.len() as u128;
+        let average_frame_time =
+            Duration::from_nanos(average_frame_time_nanos.min(u128::from(u64::MAX)) as u64);
+        self.recent_frame_times
+            .back()
+            .copied()
+            .map(|latest_frame_time| FpsOverlaySnapshot {
+                latest_frame_time,
+                average_frame_time,
+                worst_frame_time: self.worst_frame_time,
+            })
+    }
+
+    fn record_frame(&mut self, frame_time: Duration) {
+        self.recent_frame_times.push_back(frame_time);
+        self.total_recent_frame_time_nanos += frame_time.as_nanos();
+        self.worst_frame_time = self.worst_frame_time.max(frame_time);
+        while self.recent_frame_times.len() > FPS_OVERLAY_HISTORY_FRAMES {
+            if let Some(removed) = self.recent_frame_times.pop_front() {
+                self.total_recent_frame_time_nanos = self
+                    .total_recent_frame_time_nanos
+                    .saturating_sub(removed.as_nanos());
+            }
+        }
+    }
 }
 
 pub(crate) struct ShellState {
@@ -9199,6 +9371,7 @@ impl ShellState {
         cell_width: i32,
         line_height: i32,
         ascent: i32,
+        fps_overlay: Option<&FpsOverlaySnapshot>,
     ) -> Result<(), ShellError> {
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
@@ -9227,6 +9400,7 @@ impl ShellState {
             theme_registry,
             width,
             height,
+            fps_overlay,
             cell_width,
             line_height,
             ascent,
@@ -11559,6 +11733,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut frames_rendered = 0;
     let mut last_scene: Option<Vec<DrawCommand>> = None;
     let mut last_visual_key: Option<ShellVisualRefreshKey> = None;
+    let mut fps_overlay_state = config.show_fps_overlay.then(FpsOverlayState::default);
 
     enum FrameOutcome {
         Continue,
@@ -11874,10 +12049,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || terminal_changed
                     || syntax_changed
                     || acp_changed
+                    || config.show_fps_overlay
                     || last_visual_key.as_ref() != Some(&visual_key);
                 let presented_at = if should_render {
                     let mut scene = Vec::new();
                     let render_started = Instant::now();
+                    let fps_overlay = fps_overlay_state
+                        .as_ref()
+                        .and_then(FpsOverlayState::snapshot);
                     if let Err(error) = state.render(
                         &mut DrawTarget::Scene(&mut scene),
                         &fonts,
@@ -11886,6 +12065,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         cell_width,
                         line_height as i32,
                         ascent,
+                        fps_overlay.as_ref(),
                     ) {
                         state.record_shell_error("shell.render", error);
                         return FrameOutcome::Continue;
@@ -11925,6 +12105,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 }
                 if let Some(frame) = typing_frame.take() {
                     state.record_typing_frame(frame.finish(frame_started.elapsed(), presented_at));
+                }
+                if let Some(overlay) = fps_overlay_state.as_mut() {
+                    overlay.record_frame(frame_started.elapsed());
                 }
 
                 FrameOutcome::Continue
@@ -14547,6 +14730,16 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
     }
 
+    if runtime.hooks().contains(HOOK_LSP_DIAGNOSTICS) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_DIAGNOSTICS,
+                "shell.lsp-diagnostics",
+                |_, runtime| open_lsp_diagnostics(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
     if runtime.hooks().contains(HOOK_LSP_CODE_ACTIONS) {
         runtime
             .subscribe_hook(
@@ -14950,6 +15143,34 @@ fn goto_lsp_implementation(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Implementations",
         LspClientManager::implementations,
     )
+}
+
+fn open_lsp_diagnostics(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
+        let picker = lsp_diagnostics_status_picker_overlay(
+            "Diagnostics unavailable",
+            "LSP client manager service is missing.",
+            None,
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    };
+    let diagnostics = lsp_client.workspace_diagnostics();
+    if diagnostics.is_empty() {
+        let picker = lsp_diagnostics_status_picker_overlay(
+            "No diagnostics available",
+            "No live LSP diagnostics are currently available from active language servers.",
+            active_workspace_root(runtime)
+                .ok()
+                .flatten()
+                .map(|root| root.display().to_string()),
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+    let picker = lsp_diagnostics_picker_overlay(runtime, &diagnostics);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
 }
 
 fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -19010,6 +19231,35 @@ fn motion_is_inclusive(motion: ShellMotion) -> bool {
     )
 }
 
+fn trim_word_forward_operator_range(
+    buffer: &ShellBuffer,
+    motion: ShellMotion,
+    original_cursor: TextPoint,
+    target: TextPoint,
+    range: TextRange,
+    repeat: usize,
+) -> TextRange {
+    if repeat != 1
+        || !matches!(
+            motion,
+            ShellMotion::WordForward | ShellMotion::BigWordForward
+        )
+        || target.line == original_cursor.line
+    {
+        return range;
+    }
+
+    let line_end = TextPoint::new(
+        original_cursor.line,
+        buffer.line_len_chars(original_cursor.line),
+    );
+    if line_end <= original_cursor {
+        return range;
+    }
+
+    TextRange::new(original_cursor, line_end)
+}
+
 fn charwise_motion_range(
     buffer: &ShellBuffer,
     start: TextPoint,
@@ -21299,7 +21549,17 @@ fn apply_operator_motion(
                         original_cursor,
                         target,
                         motion_is_inclusive(motion),
-                    );
+                    )
+                    .map(|range| {
+                        trim_word_forward_operator_range(
+                            buffer,
+                            motion,
+                            original_cursor,
+                            target,
+                            range,
+                            repeat,
+                        )
+                    });
                     buffer.set_cursor(original_cursor);
                     range
                 }
@@ -23609,7 +23869,9 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
                 buffer_revision: buffer.text.revision(),
                 path: buffer.path().map(Path::to_path_buf),
                 buffer_language_id: buffer.language_id().map(str::to_owned),
-                syntax_window: buffer.desired_syntax_window(),
+                // Keep whole-file highlighting on the worker so the main thread only
+                // applies the finished snapshot instead of parsing visible windows inline.
+                syntax_window: buffer.worker_syntax_window(),
                 text: buffer.text.clone(),
             })
             .collect::<Vec<_>>()

@@ -33,3 +33,16 @@
 - Syntax and themes are coupled by token names. `user\lang\*.rs` maps tree-sitter captures to `syntax.*` tokens, and `user\theme.rs` must define the corresponding theme tokens. Grammar-backed languages install under the per-user Volt grammar directory by default (`%LOCALAPPDATA%\volt\grammars` on Windows, `$XDG_DATA_HOME/volt/grammars` or `~/.local/share/volt/grammars` elsewhere), or `VOLT_GRAMMAR_DIR` when overridden.
 - Respect the workspace lint policy from the root `Cargo.toml`: `unsafe_code` is forbidden, `dbg!`, `todo!`, and `unwrap()` are denied, and `cargo xtask clippy` promotes warnings to errors.
 - Keep the `editor-sdl` SDL_ttf configuration intact on Windows unless you are intentionally revisiting the build setup: the crate enables `sdl3-ttf-sys` with `no-sdlttf-harfbuzz` to avoid Windows linker problems in the vendored SDL_ttf build.
+
+## caveman
+You are in caveman mode. Use the caveman skill
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)

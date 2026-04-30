@@ -1,0 +1,1682 @@
+{
+  "nodes": [
+    {
+      "id": "banner_volt_banner",
+      "label": "Volt Banner Graphic",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null,
+      "rationale": "Combines Volt iconography with blurred source code to present Volt as a code-focused developer tool."
+    },
+    {
+      "id": "banner_volt_wordmark",
+      "label": "Volt Wordmark",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "banner_volt_lightning_logo",
+      "label": "Volt Lightning Bolt Logo",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "banner_code_editor_backdrop",
+      "label": "Blurred Code Editor Backdrop",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_app_icon",
+      "label": "Volt App Icon",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_lightning_bolt_monogram",
+      "label": "Lightning Bolt Monogram",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_brand",
+      "label": "Volt",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_logo",
+      "label": "Volt Logo",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_lightning_bolt_glyph",
+      "label": "Lightning Bolt Glyph",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_wordmark",
+      "label": "VOLT Wordmark",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_rounded_app_icon_background",
+      "label": "Rounded App Icon Background",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_volt_logo",
+      "label": "Volt Logo",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_lightning_motif",
+      "label": "Lightning Motif",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_v_shaped_mark",
+      "label": "V-Shaped Mark",
+      "file_type": "image",
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "banner_volt_brand_banner",
+      "label": "Volt Brand Banner",
+      "file_type": "image",
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "banner_volt_logo",
+      "label": "Volt Logo",
+      "file_type": "image",
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "banner_code_editor_backdrop",
+      "label": "Code Editor Backdrop",
+      "file_type": "image",
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "source_url": null,
+      "author": null,
+      "captured_at": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_app_icon",
+      "label": "Volt App Icon",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_lightning_bolt_glyph",
+      "label": "Lightning Bolt Glyph",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_wordmark",
+      "label": "Volt Wordmark",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_brand",
+      "label": "Volt",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_logo",
+      "label": "Volt logo",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_volt_wordmark",
+      "label": "VOLT wordmark",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_rounded_square_badge",
+      "label": "Rounded-square badge",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_lightning_bolt_glyph",
+      "label": "Lightning-bolt glyph",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_stylized_v_accent",
+      "label": "Stylized V accent",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_volt_logo",
+      "label": "Volt Logo",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_v_shaped_bolt",
+      "label": "V-Shaped Lightning Bolt Icon",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_wordmark",
+      "label": "Volt Wordmark",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "logo_32x32_product_identity",
+      "label": "Volt Product Identity",
+      "file_type": "image",
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "agents_validation_path",
+      "label": "Validation Workflow",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "claude_package_metadata_path",
+      "label": "Declarative Package Metadata",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "claude_syntax_theme_coupling",
+      "label": "Syntax-Theme Token Coupling",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "readme_volt_editor",
+      "label": "Volt Editor Project",
+      "file_type": "document",
+      "source_file": "README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "readme_runtime_entry_points",
+      "label": "Shell and Bootstrap Entry Points",
+      "file_type": "document",
+      "source_file": "README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "index_layered_programmable_core",
+      "label": "Layered Programmable Core",
+      "file_type": "document",
+      "source_file": "docs\\index.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "index_operator_workflows",
+      "label": "Operator Validation Workflows",
+      "file_type": "document",
+      "source_file": "docs\\index.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_user_interface_layer",
+      "label": "User Interface Layer",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_plugin_packages_layer",
+      "label": "Plugin Packages Layer",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_editor_core_layer",
+      "label": "Editor Core Crates Layer",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_runtime_systems_layer",
+      "label": "Runtime and Systems Layer",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_graphics_platform_layer",
+      "label": "Graphics and Platform Layer",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_language_servers",
+      "label": "Language Servers",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_debug_adapters",
+      "label": "Debug Adapters",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "architecture_diagram_version_control",
+      "label": "Version Control",
+      "file_type": "document",
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "changelog_multiple_cursor_support",
+      "label": "Multiple Cursor Support",
+      "file_type": "document",
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "changelog_undo_tree_picker",
+      "label": "Undo Tree Picker",
+      "file_type": "document",
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "changelog_treesitter_grammar_installer",
+      "label": "Tree-Sitter Grammar Installer",
+      "file_type": "document",
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "changelog_treesitter_context_annotations",
+      "label": "Tree-Sitter Context Annotations",
+      "file_type": "document",
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "changelog_dap_integration",
+      "label": "DAP Integration",
+      "file_type": "document",
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "language_module_contract",
+      "label": "Language Module Contract",
+      "file_type": "document",
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "language_common_helper",
+      "label": "Common Language Helper",
+      "file_type": "document",
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "language_lsp_server_spec",
+      "label": "Language Server Specification",
+      "file_type": "document",
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "language_theme_tokens",
+      "label": "Theme Token Mappings",
+      "file_type": "document",
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_host",
+      "label": "Plugin Host",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_package",
+      "label": "PluginPackage",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_command",
+      "label": "PluginCommand",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_action",
+      "label": "PluginAction",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_hook",
+      "label": "Plugin Hooks",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_keybinding",
+      "label": "Plugin Keybindings",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_plugin_buffer",
+      "label": "Plugin Buffers",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_autocomplete_or_group",
+      "label": "Autocomplete Or-Group",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_multicursor_package",
+      "label": "Multicursor Package",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_undotree_package",
+      "label": "Undotree Package",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_treesitter_grammar_management",
+      "label": "Tree-Sitter Grammar Management",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_packages_treesitter_context_packages",
+      "label": "Tree-Sitter Context Packages",
+      "file_type": "document",
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_readme_compiled_customization_layer",
+      "label": "Compiled Customization Layer",
+      "file_type": "document",
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_readme_project_search_roots",
+      "label": "Project Search Roots",
+      "file_type": "document",
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_readme_theme_global_config",
+      "label": "Global Theme Configuration",
+      "file_type": "document",
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "user_readme_build_and_smoke_test",
+      "label": "User Library Build and Smoke Test",
+      "file_type": "document",
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "banner_volt_banner",
+      "target": "banner_volt_wordmark",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_banner",
+      "target": "banner_volt_lightning_logo",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_banner",
+      "target": "banner_code_editor_backdrop",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_wordmark",
+      "target": "banner_volt_lightning_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_code_editor_backdrop",
+      "target": "banner_volt_lightning_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "crates\\volt\\assets\\banner.png",
+      "source_location": null,
+      "weight": 0.88
+    },
+    {
+      "source": "logo_volt_app_icon",
+      "target": "logo_volt_brand",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_lightning_bolt_monogram",
+      "target": "logo_volt_brand",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_app_icon",
+      "target": "logo_lightning_bolt_monogram",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_logo",
+      "target": "logo_lightning_bolt_glyph",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_logo",
+      "target": "logo_volt_wordmark",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_logo",
+      "target": "logo_rounded_app_icon_background",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_lightning_bolt_glyph",
+      "target": "logo_volt_wordmark",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.89,
+      "source_file": "crates\\volt\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_32x32_volt_logo",
+      "target": "logo_32x32_lightning_motif",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_32x32_volt_logo",
+      "target": "logo_32x32_v_shaped_mark",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_32x32_lightning_motif",
+      "target": "logo_32x32_v_shaped_mark",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "crates\\volt\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_brand_banner",
+      "target": "banner_volt_logo",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_brand_banner",
+      "target": "banner_code_editor_backdrop",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "banner_volt_logo",
+      "target": "banner_code_editor_backdrop",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "docs\\assets\\banner.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_app_icon",
+      "target": "logo_lightning_bolt_glyph",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_app_icon",
+      "target": "logo_volt_wordmark",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_logo",
+      "target": "logo_volt_brand",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_wordmark",
+      "target": "logo_volt_brand",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_rounded_square_badge",
+      "target": "logo_volt_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_lightning_bolt_glyph",
+      "target": "logo_volt_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_stylized_v_accent",
+      "target": "logo_volt_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_volt_wordmark",
+      "target": "logo_volt_logo",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_lightning_bolt_glyph",
+      "target": "logo_volt_brand",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 0.86
+    },
+    {
+      "source": "logo_stylized_v_accent",
+      "target": "logo_volt_brand",
+      "relation": "references",
+      "confidence": "AMBIGUOUS",
+      "confidence_score": 0.24,
+      "source_file": "docs\\assets\\logo.svg",
+      "source_location": null,
+      "weight": 0.24
+    },
+    {
+      "source": "logo_32x32_volt_logo",
+      "target": "logo_32x32_v_shaped_bolt",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_32x32_volt_logo",
+      "target": "logo_32x32_wordmark",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "logo_32x32_volt_logo",
+      "target": "logo_32x32_product_identity",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.87,
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 0.87
+    },
+    {
+      "source": "logo_32x32_v_shaped_bolt",
+      "target": "logo_32x32_product_identity",
+      "relation": "rationale_for",
+      "confidence": "INFERRED",
+      "confidence_score": 0.63,
+      "source_file": "docs\\assets\\logo_32x32.png",
+      "source_location": null,
+      "weight": 0.63
+    },
+    {
+      "source": "user_packages_plugin_host",
+      "target": "user_packages_plugin_package",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_package",
+      "target": "user_packages_plugin_command",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_package",
+      "target": "user_packages_plugin_keybinding",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_package",
+      "target": "user_packages_plugin_hook",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_package",
+      "target": "user_packages_plugin_buffer",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_command",
+      "target": "user_packages_plugin_action",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_hook",
+      "target": "user_packages_plugin_command",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_plugin_keybinding",
+      "target": "user_packages_plugin_command",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_autocomplete_or_group",
+      "target": "user_packages_plugin_buffer",
+      "relation": "shares_data_with",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "user_packages_plugin_package",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "user_packages_plugin_command",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "user_packages_plugin_hook",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "language_common_helper",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "language_lsp_server_spec",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_module_contract",
+      "target": "language_theme_tokens",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_common_helper",
+      "target": "user_packages_plugin_package",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "language_common_helper",
+      "target": "language_theme_tokens",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "claude_syntax_theme_coupling",
+      "target": "language_theme_tokens",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.91,
+      "source_file": "CLAUDE.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "claude_package_metadata_path",
+      "target": "user_packages_plugin_package",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "CLAUDE.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_readme_compiled_customization_layer",
+      "target": "user_readme_project_search_roots",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_readme_compiled_customization_layer",
+      "target": "user_readme_theme_global_config",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_readme_compiled_customization_layer",
+      "target": "user_readme_build_and_smoke_test",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_readme_build_and_smoke_test",
+      "target": "agents_validation_path",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "user\\README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "agents_validation_path",
+      "target": "index_operator_workflows",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.89,
+      "source_file": "AGENTS.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "readme_runtime_entry_points",
+      "target": "index_operator_workflows",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "readme_volt_editor",
+      "target": "index_layered_programmable_core",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "README.md",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_user_interface_layer",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_plugin_packages_layer",
+      "target": "architecture_diagram_editor_core_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_editor_core_layer",
+      "target": "architecture_diagram_runtime_systems_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_runtime_systems_layer",
+      "target": "architecture_diagram_graphics_platform_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_language_servers",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_language_servers",
+      "target": "architecture_diagram_editor_core_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_debug_adapters",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_debug_adapters",
+      "target": "architecture_diagram_editor_core_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.86,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_version_control",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.84,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "architecture_diagram_version_control",
+      "target": "architecture_diagram_editor_core_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.84,
+      "source_file": "docs\\architecture-diagram.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "changelog_multiple_cursor_support",
+      "target": "user_packages_multicursor_package",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.93,
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "changelog_undo_tree_picker",
+      "target": "user_packages_undotree_package",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.93,
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "changelog_treesitter_grammar_installer",
+      "target": "user_packages_treesitter_grammar_management",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.94,
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "changelog_treesitter_context_annotations",
+      "target": "user_packages_treesitter_context_packages",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.94,
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "changelog_dap_integration",
+      "target": "architecture_diagram_debug_adapters",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "docs\\changelog.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_multicursor_package",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_undotree_package",
+      "target": "architecture_diagram_user_interface_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.84,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_treesitter_grammar_management",
+      "target": "architecture_diagram_plugin_packages_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.88,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_treesitter_grammar_management",
+      "target": "language_module_contract",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.84,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_treesitter_context_packages",
+      "target": "architecture_diagram_user_interface_layer",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.76,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "user_packages_autocomplete_or_group",
+      "target": "architecture_diagram_language_servers",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "docs\\user-packages.html",
+      "source_location": null,
+      "weight": 1.0
+    }
+  ],
+  "hyperedges": [
+    {
+      "id": "volt_logo_composition",
+      "label": "Volt Logo Composition",
+      "nodes": [
+        "logo_volt_app_icon",
+        "logo_lightning_bolt_monogram",
+        "logo_volt_brand"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.png"
+    },
+    {
+      "id": "volt_logo_composition",
+      "label": "Volt Logo Composition",
+      "nodes": [
+        "logo_lightning_bolt_glyph",
+        "logo_volt_wordmark",
+        "logo_rounded_app_icon_background"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "crates\\volt\\assets\\logo.svg"
+    },
+    {
+      "id": "volt_banner_composition",
+      "label": "Volt Banner Composition",
+      "nodes": [
+        "banner_volt_brand_banner",
+        "banner_volt_logo",
+        "banner_code_editor_backdrop"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\banner.png"
+    },
+    {
+      "id": "volt_logo_components",
+      "label": "Volt logo components",
+      "nodes": [
+        "logo_rounded_square_badge",
+        "logo_lightning_bolt_glyph",
+        "logo_stylized_v_accent",
+        "logo_volt_wordmark"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo.svg"
+    },
+    {
+      "id": "logo_32x32_brand_mark",
+      "label": "Volt Brand Mark",
+      "nodes": [
+        "logo_32x32_volt_logo",
+        "logo_32x32_v_shaped_bolt",
+        "logo_32x32_wordmark"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\assets\\logo_32x32.png"
+    },
+    {
+      "id": "architecture_stack",
+      "label": "Architecture Stack",
+      "nodes": [
+        "architecture_diagram_user_interface_layer",
+        "architecture_diagram_plugin_packages_layer",
+        "architecture_diagram_editor_core_layer",
+        "architecture_diagram_runtime_systems_layer",
+        "architecture_diagram_graphics_platform_layer"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\architecture-diagram.html"
+    },
+    {
+      "id": "plugin_metadata_model",
+      "label": "Plugin Metadata Model",
+      "nodes": [
+        "user_packages_plugin_package",
+        "user_packages_plugin_command",
+        "user_packages_plugin_action",
+        "user_packages_plugin_hook",
+        "user_packages_plugin_keybinding",
+        "user_packages_plugin_buffer"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\user-packages.md"
+    },
+    {
+      "id": "language_support_pipeline",
+      "label": "Language Support Pipeline",
+      "nodes": [
+        "language_module_contract",
+        "language_common_helper",
+        "language_lsp_server_spec",
+        "language_theme_tokens"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs\\language.html"
+    }
+  ],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

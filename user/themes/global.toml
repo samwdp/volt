@@ -15,17 +15,17 @@ use_tabs = false
 
 [langs.c]
 indent = 4
-format_on_save = true
+format_on_save = false
 use_tabs = false
 
 [langs.cpp]
 indent = 4
-format_on_save = true
+format_on_save = false
 use_tabs = false
 
 [langs.csharp]
 indent = 4
-format_on_save = true
+format_on_save = false
 use_tabs = false
 
 [langs.css]
@@ -45,7 +45,7 @@ use_tabs = false
 
 [langs.go]
 indent = 4
-format_on_save = true
+format_on_save = false
 use_tabs = false
 
 [langs.html]

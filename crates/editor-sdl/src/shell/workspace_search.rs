@@ -2,7 +2,9 @@ use std::io::{BufRead as _, BufReader, Read as _};
 use std::process::Stdio;
 
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
-use editor_lsp::LspDocumentTextEdits;
+use editor_lsp::{
+    DiagnosticSeverity as WorkspaceDiagnosticSeverity, LspDocumentTextEdits, LspWorkspaceDiagnostic,
+};
 use url::Url;
 
 use super::*;
@@ -422,6 +424,140 @@ fn lsp_code_actions_picker_overlay_from_entries(entries: Vec<PickerEntry>) -> Pi
         .with_result_order(PickerResultOrder::Source)
 }
 
+pub(super) fn lsp_diagnostics_picker_overlay(
+    runtime: &EditorRuntime,
+    diagnostics: &[LspWorkspaceDiagnostic],
+) -> PickerOverlay {
+    let workspace_root = active_workspace_root(runtime).ok().flatten();
+    let entries = lsp_diagnostics_picker_entries(workspace_root.as_deref(), diagnostics);
+    lsp_diagnostics_picker_overlay_from_entries(entries)
+}
+
+fn lsp_diagnostics_picker_entries(
+    workspace_root: Option<&Path>,
+    diagnostics: &[LspWorkspaceDiagnostic],
+) -> Vec<PickerEntry> {
+    let mut diagnostics = diagnostics.to_vec();
+    diagnostics.sort_by(|left, right| {
+        let left_target = left.diagnostic().range().normalized().start();
+        let right_target = right.diagnostic().range().normalized().start();
+        (
+            lsp_diagnostic_severity_rank(left.diagnostic().severity()),
+            workspace_relative_path(workspace_root, left.path()).to_ascii_lowercase(),
+            left_target.line,
+            left_target.column,
+            left.server_id().to_ascii_lowercase(),
+            left.diagnostic().message().to_ascii_lowercase(),
+        )
+            .cmp(&(
+                lsp_diagnostic_severity_rank(right.diagnostic().severity()),
+                workspace_relative_path(workspace_root, right.path()).to_ascii_lowercase(),
+                right_target.line,
+                right_target.column,
+                right.server_id().to_ascii_lowercase(),
+                right.diagnostic().message().to_ascii_lowercase(),
+            ))
+    });
+    diagnostics
+        .into_iter()
+        .take(SEARCH_PICKER_ITEM_LIMIT)
+        .enumerate()
+        .map(|(index, diagnostic)| lsp_diagnostic_picker_entry(workspace_root, index, &diagnostic))
+        .collect()
+}
+
+fn lsp_diagnostics_picker_overlay_from_entries(entries: Vec<PickerEntry>) -> PickerOverlay {
+    PickerOverlay::from_entries("LSP Diagnostics", entries)
+        .with_result_order(PickerResultOrder::Source)
+}
+
+pub(super) fn lsp_diagnostics_status_picker_overlay(
+    label: &str,
+    detail: &str,
+    preview: Option<String>,
+) -> PickerOverlay {
+    lsp_diagnostics_picker_overlay_from_entries(vec![PickerEntry {
+        item: PickerItem::new("lsp-diagnostics-status", label, detail, preview),
+        action: PickerAction::NoOp,
+    }])
+}
+
+fn lsp_diagnostic_picker_entry(
+    workspace_root: Option<&Path>,
+    index: usize,
+    workspace_diagnostic: &LspWorkspaceDiagnostic,
+) -> PickerEntry {
+    let diagnostic = workspace_diagnostic.diagnostic();
+    let target = diagnostic.range().normalized().start();
+    let line_number = target.line + 1;
+    let column = target.column + 1;
+    let relative_path = workspace_relative_path(workspace_root, workspace_diagnostic.path());
+    let severity = lsp_diagnostic_severity_label(diagnostic.severity());
+    let source = diagnostic.source();
+    let mut detail_parts = vec![
+        severity.to_owned(),
+        format!("{relative_path} | Ln {line_number}, Col {column}"),
+        workspace_diagnostic.server_id().to_owned(),
+    ];
+    if !source.is_empty()
+        && !source.eq_ignore_ascii_case("lsp")
+        && !source.eq_ignore_ascii_case(workspace_diagnostic.server_id())
+    {
+        detail_parts.push(source.to_owned());
+    }
+    let preview = TextBuffer::load_from_path(workspace_diagnostic.path())
+        .ok()
+        .and_then(|buffer| buffer.line(target.line))
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .or_else(|| Some(workspace_diagnostic.path().display().to_string()));
+    PickerEntry {
+        item: PickerItem::new(
+            format!(
+                "lsp-diagnostic:{index}:{}:{line_number}:{column}",
+                workspace_diagnostic.path().display()
+            ),
+            lsp_diagnostic_label(diagnostic),
+            detail_parts.join(" | "),
+            preview,
+        ),
+        action: PickerAction::OpenFileLocation {
+            path: workspace_diagnostic.path().to_path_buf(),
+            target,
+        },
+    }
+}
+
+fn lsp_diagnostic_label(diagnostic: &editor_lsp::Diagnostic) -> String {
+    let message = diagnostic
+        .message()
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Diagnostic");
+    format!(
+        "{}: {}",
+        lsp_diagnostic_severity_label(diagnostic.severity()),
+        message
+    )
+}
+
+fn lsp_diagnostic_severity_label(severity: WorkspaceDiagnosticSeverity) -> &'static str {
+    match severity {
+        WorkspaceDiagnosticSeverity::Error => "Error",
+        WorkspaceDiagnosticSeverity::Warning => "Warning",
+        WorkspaceDiagnosticSeverity::Information => "Info",
+    }
+}
+
+fn lsp_diagnostic_severity_rank(severity: WorkspaceDiagnosticSeverity) -> u8 {
+    match severity {
+        WorkspaceDiagnosticSeverity::Error => 0,
+        WorkspaceDiagnosticSeverity::Warning => 1,
+        WorkspaceDiagnosticSeverity::Information => 2,
+    }
+}
+
 fn lsp_code_action_sorted_indices<'a>(
     kinds: impl IntoIterator<Item = Option<&'a str>>,
 ) -> Vec<usize> {
@@ -665,6 +801,65 @@ mod tests {
                 .map(|matched| matched.item().label())
                 .collect::<Vec<_>>(),
             vec!["zeta", "alpha", "mu"]
+        );
+    }
+
+    #[test]
+    fn lsp_diagnostics_picker_overlay_orders_errors_first() {
+        let diagnostics = vec![
+            LspWorkspaceDiagnostic::new(
+                "rust-analyzer",
+                PathBuf::from("src").join("main.rs"),
+                editor_lsp::Diagnostic::new(
+                    "rustc",
+                    "warning message",
+                    WorkspaceDiagnosticSeverity::Warning,
+                    TextRange::new(TextPoint::new(7, 2), TextPoint::new(7, 5)),
+                ),
+            ),
+            LspWorkspaceDiagnostic::new(
+                "rust-analyzer",
+                PathBuf::from("src").join("lib.rs"),
+                editor_lsp::Diagnostic::new(
+                    "rustc",
+                    "error message",
+                    WorkspaceDiagnosticSeverity::Error,
+                    TextRange::new(TextPoint::new(2, 4), TextPoint::new(2, 6)),
+                ),
+            ),
+            LspWorkspaceDiagnostic::new(
+                "biome",
+                PathBuf::from("src").join("app.rs"),
+                editor_lsp::Diagnostic::new(
+                    "biome",
+                    "info message",
+                    WorkspaceDiagnosticSeverity::Information,
+                    TextRange::new(TextPoint::new(1, 0), TextPoint::new(1, 3)),
+                ),
+            ),
+        ];
+
+        let entries = lsp_diagnostics_picker_entries(None, &diagnostics);
+        assert!(matches!(
+            &entries[0].action,
+            PickerAction::OpenFileLocation { path, target }
+                if path == &PathBuf::from("src").join("lib.rs")
+                    && *target == TextPoint::new(2, 4)
+        ));
+
+        let overlay = lsp_diagnostics_picker_overlay_from_entries(entries);
+        assert_eq!(
+            overlay
+                .session()
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec![
+                "Error: error message",
+                "Warning: warning message",
+                "Info: info message",
+            ]
         );
     }
 }

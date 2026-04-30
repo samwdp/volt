@@ -3308,6 +3308,35 @@ fn ensure_visible_builds_wrap_cache_for_large_buffers() -> Result<(), String> {
 }
 
 #[test]
+fn worker_syntax_window_covers_the_full_buffer() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*worker-syntax-window*",
+        (0..600).map(|index| format!("line {index}")).collect(),
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.set_language_id(Some("rust".to_owned()));
+    buffer.set_viewport_lines(12);
+    buffer.scroll_row = 80;
+
+    let desired = buffer
+        .desired_syntax_window()
+        .ok_or_else(|| "visible syntax window should exist".to_owned())?;
+    let worker = buffer
+        .worker_syntax_window()
+        .ok_or_else(|| "worker syntax window should exist".to_owned())?;
+    let full = buffer
+        .full_syntax_window()
+        .ok_or_else(|| "full syntax window should exist".to_owned())?;
+
+    assert_eq!(worker, full);
+    assert!(worker.contains(desired));
+    assert_ne!(worker, desired);
+    Ok(())
+}
+
+#[test]
 fn single_line_insert_updates_wrap_cache_prefix_rows() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_text_test_buffer(
@@ -6261,6 +6290,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         None,
         320,
         180,
+        None,
         8,
         16,
         12,
@@ -6322,6 +6352,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         Some(&registry),
         320,
         180,
+        None,
         8,
         16,
         12,
@@ -6346,6 +6377,61 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::Text { color, .. } if color.a == 255
+    )));
+    Ok(())
+}
+
+#[test]
+fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    let fps_overlay = FpsOverlaySnapshot {
+        latest_frame_time: Duration::from_nanos(8_100_000),
+        average_frame_time: Duration::from_nanos(8_300_000),
+        worst_frame_time: Duration::from_nanos(10_200_000),
+    };
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        640,
+        360,
+        Some(&fps_overlay),
+        8,
+        16,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { text, .. } if text.contains("FPS")
     )));
     Ok(())
 }
@@ -6399,6 +6485,7 @@ fn render_shell_state_scene_with_docked_runtime_popup(
         theme_registry,
         width,
         height,
+        None,
         cell_width,
         line_height,
         12,
@@ -6530,6 +6617,7 @@ fn render_shell_state_scene_with_notification_overlay(
         theme_registry,
         width,
         height,
+        None,
         cell_width,
         line_height,
         12,
@@ -11267,6 +11355,65 @@ fn insert_mode_is_buffer_local_across_split_focus_changes() -> Result<(), String
     let ui = shell_ui(&state.runtime)?;
     assert_eq!(ui.active_buffer_id(), Some(buffer_b));
     assert_eq!(ui.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn same_buffer_split_keeps_independent_cursor_and_scroll() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let lines = (0..64)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>();
+    let buffer_id = install_text_test_buffer(&mut state, "*split-shared-buffer*", lines)?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(buffer.id(), buffer_id);
+        buffer.set_cursor(TextPoint::new(2, 3));
+        buffer.scroll_row = 1;
+    }
+
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let pane_id = state
+        .runtime
+        .model_mut()
+        .split_pane(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.split_pane(pane_id, buffer_id, PaneSplitDirection::Vertical);
+    shell_ui_mut(&mut state.runtime)?.focus_pane(pane_id);
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(buffer.id(), buffer_id);
+        buffer.set_cursor(TextPoint::new(20, 2));
+        buffer.scroll_row = 18;
+    }
+
+    cycle_runtime_pane(&mut state.runtime)?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(buffer.id(), buffer_id);
+        assert_eq!(buffer.cursor_point(), TextPoint::new(2, 3));
+        assert_eq!(buffer.scroll_row, 1);
+    }
+
+    cycle_runtime_pane(&mut state.runtime)?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(buffer.id(), buffer_id);
+        assert_eq!(buffer.cursor_point(), TextPoint::new(20, 2));
+        assert_eq!(buffer.scroll_row, 18);
+    }
     Ok(())
 }
 

@@ -86,6 +86,44 @@ impl Diagnostic {
     }
 }
 
+/// Diagnostic paired with source server and file path for workspace-level listings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspWorkspaceDiagnostic {
+    server_id: String,
+    path: PathBuf,
+    diagnostic: Diagnostic,
+}
+
+impl LspWorkspaceDiagnostic {
+    /// Creates a workspace-level diagnostic entry.
+    pub fn new(
+        server_id: impl Into<String>,
+        path: impl Into<PathBuf>,
+        diagnostic: Diagnostic,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            path: path.into(),
+            diagnostic,
+        }
+    }
+
+    /// Returns the language server identifier that reported this diagnostic.
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    /// Returns the file path for this diagnostic.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the diagnostic payload.
+    pub fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
+    }
+}
+
 /// Workspace configuration metadata carried from declarative server specs into planned sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkspaceConfiguration {

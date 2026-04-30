@@ -11,6 +11,7 @@ pub const HOOK_LSP_LOG: &str = "lsp.open-log";
 pub const HOOK_LSP_DEFINITION: &str = "lsp.goto-definition";
 pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
 pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
+pub const HOOK_LSP_DIAGNOSTICS: &str = "lsp.diagnostics";
 pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
 pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Space";
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
@@ -107,6 +108,12 @@ pub fn package() -> PluginPackage {
             "lsp.implementation",
             "Jumps to LSP implementations for the symbol under the cursor.",
             HOOK_LSP_IMPLEMENTATION,
+            None,
+        ),
+        hook_command(
+            "lsp.diagnostics",
+            "Opens a picker of current LSP diagnostics from live servers.",
+            HOOK_LSP_DIAGNOSTICS,
             None,
         ),
         hook_command(
@@ -363,6 +370,10 @@ pub fn package() -> PluginPackage {
         PluginHookDeclaration::new(
             HOOK_LSP_IMPLEMENTATION,
             "Navigates to LSP implementations for the symbol under the cursor.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_DIAGNOSTICS,
+            "Opens a picker of current LSP diagnostics from live servers.",
         ),
         PluginHookDeclaration::new(
             HOOK_LSP_CODE_ACTIONS,
@@ -1486,7 +1497,7 @@ mod tests {
 
         assert_eq!(package.name(), "lsp");
         assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 45);
+        assert_eq!(package.commands().len(), 46);
         assert_eq!(package.hook_bindings().len(), 109);
         assert_eq!(servers.len(), 36);
         for expected in [
@@ -1651,6 +1662,7 @@ mod tests {
             "lsp.definition",
             "lsp.references",
             "lsp.implementation",
+            "lsp.diagnostics",
             "lsp.code-actions",
             "lsp.code-action",
         ] {

@@ -20,6 +20,8 @@ pub struct ShellConfig {
     pub render_backend: RenderBackend,
     /// Optional frame limit used for smoke tests.
     pub frame_limit: Option<u32>,
+    /// Shows a live FPS performance overlay in the shell.
+    pub show_fps_overlay: bool,
     /// Enables detailed typing/input latency profiling and writes a report on exit.
     pub profile_input_latency: bool,
     /// Compiled-in user extension library.  When `None` the shell falls back to
@@ -37,6 +39,7 @@ impl Default for ShellConfig {
             hidden: false,
             render_backend: RenderBackend::SdlCanvas,
             frame_limit: None,
+            show_fps_overlay: false,
             profile_input_latency: false,
             user_library: None,
         }
@@ -54,6 +57,7 @@ impl fmt::Debug for ShellConfig {
             .field("hidden", &self.hidden)
             .field("render_backend", &self.render_backend)
             .field("frame_limit", &self.frame_limit)
+            .field("show_fps_overlay", &self.show_fps_overlay)
             .field("profile_input_latency", &self.profile_input_latency)
             .field("user_library_loaded", &self.user_library.is_some())
             .finish()

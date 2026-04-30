@@ -1374,13 +1374,13 @@ impl TextBuffer {
 
         if around {
             let mut trailing = end_char;
-            while trailing < self.char_count() && self.rope.char(trailing).is_whitespace() {
+            while trailing < self.char_count() && is_inline_whitespace(self.rope.char(trailing)) {
                 trailing += 1;
             }
             if trailing > end_char {
                 end_char = trailing;
             } else {
-                while start_char > 0 && self.rope.char(start_char - 1).is_whitespace() {
+                while start_char > 0 && is_inline_whitespace(self.rope.char(start_char - 1)) {
                     start_char -= 1;
                 }
             }
@@ -1855,6 +1855,10 @@ fn normalize_inline_text(text: &str) -> String {
 
 fn is_word_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
+}
+
+fn is_inline_whitespace(character: char) -> bool {
+    character.is_whitespace() && !matches!(character, '\n' | '\r')
 }
 
 fn is_punctuation_char(character: char) -> bool {
@@ -2462,6 +2466,16 @@ mod tests {
             .word_range_at_kind(TextPoint::new(0, 7), WordKind::BigWord, true, 1)
             .expect("around big word range");
         assert_eq!(buffer.slice(around_big_word), "alpha-beta ");
+    }
+
+    #[test]
+    fn around_word_ranges_at_line_end_exclude_newline() {
+        let buffer = TextBuffer::from_text("alpha beta\ngamma");
+
+        let around = buffer
+            .word_range_at(TextPoint::new(0, 7), true, 1)
+            .expect("around word range");
+        assert_eq!(buffer.slice(around), " beta");
     }
 
     #[test]
