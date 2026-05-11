@@ -65,6 +65,7 @@ impl GitFringeState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct GitSummarySnapshot {
     pub(super) branch: Option<String>,
+    pub(super) head: Option<String>,
     pub(super) added: usize,
     pub(super) removed: usize,
 }
@@ -74,6 +75,7 @@ pub(super) struct GitSummaryState {
     snapshot: Arc<Mutex<Option<GitSummarySnapshot>>>,
     inflight: Arc<AtomicBool>,
     revision: Arc<AtomicU64>,
+    changed: Arc<AtomicBool>,
     last_refresh_at: Option<Instant>,
 }
 
@@ -83,6 +85,7 @@ impl GitSummaryState {
             snapshot: Arc::new(Mutex::new(None)),
             inflight: Arc::new(AtomicBool::new(false)),
             revision: Arc::new(AtomicU64::new(0)),
+            changed: Arc::new(AtomicBool::new(false)),
             last_refresh_at: None,
         }
     }
@@ -94,9 +97,17 @@ impl GitSummaryState {
 
     pub(super) fn set_snapshot(&self, snapshot: Option<GitSummarySnapshot>) {
         if let Ok(mut guard) = self.snapshot.lock() {
+            if *guard == snapshot {
+                return;
+            }
             *guard = snapshot;
             self.revision.fetch_add(1, Ordering::AcqRel);
+            self.changed.store(true, Ordering::Release);
         }
+    }
+
+    pub(super) fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::AcqRel)
     }
 
     pub(super) fn refresh_due(&self, now: Instant) -> bool {
@@ -731,6 +742,7 @@ pub(super) fn refresh_git_status_if_active_if_due(
 }
 
 pub(super) fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+    mark_git_fringe_snapshots_stale(runtime)?;
     let buffer_ids = {
         let ui = shell_ui(runtime)?;
         ui.buffers
@@ -941,6 +953,7 @@ pub(super) fn commit_git_buffer(
     );
     fs::remove_file(&temp_path).ok();
     result?;
+    mark_git_fringe_snapshots_stale(runtime)?;
     close_buffer_discard(runtime, buffer_id)?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
@@ -2044,6 +2057,57 @@ pub(super) fn remote_and_branch_from_ref(reference: &str) -> Option<(String, Str
     Some((remote.to_owned(), branch.to_owned()))
 }
 
+fn git_config_get(root: &Path, key: &str) -> Option<String> {
+    git_read_command_output_optional(
+        root,
+        &format!("config --get {key}"),
+        &["config", "--get", key],
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty())
+}
+
+fn git_branch_push_remote(root: &Path, branch: &str) -> Option<String> {
+    git_config_get(root, &format!("branch.{branch}.pushRemote"))
+}
+
+fn git_branch_remote(root: &Path, branch: &str) -> Option<String> {
+    git_config_get(root, &format!("branch.{branch}.remote")).filter(|remote| remote != ".")
+}
+
+fn git_branch_merge(root: &Path, branch: &str) -> Option<String> {
+    git_config_get(root, &format!("branch.{branch}.merge"))
+}
+
+fn local_branch_name_from_merge_ref(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("refs/heads/")
+        .map(str::to_owned)
+        .filter(|branch| !branch.is_empty())
+}
+
+fn git_push_remote_name(root: &Path, snapshot: &GitStatusSnapshot) -> Option<String> {
+    let branch = snapshot.branch()?;
+    let upstream_branch = git_branch_merge(root, branch)
+        .as_deref()
+        .and_then(local_branch_name_from_merge_ref);
+    git_branch_push_remote(root, branch)
+        .or_else(|| git_config_get(root, "remote.pushDefault"))
+        .or_else(|| git_branch_remote(root, branch))
+        .or_else(|| {
+            upstream_branch
+                .as_deref()
+                .and_then(|upstream_branch| git_branch_push_remote(root, upstream_branch))
+        })
+        .or_else(|| {
+            upstream_branch
+                .as_deref()
+                .and_then(|upstream_branch| git_branch_remote(root, upstream_branch))
+        })
+        .or_else(|| snapshot.upstream().and_then(remote_name_from_ref))
+        .or_else(|| snapshot.push_remote().and_then(remote_name_from_ref))
+}
+
 pub(super) fn fetch_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
     git_command_output(runtime, &root, "fetch", &["fetch", remote])?;
@@ -2058,12 +2122,30 @@ pub(super) fn fetch_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn fetch_git_prune(runtime: &mut EditorRuntime, root: &Path) -> Result<(), String> {
+    let remotes = git_remote_list(runtime, root)?;
+    if remotes.is_empty() {
+        return Err("no git remotes found".to_owned());
+    }
+    for remote in remotes {
+        let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
+        git_read_command_output(
+            root,
+            "fetch --prune remote-tracking refs",
+            &["fetch", "--prune", &remote, &refspec],
+        )?;
+    }
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
 pub(super) fn fetch_git_pushremote(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
+    let root = git_root(runtime)?;
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
-    if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
+    if let Some(remote) = git_push_remote_name(&root, &snapshot) {
         fetch_git_remote(runtime, &remote)?;
         return Ok(());
     }
@@ -2098,8 +2180,9 @@ pub(super) fn push_git_to_pushremote(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
+    let root = git_root(runtime)?;
     let snapshot = git_snapshot_for_buffer(runtime, buffer_id)?;
-    if let Some(remote) = snapshot.push_remote().and_then(remote_name_from_ref) {
+    if let Some(remote) = git_push_remote_name(&root, &snapshot) {
         push_git_remote(runtime, &remote)?;
         return Ok(());
     }
@@ -2188,6 +2271,75 @@ pub(super) fn git_branch_list(
     Ok(branches)
 }
 
+pub(super) fn git_remote_worktree_branch_list(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    trace_oil_worktree(
+        runtime,
+        format!("listing remote branches from `{}`", root.display()),
+    );
+    let fetch_error = fetch_git_prune(runtime, root).err();
+    match &fetch_error {
+        Some(error) => trace_oil_worktree(runtime, format!("git fetch --prune failed: {error}")),
+        None => trace_oil_worktree(runtime, "git fetch --prune succeeded"),
+    }
+    let local = git_branch_list(runtime, root)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    trace_oil_worktree(runtime, format!("found {} local branches", local.len()));
+    let output = match git_read_command_output(
+        root,
+        "branch -r --format",
+        &["branch", "-r", "--format=%(refname:short)"],
+    ) {
+        Ok(output) => output,
+        Err(error) => return Err(fetch_error.unwrap_or(error)),
+    };
+    let mut branches = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
+        .filter_map(|remote_branch| {
+            let (_, local_branch) = remote_and_branch_from_ref(remote_branch)?;
+            let local_branch = if local.contains(&local_branch) {
+                remote_branch.replace('/', "-")
+            } else {
+                local_branch
+            };
+            Some((remote_branch.to_owned(), local_branch))
+        })
+        .collect::<Vec<_>>();
+    if branches.is_empty() {
+        trace_oil_worktree(
+            runtime,
+            "no remote branches found; falling back to local branch refs",
+        );
+        branches = local
+            .iter()
+            .filter(|branch| branch.as_str() != "HEAD")
+            .map(|branch| (branch.clone(), branch.clone()))
+            .collect::<Vec<_>>();
+    }
+    branches.sort();
+    branches.dedup();
+    if branches.is_empty() {
+        if let Some(error) = fetch_error {
+            return Err(error);
+        }
+    } else if let Some(error) = fetch_error {
+        record_runtime_error(runtime, "git.worktree.fetch", error);
+    }
+    trace_oil_worktree(
+        runtime,
+        format!(
+            "found {} remote branches for worktree picker",
+            branches.len()
+        ),
+    );
+    Ok(branches)
+}
+
 pub(super) fn git_commit_list(
     _runtime: &mut EditorRuntime,
     root: &Path,
@@ -2262,6 +2414,189 @@ pub(super) fn open_git_branch_picker_with_action(
 
 pub(super) fn open_git_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
     open_git_branch_picker_with_action(runtime, "Git Branches", GitBranchActionKind::Checkout)
+}
+
+pub(super) fn open_git_worktree_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let entries = git_remote_worktree_branch_list(runtime, &root)?
+        .into_iter()
+        .map(|(remote_branch, local_branch)| {
+            let item_id = format!("git-worktree-branch:{remote_branch}");
+            let action = PickerAction::GitWorktreeBranch {
+                remote_branch: remote_branch.clone(),
+                local_branch: local_branch.clone(),
+            };
+            PickerEntry {
+                item: PickerItem::new(
+                    item_id,
+                    remote_branch,
+                    format!("create local branch {local_branch}"),
+                    None::<String>,
+                ),
+                action,
+            }
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err("no remote-only branches found".to_owned());
+    }
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Git Worktree Branch", entries));
+    Ok(())
+}
+
+pub(super) fn begin_oil_worktree_request(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    trace_oil_worktree(
+        runtime,
+        format!("begin oil worktree request for buffer `{buffer_id}`"),
+    );
+    let root = git_root(runtime)?;
+    trace_oil_worktree(runtime, format!("resolved git root `{}`", root.display()));
+    let branches = git_remote_worktree_branch_list(runtime, &root)?;
+    if branches.is_empty() {
+        return Err("no remote branches found".to_owned());
+    }
+    let entries = branches
+        .into_iter()
+        .map(|(remote_branch, local_branch)| {
+            let item_id = format!("git-worktree-oil-branch:{remote_branch}");
+            let action = PickerAction::GitWorktreeOilBranch {
+                buffer_id,
+                remote_branch: remote_branch.clone(),
+                local_branch: local_branch.clone(),
+            };
+            PickerEntry {
+                item: PickerItem::new(
+                    item_id,
+                    remote_branch,
+                    format!("create local branch {local_branch}"),
+                    None::<String>,
+                ),
+                action,
+            }
+        })
+        .collect::<Vec<_>>();
+    let entry_count = entries.len();
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Git Worktree Branch", entries));
+    trace_oil_worktree(
+        runtime,
+        format!("set git worktree picker with {entry_count} entries"),
+    );
+    Ok(())
+}
+
+pub(super) fn open_git_worktree_path_picker(
+    runtime: &mut EditorRuntime,
+    remote_branch: &str,
+    local_branch: &str,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    let base_dir = root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.clone());
+    let mut picker = PickerOverlay::from_entries(
+        format!("Worktree directory for {remote_branch}"),
+        Vec::new(),
+    );
+    picker.submit_action = Some(PickerAction::GitWorktreeCreate {
+        remote_branch: remote_branch.to_owned(),
+        local_branch: local_branch.to_owned(),
+        base_dir,
+    });
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+pub(super) fn create_git_worktree_from_query(
+    runtime: &mut EditorRuntime,
+    remote_branch: &str,
+    local_branch: &str,
+    base_dir: &Path,
+    query: &str,
+) -> Result<(), String> {
+    let name = query.trim();
+    if name.is_empty() {
+        return Err("worktree directory name is required".to_owned());
+    }
+    let worktree_path = worktree_path_from_name(base_dir, name)?;
+    create_git_worktree(runtime, remote_branch, local_branch, &worktree_path)
+}
+
+pub(super) fn finish_oil_worktree_branch_selection(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    remote_branch: &str,
+    local_branch: &str,
+) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.move_line_end();
+    buffer.insert_text("\n");
+    let line = buffer.cursor_point().line;
+    buffer.set_cursor(TextPoint::new(line, buffer.line_len_chars(line)));
+    let state = buffer
+        .directory_state_mut()
+        .ok_or_else(|| "directory state is missing".to_owned())?;
+    state.pending_worktree = Some(PendingWorktreeRequest {
+        line,
+        remote_branch: remote_branch.to_owned(),
+        local_branch: local_branch.to_owned(),
+    });
+    shell_ui_mut(runtime)?.enter_insert_mode();
+    Ok(())
+}
+
+pub(super) fn create_git_worktree(
+    runtime: &mut EditorRuntime,
+    remote_branch: &str,
+    local_branch: &str,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    if worktree_path.exists() {
+        return Err(format!(
+            "worktree path already exists: {}",
+            worktree_path.display()
+        ));
+    }
+    let path_arg = worktree_path.display().to_string();
+    let args = if remote_branch == local_branch {
+        vec!["worktree", "add", &path_arg, local_branch]
+    } else {
+        vec![
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            local_branch,
+            &path_arg,
+            remote_branch,
+        ]
+    };
+    git_command_output(runtime, &root, "worktree add", &args)?;
+    let name = worktree_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(local_branch);
+    open_workspace_from_project(runtime, name, worktree_path)?;
+    Ok(())
+}
+
+pub(super) fn worktree_path_from_name(base_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(name);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("worktree path must not contain `..`".to_owned());
+    }
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(base_dir.join(path))
+    }
 }
 
 pub(super) fn checkout_git_branch(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
@@ -2376,6 +2711,11 @@ pub(super) const GIT_STATUS_COMMANDS: &[(&str, &str, ShellCommandHandler)] = &[
         "git.status.branches",
         "Open the git branch picker.",
         git_status_branches_command,
+    ),
+    (
+        "git.worktree.create",
+        "Create a worktree from a remote-only branch.",
+        git_worktree_create_command,
     ),
     (
         "git.status.merge",
@@ -2827,6 +3167,37 @@ pub(super) fn git_status_branches_command(runtime: &mut EditorRuntime) -> Result
     open_git_branch_picker(runtime)
 }
 
+pub(super) fn git_worktree_create_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_git_worktree_branch_picker(runtime)
+}
+
+fn trace_oil_worktree(runtime: &mut EditorRuntime, message: impl Into<String>) {
+    let message = message.into();
+    eprintln!("[oil.git-worktree] {message}");
+    record_runtime_error(runtime, "oil.git-worktree.trace", message);
+}
+
+pub(super) fn oil_git_worktree_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    trace_oil_worktree(runtime, "oil.git-worktree command invoked");
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (buffer_name, buffer_kind, is_directory) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        (
+            buffer.name.clone(),
+            buffer_kind_label(&buffer.kind),
+            buffer_is_directory(&buffer.kind),
+        )
+    };
+    trace_oil_worktree(
+        runtime,
+        format!("active buffer `{buffer_name}` kind `{buffer_kind}`"),
+    );
+    if !is_directory {
+        return Err("oil.git-worktree requires an oil buffer".to_owned());
+    }
+    begin_oil_worktree_request(runtime, buffer_id)
+}
+
 pub(super) fn git_status_merge_command(runtime: &mut EditorRuntime) -> Result<(), String> {
     if git_merge_in_progress(runtime)? {
         return merge_git_continue(runtime);
@@ -3157,19 +3528,20 @@ pub(super) fn git_status_command_name(
     user_library.git_command_for_chord(prefix, chord)
 }
 
-pub(super) fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<bool, String> {
+pub(super) fn take_directory_prefix(runtime: &mut EditorRuntime) -> Result<Option<String>, String> {
     const PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
     let now = Instant::now();
     let ui = shell_ui_mut(runtime)?;
-    let pending = matches!(
-        ui.pending_directory_prefix.take(),
-        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT
-    );
+    let pending = match ui.pending_directory_prefix.take() {
+        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT => Some(state.chord),
+        _ => None,
+    };
     Ok(pending)
 }
 
-pub(super) fn set_directory_prefix(runtime: &mut EditorRuntime) -> Result<(), String> {
+pub(super) fn set_directory_prefix(runtime: &mut EditorRuntime, chord: &str) -> Result<(), String> {
     shell_ui_mut(runtime)?.pending_directory_prefix = Some(DirectoryPrefixState {
+        chord: chord.to_owned(),
         started_at: Instant::now(),
     });
     Ok(())
@@ -3368,6 +3740,9 @@ pub(super) fn refresh_pending_git_summary(
     now: Instant,
     typing_active: bool,
 ) -> Result<(), String> {
+    if shell_ui(runtime)?.take_git_summary_changed() {
+        mark_git_fringe_snapshots_stale(runtime)?;
+    }
     if typing_active {
         return Ok(());
     }
@@ -3400,6 +3775,14 @@ pub(super) fn refresh_pending_git_summary(
         summary_state.finish_refresh();
     });
 
+    Ok(())
+}
+
+pub(super) fn mark_git_fringe_snapshots_stale(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let ui = shell_ui_mut(runtime)?;
+    for buffer in &mut ui.buffers {
+        buffer.mark_git_fringe_stale();
+    }
     Ok(())
 }
 
@@ -3573,6 +3956,9 @@ pub(super) fn parse_hunk_range(part: &str) -> Option<(usize, usize)> {
 pub(super) fn build_git_summary_snapshot(root: &Path) -> Option<GitSummarySnapshot> {
     let branch_output =
         git_command_output_background(root, &["rev-parse", "--abbrev-ref", "HEAD"], &[0])?;
+    let head = git_command_output_background(root, &["rev-parse", "--verify", "HEAD"], &[0])
+        .map(|head| head.trim().to_owned())
+        .filter(|head| !head.is_empty());
     let branch = branch_output.trim();
     if branch.is_empty() {
         return None;
@@ -3582,6 +3968,7 @@ pub(super) fn build_git_summary_snapshot(root: &Path) -> Option<GitSummarySnapsh
     let (added, removed) = parse_git_numstat(&diff_output);
     Some(GitSummarySnapshot {
         branch: Some(branch.to_owned()),
+        head,
         added,
         removed,
     })
@@ -3836,4 +4223,159 @@ pub(super) fn git_remote_list(
     remotes.sort();
     remotes.dedup();
     Ok(remotes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use editor_git::GitStatusSnapshot;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn summary(branch: &str, head: &str, added: usize, removed: usize) -> GitSummarySnapshot {
+        GitSummarySnapshot {
+            branch: Some(branch.to_owned()),
+            head: Some(head.to_owned()),
+            added,
+            removed,
+        }
+    }
+
+    #[test]
+    fn git_summary_changed_tracks_head_updates() {
+        let state = GitSummaryState::new();
+        assert!(!state.take_changed());
+
+        let first = Some(summary("main", "abc123", 1, 0));
+        state.set_snapshot(first.clone());
+        assert!(state.take_changed());
+        assert!(!state.take_changed());
+
+        state.set_snapshot(first);
+        assert!(!state.take_changed());
+
+        state.set_snapshot(Some(summary("main", "def456", 0, 0)));
+        assert!(state.take_changed());
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("volt-shell-git-{unique}"))
+    }
+
+    #[test]
+    fn git_push_remote_name_prefers_branch_push_remote_for_slashy_branch_names() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+        git_read_command_output(
+            &root,
+            "config user.email",
+            &["config", "user.email", "volt-tests@example.com"],
+        )
+        .expect("user email");
+        git_read_command_output(
+            &root,
+            "config user.name",
+            &["config", "user.name", "Volt Tests"],
+        )
+        .expect("user name");
+        git_read_command_output(
+            &root,
+            "checkout branch",
+            &["checkout", "-qb", "feature/TASK-1234-abc"],
+        )
+        .expect("branch");
+        git_read_command_output(
+            &root,
+            "config pushRemote",
+            &[
+                "config",
+                "branch.feature/TASK-1234-abc.pushRemote",
+                "origin",
+            ],
+        )
+        .expect("pushRemote");
+
+        let snapshot = GitStatusSnapshot::default()
+            .with_upstreams(
+                Some("origin/feature/TASK-1234-abc".to_owned()),
+                Some("feature/TASK-1234-abc".to_owned()),
+            )
+            .with_status(editor_git::RepositoryStatus::new(
+                Some("feature/TASK-1234-abc".to_owned()),
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+
+        assert_eq!(
+            git_push_remote_name(&root, &snapshot),
+            Some("origin".to_owned())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_push_remote_name_uses_upstream_branch_remote_for_local_tracking_worktree_branch() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+        git_read_command_output(
+            &root,
+            "config branch feature remote",
+            &["config", "branch.feature/TASK-1234-abc.remote", "origin"],
+        )
+        .expect("feature remote");
+        git_read_command_output(
+            &root,
+            "config branch feature merge",
+            &[
+                "config",
+                "branch.feature/TASK-1234-abc.merge",
+                "refs/heads/feature/TASK-1234-abc",
+            ],
+        )
+        .expect("feature merge");
+        git_read_command_output(
+            &root,
+            "config branch abc remote",
+            &["config", "branch.abc.remote", "."],
+        )
+        .expect("abc remote");
+        git_read_command_output(
+            &root,
+            "config branch abc merge",
+            &[
+                "config",
+                "branch.abc.merge",
+                "refs/heads/feature/TASK-1234-abc",
+            ],
+        )
+        .expect("abc merge");
+
+        let snapshot = GitStatusSnapshot::default()
+            .with_upstreams(Some("feature/TASK-1234-abc".to_owned()), None)
+            .with_status(editor_git::RepositoryStatus::new(
+                Some("abc".to_owned()),
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+
+        assert_eq!(
+            git_push_remote_name(&root, &snapshot),
+            Some("origin".to_owned())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

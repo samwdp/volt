@@ -6,6 +6,18 @@ use std::{
 
 const STANDALONE_USER_GITIGNORE: &str = "target/\nsdk/\n";
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_background_command(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub fn setup_standalone_user_repository(
     user_destination: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +26,9 @@ pub fn setup_standalone_user_repository(
         STANDALONE_USER_GITIGNORE,
     )?;
 
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    let status = command
         .arg("init")
         .arg("--quiet")
         .current_dir(user_destination)

@@ -1,4 +1,12 @@
-use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+use editor_plugin_api::{PaneConfig, PluginAction, PluginCommand, PluginPackage};
+
+pub const GOLDEN_RATIO: bool = false;
+
+pub const fn config() -> PaneConfig {
+    PaneConfig {
+        golden_ratio: GOLDEN_RATIO,
+    }
+}
 
 /// Returns the metadata for the pane management package.
 pub fn package() -> PluginPackage {
@@ -36,7 +44,7 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
 
 #[cfg(test)]
 mod tests {
-    use super::package;
+    use super::{GOLDEN_RATIO, config, package};
 
     #[test]
     fn package_exports_split_close_and_switch_commands() {
@@ -65,5 +73,10 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "pane.switch-split")
         );
+    }
+
+    #[test]
+    fn config_exposes_current_golden_ratio_setting() {
+        assert_eq!(config().golden_ratio, GOLDEN_RATIO);
     }
 }

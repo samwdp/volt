@@ -27,6 +27,14 @@ pub(super) struct DirectoryViewState {
     pub(super) sort_mode: DirectorySortMode,
     pub(super) trash_enabled: bool,
     pub(super) edit_snapshot: Vec<String>,
+    pub(super) pending_worktree: Option<PendingWorktreeRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PendingWorktreeRequest {
+    pub(super) line: usize,
+    pub(super) remote_branch: String,
+    pub(super) local_branch: String,
 }
 
 impl DirectoryViewState {
@@ -38,6 +46,7 @@ impl DirectoryViewState {
             sort_mode: defaults.sort_mode,
             trash_enabled: defaults.trash_enabled,
             edit_snapshot: Vec::new(),
+            pending_worktree: None,
         }
     }
 }
@@ -286,8 +295,19 @@ pub(super) struct DirectoryLine {
 pub(super) enum DirectoryEditAction {
     CreateFile(PathBuf),
     CreateDir(PathBuf),
-    Delete { path: PathBuf, is_dir: bool },
-    Rename { from: PathBuf, to: PathBuf },
+    CreateGitWorktree {
+        remote_branch: String,
+        local_branch: String,
+        path: PathBuf,
+    },
+    Delete {
+        path: PathBuf,
+        is_dir: bool,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 pub(super) fn directory_edit_lines(
@@ -396,6 +416,71 @@ mod directory_line_tests {
     }
 
     #[test]
+    fn trailing_slash_added_line_creates_directory() {
+        let root = PathBuf::from("workspace");
+        let before = vec!["Cargo.toml".to_owned()];
+        let after = vec!["Cargo.toml".to_owned(), "scratch/".to_owned()];
+        let user_library = NullUserLibrary;
+        let actions = directory_edit_actions(&root, &before, &after, &user_library)
+            .expect("trailing slash entry should parse as directory create");
+        assert_eq!(
+            actions,
+            vec![DirectoryEditAction::CreateDir(root.join("scratch"))]
+        );
+    }
+
+    #[test]
+    fn create_dir_action_creates_empty_directory() {
+        let temp =
+            std::env::temp_dir().join(format!("volt-oil-dir-create-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).expect("create temp directory");
+        let path = temp.join("scratch");
+        apply_directory_edit_actions(&[DirectoryEditAction::CreateDir(path.clone())])
+            .expect("create directory action should create empty directory");
+        assert!(path.is_dir());
+        fs::remove_dir_all(&temp).expect("remove temp directory");
+    }
+
+    #[test]
+    fn copy_directory_yank_entries_copies_files_and_directories() {
+        let temp = std::env::temp_dir().join(format!("volt-oil-copy-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        let source = temp.join("source");
+        let dest = temp.join("dest");
+        fs::create_dir_all(source.join("nested")).expect("create source dirs");
+        fs::create_dir_all(&dest).expect("create dest dir");
+        fs::write(source.join("file.txt"), "file body").expect("write source file");
+        fs::write(source.join("nested").join("inner.txt"), "inner body")
+            .expect("write nested file");
+
+        let entries = vec![
+            DirectoryYankEntry {
+                path: source.join("file.txt"),
+                label: "file.txt".to_owned(),
+                is_dir: false,
+            },
+            DirectoryYankEntry {
+                path: source.join("nested"),
+                label: "nested/".to_owned(),
+                is_dir: true,
+            },
+        ];
+        copy_directory_yank_entries(&entries, &dest).expect("copy yanked entries");
+
+        assert_eq!(
+            fs::read_to_string(dest.join("file.txt")).expect("read copied file"),
+            "file body"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("nested").join("inner.txt"))
+                .expect("read copied nested file"),
+            "inner body"
+        );
+        fs::remove_dir_all(&temp).expect("remove temp directory");
+    }
+
+    #[test]
     fn oil_theme_tokens_follow_entry_kind() {
         assert_eq!(
             oil_directory_theme_token(Path::new(".git")),
@@ -468,7 +553,15 @@ pub(super) fn directory_edit_actions(
     }
     let before_parsed = parse_directory_lines(before, user_library)?;
     let after_parsed = parse_directory_lines(after, user_library)?;
-    let (removed_indices, added_indices) = diff_directory_lines(before, after);
+    let before_labels = before_parsed
+        .iter()
+        .map(|entry| entry.label.clone())
+        .collect::<Vec<_>>();
+    let after_labels = after_parsed
+        .iter()
+        .map(|entry| entry.label.clone())
+        .collect::<Vec<_>>();
+    let (removed_indices, added_indices) = diff_directory_lines(&before_labels, &after_labels);
     let removed = removed_indices
         .iter()
         .map(|index| &before_parsed[*index])
@@ -504,6 +597,14 @@ pub(super) fn directory_edit_actions(
         });
     }
     for dst in added.iter().skip(rename_count) {
+        if let Some((remote_branch, local_branch, name)) = parse_worktree_request(&dst.label) {
+            actions.push(DirectoryEditAction::CreateGitWorktree {
+                remote_branch,
+                local_branch,
+                path: root.join(name),
+            });
+            continue;
+        }
         let path = root.join(&dst.rel_path);
         if dst.is_dir {
             actions.push(DirectoryEditAction::CreateDir(path));
@@ -553,16 +654,91 @@ pub(super) fn apply_directory_edit_actions(actions: &[DirectoryEditAction]) -> R
                     .open(path)
                     .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
             }
+            DirectoryEditAction::CreateGitWorktree { .. } => {}
         }
     }
     Ok(())
+}
+
+pub(super) fn copy_directory_yank_entries(
+    entries: &[DirectoryYankEntry],
+    dest_root: &Path,
+) -> Result<(), String> {
+    for entry in entries {
+        let name = entry
+            .path
+            .file_name()
+            .ok_or_else(|| format!("cannot copy `{}`: missing file name", entry.path.display()))?;
+        let dest = dest_root.join(name);
+        if dest.exists() {
+            return Err(format!("copy target `{}` already exists", dest.display()));
+        }
+        if entry.is_dir {
+            copy_directory_recursive(&entry.path, &dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create `{}`: {error}", parent.display()))?;
+            }
+            fs::copy(&entry.path, &dest).map_err(|error| {
+                format!(
+                    "failed to copy `{}` to `{}`: {error}",
+                    entry.path.display(),
+                    dest.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_recursive(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to)
+        .map_err(|error| format!("failed to create `{}`: {error}", to.display()))?;
+    for entry in fs::read_dir(from)
+        .map_err(|error| format!("failed to read `{}`: {error}", from.display()))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to read `{}`: {error}", from.display()))?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", src.display()))?;
+        if file_type.is_dir() {
+            copy_directory_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst).map_err(|error| {
+                format!(
+                    "failed to copy `{}` to `{}`: {error}",
+                    src.display(),
+                    dst.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn parse_worktree_request(line: &str) -> Option<(String, String, PathBuf)> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "worktree" {
+        return None;
+    }
+    let remote_branch = parts.next()?.to_owned();
+    let local_branch = parts.next()?.to_owned();
+    let name = parts.collect::<Vec<_>>().join(" ");
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some((remote_branch, local_branch, PathBuf::from(name.trim())))
 }
 
 pub(super) fn apply_directory_edit_queue(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let (root, before) = {
+    let (root, before, pending_worktree) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let Some(state) = buffer.directory_state() else {
             return Ok(());
@@ -575,17 +751,45 @@ pub(super) fn apply_directory_edit_queue(
         } else {
             state.edit_snapshot.clone()
         };
-        (state.root.clone(), snapshot)
+        (state.root.clone(), snapshot, state.pending_worktree.clone())
     };
     let after = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let user_library = shell_user_library(runtime);
         directory_edit_lines(buffer, &*user_library)
     };
+    if let Some(request) = pending_worktree {
+        let line = shell_buffer(runtime, buffer_id)?
+            .text
+            .line(request.line)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if line.is_empty() {
+            return Err("worktree directory name is required".to_owned());
+        }
+        create_git_worktree(
+            runtime,
+            &request.remote_branch,
+            &request.local_branch,
+            &root.join(line),
+        )?;
+        return Ok(());
+    }
     let user_library = shell_user_library(runtime);
     let actions = directory_edit_actions(&root, &before, &after, &*user_library)?;
     if actions.is_empty() {
         return Ok(());
+    }
+    for action in &actions {
+        if let DirectoryEditAction::CreateGitWorktree {
+            remote_branch,
+            local_branch,
+            path,
+        } = action
+        {
+            create_git_worktree(runtime, remote_branch, local_branch, path)?;
+        }
     }
     apply_directory_edit_actions(&actions)?;
     refresh_directory_buffer(runtime, buffer_id)?;

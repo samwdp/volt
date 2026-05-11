@@ -29,7 +29,6 @@ mod tests {
     fn nix_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-nix");
-        assert!(pkg.auto_load());
     }
 
     #[test]

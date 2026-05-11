@@ -275,7 +275,9 @@ fn render_pdf_page_with_pdftocairo(
     if render_path.exists() {
         let _ = fs::remove_file(&render_path);
     }
-    let output = Command::new(PDF_RENDER_PROGRAM)
+    let mut command = Command::new(PDF_RENDER_PROGRAM);
+    configure_background_command(&mut command);
+    let output = command
         .arg("-png")
         .arg("-singlefile")
         .arg("-f")

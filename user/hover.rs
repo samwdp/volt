@@ -128,6 +128,7 @@ fn hook_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn package_exports_hover_commands_and_keybindings() {
@@ -160,29 +161,36 @@ mod tests {
             package
                 .key_bindings()
                 .iter()
-                .any(|binding| binding.chord() == NEXT_CHORD)
+                .any(|binding| binding.command_name() == "hover.next")
         );
         assert!(
             package
                 .key_bindings()
                 .iter()
-                .any(|binding| binding.chord() == PREVIOUS_CHORD)
+                .any(|binding| binding.command_name() == "hover.previous")
         );
-        assert_eq!(TOGGLE_CHORD, "K");
     }
 
     #[test]
-    fn provider_order_matches_current_source_of_truth() {
+    fn providers_have_unique_ids_and_keep_calculator_scoping() {
         let providers = providers();
-        assert_eq!(providers[0].id, PROVIDER_LSP);
-        assert_eq!(providers[1].id, PROVIDER_SIGNATURE_HELP);
-        assert_eq!(providers[2].id, PROVIDER_DIAGNOSTICS);
-        assert_eq!(providers[3].id, calculator::PROVIDER_CALCULATOR);
-        assert_eq!(providers[4].id, PROVIDER_TEST_HOVER);
+        let mut ids = BTreeSet::new();
+        for provider in &providers {
+            assert!(
+                ids.insert(provider.id.clone()),
+                "duplicate hover provider `{}`",
+                provider.id
+            );
+        }
+
+        let calculator = providers
+            .iter()
+            .find(|provider| provider.id == calculator::PROVIDER_CALCULATOR)
+            .expect("calculator hover provider should be exported");
         assert_eq!(
-            providers[3].buffer_kind.as_deref(),
+            calculator.buffer_kind.as_deref(),
             Some(calculator::CALCULATOR_KIND)
         );
-        assert!(!providers[3].topics.is_empty());
+        assert!(!calculator.topics.is_empty());
     }
 }

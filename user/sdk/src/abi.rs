@@ -20,8 +20,8 @@ use serde_json::Number;
 use crate::{
     AcpClient, AutocompleteProvider, AutocompleteProviderItem, GhostTextContext, GhostTextLine,
     GitStatusPrefix, HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, PdfOpenMode, StatuslineContext,
-    TerminalConfig, WorkspaceRoot,
+    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode,
+    StatuslineContext, TerminalConfig, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -553,9 +553,11 @@ pub struct AbiLanguageServerSpec {
     program: RString,
     args: RVec<RString>,
     root_markers: RVec<RString>,
+    activation_markers: RVec<RString>,
     root_strategy: AbiLanguageServerRootStrategy,
     env: RVec<AbiStringPair>,
     workspace_configuration: AbiWorkspaceConfiguration,
+    enabled_by_default: bool,
 }
 
 impl From<LanguageServerSpec> for AbiLanguageServerSpec {
@@ -612,9 +614,17 @@ impl From<LanguageServerSpec> for AbiLanguageServerSpec {
                 .map(Into::into)
                 .collect::<Vec<RString>>()
                 .into(),
+            activation_markers: value
+                .activation_markers()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
             root_strategy: value.root_strategy().into(),
             env: env.into(),
             workspace_configuration: value.workspace_configuration().into(),
+            enabled_by_default: value.enabled_by_default(),
         }
     }
 }
@@ -632,7 +642,14 @@ impl From<AbiLanguageServerSpec> for LanguageServerSpec {
         .with_file_names(value.file_names.into_iter().map(RString::into_string))
         .with_file_globs(value.file_globs.into_iter().map(RString::into_string))
         .with_root_markers(value.root_markers.into_iter().map(RString::into_string))
-        .with_root_strategy(value.root_strategy.into());
+        .with_activation_markers(
+            value
+                .activation_markers
+                .into_iter()
+                .map(RString::into_string),
+        )
+        .with_root_strategy(value.root_strategy.into())
+        .with_enabled_by_default(value.enabled_by_default);
         let mappings = value
             .document_language_ids
             .into_iter()
@@ -773,6 +790,7 @@ pub enum AbiOilKeyAction {
     ToggleTrash,
     OpenExternal,
     SetTabLocalRoot,
+    CreateGitWorktree,
 }
 
 impl From<OilKeyAction> for AbiOilKeyAction {
@@ -795,6 +813,7 @@ impl From<OilKeyAction> for AbiOilKeyAction {
             OilKeyAction::ToggleTrash => Self::ToggleTrash,
             OilKeyAction::OpenExternal => Self::OpenExternal,
             OilKeyAction::SetTabLocalRoot => Self::SetTabLocalRoot,
+            OilKeyAction::CreateGitWorktree => Self::CreateGitWorktree,
         }
     }
 }
@@ -819,6 +838,7 @@ impl From<AbiOilKeyAction> for OilKeyAction {
             AbiOilKeyAction::ToggleTrash => Self::ToggleTrash,
             AbiOilKeyAction::OpenExternal => Self::OpenExternal,
             AbiOilKeyAction::SetTabLocalRoot => Self::SetTabLocalRoot,
+            AbiOilKeyAction::CreateGitWorktree => Self::CreateGitWorktree,
         }
     }
 }
@@ -1159,6 +1179,28 @@ impl From<AbiLigatureConfig> for LigatureConfig {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub struct AbiPaneConfig {
+    pub golden_ratio: bool,
+}
+
+impl From<PaneConfig> for AbiPaneConfig {
+    fn from(value: PaneConfig) -> Self {
+        Self {
+            golden_ratio: value.golden_ratio,
+        }
+    }
+}
+
+impl From<AbiPaneConfig> for PaneConfig {
+    fn from(value: AbiPaneConfig) -> Self {
+        Self {
+            golden_ratio: value.golden_ratio,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub struct AbiLspDiagnosticsInfo {
     pub errors: usize,
     pub warnings: usize,
@@ -1230,6 +1272,7 @@ pub struct AbiOilKeybindings {
     pub toggle_trash: RStr<'static>,
     pub open_external: RStr<'static>,
     pub set_tab_local_root: RStr<'static>,
+    pub create_git_worktree: RStr<'static>,
 }
 
 impl From<OilKeybindings> for AbiOilKeybindings {
@@ -1252,6 +1295,7 @@ impl From<OilKeybindings> for AbiOilKeybindings {
             toggle_trash: RStr::from_str(value.toggle_trash),
             open_external: RStr::from_str(value.open_external),
             set_tab_local_root: RStr::from_str(value.set_tab_local_root),
+            create_git_worktree: RStr::from_str(value.create_git_worktree),
         }
     }
 }
@@ -1276,6 +1320,7 @@ impl From<AbiOilKeybindings> for OilKeybindings {
             toggle_trash: value.toggle_trash.as_str(),
             open_external: value.open_external.as_str(),
             set_tab_local_root: value.set_tab_local_root.as_str(),
+            create_git_worktree: value.create_git_worktree.as_str(),
         }
     }
 }
@@ -1908,8 +1953,9 @@ pub struct UserLibraryModule {
     pub ligature_config_v1: extern "C" fn() -> AbiLigatureConfig,
     pub ghost_text_lines: extern "C" fn(AbiGhostTextContext) -> RVec<AbiGhostTextLine>,
     pub headerline_lines: extern "C" fn(AbiGhostTextContext) -> RVec<RString>,
-    #[sabi(last_prefix_field)]
     pub pdf_open_mode: extern "C" fn() -> AbiPdfOpenMode,
+    #[sabi(last_prefix_field)]
+    pub pane_config_v1: extern "C" fn() -> AbiPaneConfig,
 }
 
 impl RootModule for UserLibraryModuleRef {
@@ -1971,9 +2017,51 @@ mod tests {
         assert_eq!(round_trip.file_names(), ["Dockerfile"]);
         assert_eq!(round_trip.file_globs(), ["Dockerfile.*"]);
         assert!(round_trip.matches_path(Path::new("Dockerfile.dev")));
+        assert!(round_trip.enabled_by_default());
         assert_eq!(
             round_trip.document_language_ids().get("Dockerfile.*"),
             Some(&"dockerfile".to_owned())
+        );
+    }
+
+    #[test]
+    fn abi_language_server_spec_round_trips_default_enabled_flag() {
+        let spec = LanguageServerSpec::new(
+            "copilot-language-server",
+            "plaintext",
+            ["rs"],
+            "copilot",
+            std::iter::empty::<&str>(),
+        )
+        .with_enabled_by_default(false);
+
+        let round_trip = LanguageServerSpec::from(AbiLanguageServerSpec::from(spec));
+
+        assert!(!round_trip.enabled_by_default());
+    }
+
+    #[test]
+    fn abi_language_server_spec_round_trips_activation_markers() {
+        let spec = LanguageServerSpec::new(
+            "tailwindcss-language-server",
+            "html",
+            ["html", "tsx"],
+            "tailwindcss-language-server",
+            ["--stdio"],
+        )
+        .with_activation_markers([
+            "tailwind.config.ts",
+            "node_modules/tailwindcss/package.json",
+        ]);
+
+        let round_trip = LanguageServerSpec::from(AbiLanguageServerSpec::from(spec));
+
+        assert_eq!(
+            round_trip.activation_markers(),
+            [
+                "tailwind.config.ts",
+                "node_modules/tailwindcss/package.json",
+            ]
         );
     }
 

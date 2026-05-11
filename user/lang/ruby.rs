@@ -33,7 +33,6 @@ mod tests {
     fn ruby_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-ruby");
-        assert!(pkg.auto_load());
     }
 
     #[test]

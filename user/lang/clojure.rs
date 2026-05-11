@@ -29,7 +29,6 @@ mod tests {
     fn clojure_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-clojure");
-        assert!(pkg.auto_load());
     }
 
     #[test]

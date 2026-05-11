@@ -63,11 +63,11 @@ use crate::browser_host::{
 };
 use crate::config::{ShellConfig, ShellError, ShellSummary, TypingProfileSummary};
 use crate::state::{
-    BlockInsertState, BlockSelection, FormatterRegistry, FormatterSpec, InputMode, LastFind,
-    LastSearch, MulticursorState, ScrollCommand, ShellMotion, VimBufferState, VimFindKind, VimMark,
-    VimOperator, VimPending, VimRecordedInput, VimSearchDirection, VimState, VimTarget,
-    VimTextObjectKind, VimVisualSnapshot, VisualSelection, VisualSelectionKind, YankFlash,
-    YankRegister,
+    BlockInsertState, BlockSelection, DirectoryYankEntry, FormatterRegistry, FormatterSpec,
+    InputMode, LastFind, LastSearch, MulticursorState, ScrollCommand, ShellMotion, VimBufferState,
+    VimFindKind, VimMark, VimOperator, VimPending, VimRecordedInput, VimSearchDirection, VimState,
+    VimTarget, VimTextObjectKind, VimVisualSnapshot, VisualSelection, VisualSelectionKind,
+    YankFlash, YankRegister,
 };
 use crate::window_effects::{
     WindowEffects, apply_window_effects, configure_window_opacity_driver,
@@ -88,8 +88,8 @@ use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
     LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction, LspFormattingOptions,
-    LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationLevel, LspNotificationSnapshot,
-    LspTextEdit, LspWorkspaceDiagnostic,
+    LspInlineCompletionItem, LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationAction,
+    LspNotificationLevel, LspNotificationSnapshot, LspTextEdit, LspWorkspaceDiagnostic,
 };
 use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
@@ -105,7 +105,7 @@ use editor_plugin_host::{
 };
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
-    find_system_monospace_font, horizontal_pane_rects, vertical_pane_rects,
+    find_system_monospace_font, horizontal_pane_rects_for_active, vertical_pane_rects_for_active,
 };
 use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
@@ -132,6 +132,33 @@ use sdl3::{
     video::{Window, WindowContext},
 };
 use sdl3_ttf_sys as _;
+
+fn runtime_pane_rects(
+    user_library: &dyn UserLibrary,
+    split_direction: PaneSplitDirection,
+    width: u32,
+    pane_height: u32,
+    pane_count: usize,
+    active_pane_index: usize,
+) -> Vec<PixelRect> {
+    let golden_ratio = user_library.pane_config().golden_ratio;
+    match split_direction {
+        PaneSplitDirection::Vertical => vertical_pane_rects_for_active(
+            width,
+            pane_height,
+            pane_count,
+            active_pane_index,
+            golden_ratio,
+        ),
+        PaneSplitDirection::Horizontal => horizontal_pane_rects_for_active(
+            width,
+            pane_height,
+            pane_count,
+            active_pane_index,
+            golden_ratio,
+        ),
+    }
+}
 
 const HOOK_MOVE_LEFT: &str = "editor.cursor.move-left";
 const HOOK_MOVE_DOWN: &str = "editor.cursor.move-down";
@@ -162,6 +189,9 @@ const HOOK_SCROLL_PAGE_DOWN: &str = "editor.vim.scroll-page-down";
 const HOOK_SCROLL_PAGE_UP: &str = "editor.vim.scroll-page-up";
 const HOOK_SCROLL_LINE_DOWN: &str = "editor.vim.scroll-line-down";
 const HOOK_SCROLL_LINE_UP: &str = "editor.vim.scroll-line-up";
+const HOOK_CURRENT_LINE_TOP: &str = "editor.vim.current-line-top";
+const HOOK_CENTER_CURRENT_LINE: &str = "editor.vim.center-current-line";
+const HOOK_CURRENT_LINE_BOTTOM: &str = "editor.vim.current-line-bottom";
 const HOOK_MODE_INSERT: &str = "editor.mode.insert";
 const HOOK_MODE_NORMAL: &str = "editor.mode.normal";
 const HOOK_VIM_EDIT: &str = "editor.vim.edit";
@@ -241,8 +271,10 @@ const HOOK_LSP_REFERENCES: &str = lsp_hooks::REFERENCES;
 const HOOK_LSP_IMPLEMENTATION: &str = lsp_hooks::IMPLEMENTATION;
 const HOOK_LSP_DIAGNOSTICS: &str = lsp_hooks::DIAGNOSTICS;
 const HOOK_LSP_CODE_ACTIONS: &str = lsp_hooks::CODE_ACTIONS;
-const ACP_INPUT_PLACEHOLDER: &str =
-    "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts";
+const HOOK_LSP_COPILOT_SIGN_IN: &str = lsp_hooks::COPILOT_SIGN_IN;
+const HOOK_LSP_COPILOT_SIGN_OUT: &str = lsp_hooks::COPILOT_SIGN_OUT;
+const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
+const ACP_INPUT_PLACEHOLDER: &str = "Type / for commands. Press M-x and `acp.` for other commands";
 const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
 const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
 const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
@@ -259,6 +291,8 @@ const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
 const HOOK_GIT_STASH_LIST_OPEN: &str = git_hooks::STASH_LIST_OPEN;
 const HOOK_OIL_OPEN: &str = oil_hooks::OPEN;
 const HOOK_OIL_OPEN_PARENT: &str = oil_hooks::OPEN_PARENT;
+const HOOK_OIL_ACTION: &str = oil_hooks::ACTION;
+const HOOK_OIL_GIT_WORKTREE: &str = "ui.oil.git-worktree";
 const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
@@ -309,11 +343,6 @@ const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
 const OIL_HELP_BUFFER_NAME: &str = "*oil-help*";
 const LSP_LOG_BUFFER_PREFIX: &str = "*lsp-log ";
 const LSP_METADATA_BUFFER_KIND: &str = "lsp-metadata";
-const LSP_METADATA_BUFFER_PREFIX: &str = "*lsp-metadata ";
-const CSHARP_LSP_SERVER_ID: &str = "csharp-ls";
-const CSHARP_LANGUAGE_ID: &str = "csharp";
-const CSHARP_METADATA_URI_SCHEME: &str = "csharp:/";
-const CSHARP_SOLUTION_PICKER_TITLE: &str = "Select C# solution";
 const OIL_PREVIEW_KIND: &str = "oil-preview";
 const OIL_HELP_KIND: &str = "oil-help";
 const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
@@ -329,16 +358,6 @@ const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
 const DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH: usize = 6;
 const BUNDLED_ICON_FONT_SEARCH_DEPTH: usize = 6;
-const CSHARP_SOLUTION_IGNORED_DIR_NAMES: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    ".vs",
-    "node_modules",
-    "target",
-    "bin",
-    "obj",
-];
 const BUNDLED_ICON_FONT_DIR_CANDIDATES: &[&[&str]] =
     &[&["crates", "volt", "assets", "font"], &["assets", "font"]];
 const BUNDLED_ICON_FONT_FILES: &[&str] = &[
@@ -1013,14 +1032,101 @@ fn desired_indent_columns_for_text(
         }
     }
     let (mut indent_columns, _) = leading_whitespace_info(&base_line, indent_size);
-    if indent_size > 0 && base_line.trim_end().ends_with('{') {
+    if indent_size > 0 && matches!(base_line.trim_end().chars().last(), Some('{') | Some('[')) {
         indent_columns = indent_columns.saturating_add(indent_size);
     }
     let current_line = buffer.line(line_index).unwrap_or_default();
-    if current_line.trim_start().starts_with('}') {
+    if matches!(
+        current_line.trim_start().chars().next(),
+        Some('}') | Some(']')
+    ) {
         indent_columns = indent_columns.saturating_sub(indent_size);
     }
     indent_columns
+}
+
+fn desired_reindent_columns_for_line(
+    buffer: &TextBuffer,
+    line_index: usize,
+    indent_size: usize,
+) -> usize {
+    let current_line = buffer.line(line_index).unwrap_or_default();
+    let mut base_line = String::new();
+    let mut search_index = line_index;
+    while search_index > 0 {
+        search_index = search_index.saturating_sub(1);
+        let Some(line) = buffer.line(search_index) else {
+            continue;
+        };
+        if !line.trim().is_empty() {
+            base_line = line;
+            break;
+        }
+    }
+    let (mut indent_columns, _) = leading_whitespace_info(&base_line, indent_size);
+    if indent_size > 0 && matches!(base_line.trim_end().chars().last(), Some('{') | Some('[')) {
+        indent_columns = indent_columns.saturating_add(indent_size);
+    }
+    if matches!(
+        current_line.trim_start().chars().next(),
+        Some('}') | Some(']')
+    ) {
+        indent_columns = indent_columns.saturating_sub(indent_size);
+    }
+    indent_columns
+}
+
+fn should_format_current_line_after_closing_delimiter(buffer: &ShellBuffer, text: &str) -> bool {
+    matches!(text, "}" | "]")
+        && matches!(
+            buffer
+                .text
+                .line(buffer.cursor_row())
+                .unwrap_or_default()
+                .trim_start()
+                .chars()
+                .next(),
+            Some('}') | Some(']')
+        )
+}
+
+fn should_split_insert_newline_for_pair(buffer: &ShellBuffer) -> bool {
+    let cursor = buffer.cursor_point();
+    let Some(previous_point) = buffer.text.point_before(cursor) else {
+        return false;
+    };
+    let Some(previous) = buffer.text.char_at_point(previous_point) else {
+        return false;
+    };
+    let Some(next) = buffer.text.char_at_point(cursor) else {
+        return false;
+    };
+    matches!((previous, next), ('{', '}') | ('[', ']'))
+}
+
+fn insert_newline_inside_pair(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    indent_size: usize,
+    use_tabs: bool,
+) -> Result<bool, String> {
+    let should_split = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        should_split_insert_newline_for_pair(buffer)
+    };
+    if !should_split {
+        return Ok(false);
+    }
+
+    let cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.insert_text("\n\n");
+        buffer.set_cursor(TextPoint::new(cursor.line + 1, 0));
+    }
+    format_buffer_line_indent(runtime, buffer_id, cursor.line + 1, indent_size, use_tabs)?;
+    format_buffer_line_indent(runtime, buffer_id, cursor.line + 2, indent_size, use_tabs)?;
+    Ok(true)
 }
 
 fn desired_indent_for_buffer(
@@ -2409,6 +2515,14 @@ struct BufferContextOverlaySnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct InlineCompletionState {
+    item: LspInlineCompletionItem,
+    buffer_revision: u64,
+    cursor: TextPoint,
+    shown: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
     pub(crate) name: String,
@@ -2450,6 +2564,7 @@ pub(crate) struct ShellBuffer {
     lsp_diagnostics: Vec<LspDiagnostic>,
     lsp_diagnostic_lines: BTreeMap<usize, Box<[DiagnosticLineSpan]>>,
     lsp_diagnostics_revision: u64,
+    inline_completion: Option<InlineCompletionState>,
     last_edit_at: Option<Instant>,
     vim_buffer_state: VimBufferState,
 }
@@ -3294,6 +3409,7 @@ impl ShellBuffer {
             lsp_diagnostics: Vec::new(),
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
+            inline_completion: None,
             last_edit_at: None,
             vim_buffer_state: VimBufferState {
                 target: vim_target,
@@ -3359,6 +3475,7 @@ impl ShellBuffer {
             lsp_diagnostics: Vec::new(),
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
+            inline_completion: None,
             last_edit_at: None,
             vim_buffer_state: VimBufferState {
                 target: vim_target,
@@ -3426,6 +3543,7 @@ impl ShellBuffer {
             lsp_diagnostics: Vec::new(),
             lsp_diagnostic_lines: BTreeMap::new(),
             lsp_diagnostics_revision: 0,
+            inline_completion: None,
             last_edit_at: None,
             vim_buffer_state: VimBufferState {
                 target: vim_target,
@@ -3475,19 +3593,29 @@ impl ShellBuffer {
             cursor_line: key.cursor_line,
             cursor_column: key.cursor_column,
         };
+        let mut ghost_text_by_line: BTreeMap<usize, String> = user_library
+            .ghost_text_lines(&context)
+            .into_iter()
+            .map(|line| (line.line, line.text))
+            .collect();
+        if let Some(ghost_text) = self.inline_completion_ghost_text() {
+            ghost_text_by_line.insert(key.cursor_line, ghost_text);
+        }
         let snapshot = BufferContextOverlaySnapshot {
             key,
             headerline_lines: user_library.headerline_lines(&context),
-            ghost_text_by_line: user_library
-                .ghost_text_lines(&context)
-                .into_iter()
-                .map(|line| (line.line, line.text))
-                .collect(),
+            ghost_text_by_line,
         };
         if let Ok(mut cache) = self.context_overlay_cache.lock() {
             *cache = Some(snapshot.clone());
         }
         snapshot
+    }
+
+    fn clear_context_overlay_cache(&self) {
+        if let Ok(mut cache) = self.context_overlay_cache.lock() {
+            *cache = None;
+        }
     }
 
     fn is_read_only(&self) -> bool {
@@ -3499,6 +3627,68 @@ impl ShellBuffer {
             || self.acp_active_pane_is_read_only()
             || self.browser_active_pane_is_read_only()
             || (self.kind == BufferKind::Image && !self.is_svg_source_mode())
+    }
+
+    fn inline_completion_ghost_text(&self) -> Option<String> {
+        let completion = self.inline_completion.as_ref()?;
+        if completion.buffer_revision != self.text.revision()
+            || completion.cursor != self.cursor_point()
+            || completion.item.range().start() > completion.cursor
+            || completion.item.range().end() < completion.cursor
+        {
+            return None;
+        }
+        let inserted = completion.item.insert_text();
+        let preview = if completion.item.range().start() < completion.cursor {
+            let typed_range = TextRange::new(completion.item.range().start(), completion.cursor);
+            let typed = self.slice(typed_range);
+            inserted.strip_prefix(&typed).unwrap_or(inserted)
+        } else {
+            inserted
+        };
+        preview
+            .split('\n')
+            .next()
+            .map(str::to_owned)
+            .filter(|line| !line.is_empty())
+    }
+
+    fn set_inline_completion(&mut self, item: LspInlineCompletionItem) {
+        self.inline_completion = Some(InlineCompletionState {
+            item,
+            buffer_revision: self.text.revision(),
+            cursor: self.cursor_point(),
+            shown: false,
+        });
+        self.clear_context_overlay_cache();
+    }
+
+    fn mark_inline_completion_shown(&mut self) -> Option<LspInlineCompletionItem> {
+        let completion = self.inline_completion.as_mut()?;
+        if completion.shown {
+            return None;
+        }
+        completion.shown = true;
+        Some(completion.item.clone())
+    }
+
+    fn take_valid_inline_completion(&mut self) -> Option<LspInlineCompletionItem> {
+        let completion = self.inline_completion.take()?;
+        if completion.buffer_revision == self.text.revision()
+            && completion.cursor == self.cursor_point()
+            && completion.item.range().start() <= completion.cursor
+            && completion.item.range().end() >= completion.cursor
+        {
+            Some(completion.item)
+        } else {
+            None
+        }
+    }
+
+    fn clear_inline_completion(&mut self) {
+        if self.inline_completion.take().is_some() {
+            self.clear_context_overlay_cache();
+        }
     }
 
     fn has_input_field(&self) -> bool {
@@ -4073,6 +4263,18 @@ impl ShellBuffer {
     pub(crate) fn acp_set_plan(&mut self, plan: Plan) {
         if let Some(state) = self.acp_state.as_mut() {
             state.plan_entries = plan.entries;
+            normalize_acp_plan_entries(&mut state.plan_entries);
+        }
+        self.acp_rebuild_plan_view();
+    }
+
+    pub(crate) fn acp_complete_plan(&mut self) {
+        if let Some(state) = self.acp_state.as_mut() {
+            for entry in &mut state.plan_entries {
+                if !matches!(entry.status, PlanEntryStatus::Completed) {
+                    entry.status = PlanEntryStatus::Completed;
+                }
+            }
         }
         self.acp_rebuild_plan_view();
     }
@@ -4254,6 +4456,13 @@ impl ShellBuffer {
         }
     }
 
+    fn mark_git_fringe_stale(&mut self) {
+        if matches!(self.kind, BufferKind::File) && self.git_fringe.is_some() {
+            self.git_fringe_dirty = true;
+            self.git_fringe_last_edit_at = None;
+        }
+    }
+
     fn git_fringe_refresh_due(&self, now: Instant, typing_active: bool) -> bool {
         !typing_active
             && self.git_fringe_dirty
@@ -4269,6 +4478,10 @@ impl ShellBuffer {
 
     fn directory_state(&self) -> Option<&DirectoryViewState> {
         self.directory_state.as_ref()
+    }
+
+    fn directory_state_mut(&mut self) -> Option<&mut DirectoryViewState> {
+        self.directory_state.as_mut()
     }
 
     fn set_directory_state(&mut self, state: DirectoryViewState) {
@@ -4945,6 +5158,7 @@ impl ShellBuffer {
     }
 
     fn insert_text(&mut self, text: &str) {
+        self.clear_inline_completion();
         let wrap_edit = (!text.contains('\n'))
             .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
             .flatten();
@@ -4958,6 +5172,7 @@ impl ShellBuffer {
     }
 
     fn replace_mode_text(&mut self, text: &str) {
+        self.clear_inline_completion();
         let wrap_edit = (!text.contains('\n'))
             .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
             .flatten();
@@ -5000,6 +5215,7 @@ impl ShellBuffer {
     }
 
     fn backspace(&mut self) {
+        self.clear_inline_completion();
         let single_line_edit = self.cursor_col() > 0;
         let wrap_edit = single_line_edit
             .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
@@ -5015,6 +5231,7 @@ impl ShellBuffer {
     }
 
     fn delete_forward(&mut self) {
+        self.clear_inline_completion();
         let current = self.cursor_point();
         let single_line_edit = self
             .point_after(current)
@@ -5409,12 +5626,14 @@ impl ShellBuffer {
     }
 
     fn delete_range(&mut self, range: TextRange) {
+        self.clear_inline_completion();
         self.preserve_root_cursor_before_text_change();
         self.text.delete(range);
         self.invalidate_wrap_cache();
     }
 
     fn replace_range(&mut self, range: TextRange, text: &str) {
+        self.clear_inline_completion();
         self.preserve_root_cursor_before_text_change();
         self.text.replace(range, text);
         self.invalidate_wrap_cache();
@@ -5947,6 +6166,27 @@ fn acp_build_plan_lines(entries: &[PlanEntry]) -> Vec<AcpRenderedLine> {
         .collect()
 }
 
+fn normalize_acp_plan_entries(entries: &mut [PlanEntry]) {
+    let active_index = entries
+        .iter()
+        .position(|entry| matches!(entry.status, PlanEntryStatus::InProgress));
+    if let Some(active_index) = active_index {
+        for entry in &mut entries[..active_index] {
+            entry.status = PlanEntryStatus::Completed;
+        }
+        return;
+    }
+
+    let completed_prefix_len = entries
+        .iter()
+        .rposition(|entry| matches!(entry.status, PlanEntryStatus::Completed))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    for entry in &mut entries[..completed_prefix_len] {
+        entry.status = PlanEntryStatus::Completed;
+    }
+}
+
 fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
     let mut lines = Vec::new();
     for (index, item) in items.iter().enumerate() {
@@ -6406,6 +6646,7 @@ enum LspLifecycleAction {
 enum PickerAction {
     NoOp,
     ExecuteCommand(String),
+    ExecuteCommands(Vec<String>),
     ApplyLspCodeAction {
         workspace_id: WorkspaceId,
         buffer_id: BufferId,
@@ -6447,6 +6688,20 @@ enum PickerAction {
     DeleteWorkspace(WorkspaceId),
     GitPushRemote(String),
     GitFetchRemote(String),
+    GitWorktreeBranch {
+        remote_branch: String,
+        local_branch: String,
+    },
+    GitWorktreeCreate {
+        remote_branch: String,
+        local_branch: String,
+        base_dir: PathBuf,
+    },
+    GitWorktreeOilBranch {
+        buffer_id: BufferId,
+        remote_branch: String,
+        local_branch: String,
+    },
     GitBranchAction {
         action: GitBranchActionKind,
         branch: String,
@@ -6474,12 +6729,6 @@ enum PickerAction {
     AcpResolvePermission {
         request_id: u64,
         option_id: String,
-    },
-    SelectCsharpSolution {
-        root: Option<PathBuf>,
-        solution_path: PathBuf,
-        lifecycle: LspLifecycleAction,
-        preferred_server_id: Option<String>,
     },
     CopyToClipboard(String),
 }
@@ -6679,6 +6928,7 @@ impl ShellWorkspaceView {
 
 #[derive(Debug, Clone)]
 struct DirectoryPrefixState {
+    chord: String,
     started_at: Instant,
 }
 
@@ -6713,6 +6963,7 @@ pub(crate) struct ShellUiState {
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
     autocomplete_worker: AutocompleteWorkerState,
+    inline_completion_worker: InlineCompletionWorkerState,
     vim_search_worker: VimSearchWorkerState,
     workspace_search_worker: WorkspaceSearchWorkerState,
     file_reload_worker: FileReloadWorkerState,
@@ -6771,6 +7022,7 @@ impl ShellUiState {
             yank_flash: None,
             git_summary: GitSummaryState::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
+            inline_completion_worker: InlineCompletionWorkerState::new(),
             vim_search_worker: VimSearchWorkerState::new(),
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
             file_reload_worker: FileReloadWorkerState::new(),
@@ -6857,6 +7109,10 @@ impl ShellUiState {
 
     fn git_summary_state(&self) -> GitSummaryState {
         self.git_summary.clone()
+    }
+
+    fn take_git_summary_changed(&self) -> bool {
+        self.git_summary.take_changed()
     }
 
     fn mark_git_summary_refreshed(&mut self, now: Instant) {
@@ -8571,6 +8827,14 @@ impl ShellState {
                             acp::acp_open_permission_request(&mut self.runtime, request_id)
                                 .map_err(ShellError::Runtime)?;
                         }
+                        NotificationAction::OpenBrowserPopup { url } => {
+                            open_browser_buffer_in_popup(&mut self.runtime, Some(&url))
+                                .map_err(ShellError::Runtime)?;
+                        }
+                        NotificationAction::CopilotSignIn { root } => {
+                            begin_copilot_sign_in(&mut self.runtime, root.as_deref())
+                                .map_err(ShellError::Runtime)?;
+                        }
                     }
                     return Ok(false);
                 }
@@ -9055,17 +9319,26 @@ impl ShellState {
                                         theme_lang_use_tabs(theme_registry, language_id),
                                     )
                                 };
-                                {
-                                    let buffer = self.active_buffer_mut()?;
-                                    buffer.insert_text("\n");
-                                }
-                                format_current_line_indent(
+                                if !insert_newline_inside_pair(
                                     &mut self.runtime,
                                     buffer_id,
                                     indent_size,
                                     use_tabs,
                                 )
-                                .map_err(ShellError::Runtime)?;
+                                .map_err(ShellError::Runtime)?
+                                {
+                                    {
+                                        let buffer = self.active_buffer_mut()?;
+                                        buffer.insert_text("\n");
+                                    }
+                                    format_current_line_indent(
+                                        &mut self.runtime,
+                                        buffer_id,
+                                        indent_size,
+                                        use_tabs,
+                                    )
+                                    .map_err(ShellError::Runtime)?;
+                                }
                                 self.mark_active_buffer_syntax_dirty()?;
                                 close_autocomplete = true;
                             }
@@ -9154,26 +9427,30 @@ impl ShellState {
                             && !active_buffer.has_input
                             && !active_buffer.is_read_only
                         {
-                            let changed = {
-                                let buffer = self.active_buffer_mut()?;
-                                advance_markdown_table_insert_tab(buffer)
-                            };
-                            if let Some(changed) = changed {
-                                if changed {
-                                    self.mark_active_buffer_syntax_dirty()?;
-                                }
+                            if self.accept_inline_completion()? {
                                 close_autocomplete = true;
                             } else {
-                                let insert = {
-                                    let ui = self.ui()?;
-                                    let language_id = ui
-                                        .buffer(active_buffer.buffer_id)
-                                        .and_then(|buffer| buffer.language_id());
-                                    let theme_registry =
-                                        self.runtime.services().get::<ThemeRegistry>();
-                                    tab_insert_string(theme_registry, language_id)
+                                let changed = {
+                                    let buffer = self.active_buffer_mut()?;
+                                    advance_markdown_table_insert_tab(buffer)
                                 };
-                                self.handle_text_input(&insert)?;
+                                if let Some(changed) = changed {
+                                    if changed {
+                                        self.mark_active_buffer_syntax_dirty()?;
+                                    }
+                                    close_autocomplete = true;
+                                } else {
+                                    let insert = {
+                                        let ui = self.ui()?;
+                                        let language_id = ui
+                                            .buffer(active_buffer.buffer_id)
+                                            .and_then(|buffer| buffer.language_id());
+                                        let theme_registry =
+                                            self.runtime.services().get::<ThemeRegistry>();
+                                        tab_insert_string(theme_registry, language_id)
+                                    };
+                                    self.handle_text_input(&insert)?;
+                                }
                             }
                         } else {
                             cycle_runtime_pane(&mut self.runtime).map_err(ShellError::Runtime)?;
@@ -9190,6 +9467,7 @@ impl ShellState {
                     self.ui_mut()?.close_autocomplete();
                 } else if refresh_autocomplete {
                     self.schedule_autocomplete_refresh_if_active()?;
+                    self.schedule_inline_completion_refresh()?;
                 }
             }
             Event::TextInput { text, .. } => {
@@ -9231,12 +9509,14 @@ impl ShellState {
         let Some(panes) = ui.panes() else {
             return Ok(None);
         };
-        let pane_rects = match ui.pane_split_direction() {
-            PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
-            PaneSplitDirection::Horizontal => {
-                horizontal_pane_rects(width, pane_height, panes.len())
-            }
-        };
+        let pane_rects = runtime_pane_rects(
+            &*shell_user_library(&self.runtime),
+            ui.pane_split_direction(),
+            width,
+            pane_height,
+            panes.len(),
+            ui.active_pane_index(),
+        );
         Ok(panes
             .iter()
             .zip(pane_rects.iter())
@@ -9729,6 +10009,8 @@ impl ShellState {
                     }
                 }
                 self.ui_mut()?.enter_normal_mode();
+                apply_directory_edit_queue_if_needed(&mut self.runtime)
+                    .map_err(ShellError::Runtime)?;
                 schedule_finish_change(&mut self.runtime).map_err(ShellError::Runtime)?;
                 Ok(true)
             }
@@ -9743,6 +10025,8 @@ impl ShellState {
                 } else {
                     self.ui_mut()?.enter_normal_mode();
                 }
+                apply_directory_edit_queue_if_needed(&mut self.runtime)
+                    .map_err(ShellError::Runtime)?;
                 schedule_finish_change(&mut self.runtime).map_err(ShellError::Runtime)?;
                 Ok(true)
             }
@@ -10173,12 +10457,16 @@ impl ShellState {
                         let _ = format_markdown_table_at_cursor(buffer);
                     }
                 }
-                if text == "}" {
+                if should_format_current_line_after_closing_delimiter(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                ) {
                     format_current_line_indent(&mut self.runtime, buffer_id, indent_size, use_tabs)
                         .map_err(ShellError::Runtime)?;
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
+                self.schedule_inline_completion_refresh()?;
                 self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
@@ -10245,12 +10533,16 @@ impl ShellState {
                         let _ = format_markdown_table_at_cursor(buffer);
                     }
                 }
-                if text == "}" {
+                if should_format_current_line_after_closing_delimiter(
+                    shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?,
+                    text,
+                ) {
                     format_current_line_indent(&mut self.runtime, buffer_id, indent_size, use_tabs)
                         .map_err(ShellError::Runtime)?;
                 }
                 self.mark_active_buffer_syntax_dirty()?;
                 self.schedule_autocomplete_refresh_if_active()?;
+                self.schedule_inline_completion_refresh()?;
                 self.record_vim_input(VimRecordedInput::Text(normalized.to_string()))?;
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
@@ -10568,6 +10860,157 @@ impl ShellState {
             None => ui.close_autocomplete(),
         }
         Ok(())
+    }
+
+    fn schedule_inline_completion_refresh(&mut self) -> Result<(), ShellError> {
+        if self.command_line_visible()?
+            || self.picker_visible()?
+            || !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+        {
+            return Ok(());
+        }
+        let Some(lsp_client) = self
+            .runtime
+            .services()
+            .get::<Arc<LspClientManager>>()
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let (buffer_id, buffer_revision, text, path, cursor, language_id) = {
+            let ui = self.ui()?;
+            let Some(buffer_id) = ui.active_buffer_id() else {
+                return Ok(());
+            };
+            let Some(buffer) = ui.buffer(buffer_id) else {
+                return Ok(());
+            };
+            if buffer.is_read_only() || !buffer.lsp_enabled() {
+                return Ok(());
+            }
+            let Some(path) = buffer.path().map(Path::to_path_buf) else {
+                return Ok(());
+            };
+            if !lsp_client
+                .registered_server_ids_for_path(&path)
+                .iter()
+                .any(|server_id| server_id == "copilot-language-server")
+            {
+                return Ok(());
+            }
+            (
+                buffer_id,
+                buffer.text.revision(),
+                buffer.text.snapshot(),
+                path,
+                buffer.cursor_point(),
+                buffer.language_id().map(str::to_owned),
+            )
+        };
+        let root = workspace_root_for_path(&self.runtime, &path).map_err(ShellError::Runtime)?;
+        let request = InlineCompletionWorkerRequest {
+            request_id: 0,
+            buffer_id,
+            buffer_revision,
+            text,
+            path,
+            root,
+            cursor,
+            options: lsp_formatting_options(&self.runtime, language_id.as_deref()),
+            lsp_client,
+        };
+        self.ui_mut()?.inline_completion_worker.schedule(request);
+        Ok(())
+    }
+
+    fn refresh_pending_inline_completion(&mut self) -> Result<bool, ShellError> {
+        let now = Instant::now();
+        self.ui_mut()?.inline_completion_worker.dispatch_due(now);
+        let Some(result) = self.ui()?.inline_completion_worker.take_latest_result() else {
+            return Ok(false);
+        };
+        if let Some(error) = result.error {
+            record_runtime_error(
+                &mut self.runtime,
+                "lsp.inline-completion",
+                format!("failed to request inline completion: {error}"),
+            );
+        }
+        let should_apply = {
+            let ui = self.ui()?;
+            ui.active_buffer_id() == Some(result.buffer_id)
+                && result.request_id == ui.inline_completion_worker.next_request_id
+                && ui
+                    .buffer(result.buffer_id)
+                    .map(|buffer| {
+                        buffer.text.revision() == result.buffer_revision
+                            && buffer.cursor_point() == result.cursor
+                    })
+                    .unwrap_or(false)
+        };
+        if !should_apply {
+            return Ok(false);
+        }
+        let lsp_client = self
+            .runtime
+            .services()
+            .get::<Arc<LspClientManager>>()
+            .cloned();
+        let shown_item = {
+            let Some(buffer) = self.ui_mut()?.buffer_mut(result.buffer_id) else {
+                return Ok(false);
+            };
+            if let Some(item) = result.item {
+                buffer.set_inline_completion(item);
+                buffer.mark_inline_completion_shown()
+            } else {
+                buffer.clear_inline_completion();
+                None
+            }
+        };
+        if let (Some(lsp_client), Some(item)) = (lsp_client, shown_item)
+            && let Err(error) = lsp_client.did_show_inline_completion(&item)
+        {
+            record_runtime_error(
+                &mut self.runtime,
+                "lsp.inline-completion",
+                format!("failed to report shown inline completion: {error}"),
+            );
+        }
+        Ok(true)
+    }
+
+    fn accept_inline_completion(&mut self) -> Result<bool, ShellError> {
+        let lsp_client = self
+            .runtime
+            .services()
+            .get::<Arc<LspClientManager>>()
+            .cloned();
+        let Some(buffer_id) = self.ui()?.active_buffer_id() else {
+            return Ok(false);
+        };
+        let Some(item) = self
+            .ui_mut()?
+            .buffer_mut(buffer_id)
+            .and_then(ShellBuffer::take_valid_inline_completion)
+        else {
+            return Ok(false);
+        };
+        {
+            let buffer = self.active_buffer_mut()?;
+            buffer.replace_range(item.range(), item.insert_text());
+        }
+        self.mark_active_buffer_syntax_dirty()?;
+        if let Some(lsp_client) = lsp_client
+            && let Err(error) = lsp_client.accept_inline_completion(&item)
+        {
+            record_runtime_error(
+                &mut self.runtime,
+                "lsp.inline-completion",
+                format!("failed to accept inline completion: {error}"),
+            );
+        }
+        Ok(true)
     }
 
     fn refresh_pending_autocomplete(&mut self) -> Result<bool, ShellError> {
@@ -11174,9 +11617,11 @@ impl ShellState {
         let Some(binding) = binding else {
             return Ok(false);
         };
-        self.runtime
-            .execute_command(binding.command_name())
-            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        for command_name in binding.command_names() {
+            self.runtime
+                .execute_command(command_name.as_str())
+                .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        }
         Ok(true)
     }
 
@@ -11326,14 +11771,14 @@ impl ShellState {
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-        let pane_rects = match ui.pane_split_direction() {
-            PaneSplitDirection::Vertical => {
-                vertical_pane_rects(render_width, pane_height, panes.len())
-            }
-            PaneSplitDirection::Horizontal => {
-                horizontal_pane_rects(render_width, pane_height, panes.len())
-            }
-        };
+        let pane_rects = runtime_pane_rects(
+            &*shell_user_library(&self.runtime),
+            ui.pane_split_direction(),
+            render_width,
+            pane_height,
+            panes.len(),
+            ui.active_pane_index(),
+        );
         let rect = pane_rects
             .get(ui.active_pane_index())
             .ok_or_else(|| ShellError::Runtime("active pane rect is missing".to_owned()))?;
@@ -11371,14 +11816,14 @@ impl ShellState {
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-        let pane_rects = match ui.pane_split_direction() {
-            PaneSplitDirection::Vertical => {
-                vertical_pane_rects(render_width, pane_height, panes.len())
-            }
-            PaneSplitDirection::Horizontal => {
-                horizontal_pane_rects(render_width, pane_height, panes.len())
-            }
-        };
+        let pane_rects = runtime_pane_rects(
+            &*shell_user_library(&self.runtime),
+            ui.pane_split_direction(),
+            render_width,
+            pane_height,
+            panes.len(),
+            ui.active_pane_index(),
+        );
         let mut visible_buffers = panes
             .iter()
             .zip(pane_rects.iter())
@@ -11979,6 +12424,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 if let Some(frame) = typing_frame.as_mut() {
                     frame.autocomplete_refresh = autocomplete_refresh_started.elapsed();
                 }
+                let inline_completion_changed = match state.refresh_pending_inline_completion() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.inline-completion-refresh", error);
+                        false
+                    }
+                };
                 let hover_refresh_started = Instant::now();
                 let hover_changed = match state.refresh_hover_state() {
                     Ok(changed) => changed,
@@ -12081,6 +12533,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || lsp_changed
                     || notification_changed
                     || autocomplete_changed
+                    || inline_completion_changed
                     || hover_changed
                     || command_stream_changed
                     || terminal_changed
@@ -12734,6 +13187,21 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_CURRENT_LINE_TOP,
+        "Redraws with the current line at the top of the window.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_CENTER_CURRENT_LINE,
+        "Redraws with the current line at the center of the window.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_CURRENT_LINE_BOTTOM,
+        "Redraws with the current line at the bottom of the window.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_MODE_INSERT,
         "Switches the shell into insert mode.",
     )?;
@@ -13055,6 +13523,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_OIL_OPEN_PARENT,
         "Opens the oil parent directory buffer.",
     )?;
+    register_hook(runtime, HOOK_OIL_ACTION, "Runs an oil buffer action.")?;
+    register_hook(
+        runtime,
+        HOOK_OIL_GIT_WORKTREE,
+        "Starts git worktree creation from the active oil buffer.",
+    )?;
     register_hook(
         runtime,
         HOOK_INPUT_SUBMIT,
@@ -13314,6 +13788,44 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             apply_motion_command(runtime, ShellMotion::LastLine)?;
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_CURRENT_LINE_TOP,
+            "shell.current-line-top",
+            |_, runtime| {
+                position_current_line_in_viewport(runtime, 0)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_CENTER_CURRENT_LINE,
+            "shell.center-current-line",
+            |_, runtime| {
+                let offset = {
+                    let buffer = active_shell_buffer_mut(runtime)?;
+                    buffer.viewport_lines().saturating_sub(1) / 2
+                };
+                position_current_line_in_viewport(runtime, offset)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_CURRENT_LINE_BOTTOM,
+            "shell.current-line-bottom",
+            |_, runtime| {
+                let offset = {
+                    let buffer = active_shell_buffer_mut(runtime)?;
+                    buffer.viewport_lines().saturating_sub(1)
+                };
+                position_current_line_in_viewport(runtime, offset)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
@@ -13864,6 +14376,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     start_change_recording(runtime)?;
                     join_visual_selection_lines(runtime)?;
                 }
+                "visual-move-down" => {
+                    start_change_recording(runtime)?;
+                    move_visual_selection_lines(runtime, true)?;
+                }
+                "visual-move-up" => {
+                    start_change_recording(runtime)?;
+                    move_visual_selection_lines(runtime, false)?;
+                }
                 _ => {}
             }
             Ok(())
@@ -14247,6 +14767,35 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_OIL_ACTION, "shell.oil-action", |event, runtime| {
+            let detail = event
+                .detail
+                .as_deref()
+                .ok_or_else(|| "oil action hook missing detail".to_owned())?;
+            let action = oil_action_from_detail(detail)
+                .ok_or_else(|| format!("unknown oil action `{detail}`"))?;
+            if !execute_oil_action(runtime, action)? {
+                return Err("oil action requires an active oil buffer".to_owned());
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_OIL_GIT_WORKTREE,
+            "shell.oil-git-worktree",
+            |_, runtime| {
+                eprintln!("[oil.git-worktree] ui.oil.git-worktree hook received");
+                record_runtime_error(
+                    runtime,
+                    "oil.git-worktree.trace",
+                    "ui.oil.git-worktree hook received",
+                );
+                oil_git_worktree_command(runtime)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
             shell_ui_mut(runtime)?.close_autocomplete();
             refresh_git_status_if_active_if_due(runtime)?;
@@ -14471,6 +15020,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         .map_err(|error| error.to_string())?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::ExecuteCommands(command_names) => {
+                    for command_name in command_names {
+                        runtime
+                            .execute_command(&command_name)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::ApplyLspCodeAction {
                     workspace_id,
                     buffer_id,
@@ -14566,6 +15123,39 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::GitFetchRemote(remote) => {
                     fetch_git_remote(runtime, &remote)?;
                 }
+                PickerAction::GitWorktreeBranch {
+                    remote_branch,
+                    local_branch,
+                } => {
+                    open_git_worktree_path_picker(runtime, &remote_branch, &local_branch)?;
+                }
+                PickerAction::GitWorktreeCreate {
+                    remote_branch,
+                    local_branch,
+                    base_dir,
+                } => {
+                    create_git_worktree_from_query(
+                        runtime,
+                        &remote_branch,
+                        &local_branch,
+                        &base_dir,
+                        &query,
+                    )?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::GitWorktreeOilBranch {
+                    buffer_id,
+                    remote_branch,
+                    local_branch,
+                } => {
+                    finish_oil_worktree_branch_selection(
+                        runtime,
+                        buffer_id,
+                        &remote_branch,
+                        &local_branch,
+                    )?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::GitBranchAction { action, branch } => match action {
                     GitBranchActionKind::Checkout => {
                         checkout_git_branch(runtime, &branch)?;
@@ -14646,20 +15236,6 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 } => {
                     acp::acp_resolve_permission_option(runtime, request_id, &option_id)?;
                     sync_active_buffer(runtime)?;
-                }
-                PickerAction::SelectCsharpSolution {
-                    root,
-                    solution_path,
-                    lifecycle,
-                    preferred_server_id,
-                } => {
-                    resume_lsp_lifecycle_with_selected_csharp_solution(
-                        runtime,
-                        preferred_server_id.as_deref(),
-                        lifecycle,
-                        root.as_deref(),
-                        &solution_path,
-                    )?;
                 }
                 PickerAction::CopyToClipboard(text) => {
                     write_system_clipboard(&text);
@@ -14787,6 +15363,26 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
     }
 
+    if runtime.hooks().contains(HOOK_LSP_COPILOT_SIGN_IN) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_COPILOT_SIGN_IN,
+                "shell.lsp-copilot-sign-in",
+                |_, runtime| copilot_sign_in_for_active_buffer(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runtime.hooks().contains(HOOK_LSP_COPILOT_SIGN_OUT) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_COPILOT_SIGN_OUT,
+                "shell.lsp-copilot-sign-out",
+                |_, runtime| copilot_sign_out_for_active_buffer(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -14795,6 +15391,125 @@ fn start_lsp_for_active_buffer(
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
     run_lsp_lifecycle_for_active_buffer(runtime, preferred_server_id, LspLifecycleAction::Start)
+}
+
+fn copilot_sign_in_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    validate_lsp_server_request(
+        &lsp_client,
+        &context.path,
+        context.root.as_deref(),
+        Some(COPILOT_LANGUAGE_SERVER),
+    )?;
+    execute_lsp_lifecycle_for_buffer(
+        runtime,
+        &lsp_client,
+        &context,
+        Some(COPILOT_LANGUAGE_SERVER),
+        LspLifecycleAction::Start,
+    )?;
+    begin_copilot_sign_in(runtime, context.root.as_deref())
+}
+
+fn copilot_sign_out_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    validate_lsp_server_request(
+        &lsp_client,
+        &context.path,
+        context.root.as_deref(),
+        Some(COPILOT_LANGUAGE_SERVER),
+    )?;
+    execute_lsp_lifecycle_for_buffer(
+        runtime,
+        &lsp_client,
+        &context,
+        Some(COPILOT_LANGUAGE_SERVER),
+        LspLifecycleAction::Start,
+    )?;
+    let signed_out = lsp_client
+        .copilot_sign_out(context.root.as_deref())
+        .map_err(|error| error.to_string())?;
+    if !signed_out {
+        return Err("Copilot language server is not running".to_owned());
+    }
+    apply_copilot_auth_notification(
+        runtime,
+        "copilot.sign-out",
+        NotificationSeverity::Info,
+        "Copilot sign-out requested",
+        vec!["Copilot session sign-out sent to language server.".to_owned()],
+        false,
+    )?;
+    Ok(())
+}
+
+fn begin_copilot_sign_in(runtime: &mut EditorRuntime, root: Option<&Path>) -> Result<(), String> {
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let prompt = lsp_client
+        .copilot_sign_in(root)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Copilot language server is not running".to_owned())?;
+    write_system_clipboard(prompt.user_code());
+    apply_copilot_auth_notification(
+        runtime,
+        &copilot_status_notification_key(root),
+        NotificationSeverity::Info,
+        "Copilot sign-in started",
+        vec![
+            format!("Device code: {}", prompt.user_code()),
+            "Code copied to clipboard.".to_owned(),
+            "Enter code in GitHub browser flow.".to_owned(),
+        ],
+        true,
+    )?;
+    lsp_client
+        .execute_server_command(COPILOT_LANGUAGE_SERVER, root, prompt.command())
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn copilot_status_notification_key(root: Option<&Path>) -> String {
+    match root {
+        Some(root) => format!("status:{COPILOT_LANGUAGE_SERVER}:{}", root.display()),
+        None => format!("status:{COPILOT_LANGUAGE_SERVER}:global"),
+    }
+}
+
+fn apply_copilot_auth_notification(
+    runtime: &mut EditorRuntime,
+    key: &str,
+    severity: NotificationSeverity,
+    title: &str,
+    body_lines: Vec<String>,
+    active: bool,
+) -> Result<(), String> {
+    shell_ui_mut(runtime)?.apply_notification(
+        NotificationUpdate {
+            key: key.to_owned(),
+            severity,
+            title: title.to_owned(),
+            body_lines,
+            progress: None,
+            active,
+            action: None,
+        },
+        Instant::now(),
+    );
+    Ok(())
 }
 
 fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -14835,42 +15550,12 @@ fn run_lsp_lifecycle_for_active_buffer(
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    validate_lsp_server_request(&lsp_client, &context.path, preferred_server_id)?;
-    if maybe_prepare_csharp_lsp_solution_override(
-        runtime,
+    validate_lsp_server_request(
         &lsp_client,
-        &context,
+        &context.path,
+        context.root.as_deref(),
         preferred_server_id,
-        lifecycle,
-    )? {
-        return Ok(());
-    }
-    execute_lsp_lifecycle_for_buffer(
-        runtime,
-        &lsp_client,
-        &context,
-        preferred_server_id,
-        lifecycle,
-    )
-}
-
-fn resume_lsp_lifecycle_with_selected_csharp_solution(
-    runtime: &mut EditorRuntime,
-    preferred_server_id: Option<&str>,
-    lifecycle: LspLifecycleAction,
-    root: Option<&Path>,
-    solution_path: &Path,
-) -> Result<(), String> {
-    let lsp_client = runtime
-        .services()
-        .get::<Arc<LspClientManager>>()
-        .cloned()
-        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    lsp_client
-        .set_csharp_solution_path_override(root, solution_path)
-        .map_err(|error| error.to_string())?;
-    let context = active_lsp_buffer_context(runtime)?;
-    validate_lsp_server_request(&lsp_client, &context.path, preferred_server_id)?;
+    )?;
     execute_lsp_lifecycle_for_buffer(
         runtime,
         &lsp_client,
@@ -14883,11 +15568,12 @@ fn resume_lsp_lifecycle_with_selected_csharp_solution(
 fn validate_lsp_server_request(
     manager: &LspClientManager,
     path: &Path,
+    workspace_root: Option<&Path>,
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
     if let Some(server_id) = preferred_server_id {
         let supported = manager
-            .registered_server_ids_for_path(path)
+            .registered_server_ids_for_path_in_workspace(path, workspace_root)
             .into_iter()
             .any(|registered| registered == server_id);
         if !supported {
@@ -14898,7 +15584,7 @@ fn validate_lsp_server_request(
         }
         return Ok(());
     }
-    if !manager.supports_path(path) {
+    if !manager.supports_path_in_workspace(path, workspace_root) {
         return Err(format!(
             "no language server is registered for `{}`",
             path.display()
@@ -14950,202 +15636,6 @@ fn execute_lsp_lifecycle_for_buffer(
         (!labels.is_empty()).then(|| labels.join(", ")),
     );
     Ok(())
-}
-
-fn maybe_prepare_csharp_lsp_solution_override(
-    runtime: &mut EditorRuntime,
-    manager: &LspClientManager,
-    context: &ActiveLspBufferContext,
-    preferred_server_id: Option<&str>,
-    lifecycle: LspLifecycleAction,
-) -> Result<bool, String> {
-    if !should_prepare_csharp_lsp_solution_override(manager, &context.path, preferred_server_id) {
-        return Ok(false);
-    }
-    let session_root = manager
-        .planned_server_root_for_path(CSHARP_LSP_SERVER_ID, &context.path, context.root.as_deref())
-        .map_err(|error| error.to_string())?;
-    if manager
-        .has_csharp_solution_path_override(session_root.as_deref())
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(false);
-    }
-    let discovery_root = active_workspace_root(runtime)?.or_else(|| context.root.clone());
-    let solutions = discovery_root
-        .as_deref()
-        .map(discover_workspace_solution_paths)
-        .transpose()?
-        .unwrap_or_default();
-    match solutions.as_slice() {
-        [] => {
-            manager
-                .clear_csharp_solution_path_override(session_root.as_deref())
-                .map_err(|error| error.to_string())?;
-            Ok(false)
-        }
-        [solution_path] => {
-            manager
-                .set_csharp_solution_path_override(session_root.as_deref(), solution_path)
-                .map_err(|error| error.to_string())?;
-            Ok(false)
-        }
-        _ => {
-            let picker = csharp_solution_picker_overlay(
-                discovery_root.as_deref(),
-                session_root.as_deref(),
-                lifecycle,
-                preferred_server_id,
-                &solutions,
-            );
-            shell_ui_mut(runtime)?.set_picker(picker);
-            Ok(true)
-        }
-    }
-}
-
-fn should_prepare_csharp_lsp_solution_override(
-    manager: &LspClientManager,
-    path: &Path,
-    preferred_server_id: Option<&str>,
-) -> bool {
-    match preferred_server_id {
-        Some(server_id) => server_id == CSHARP_LSP_SERVER_ID,
-        None => manager
-            .registered_server_ids_for_path(path)
-            .into_iter()
-            .any(|server_id| server_id == CSHARP_LSP_SERVER_ID),
-    }
-}
-
-fn csharp_solution_picker_overlay(
-    display_root: Option<&Path>,
-    root: Option<&Path>,
-    lifecycle: LspLifecycleAction,
-    preferred_server_id: Option<&str>,
-    solutions: &[PathBuf],
-) -> PickerOverlay {
-    let entries = solutions
-        .iter()
-        .take(SEARCH_PICKER_ITEM_LIMIT)
-        .map(|solution_path| {
-            csharp_solution_picker_entry(
-                display_root,
-                root,
-                lifecycle,
-                preferred_server_id,
-                solution_path,
-            )
-        })
-        .collect();
-    PickerOverlay::from_entries(CSHARP_SOLUTION_PICKER_TITLE, entries)
-        .with_result_order(PickerResultOrder::Source)
-}
-
-fn csharp_solution_picker_entry(
-    display_root: Option<&Path>,
-    root: Option<&Path>,
-    lifecycle: LspLifecycleAction,
-    preferred_server_id: Option<&str>,
-    solution_path: &Path,
-) -> PickerEntry {
-    let relative_path = workspace_relative_path(display_root, solution_path);
-    let label = solution_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| relative_path.clone());
-    PickerEntry {
-        item: PickerItem::new(
-            format!("csharp-solution:{}", solution_path.display()),
-            label,
-            relative_path,
-            Some(solution_path.display().to_string()),
-        ),
-        action: PickerAction::SelectCsharpSolution {
-            root: root.map(Path::to_path_buf),
-            solution_path: solution_path.to_path_buf(),
-            lifecycle,
-            preferred_server_id: preferred_server_id.map(str::to_owned),
-        },
-    }
-}
-
-fn discover_workspace_solution_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut solutions = Vec::new();
-    collect_workspace_solution_paths(root, &mut solutions).map_err(|error| {
-        format!(
-            "failed to scan `{}` for C# solution files: {error}",
-            root.display()
-        )
-    })?;
-    solutions.sort_by(|left, right| {
-        workspace_relative_path(Some(root), left)
-            .to_ascii_lowercase()
-            .cmp(&workspace_relative_path(Some(root), right).to_ascii_lowercase())
-            .then_with(|| left.cmp(right))
-    });
-    Ok(solutions)
-}
-
-fn collect_workspace_solution_paths(root: &Path, solutions: &mut Vec<PathBuf>) -> io::Result<()> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if is_skippable_solution_scan_error(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut subdirectories = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if is_skippable_solution_scan_error(&error) => continue,
-            Err(error) => return Err(error),
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if is_skippable_solution_scan_error(&error) => continue,
-            Err(error) => return Err(error),
-        };
-        let entry_path = entry.path();
-        if file_type.is_dir() {
-            if should_descend_solution_search_dir(&entry_path) {
-                subdirectories.push(entry_path);
-            }
-            continue;
-        }
-        if file_type.is_file() && path_has_extension(&entry_path, "sln") {
-            solutions.push(entry_path);
-        }
-    }
-    subdirectories.sort();
-    for directory in subdirectories {
-        collect_workspace_solution_paths(&directory, solutions)?;
-    }
-    Ok(())
-}
-
-fn should_descend_solution_search_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            !CSHARP_SOLUTION_IGNORED_DIR_NAMES
-                .iter()
-                .any(|ignored| name.eq_ignore_ascii_case(ignored))
-        })
-        .unwrap_or(true)
-}
-
-fn is_skippable_solution_scan_error(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-    )
-}
-
-fn path_has_extension(path: &Path, extension: &str) -> bool {
-    path.extension()
-        .and_then(|candidate| candidate.to_str())
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
 }
 
 fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -15438,103 +15928,11 @@ fn open_lsp_location(runtime: &mut EditorRuntime, location: &LspLocation) -> Res
     if let Some(path) = location.file_path() {
         return open_workspace_file_at(runtime, path, location.range().start());
     }
-    if location.uri().starts_with(CSHARP_METADATA_URI_SCHEME) {
-        return open_csharp_metadata_buffer(runtime, location.uri(), location.range().start());
-    }
     Err(format!(
         "unsupported LSP location URI `{}` returned by `{}`",
         location.uri(),
         location.server_id()
     ))
-}
-
-fn open_csharp_metadata_buffer(
-    runtime: &mut EditorRuntime,
-    uri: &str,
-    target: TextPoint,
-) -> Result<(), String> {
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|error| error.to_string())?;
-    let lsp_client = runtime
-        .services()
-        .get::<Arc<LspClientManager>>()
-        .cloned()
-        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    let root =
-        active_lsp_session_root(runtime).or_else(|| active_workspace_root(runtime).ok().flatten());
-    let metadata = lsp_client
-        .csharp_metadata(root.as_deref(), uri)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("csharp metadata content is unavailable for `{uri}`"))?;
-    let source = metadata
-        .get("source")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            format!("csharp metadata response for `{uri}` did not include source text")
-        })?;
-    let buffer_name = lsp_metadata_buffer_name(uri);
-    let buffer_id = ensure_lsp_metadata_buffer(runtime, workspace_id, &buffer_name)?;
-    install_lsp_metadata_buffer(runtime, workspace_id, buffer_id, source, target)?;
-    queue_buffer_syntax_refresh(runtime, buffer_id)?;
-    Ok(())
-}
-
-fn active_lsp_session_root(runtime: &EditorRuntime) -> Option<PathBuf> {
-    active_lsp_buffer_context(runtime)
-        .ok()
-        .and_then(|context| context.root)
-}
-
-fn lsp_metadata_buffer_name(uri: &str) -> String {
-    format!("{LSP_METADATA_BUFFER_PREFIX}{uri}*")
-}
-
-fn ensure_lsp_metadata_buffer(
-    runtime: &mut EditorRuntime,
-    workspace_id: WorkspaceId,
-    buffer_name: &str,
-) -> Result<BufferId, String> {
-    let kind = BufferKind::Plugin(LSP_METADATA_BUFFER_KIND.to_owned());
-    if let Some(buffer_id) = find_workspace_named_buffer(runtime, workspace_id, buffer_name, &kind)?
-    {
-        runtime
-            .model_mut()
-            .focus_buffer(workspace_id, buffer_id)
-            .map_err(|error| error.to_string())?;
-        return Ok(buffer_id);
-    }
-    runtime
-        .model_mut()
-        .create_buffer(workspace_id, buffer_name, kind, None)
-        .map_err(|error| error.to_string())
-}
-
-fn install_lsp_metadata_buffer(
-    runtime: &mut EditorRuntime,
-    workspace_id: WorkspaceId,
-    buffer_id: BufferId,
-    source: &str,
-    target: TextPoint,
-) -> Result<(), String> {
-    let buffer = runtime
-        .model()
-        .workspace(workspace_id)
-        .map_err(|error| error.to_string())?
-        .buffer(buffer_id)
-        .ok_or_else(|| format!("LSP metadata buffer `{buffer_id}` is missing"))?;
-    let user_library = shell_user_library(runtime);
-    let mut shell_buffer =
-        ShellBuffer::from_text_buffer(buffer, TextBuffer::from_text(source), &*user_library);
-    shell_buffer.set_language_id(Some(CSHARP_LANGUAGE_ID.to_owned()));
-    shell_buffer.set_lsp_enabled(false);
-    shell_buffer.set_lsp_diagnostics(Vec::new());
-    shell_buffer.set_cursor(target);
-    let ui = shell_ui_mut(runtime)?;
-    ui.insert_buffer(shell_buffer);
-    ui.focus_buffer_in_active_pane(buffer_id);
-    Ok(())
 }
 
 fn ensure_lsp_log_buffer(
@@ -16095,6 +16493,8 @@ fn vim_edit_requires_write(detail: &str) -> bool {
             | "visual-indent"
             | "visual-outdent"
             | "visual-join"
+            | "visual-move-down"
+            | "visual-move-up"
             | "visual-block-insert"
             | "visual-block-append"
     )
@@ -16505,6 +16905,125 @@ struct LspSyncWorkerRequest {
 struct PendingLspSyncRequest {
     due_at: Instant,
     request: LspSyncWorkerRequest,
+}
+
+#[derive(Debug, Clone)]
+struct InlineCompletionWorkerRequest {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    text: TextSnapshot,
+    path: PathBuf,
+    root: Option<PathBuf>,
+    cursor: TextPoint,
+    options: LspFormattingOptions,
+    lsp_client: Arc<LspClientManager>,
+}
+
+struct PendingInlineCompletionRequest {
+    due_at: Instant,
+    request: InlineCompletionWorkerRequest,
+}
+
+struct InlineCompletionWorkerResult {
+    request_id: u64,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    cursor: TextPoint,
+    item: Option<LspInlineCompletionItem>,
+    error: Option<String>,
+}
+
+struct InlineCompletionWorkerState {
+    pending: Option<PendingInlineCompletionRequest>,
+    next_request_id: u64,
+    request_tx: Sender<InlineCompletionWorkerRequest>,
+    results: Arc<Mutex<Vec<InlineCompletionWorkerResult>>>,
+}
+
+impl InlineCompletionWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<InlineCompletionWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(mut request) = request_rx.recv() {
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    request = newer_request;
+                }
+                let result = request
+                    .lsp_client
+                    .sync_buffer(
+                        &request.path,
+                        request.text.text(),
+                        request.buffer_revision,
+                        request.root.as_deref(),
+                    )
+                    .and_then(|_| {
+                        request.lsp_client.inline_completion(
+                            &request.path,
+                            request.cursor,
+                            request.options,
+                        )
+                    });
+                let (item, error) = match result {
+                    Ok(item) => (item, None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                if let Ok(mut results) = worker_results.lock() {
+                    results.push(InlineCompletionWorkerResult {
+                        request_id: request.request_id,
+                        buffer_id: request.buffer_id,
+                        buffer_revision: request.buffer_revision,
+                        cursor: request.cursor,
+                        item,
+                        error,
+                    });
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self {
+            pending: None,
+            next_request_id: 0,
+            request_tx,
+            results,
+        }
+    }
+
+    fn schedule(&mut self, mut request: InlineCompletionWorkerRequest) {
+        let debounce = if cfg!(test) {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(120)
+        };
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        request.request_id = self.next_request_id;
+        self.pending = Some(PendingInlineCompletionRequest {
+            due_at: Instant::now() + debounce,
+            request,
+        });
+    }
+
+    fn dispatch_due(&mut self, now: Instant) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        let request = self.pending.take().map(|pending| pending.request);
+        if let Some(request) = request {
+            let _ = self.request_tx.send(request);
+        }
+    }
+
+    fn take_latest_result(&self) -> Option<InlineCompletionWorkerResult> {
+        let mut results = self.results.lock().ok()?;
+        results.drain(..).next_back()
+    }
 }
 
 #[derive(Debug)]
@@ -19706,6 +20225,7 @@ fn shift_visual_selection(runtime: &mut EditorRuntime, indent: bool) -> Result<(
         buffer.mark_syntax_dirty();
     }
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -19738,6 +20258,115 @@ fn join_visual_selection_lines(runtime: &mut EditorRuntime) -> Result<(), String
         buffer.mark_syntax_dirty();
     }
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
+    schedule_finish_change(runtime)?;
+    Ok(())
+}
+
+fn move_visual_selection_lines(runtime: &mut EditorRuntime, down: bool) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (start_line, end_line, cursor, anchor, kind) = current_visual_line_span(runtime)?;
+    let line_count = shell_buffer(runtime, buffer_id)?.line_count();
+    if (down && end_line.saturating_add(1) >= line_count) || (!down && start_line == 0) {
+        return Ok(());
+    }
+    let (indent_size, use_tabs) = {
+        let ui = shell_ui(runtime)?;
+        let language_id = ui.buffer(buffer_id).and_then(|buffer| buffer.language_id());
+        let theme_registry = runtime.services().get::<ThemeRegistry>();
+        let indent_size = theme_lang_indent(theme_registry, language_id);
+        (
+            if indent_size == 0 { 4 } else { indent_size },
+            theme_lang_use_tabs(theme_registry, language_id),
+        )
+    };
+    let (replacement_range, replacement_text, moved_start_line, moved_end_line) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let selected_range = buffer
+            .line_span_range(
+                start_line,
+                end_line.saturating_sub(start_line).saturating_add(1),
+            )
+            .ok_or_else(|| "visual move range is unavailable".to_owned())?;
+        let selected_text = buffer.slice(selected_range);
+        if down {
+            let adjacent_range = buffer
+                .line_span_range(end_line.saturating_add(1), 1)
+                .ok_or_else(|| "visual move adjacent range is unavailable".to_owned())?;
+            let adjacent_text = buffer.slice(adjacent_range);
+            (
+                TextRange::new(selected_range.start(), adjacent_range.end()),
+                format!("{adjacent_text}{selected_text}"),
+                start_line.saturating_add(1),
+                end_line.saturating_add(1),
+            )
+        } else {
+            let adjacent_range = buffer
+                .line_span_range(start_line.saturating_sub(1), 1)
+                .ok_or_else(|| "visual move adjacent range is unavailable".to_owned())?;
+            let adjacent_text = buffer.slice(adjacent_range);
+            (
+                TextRange::new(adjacent_range.start(), selected_range.end()),
+                format!("{selected_text}{adjacent_text}"),
+                start_line.saturating_sub(1),
+                end_line.saturating_sub(1),
+            )
+        }
+    };
+    {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        buffer.replace_range(replacement_range, &replacement_text);
+        buffer.mark_syntax_dirty();
+    }
+    for line_index in moved_start_line..=moved_end_line {
+        let indent = {
+            let text = shell_buffer(runtime, buffer_id)?.text.clone();
+            indent_string_from_columns(
+                desired_reindent_columns_for_line(&text, line_index, indent_size),
+                indent_size,
+                use_tabs,
+            )
+        };
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        apply_line_indent(buffer, line_index, indent_size, &indent);
+    }
+    let new_anchor = TextPoint::new(
+        if down {
+            anchor.line.saturating_add(1)
+        } else {
+            anchor.line.saturating_sub(1)
+        },
+        anchor.column,
+    );
+    let new_cursor = TextPoint::new(
+        if down {
+            cursor.line.saturating_add(1)
+        } else {
+            cursor.line.saturating_sub(1)
+        },
+        cursor.column,
+    );
+    let (new_anchor, new_cursor) = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        let anchor_column = new_anchor
+            .column
+            .min(buffer.line_len_chars(new_anchor.line));
+        let cursor_column = new_cursor
+            .column
+            .min(buffer.line_len_chars(new_cursor.line));
+        let new_anchor = TextPoint::new(new_anchor.line, anchor_column);
+        let new_cursor = TextPoint::new(new_cursor.line, cursor_column);
+        buffer.set_cursor(new_cursor);
+        (new_anchor, new_cursor)
+    };
+    shell_ui_mut(runtime)?.enter_visual_mode(new_anchor, kind);
+    store_last_visual_selection(runtime, new_anchor, new_cursor, kind)?;
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -19796,6 +20425,7 @@ fn replace_visual_selection_chars(
         }
     }
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     Ok(())
 }
 
@@ -20206,6 +20836,7 @@ fn toggle_current_line_comment(runtime: &mut EditorRuntime, count: usize) -> Res
     );
     toggle_line_comments_in_range(runtime, cursor.line, end_line, cursor)?;
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -20227,6 +20858,7 @@ fn toggle_visual_selection_comments(runtime: &mut EditorRuntime) -> Result<(), S
     };
     toggle_line_comments_in_range(runtime, start_line, end_line, target)?;
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -20381,6 +21013,55 @@ fn jump_to_mark(runtime: &mut EditorRuntime, mark: char, linewise: bool) -> Resu
     Ok(())
 }
 
+fn directory_yank_for_range(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    range: TextRange,
+) -> Result<Option<YankRegister>, String> {
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_directory(&buffer.kind) {
+        return Ok(None);
+    }
+    let Some(state) = buffer.directory_state() else {
+        return Ok(None);
+    };
+    let start_line = range.start().line.min(range.end().line);
+    let end_line = range.start().line.max(range.end().line);
+    let mut entries = Vec::new();
+    for line in start_line..=end_line {
+        let Some(action) = buffer
+            .section_line_meta(line)
+            .and_then(|meta| meta.action.as_ref())
+        else {
+            continue;
+        };
+        if action.id() != oil_protocol::ACTION_OIL_ENTRY {
+            continue;
+        }
+        let Some(detail) = action.detail() else {
+            continue;
+        };
+        let path = Path::new(detail);
+        let Some(entry) = state.entries.iter().find(|entry| entry.path() == path) else {
+            continue;
+        };
+        entries.push(DirectoryYankEntry {
+            path: entry.path().to_path_buf(),
+            label: directory_entry_label(entry),
+            is_dir: matches!(entry.kind(), DirectoryEntryKind::Directory),
+        });
+    }
+    Ok((!entries.is_empty()).then_some(YankRegister::Directory(entries)))
+}
+
+fn apply_directory_edit_queue_if_needed(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    apply_directory_edit_queue(runtime, buffer_id)
+}
+
 fn apply_operator_to_range(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
@@ -20400,7 +21081,9 @@ fn apply_operator_to_range(
         VimOperator::Delete | VimOperator::Change | VimOperator::Yank
     ) {
         let yank = if linewise {
-            YankRegister::Line(removed.clone())
+            let buffer_id = active_shell_buffer_id(runtime)?;
+            directory_yank_for_range(runtime, buffer_id, range)?
+                .unwrap_or_else(|| YankRegister::Line(removed.clone()))
         } else {
             YankRegister::Character(removed.clone())
         };
@@ -20413,7 +21096,7 @@ fn apply_operator_to_range(
             buffer.delete_range(range);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
-            apply_directory_delete_if_needed(runtime)?;
+            apply_directory_edit_queue_if_needed(runtime)?;
             schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
@@ -20443,6 +21126,7 @@ fn apply_operator_to_range(
             buffer.set_cursor(original_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
+            apply_directory_edit_queue_if_needed(runtime)?;
             schedule_finish_change(runtime)?;
         }
     }
@@ -20488,7 +21172,7 @@ fn apply_block_operator(
             buffer.set_cursor(target_cursor);
             buffer.mark_syntax_dirty();
             shell_ui_mut(runtime)?.enter_normal_mode();
-            apply_directory_delete_if_needed(runtime)?;
+            apply_directory_edit_queue_if_needed(runtime)?;
             schedule_finish_change(runtime)?;
         }
         VimOperator::Change => {
@@ -20532,14 +21216,6 @@ fn apply_block_operator(
     }
 
     Ok(())
-}
-
-fn apply_directory_delete_if_needed(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    if !buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
-        return Ok(());
-    }
-    apply_directory_edit_queue(runtime, buffer_id)
 }
 
 fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> Result<(), String> {
@@ -21187,7 +21863,7 @@ fn try_format_buffer_entire_with_lsp(
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, edits) = {
-        if !lsp_client.supports_path(&context.path) {
+        if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
             return Ok(false);
         }
         let labels = lsp_client
@@ -21232,7 +21908,7 @@ fn try_format_visual_selection_with_lsp(
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     let (labels, edits) = {
-        if !lsp_client.supports_path(&context.path) {
+        if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
             return Ok(false);
         }
         let labels = lsp_client
@@ -21573,6 +22249,7 @@ fn toggle_case_chars(runtime: &mut EditorRuntime) -> Result<(), String> {
     buffer.set_cursor(end_point);
     buffer.mark_syntax_dirty();
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -21821,6 +22498,17 @@ fn scroll_buffer_viewport_only(buffer: &mut ShellBuffer, delta: i32) {
     } else if buffer.cursor_row() > bottom {
         let _ = buffer.goto_line(bottom);
     }
+}
+
+fn position_current_line_in_viewport(
+    runtime: &mut EditorRuntime,
+    viewport_offset: usize,
+) -> Result<(), String> {
+    let buffer = active_shell_buffer_mut(runtime)?;
+    let max_scroll = buffer.line_count().saturating_sub(buffer.viewport_lines());
+    let target_scroll = buffer.cursor_row().saturating_sub(viewport_offset);
+    buffer.scroll_row = target_scroll.min(max_scroll);
+    Ok(())
 }
 
 fn resolve_find_target(
@@ -22330,7 +23018,9 @@ fn repeat_vim_search(runtime: &mut EditorRuntime, reverse: bool) -> Result<(), S
     } else {
         last_search.direction
     };
-    run_vim_search(runtime, direction, &last_search.query)
+    run_vim_search(runtime, direction, &last_search.query)?;
+    shell_ui_mut(runtime)?.vim_mut().last_search = Some(last_search);
+    Ok(())
 }
 
 fn resolve_g_prefix(
@@ -22600,6 +23290,20 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
         shell_ui_mut(runtime)?.vim_mut().clear_transient();
         return Ok(());
     }
+    if let YankRegister::Directory(entries) = &yank {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        if buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
+            let root = shell_buffer(runtime, buffer_id)?
+                .directory_state()
+                .ok_or_else(|| "directory state is missing".to_owned())?
+                .root
+                .clone();
+            copy_directory_yank_entries(entries, &root)?;
+            refresh_directory_buffer(runtime, buffer_id)?;
+            shell_ui_mut(runtime)?.vim_mut().clear_transient();
+            return Ok(());
+        }
+    }
 
     start_change_recording(runtime)?;
     let buffer_id = active_shell_buffer_id(runtime)?;
@@ -22672,6 +23376,28 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
                 let target_col = insertion_col.min(buffer.line_len_chars(origin.line));
                 buffer.set_cursor(TextPoint::new(origin.line, target_col));
             }
+            YankRegister::Directory(entries) => {
+                let mut text = entries
+                    .iter()
+                    .map(|entry| entry.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                text.push('\n');
+                let line = buffer.cursor_row();
+                let insertion_point = if after {
+                    buffer
+                        .line_range(line)
+                        .map(TextRange::end)
+                        .unwrap_or_else(|| buffer.cursor_point())
+                } else {
+                    buffer
+                        .line_range(line)
+                        .map(TextRange::start)
+                        .unwrap_or_else(|| buffer.cursor_point())
+                };
+                buffer.insert_at(insertion_point, &text);
+                buffer.goto_line(if after { line.saturating_add(1) } else { line });
+            }
         }
         buffer.supports_text_file_actions()
     };
@@ -22680,6 +23406,7 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
         format_current_line_indent(runtime, buffer_id, indent_size, use_tabs)?;
     }
     shell_buffer_mut(runtime, buffer_id)?.mark_syntax_dirty();
+    apply_directory_edit_queue_if_needed(runtime)?;
 
     shell_ui_mut(runtime)?.vim_mut().clear_transient();
     schedule_finish_change(runtime)?;
@@ -22693,6 +23420,21 @@ fn put_yank_over_visual_selection(runtime: &mut EditorRuntime, after: bool) -> R
     };
     if active_shell_buffer_is_terminal(runtime)? {
         return put_yank(runtime, after);
+    }
+    if let YankRegister::Directory(entries) = &yank {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        if buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
+            let root = shell_buffer(runtime, buffer_id)?
+                .directory_state()
+                .ok_or_else(|| "directory state is missing".to_owned())?
+                .root
+                .clone();
+            copy_directory_yank_entries(entries, &root)?;
+            refresh_directory_buffer(runtime, buffer_id)?;
+            shell_ui_mut(runtime)?.vim_mut().clear_transient();
+            shell_ui_mut(runtime)?.enter_normal_mode();
+            return Ok(());
+        }
     }
 
     start_change_recording(runtime)?;
@@ -22806,6 +23548,7 @@ fn put_yank_over_visual_selection(runtime: &mut EditorRuntime, after: bool) -> R
 
     store_yank_register(runtime, replaced_yank, true)?;
     shell_ui_mut(runtime)?.enter_normal_mode();
+    apply_directory_edit_queue_if_needed(runtime)?;
     schedule_finish_change(runtime)?;
     Ok(())
 }
@@ -23645,11 +24388,6 @@ fn run_compile_command_in_buffer(
         return Ok(());
     }
 
-    // Parse into program + args.
-    let mut parts = command.split_whitespace();
-    let program = parts.next().unwrap_or("").to_owned();
-    let args: Vec<String> = parts.map(str::to_owned).collect();
-
     // Determine working directory (workspace root or cwd).
     let cwd = active_workspace_root(runtime)
         .ok()
@@ -23672,8 +24410,15 @@ fn run_compile_command_in_buffer(
         buf.clear_input();
     }
 
+    // Run through configured shell so builtins, quoting, and shell operators work.
+    let terminal_config = shell_user_library(runtime).terminal_config();
+    let mut args = terminal_config.args;
+    let shell_program = terminal_config.program;
+    args.push(shell_command_eval_flag(&shell_program).to_owned());
+    args.push(command.clone());
+
     // Spawn the job and wait (synchronously — same pattern as git commands).
-    let spec = JobSpec::command("compile", &program, args).with_cwd(cwd);
+    let spec = JobSpec::compilation("compile", shell_program, args).with_cwd(cwd);
     let manager = runtime
         .services()
         .get::<Mutex<JobManager>>()
@@ -23784,6 +24529,135 @@ fn open_file_at_line(
     Ok(())
 }
 
+fn oil_action_from_detail(detail: &str) -> Option<OilKeyAction> {
+    match detail {
+        "open-entry" => Some(OilKeyAction::OpenEntry),
+        "open-vertical-split" => Some(OilKeyAction::OpenVerticalSplit),
+        "open-horizontal-split" => Some(OilKeyAction::OpenHorizontalSplit),
+        "open-new-pane" => Some(OilKeyAction::OpenNewPane),
+        "preview-entry" => Some(OilKeyAction::PreviewEntry),
+        "refresh" => Some(OilKeyAction::Refresh),
+        "close" => Some(OilKeyAction::Close),
+        "open-parent" => Some(OilKeyAction::OpenParent),
+        "open-workspace-root" => Some(OilKeyAction::OpenWorkspaceRoot),
+        "set-root" => Some(OilKeyAction::SetRoot),
+        "show-help" => Some(OilKeyAction::ShowHelp),
+        "cycle-sort" => Some(OilKeyAction::CycleSort),
+        "toggle-hidden" => Some(OilKeyAction::ToggleHidden),
+        "toggle-trash" => Some(OilKeyAction::ToggleTrash),
+        "open-external" => Some(OilKeyAction::OpenExternal),
+        "set-tab-local-root" => Some(OilKeyAction::SetTabLocalRoot),
+        "git-worktree" => Some(OilKeyAction::CreateGitWorktree),
+        _ => None,
+    }
+}
+
+fn execute_oil_action(runtime: &mut EditorRuntime, action: OilKeyAction) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_directory(&buffer.kind) {
+        return Ok(false);
+    }
+    shell_ui_mut(runtime)?.pending_directory_prefix = None;
+    match action {
+        OilKeyAction::OpenEntry => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
+            Ok(true)
+        }
+        OilKeyAction::OpenVerticalSplit => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
+            Ok(true)
+        }
+        OilKeyAction::OpenHorizontalSplit => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(
+                runtime,
+                buffer_id,
+                entry,
+                DirectoryOpenMode::SplitHorizontal,
+            )?;
+            Ok(true)
+        }
+        OilKeyAction::OpenNewPane => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
+            Ok(true)
+        }
+        OilKeyAction::PreviewEntry => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
+            Ok(true)
+        }
+        OilKeyAction::Refresh => {
+            refresh_directory_buffer(runtime, buffer_id)?;
+            Ok(true)
+        }
+        OilKeyAction::Close => {
+            close_buffer_discard(runtime, buffer_id)?;
+            Ok(true)
+        }
+        OilKeyAction::ShowHelp => {
+            open_oil_help_popup(runtime)?;
+            Ok(true)
+        }
+        OilKeyAction::ToggleHidden => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.show_hidden = !state.show_hidden;
+            })?;
+            Ok(true)
+        }
+        OilKeyAction::ToggleTrash => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.trash_enabled = !state.trash_enabled;
+            })?;
+            Ok(true)
+        }
+        OilKeyAction::CycleSort => {
+            update_directory_state(runtime, buffer_id, |state| {
+                state.sort_mode = state.sort_mode.cycle();
+            })?;
+            Ok(true)
+        }
+        OilKeyAction::OpenExternal => {
+            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
+            open_external_path(entry.path())?;
+            Ok(true)
+        }
+        OilKeyAction::SetTabLocalRoot | OilKeyAction::SetRoot => {
+            directory_cd_from_cursor(runtime, buffer_id)?;
+            Ok(true)
+        }
+        OilKeyAction::CreateGitWorktree => {
+            eprintln!("[oil.git-worktree] oil action executing oil.git-worktree");
+            record_runtime_error(
+                runtime,
+                "oil.git-worktree.trace",
+                "oil action executing oil.git-worktree",
+            );
+            runtime
+                .execute_command("oil.git-worktree")
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        OilKeyAction::StartPrefix => {
+            set_directory_prefix(runtime, "")?;
+            Ok(true)
+        }
+        OilKeyAction::OpenParent => {
+            let root = oil_parent_root(runtime)?;
+            set_directory_root(runtime, buffer_id, root)?;
+            Ok(true)
+        }
+        OilKeyAction::OpenWorkspaceRoot => {
+            let root = oil_workspace_root(runtime)?;
+            set_directory_root(runtime, buffer_id, root)?;
+            Ok(true)
+        }
+    }
+}
+
 fn handle_directory_keydown_chord(
     runtime: &mut EditorRuntime,
     chord: &str,
@@ -23795,46 +24669,10 @@ fn handle_directory_keydown_chord(
     }
     shell_ui_mut(runtime)?.pending_directory_prefix = None;
     let user_library = shell_user_library(runtime);
-    match user_library.oil_keydown_action(chord) {
-        Some(OilKeyAction::OpenEntry) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Current)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenVerticalSplit) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::SplitVertical)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenHorizontalSplit) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_directory_entry(
-                runtime,
-                buffer_id,
-                entry,
-                DirectoryOpenMode::SplitHorizontal,
-            )?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenNewPane) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::NewPane)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::PreviewEntry) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_directory_entry(runtime, buffer_id, entry, DirectoryOpenMode::Preview)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::Refresh) => {
-            refresh_directory_buffer(runtime, buffer_id)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::Close) => {
-            close_buffer_discard(runtime, buffer_id)?;
-            Ok(true)
-        }
-        _ => Ok(false),
+    if let Some(action) = user_library.oil_keydown_action(chord) {
+        execute_oil_action(runtime, action)
+    } else {
+        Ok(false)
     }
 }
 
@@ -23844,52 +24682,17 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
     if !buffer_is_directory(&buffer.kind) {
         return Ok(false);
     }
-    let had_prefix = take_directory_prefix(runtime)?;
+    let prefix = take_directory_prefix(runtime)?;
+    let had_prefix = prefix.is_some();
+    let chord = match prefix {
+        Some(prefix) => format!("{prefix}{chord}"),
+        None => chord.to_owned(),
+    };
     let user_library = shell_user_library(runtime);
-    match user_library.oil_chord_action(had_prefix, chord) {
-        Some(OilKeyAction::ShowHelp) => {
-            open_oil_help_popup(runtime)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::ToggleHidden) => {
-            update_directory_state(runtime, buffer_id, |state| {
-                state.show_hidden = !state.show_hidden;
-            })?;
-            Ok(true)
-        }
-        Some(OilKeyAction::ToggleTrash) => {
-            update_directory_state(runtime, buffer_id, |state| {
-                state.trash_enabled = !state.trash_enabled;
-            })?;
-            Ok(true)
-        }
-        Some(OilKeyAction::CycleSort) => {
-            update_directory_state(runtime, buffer_id, |state| {
-                state.sort_mode = state.sort_mode.cycle();
-            })?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenExternal) => {
-            let entry = directory_entry_at_cursor(runtime, buffer_id)?;
-            open_external_path(entry.path())?;
-            Ok(true)
-        }
-        Some(OilKeyAction::SetTabLocalRoot) | Some(OilKeyAction::SetRoot) => {
-            directory_cd_from_cursor(runtime, buffer_id)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::StartPrefix) => {
-            set_directory_prefix(runtime)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenParent) => {
-            let root = oil_parent_root(runtime)?;
-            set_directory_root(runtime, buffer_id, root)?;
-            Ok(true)
-        }
-        Some(OilKeyAction::OpenWorkspaceRoot) => {
-            let root = oil_workspace_root(runtime)?;
-            set_directory_root(runtime, buffer_id, root)?;
+    match user_library.oil_chord_action(had_prefix, &chord) {
+        Some(action) => execute_oil_action(runtime, action),
+        None if chord == "w" => {
+            set_directory_prefix(runtime, "w")?;
             Ok(true)
         }
         None if had_prefix => {
@@ -23897,7 +24700,7 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
             record_runtime_error(
                 runtime,
                 "oil.directory",
-                format!("unknown oil {prefix} action `{chord}`"),
+                format!("unknown oil {prefix}{chord} action"),
             );
             Ok(true)
         }
@@ -24125,8 +24928,8 @@ fn refresh_pending_git(
     now: Instant,
     typing_active: bool,
 ) -> Result<(), String> {
-    refresh_pending_git_fringe(runtime, now, typing_active)?;
     refresh_pending_git_summary(runtime, now, typing_active)?;
+    refresh_pending_git_fringe(runtime, now, typing_active)?;
     Ok(())
 }
 
@@ -24178,8 +24981,9 @@ fn schedule_pending_lsp_syncs(
                 {
                     return Ok(None);
                 }
+                let root = workspace_root_for_path(runtime, &path)?;
                 let revision = buffer.text.revision();
-                if !lsp_client.needs_sync(&path, revision)
+                if !lsp_client.needs_sync_in_workspace(&path, revision, root.as_deref())
                     || ui.lsp_sync_worker.has_request(&path, revision)
                 {
                     return Ok(None);
@@ -24188,7 +24992,7 @@ fn schedule_pending_lsp_syncs(
                     path: path.clone(),
                     revision,
                     text: buffer.text.snapshot(),
-                    root: workspace_root_for_path(runtime, &path)?,
+                    root,
                     lsp_client: lsp_client.clone(),
                 }))
             })
@@ -24259,8 +25063,8 @@ fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> 
             }
         }
         changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
-        changed |= apply_lsp_notifications(ui, &notification_snapshot, now);
     }
+    changed |= apply_lsp_notifications(runtime, &notification_snapshot, now)?;
     if let Some(log_snapshot) = log_snapshot.as_ref() {
         changed |= refresh_lsp_log_buffers(runtime, log_snapshot)?;
     }
@@ -24277,12 +25081,12 @@ fn notification_severity(level: LspNotificationLevel) -> NotificationSeverity {
 }
 
 fn apply_lsp_notifications(
-    ui: &mut ShellUiState,
+    runtime: &mut EditorRuntime,
     snapshot: &LspNotificationSnapshot,
     now: Instant,
-) -> bool {
+) -> Result<bool, String> {
     let mut changed = false;
-    let last_seen = ui.last_lsp_notification_revision();
+    let last_seen = shell_ui(runtime)?.last_lsp_notification_revision();
     for entry in snapshot.entries() {
         if entry.revision() <= last_seen {
             continue;
@@ -24295,21 +25099,52 @@ fn apply_lsp_notifications(
                     .percentage()
                     .and_then(|percentage| u8::try_from(percentage.min(u32::from(u8::MAX))).ok()),
             });
-        changed |= ui.apply_notification(
+        let action = lsp_notification_action(notification);
+        if let Some(NotificationAction::OpenBrowserPopup { url }) = action.as_ref() {
+            open_browser_buffer_in_popup(runtime, Some(url))?;
+        }
+        changed |= shell_ui_mut(runtime)?.apply_notification(
             NotificationUpdate {
                 key: notification.key().to_owned(),
                 severity: notification_severity(notification.level()),
                 title: notification.title().to_owned(),
-                body_lines: notification.body_lines().to_vec(),
+                body_lines: lsp_notification_body_lines(notification),
                 progress,
                 active: notification.active(),
-                action: None,
+                action,
             },
             now,
         );
     }
-    ui.set_last_lsp_notification_revision(snapshot.revision());
-    changed
+    shell_ui_mut(runtime)?.set_last_lsp_notification_revision(snapshot.revision());
+    Ok(changed)
+}
+
+fn lsp_notification_body_lines(notification: &editor_lsp::LspNotification) -> Vec<String> {
+    let mut lines = notification.body_lines().to_vec();
+    match notification.action() {
+        Some(LspNotificationAction::CopilotSignIn) => {
+            lines.push("Click notification to sign in.".to_owned());
+        }
+        Some(LspNotificationAction::OpenBrowserPopup { .. }) => {
+            lines.push("Click notification to reopen browser popup.".to_owned());
+        }
+        None => {}
+    }
+    lines
+}
+
+fn lsp_notification_action(
+    notification: &editor_lsp::LspNotification,
+) -> Option<NotificationAction> {
+    match notification.action()? {
+        LspNotificationAction::CopilotSignIn => Some(NotificationAction::CopilotSignIn {
+            root: notification.root().map(Path::to_path_buf),
+        }),
+        LspNotificationAction::OpenBrowserPopup { url } => {
+            Some(NotificationAction::OpenBrowserPopup { url: url.clone() })
+        }
+    }
 }
 
 fn refresh_lsp_log_buffers(
@@ -24458,10 +25293,49 @@ fn readme_path_priority(path: &Path) -> (u8, String) {
 }
 
 fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_directory_root(runtime)? {
+        return resolve_git_root_from_path(&root).or(Ok(root));
+    }
     if let Some(root) = active_workspace_root(runtime)? {
-        return Ok(root);
+        return resolve_git_root_from_path(&root).or(Ok(root));
     }
     env::current_dir().map_err(|error| format!("git status requires a workspace root: {error}"))
+}
+
+fn resolve_git_root_from_path(path: &Path) -> Result<PathBuf, String> {
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    let output = command
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to resolve git root from {}: {error}",
+                path.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if stderr.is_empty() {
+            format!(
+                "git rev-parse --show-toplevel failed in {} with status {}",
+                path.display(),
+                output.status
+            )
+        } else {
+            stderr
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let root = stdout.trim();
+    if root.is_empty() {
+        return Err(format!(
+            "git rev-parse --show-toplevel returned no root for {}",
+            path.display()
+        ));
+    }
+    Ok(PathBuf::from(root))
 }
 
 fn find_workspace_by_root(

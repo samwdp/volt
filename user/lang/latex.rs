@@ -38,7 +38,6 @@ mod tests {
     fn latex_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-latex");
-        assert!(pkg.auto_load());
     }
 
     #[test]

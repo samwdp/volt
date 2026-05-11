@@ -64,6 +64,14 @@ pub(super) fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {
             }
         }
         YankRegister::Block(lines) => Cow::Owned(lines.join("\n")),
+        YankRegister::Directory(entries) => Cow::Owned(
+            entries
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        ),
     }
 }
 

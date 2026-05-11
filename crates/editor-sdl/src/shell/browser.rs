@@ -607,10 +607,14 @@ pub(super) fn browser_sync_plan(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let pane_rects = match state.pane_split_direction() {
-        PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
-        PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
-    };
+    let pane_rects = runtime_pane_rects(
+        user_library,
+        state.pane_split_direction(),
+        width,
+        pane_height,
+        panes.len(),
+        state.active_pane_index(),
+    );
     let notification_rects = notification_overlay_layouts(
         &state.visible_notifications(now),
         width,

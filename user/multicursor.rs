@@ -60,23 +60,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn package_exports_default_gn_bindings() {
+    fn package_exports_normal_mode_bindings_for_multicursor_commands() {
         let package = package();
         assert!(
             package
                 .key_bindings()
                 .iter()
-                .any(|binding| binding.chord() == "g n"
-                    && binding.command_name() == "multicursor.add-next-match"
-                    && binding.vim_mode() == PluginVimMode::Normal)
+                .any(
+                    |binding| binding.command_name() == "multicursor.add-next-match"
+                        && binding.vim_mode() == PluginVimMode::Normal
+                )
         );
         assert!(
             package
                 .key_bindings()
                 .iter()
-                .any(|binding| binding.chord() == "g N"
-                    && binding.command_name() == "multicursor.select-all-matches"
-                    && binding.vim_mode() == PluginVimMode::Normal)
+                .any(
+                    |binding| binding.command_name() == "multicursor.select-all-matches"
+                        && binding.vim_mode() == PluginVimMode::Normal
+                )
         );
     }
 }

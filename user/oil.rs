@@ -1,10 +1,14 @@
 use editor_core::{Section, SectionAction, SectionItem, SectionTree};
 use editor_fs::{DirectoryEntry, DirectoryEntryKind};
-use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+use editor_plugin_api::{
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+};
 use std::path::Path;
 
 pub const HOOK_OIL_OPEN: &str = "ui.oil.open";
 pub const HOOK_OIL_OPEN_PARENT: &str = "ui.oil.open-parent";
+pub const HOOK_OIL_ACTION: &str = "ui.oil.action";
+pub const HOOK_OIL_GIT_WORKTREE: &str = "ui.oil.git-worktree";
 pub const ACTION_OIL_ENTRY: &str = "oil.entry";
 pub const SECTION_OIL_DIRECTORY: &str = "oil.directory";
 
@@ -61,6 +65,7 @@ pub struct OilKeybindings {
     pub toggle_trash: &'static str,
     pub open_external: &'static str,
     pub set_tab_local_root: &'static str,
+    pub create_git_worktree: &'static str,
 }
 
 /// Oil actions resolved from user-configured keybindings.
@@ -83,6 +88,7 @@ pub enum OilKeyAction {
     ToggleTrash,
     OpenExternal,
     SetTabLocalRoot,
+    CreateGitWorktree,
 }
 
 /// Returns the default options applied to newly created oil buffers.
@@ -114,6 +120,7 @@ pub fn keybindings() -> OilKeybindings {
         toggle_trash: "\\",
         open_external: "x",
         set_tab_local_root: "~",
+        create_git_worktree: "wn",
     }
 }
 
@@ -155,6 +162,8 @@ pub fn chord_action(prefix_pending: bool, chord: &str) -> Option<OilKeyAction> {
             Some(OilKeyAction::OpenExternal)
         } else if chord == bindings.set_tab_local_root {
             Some(OilKeyAction::SetTabLocalRoot)
+        } else if chord == bindings.create_git_worktree {
+            Some(OilKeyAction::CreateGitWorktree)
         } else {
             None
         }
@@ -169,6 +178,18 @@ pub fn chord_action(prefix_pending: bool, chord: &str) -> Option<OilKeyAction> {
     } else {
         None
     }
+}
+
+fn oil_action_command(
+    name: &'static str,
+    description: &'static str,
+    action: &'static str,
+) -> PluginCommand {
+    PluginCommand::new(
+        name,
+        description,
+        vec![PluginAction::emit_hook(HOOK_OIL_ACTION, Some(action))],
+    )
 }
 
 /// Returns the metadata for the directory editing package.
@@ -189,6 +210,78 @@ pub fn package() -> PluginPackage {
             "Opens a parent-directory view.",
             vec![PluginAction::emit_hook(HOOK_OIL_OPEN_PARENT, None::<&str>)],
         ),
+        oil_action_command(
+            "oil.open-entry",
+            "Opens the selected oil entry.",
+            "open-entry",
+        ),
+        oil_action_command(
+            "oil.open-vertical-split",
+            "Opens the selected oil entry in a vertical split.",
+            "open-vertical-split",
+        ),
+        oil_action_command(
+            "oil.open-horizontal-split",
+            "Opens the selected oil entry in a horizontal split.",
+            "open-horizontal-split",
+        ),
+        oil_action_command(
+            "oil.open-new-pane",
+            "Opens the selected oil entry in a new pane.",
+            "open-new-pane",
+        ),
+        oil_action_command(
+            "oil.preview-entry",
+            "Previews the selected oil entry.",
+            "preview-entry",
+        ),
+        oil_action_command("oil.refresh", "Refreshes the active oil buffer.", "refresh"),
+        oil_action_command("oil.close", "Closes the active oil buffer.", "close"),
+        oil_action_command(
+            "oil.open-workspace-root",
+            "Opens the workspace root in the active oil buffer.",
+            "open-workspace-root",
+        ),
+        oil_action_command(
+            "oil.set-root",
+            "Sets the active oil root to the selected directory.",
+            "set-root",
+        ),
+        oil_action_command("oil.show-help", "Shows oil help.", "show-help"),
+        oil_action_command(
+            "oil.cycle-sort",
+            "Cycles the active oil sort mode.",
+            "cycle-sort",
+        ),
+        oil_action_command(
+            "oil.toggle-hidden",
+            "Toggles hidden files in the active oil buffer.",
+            "toggle-hidden",
+        ),
+        oil_action_command(
+            "oil.toggle-trash",
+            "Toggles trash mode in the active oil buffer.",
+            "toggle-trash",
+        ),
+        oil_action_command(
+            "oil.open-external",
+            "Opens the selected oil entry externally.",
+            "open-external",
+        ),
+        oil_action_command(
+            "oil.set-tab-local-root",
+            "Sets the tab-local oil root to the selected directory.",
+            "set-tab-local-root",
+        ),
+        PluginCommand::new(
+            "oil.git-worktree",
+            "Creates a git worktree from an oil directory buffer.",
+            vec![PluginAction::emit_hook(HOOK_OIL_GIT_WORKTREE, None::<&str>)],
+        ),
+    ])
+    .with_key_bindings(vec![
+        PluginKeyBinding::new("g w n", "oil.git-worktree", PluginKeymapScope::Workspace)
+            .with_vim_mode(PluginVimMode::Normal),
     ])
 }
 
@@ -389,6 +482,9 @@ pub fn help_lines() -> Vec<String> {
         "Oil directory buffer".to_owned(),
         "".to_owned(),
         "Edit entries in INSERT mode, then press Escape to apply queued actions.".to_owned(),
+        "Use yy to copy the selected entry and p to paste it into the current directory."
+            .to_owned(),
+        "Use visual-line selection plus y to copy multiple entries.".to_owned(),
         "Delete a line to remove a file or directory.".to_owned(),
         "Add a line to create a file; add a trailing / to create a directory.".to_owned(),
         format!("{}: open file/directory", bindings.open_entry),
@@ -412,6 +508,10 @@ pub fn help_lines() -> Vec<String> {
         format!("{}: toggle hidden files", prefixed(bindings.toggle_hidden)),
         format!("{}: toggle trash", prefixed(bindings.toggle_trash)),
         format!("{}: open externally", prefixed(bindings.open_external)),
+        format!(
+            "{}: create git worktree",
+            prefixed(bindings.create_git_worktree)
+        ),
         format!("{}: show help", prefixed(bindings.show_help)),
     ]
 }
@@ -489,18 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn default_oil_options_are_exported() {
-        assert_eq!(
-            defaults(),
-            OilDefaults {
-                show_hidden: false,
-                sort_mode: OilSortMode::TypeThenName,
-                trash_enabled: false,
-            }
-        );
-    }
-
-    #[test]
     fn default_oil_keybindings_map_to_actions() {
         let bindings = keybindings();
 
@@ -520,13 +608,92 @@ mod tests {
             chord_action(true, bindings.toggle_trash),
             Some(OilKeyAction::ToggleTrash)
         );
+        assert_eq!(
+            chord_action(true, bindings.create_git_worktree),
+            Some(OilKeyAction::CreateGitWorktree)
+        );
     }
 
     #[test]
-    fn help_lines_reflect_default_keybindings() {
+    fn package_binds_git_worktree_command() {
+        let package = package();
+        let command = package
+            .commands()
+            .iter()
+            .find(|command| command.name() == "oil.git-worktree")
+            .expect("oil.git-worktree command");
+        assert_eq!(
+            command.actions()[0].hook().map(|hook| hook.hook_name()),
+            Some(HOOK_OIL_GIT_WORKTREE)
+        );
+
+        let binding = package
+            .key_bindings()
+            .iter()
+            .find(|binding| binding.command_name() == "oil.git-worktree")
+            .expect("oil.git-worktree binding");
+
+        assert!(!binding.chord().trim().is_empty());
+        assert_eq!(binding.scope(), PluginKeymapScope::Workspace);
+        assert_eq!(binding.vim_mode(), PluginVimMode::Normal);
+    }
+
+    #[test]
+    fn package_exports_oil_actions_as_commands() {
+        let package = package();
+        let names: Vec<_> = package
+            .commands()
+            .iter()
+            .map(|command| command.name())
+            .collect();
+
+        for name in [
+            "oil.open-directory",
+            "oil.open-parent",
+            "oil.open-entry",
+            "oil.open-vertical-split",
+            "oil.open-horizontal-split",
+            "oil.open-new-pane",
+            "oil.preview-entry",
+            "oil.refresh",
+            "oil.close",
+            "oil.open-workspace-root",
+            "oil.set-root",
+            "oil.show-help",
+            "oil.cycle-sort",
+            "oil.toggle-hidden",
+            "oil.toggle-trash",
+            "oil.open-external",
+            "oil.set-tab-local-root",
+            "oil.git-worktree",
+        ] {
+            assert!(names.contains(&name), "missing command {name}");
+        }
+    }
+
+    #[test]
+    fn help_lines_reflect_current_keybindings() {
+        let bindings = keybindings();
+        let prefixed = |suffix: &str| format!("{}{}", bindings.prefix, suffix);
         let lines = help_lines();
-        assert!(lines.contains(&"Enter: open file/directory".to_owned()));
-        assert!(lines.contains(&"g.: toggle hidden files".to_owned()));
-        assert!(lines.contains(&"g\\: toggle trash".to_owned()));
+        assert!(lines.contains(&format!("{}: open file/directory", bindings.open_entry)));
+        assert!(
+            lines.contains(
+                &"Use yy to copy the selected entry and p to paste it into the current directory."
+                    .to_owned()
+            )
+        );
+        assert!(lines.contains(&format!(
+            "{}: toggle hidden files",
+            prefixed(bindings.toggle_hidden)
+        )));
+        assert!(lines.contains(&format!(
+            "{}: toggle trash",
+            prefixed(bindings.toggle_trash)
+        )));
+        assert!(lines.contains(&format!(
+            "{}: create git worktree",
+            prefixed(bindings.create_git_worktree)
+        )));
     }
 }

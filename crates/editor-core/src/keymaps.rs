@@ -205,7 +205,7 @@ impl fmt::Display for KeymapVimMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyBinding {
     chord: String,
-    command_name: String,
+    command_names: Vec<String>,
     scope: KeymapScope,
     vim_mode: KeymapVimMode,
     source: CommandSource,
@@ -214,14 +214,14 @@ pub struct KeyBinding {
 impl KeyBinding {
     fn new(
         chord: String,
-        command_name: String,
+        command_names: Vec<String>,
         scope: KeymapScope,
         vim_mode: KeymapVimMode,
         source: CommandSource,
     ) -> Self {
         Self {
             chord,
-            command_name,
+            command_names,
             scope,
             vim_mode,
             source,
@@ -233,9 +233,14 @@ impl KeyBinding {
         &self.chord
     }
 
-    /// Returns the command invoked by the binding.
+    /// Returns the first command invoked by the binding.
     pub fn command_name(&self) -> &str {
-        &self.command_name
+        &self.command_names[0]
+    }
+
+    /// Returns all commands invoked by the binding.
+    pub fn command_names(&self) -> &[String] {
+        &self.command_names
     }
 
     /// Returns the scope in which the binding applies.
@@ -286,9 +291,20 @@ impl KeymapRegistry {
         vim_mode: KeymapVimMode,
         source: CommandSource,
     ) -> Result<(), KeymapError> {
+        self.register_for_mode_many(chord, vec![command_name.into()], scope, vim_mode, source)
+    }
+
+    /// Registers a new keybinding for a specific Vim mode that executes multiple commands.
+    pub fn register_for_mode_many(
+        &mut self,
+        chord: impl Into<String>,
+        command_names: Vec<String>,
+        scope: KeymapScope,
+        vim_mode: KeymapVimMode,
+        source: CommandSource,
+    ) -> Result<(), KeymapError> {
         let chord = chord.into();
         let chord = normalize_chord(&chord);
-        let command_name = command_name.into();
         let key = BindingKey {
             scope: scope.clone(),
             vim_mode,
@@ -305,7 +321,7 @@ impl KeymapRegistry {
 
         self.bindings.insert(
             key,
-            KeyBinding::new(chord, command_name, scope, vim_mode, source),
+            KeyBinding::new(chord, command_names, scope, vim_mode, source),
         );
         Ok(())
     }

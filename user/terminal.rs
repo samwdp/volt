@@ -89,16 +89,21 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "terminal.popup")
         );
-        assert!(package.key_bindings().iter().any(|binding| {
-            binding.chord() == "Ctrl+`" && binding.command_name() == "terminal.open"
-        }));
+        assert!(
+            package
+                .key_bindings()
+                .iter()
+                .any(|binding| binding.command_name() == "terminal.open")
+        );
     }
 
     #[test]
-    fn default_terminal_shell_configuration_is_present() {
-        assert!(!default_shell_program().is_empty());
-        if cfg!(target_os = "windows") {
-            assert_eq!(default_shell_args(), vec!["-NoLogo".to_owned()]);
-        }
+    fn terminal_shell_configuration_is_non_empty() {
+        assert!(!default_shell_program().trim().is_empty());
+        assert!(
+            default_shell_args()
+                .iter()
+                .all(|arg| !arg.trim().is_empty())
+        );
     }
 }

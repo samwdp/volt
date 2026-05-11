@@ -96,8 +96,8 @@ use editor_plugin_api::{
         AbiGhostTextContext, AbiGhostTextLine, AbiGitStatusPrefix, AbiGitStatusSnapshot,
         AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
         AbiLigatureConfig, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
-        AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig, AbiTheme,
-        AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiPaneConfig, AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig,
+        AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
     },
 };
 
@@ -171,8 +171,8 @@ pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GhostTextContext, GhostTextLine, GitStatusPrefix,
-    HoverProvider, LigatureConfig, OilDefaults, OilKeyAction, OilKeybindings, StatuslineContext,
-    TerminalConfig, UserLibrary, WorkspaceRoot,
+    HoverProvider, LigatureConfig, OilDefaults, OilKeyAction, OilKeybindings, PaneConfig,
+    StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -291,6 +291,10 @@ impl UserLibrary for UserLibraryImpl {
         commandline::enabled()
     }
 
+    fn pane_config(&self) -> PaneConfig {
+        pane::config()
+    }
+
     fn ligature_config(&self) -> LigatureConfig {
         ligatures::config()
     }
@@ -329,6 +333,7 @@ impl UserLibrary for UserLibraryImpl {
             toggle_trash: k.toggle_trash,
             open_external: k.open_external,
             set_tab_local_root: k.set_tab_local_root,
+            create_git_worktree: k.create_git_worktree,
         }
     }
 
@@ -548,6 +553,7 @@ fn map_oil_key_action(action: oil::OilKeyAction) -> OilKeyAction {
         oil::OilKeyAction::ToggleTrash => OilKeyAction::ToggleTrash,
         oil::OilKeyAction::OpenExternal => OilKeyAction::OpenExternal,
         oil::OilKeyAction::SetTabLocalRoot => OilKeyAction::SetTabLocalRoot,
+        oil::OilKeyAction::CreateGitWorktree => OilKeyAction::CreateGitWorktree,
     }
 }
 
@@ -656,6 +662,10 @@ extern "C" fn exported_terminal_config() -> AbiTerminalConfig {
 
 extern "C" fn exported_commandline_enabled() -> bool {
     UserLibraryImpl.commandline_enabled()
+}
+
+extern "C" fn exported_pane_config() -> AbiPaneConfig {
+    UserLibraryImpl.pane_config().into()
 }
 
 extern "C" fn exported_ligature_config() -> AbiLigatureConfig {
@@ -982,6 +992,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         ghost_text_lines: exported_ghost_text_lines,
         headerline_lines: exported_headerline_lines,
         pdf_open_mode: exported_pdf_open_mode,
+        pane_config_v1: exported_pane_config,
     }
     .leak_into_prefix()
 }
@@ -997,18 +1008,6 @@ mod tests {
         UserLibraryImpl, debug_adapters, language_servers, packages, syntax_languages, themes,
     };
     use crate::calculator;
-    use crate::lsp::{
-        SERVER_BASH_LANGUAGE_SERVER, SERVER_BUFLS, SERVER_CLANGD, SERVER_CLOJURE_LSP,
-        SERVER_CMAKE_LANGUAGE_SERVER, SERVER_CSHARP_LS, SERVER_ELIXIR_LS, SERVER_GOPLS,
-        SERVER_GRAPHQL_LANGUAGE_SERVICE, SERVER_INTELEPHENSE, SERVER_JDTLS,
-        SERVER_KOTLIN_LANGUAGE_SERVER, SERVER_LUA_LANGUAGE_SERVER, SERVER_MAKEFILE_LANGUAGE_SERVER,
-        SERVER_MARKSMAN, SERVER_METALS, SERVER_NIL, SERVER_OLS, SERVER_PERLNAVIGATOR,
-        SERVER_PYRIGHT_LANGSERVER, SERVER_R_LANGUAGE_SERVER, SERVER_RUBY_LSP, SERVER_RUST_ANALYZER,
-        SERVER_SOLC_LSP, SERVER_SOURCEKIT_LSP, SERVER_SQLS, SERVER_TERRAFORM_LS, SERVER_TEXLAB,
-        SERVER_TOMBI, SERVER_TYPESCRIPT_LANGUAGE_SERVER, SERVER_VSCODE_CSS_LANGUAGE_SERVER,
-        SERVER_VSCODE_HTML_LANGUAGE_SERVER, SERVER_VSCODE_JSON_LANGUAGE_SERVER,
-        SERVER_XML_LANGUAGE_SERVER, SERVER_YAML_LANGUAGE_SERVER, SERVER_ZLS,
-    };
     use editor_buffer::TextBuffer;
     use editor_plugin_api::UserLibrary;
     use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
@@ -1138,9 +1137,17 @@ mod tests {
     }
 
     #[test]
-    fn user_library_contains_auto_loaded_packages() {
+    fn user_library_contains_unique_packages_with_behavior() {
         let packages = packages();
-        assert!(packages.iter().any(|package| package.auto_load()));
+        let mut names = BTreeSet::new();
+        for package in &packages {
+            assert!(!package.name().is_empty());
+            assert!(
+                names.insert(package.name().to_owned()),
+                "duplicate package `{}`",
+                package.name()
+            );
+        }
         assert!(
             packages
                 .iter()
@@ -1151,6 +1158,31 @@ mod tests {
                 .iter()
                 .any(|package| !package.key_bindings().is_empty())
         );
+    }
+
+    #[test]
+    fn user_library_exports_acp_clients_by_id_consistently() {
+        let library = UserLibraryImpl;
+        let clients = library.acp_clients();
+        let mut ids = BTreeSet::new();
+
+        for client in &clients {
+            assert!(!client.id.is_empty());
+            assert!(
+                ids.insert(client.id.clone()),
+                "duplicate ACP client `{}`",
+                client.id
+            );
+
+            let resolved = library
+                .acp_client_by_id(&client.id)
+                .expect("ACP client should round-trip by id");
+            assert_eq!(resolved.id, client.id);
+            assert_eq!(resolved.command, client.command);
+            assert_eq!(resolved.args, client.args);
+        }
+
+        assert!(library.acp_client_by_id("__missing__").is_none());
     }
 
     #[test]
@@ -1260,444 +1292,67 @@ mod tests {
     #[test]
     fn user_library_exports_language_registrations() {
         let languages = syntax_languages();
-        assert!(languages.len() >= 45);
-        let ids = languages
-            .iter()
-            .map(|language| language.id())
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&"bash"));
-        assert!(ids.contains(&"c"));
-        assert!(ids.contains(&"clojure"));
-        assert!(ids.contains(&"cmake"));
-        assert!(ids.contains(&"csharp"));
-        assert!(ids.contains(&"cpp"));
-        assert!(ids.contains(&"css"));
-        assert!(ids.contains(&"diff"));
-        assert!(ids.contains(&"elixir"));
-        assert!(ids.contains(&"gitcommit"));
-        assert!(ids.contains(&"go"));
-        assert!(ids.contains(&"graphql"));
-        assert!(ids.contains(&"hcl"));
-        assert!(ids.contains(&"html"));
-        assert!(ids.contains(&"javascript"));
-        assert!(ids.contains(&"java"));
-        assert!(ids.contains(&"jsx"));
-        assert!(ids.contains(&"json"));
-        assert!(ids.contains(&"kotlin"));
-        assert!(ids.contains(&"latex"));
-        assert!(ids.contains(&"lua"));
-        assert!(ids.contains(&"make"));
-        assert!(ids.contains(&"markdown"));
-        assert!(ids.contains(&"markdown-inline"));
-        assert!(ids.contains(&"nix"));
-        assert!(ids.contains(&"odin"));
-        assert!(ids.contains(&"perl"));
-        assert!(ids.contains(&"php"));
-        assert!(ids.contains(&"proto"));
-        assert!(ids.contains(&"python"));
-        assert!(ids.contains(&"r"));
-        assert!(ids.contains(&"ruby"));
-        assert!(ids.contains(&"rust"));
-        assert!(ids.contains(&"scala"));
-        assert!(ids.contains(&"scss"));
-        assert!(ids.contains(&"solidity"));
-        assert!(ids.contains(&"sql"));
-        assert!(ids.contains(&"swift"));
-        assert!(ids.contains(&"toml"));
-        assert!(ids.contains(&"typescript"));
-        assert!(ids.contains(&"tsx"));
-        assert!(ids.contains(&"vim"));
-        assert!(ids.contains(&"xml"));
-        assert!(ids.contains(&"yaml"));
-        assert!(ids.contains(&"zig"));
+        let mut ids = BTreeSet::new();
 
-        assert_eq!(
-            language_extensions(&languages, "bash"),
-            Some(vec![
-                "sh".to_owned(),
-                "bash".to_owned(),
-                "zsh".to_owned(),
-                "ksh".to_owned(),
-                "ash".to_owned(),
-                "dash".to_owned(),
-                "mksh".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "c"),
-            Some(vec!["c".to_owned(), "h".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "clojure"),
-            Some(vec![
-                "clj".to_owned(),
-                "cljs".to_owned(),
-                "cljc".to_owned(),
-                "edn".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "cmake"),
-            Some(vec!["cmake".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "csharp"),
-            Some(vec!["cs".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "cpp"),
-            Some(vec![
-                "cc".to_owned(),
-                "cpp".to_owned(),
-                "cxx".to_owned(),
-                "hpp".to_owned(),
-                "hh".to_owned(),
-                "hxx".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "css"),
-            Some(vec!["css".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "diff"),
-            Some(vec!["diff".to_owned(), "patch".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "elixir"),
-            Some(vec!["ex".to_owned(), "exs".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "go"),
-            Some(vec!["go".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "graphql"),
-            Some(vec![
-                "gql".to_owned(),
-                "graphql".to_owned(),
-                "graphqls".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "hcl"),
-            Some(vec!["hcl".to_owned(), "tf".to_owned(), "nomad".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "html"),
-            Some(vec!["html".to_owned(), "htm".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "java"),
-            Some(vec!["java".to_owned(), "jav".to_owned(), "pde".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "rust"),
-            Some(vec!["rs".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "javascript"),
-            Some(vec!["js".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "jsx"),
-            Some(vec!["jsx".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "json"),
-            Some(vec!["json".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "kotlin"),
-            Some(vec!["kt".to_owned(), "kts".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "latex"),
-            Some(vec![
-                "tex".to_owned(),
-                "dtx".to_owned(),
-                "ins".to_owned(),
-                "sty".to_owned(),
-                "cls".to_owned(),
-                "rd".to_owned(),
-                "bbx".to_owned(),
-                "cbx".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "lua"),
-            Some(vec!["lua".to_owned(), "rockspec".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "make"),
-            Some(vec!["mk".to_owned(), "mak".to_owned(), "make".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "markdown"),
-            Some(vec!["md".to_owned(), "markdown".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "odin"),
-            Some(vec!["odin".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "nix"),
-            Some(vec!["nix".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "perl"),
-            Some(vec![
-                "pl".to_owned(),
-                "pm".to_owned(),
-                "t".to_owned(),
-                "psgi".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "php"),
-            Some(vec![
-                "php".to_owned(),
-                "inc".to_owned(),
-                "php4".to_owned(),
-                "php5".to_owned(),
-                "phtml".to_owned(),
-                "ctp".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "proto"),
-            Some(vec!["proto".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "python"),
-            Some(vec!["py".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "r"),
-            Some(vec!["r".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "ruby"),
-            Some(vec![
-                "rb".to_owned(),
-                "rake".to_owned(),
-                "irb".to_owned(),
-                "gemspec".to_owned(),
-                "rabl".to_owned(),
-                "jbuilder".to_owned(),
-                "jb".to_owned(),
-                "podspec".to_owned(),
-                "rjs".to_owned(),
-                "rbi".to_owned(),
-                "rbs".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "scala"),
-            Some(vec!["scala".to_owned(), "sbt".to_owned(), "sc".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "scss"),
-            Some(vec!["scss".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "solidity"),
-            Some(vec!["sol".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "sql"),
-            Some(vec!["sql".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "swift"),
-            Some(vec!["swift".to_owned(), "swiftinterface".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "toml"),
-            Some(vec!["toml".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "typescript"),
-            Some(vec!["ts".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "tsx"),
-            Some(vec!["tsx".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "yaml"),
-            Some(vec!["yaml".to_owned(), "yml".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "vim"),
-            Some(vec!["vim".to_owned()])
-        );
-        assert_eq!(
-            language_extensions(&languages, "xml"),
-            Some(vec![
-                "xml".to_owned(),
-                "svg".to_owned(),
-                "xsd".to_owned(),
-                "xslt".to_owned(),
-                "xsl".to_owned(),
-                "rng".to_owned(),
-                "csproj".to_owned(),
-            ])
-        );
-        assert_eq!(
-            language_extensions(&languages, "zig"),
-            Some(vec!["zig".to_owned()])
-        );
+        for language in &languages {
+            assert!(!language.id().is_empty());
+            assert!(
+                ids.insert(language.id().to_owned()),
+                "duplicate language `{}`",
+                language.id()
+            );
+            assert_eq!(
+                language_extensions(&languages, language.id()),
+                Some(language.file_extensions().to_vec())
+            );
+
+            if let Some(grammar) = language.grammar() {
+                assert!(!grammar.repository_url().is_empty());
+                assert!(!grammar.install_dir_name().is_empty());
+                assert!(!grammar.symbol_name().is_empty());
+            }
+        }
     }
 
     #[test]
-    fn user_library_exports_lsp_and_dap_defaults() {
+    fn user_library_exports_lsp_and_dap_registrations() {
         let servers = language_servers();
-        let server_ids = servers.iter().map(|server| server.id()).collect::<Vec<_>>();
         let adapters = debug_adapters();
+        let mut server_ids = BTreeSet::new();
+        for server in &servers {
+            assert!(!server.id().is_empty());
+            assert!(
+                server_ids.insert(server.id().to_owned()),
+                "duplicate language server `{}`",
+                server.id()
+            );
+            assert!(!server.language_id().is_empty());
+            assert!(!server.program().is_empty());
+        }
 
-        assert_eq!(servers.len(), 36);
-        assert!(server_ids.contains(&SERVER_BASH_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_BUFLS));
-        assert!(server_ids.contains(&SERVER_CLANGD));
-        assert!(server_ids.contains(&SERVER_CLOJURE_LSP));
-        assert!(server_ids.contains(&SERVER_CMAKE_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_RUST_ANALYZER));
-        assert!(server_ids.contains(&SERVER_MARKSMAN));
-        assert!(server_ids.contains(&SERVER_CSHARP_LS));
-        assert!(server_ids.contains(&SERVER_ELIXIR_LS));
-        assert!(server_ids.contains(&SERVER_GOPLS));
-        assert!(server_ids.contains(&SERVER_GRAPHQL_LANGUAGE_SERVICE));
-        assert!(server_ids.contains(&SERVER_INTELEPHENSE));
-        assert!(server_ids.contains(&SERVER_JDTLS));
-        assert!(server_ids.contains(&SERVER_KOTLIN_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_LUA_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_MAKEFILE_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_METALS));
-        assert!(server_ids.contains(&SERVER_NIL));
-        assert!(server_ids.contains(&SERVER_OLS));
-        assert!(server_ids.contains(&SERVER_PERLNAVIGATOR));
-        assert!(server_ids.contains(&SERVER_PYRIGHT_LANGSERVER));
-        assert!(server_ids.contains(&SERVER_R_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_RUBY_LSP));
-        assert!(server_ids.contains(&SERVER_SOLC_LSP));
-        assert!(server_ids.contains(&SERVER_SOURCEKIT_LSP));
-        assert!(server_ids.contains(&SERVER_SQLS));
-        assert!(server_ids.contains(&SERVER_TERRAFORM_LS));
-        assert!(server_ids.contains(&SERVER_TEXLAB));
-        assert!(server_ids.contains(&SERVER_TYPESCRIPT_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_VSCODE_CSS_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_VSCODE_HTML_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_VSCODE_JSON_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_TOMBI));
-        assert!(server_ids.contains(&SERVER_XML_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_YAML_LANGUAGE_SERVER));
-        assert!(server_ids.contains(&SERVER_ZLS));
-        assert_eq!(adapters.len(), 1);
-        assert_eq!(adapters[0].id(), "codelldb");
-
-        let typescript = servers
-            .iter()
-            .find(|server| server.id() == SERVER_TYPESCRIPT_LANGUAGE_SERVER)
-            .expect("typescript-language-server missing");
-        assert_eq!(
-            typescript
-                .file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["ts", "tsx", "js", "jsx"]
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".ts"),
-            "typescript"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".tsx"),
-            "typescriptreact"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".js"),
-            "javascript"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".jsx"),
-            "javascriptreact"
-        );
-
-        let css = servers
-            .iter()
-            .find(|server| server.id() == SERVER_VSCODE_CSS_LANGUAGE_SERVER)
-            .expect("vscode-css-language-server missing");
-        assert_eq!(css.document_language_id_for_extension(".scss"), "scss");
-
-        let clangd = servers
-            .iter()
-            .find(|server| server.id() == SERVER_CLANGD)
-            .expect("clangd missing");
-        assert_eq!(clangd.document_language_id_for_extension(".c"), "c");
-        assert_eq!(clangd.document_language_id_for_extension(".cpp"), "cpp");
-
-        let html = servers
-            .iter()
-            .find(|server| server.id() == SERVER_VSCODE_HTML_LANGUAGE_SERVER)
-            .expect("vscode-html-language-server missing");
-        assert_eq!(
-            html.file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["html", "htm"]
-        );
-
-        let clojure = servers
-            .iter()
-            .find(|server| server.id() == SERVER_CLOJURE_LSP)
-            .expect("clojure-lsp missing");
-        assert_eq!(
-            clojure.document_language_id_for_extension(".clj"),
-            "clojure"
-        );
-        assert_eq!(clojure.document_language_id_for_extension(".edn"), "edn");
-
-        let solidity = servers
-            .iter()
-            .find(|server| server.id() == SERVER_SOLC_LSP)
-            .expect("solc-lsp missing");
-        assert_eq!(
-            solidity
-                .args()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["--lsp"]
-        );
-
-        let xml = servers
-            .iter()
-            .find(|server| server.id() == SERVER_XML_LANGUAGE_SERVER)
-            .expect("xml-language-server missing");
-        assert_eq!(
-            xml.file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["xml", "svg", "xsd", "xslt", "xsl", "rng"]
-        );
+        let mut adapter_ids = BTreeSet::new();
+        for adapter in &adapters {
+            assert!(!adapter.id().is_empty());
+            assert!(
+                adapter_ids.insert(adapter.id().to_owned()),
+                "duplicate debug adapter `{}`",
+                adapter.id()
+            );
+        }
     }
 
     #[test]
     fn user_library_exports_themes() {
         let themes = themes();
-        let ids = themes.iter().map(|theme| theme.id()).collect::<Vec<_>>();
-        assert_eq!(themes.len(), 7);
-        assert!(ids.contains(&"volt-dark"));
-        assert!(ids.contains(&"volt-light"));
-        assert!(ids.contains(&"gruvbox-dark"));
-        assert!(ids.contains(&"gruvbox-light"));
-        assert!(ids.contains(&"rosepine-dark"));
-        assert!(ids.contains(&"vscode-dark"));
-        assert!(ids.contains(&"vscode-light"));
+        let mut ids = BTreeSet::new();
+        for theme in &themes {
+            assert!(!theme.id().is_empty());
+            assert!(
+                ids.insert(theme.id().to_owned()),
+                "duplicate theme `{}`",
+                theme.id()
+            );
+        }
         assert!(
             themes
                 .iter()

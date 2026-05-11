@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use editor_buffer::{TextPoint, TextRange};
 use editor_core::BufferId;
@@ -162,6 +162,14 @@ pub(crate) enum YankRegister {
     Character(String),
     Line(String),
     Block(Vec<String>),
+    Directory(Vec<DirectoryYankEntry>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectoryYankEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) label: String,
+    pub(crate) is_dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

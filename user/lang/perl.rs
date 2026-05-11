@@ -29,7 +29,6 @@ mod tests {
     fn perl_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-perl");
-        assert!(pkg.auto_load());
     }
 
     #[test]

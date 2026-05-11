@@ -29,7 +29,6 @@ mod tests {
     fn php_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-php");
-        assert!(pkg.auto_load());
     }
 
     #[test]

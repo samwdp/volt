@@ -66,6 +66,8 @@ pub mod lsp_hooks {
     pub const IMPLEMENTATION: &str = "lsp.goto-implementation";
     pub const DIAGNOSTICS: &str = "lsp.diagnostics";
     pub const CODE_ACTIONS: &str = "lsp.code-actions";
+    pub const COPILOT_SIGN_IN: &str = "lsp.copilot-sign-in";
+    pub const COPILOT_SIGN_OUT: &str = "lsp.copilot-sign-out";
 }
 
 /// Hook name constants for the git subsystem.
@@ -80,6 +82,7 @@ pub mod git_hooks {
 pub mod oil_hooks {
     pub const OPEN: &str = "ui.oil.open";
     pub const OPEN_PARENT: &str = "ui.oil.open-parent";
+    pub const ACTION: &str = "ui.oil.action";
 }
 
 /// Hook name constants for the browser buffer.
@@ -318,6 +321,7 @@ pub trait UserLibrary: Send + Sync {
     fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
     fn terminal_config(&self) -> TerminalConfig;
     fn commandline_enabled(&self) -> bool;
+    fn pane_config(&self) -> PaneConfig;
     fn ligature_config(&self) -> LigatureConfig;
     fn oil_defaults(&self) -> OilDefaults;
     fn oil_keybindings(&self) -> OilKeybindings;
@@ -617,6 +621,7 @@ pub enum OilKeyAction {
     ToggleTrash,
     OpenExternal,
     SetTabLocalRoot,
+    CreateGitWorktree,
 }
 
 /// User-configurable default options for new oil directory buffers.
@@ -647,6 +652,7 @@ pub struct OilKeybindings {
     pub toggle_trash: &'static str,
     pub open_external: &'static str,
     pub set_tab_local_root: &'static str,
+    pub create_git_worktree: &'static str,
 }
 
 /// Git key-chord action prefix kind used for file-scoped git commands.
@@ -743,6 +749,12 @@ pub enum PdfOpenMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LigatureConfig {
     pub enabled: bool,
+}
+
+/// Pane layout configuration exported by the user library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneConfig {
+    pub golden_ratio: bool,
 }
 
 /// LSP diagnostic counts surfaced to the statusline.
@@ -992,7 +1004,7 @@ impl PluginAction {
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct PluginKeyBinding {
     chord: RString,
-    command_name: RString,
+    command_names: RVec<RString>,
     scope: PluginKeymapScope,
     vim_mode: PluginVimMode,
 }
@@ -1004,9 +1016,30 @@ impl PluginKeyBinding {
         command_name: impl Into<RString>,
         scope: PluginKeymapScope,
     ) -> Self {
+        Self::new_many(chord, [command_name], scope)
+    }
+
+    /// Creates a new keybinding that executes multiple commands in order.
+    pub fn new_many<I, S>(
+        chord: impl Into<RString>,
+        command_names: I,
+        scope: PluginKeymapScope,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<RString>,
+    {
+        let command_names = command_names
+            .into_iter()
+            .map(Into::into)
+            .collect::<RVec<_>>();
+        assert!(
+            !command_names.is_empty(),
+            "PluginKeyBinding requires at least one command"
+        );
         Self {
             chord: chord.into(),
-            command_name: command_name.into(),
+            command_names,
             scope,
             vim_mode: PluginVimMode::Any,
         }
@@ -1023,9 +1056,14 @@ impl PluginKeyBinding {
         self.chord.as_str()
     }
 
-    /// Returns the command targeted by the keybinding.
+    /// Returns the first command targeted by the keybinding.
     pub fn command_name(&self) -> &str {
-        self.command_name.as_str()
+        self.command_names[0].as_str()
+    }
+
+    /// Returns all commands targeted by the keybinding.
+    pub fn command_names(&self) -> &[RString] {
+        self.command_names.as_slice()
     }
 
     /// Returns the scope that activates the keybinding.
@@ -1280,6 +1318,14 @@ mod tests {
         assert_eq!(package.description(), "Language server integration.");
         assert_eq!(package.commands()[0].name(), "lsp.start");
         assert_eq!(package.key_bindings()[0].chord(), "Alt+x lsp.start");
+        assert_eq!(
+            package.key_bindings()[0]
+                .command_names()
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lsp.start"]
+        );
         assert_eq!(package.key_bindings()[0].vim_mode(), PluginVimMode::Normal);
         assert_eq!(package.hook_declarations()[0].name(), "lsp.startup");
         assert_eq!(package.hook_bindings()[0].detail_filter(), Some(".rs"));
@@ -1314,5 +1360,27 @@ mod tests {
             Some("Output")
         );
         assert_eq!(package.buffers()[0].key_bindings()[0].chord(), "Ctrl+Enter");
+    }
+
+    #[test]
+    fn plugin_key_binding_can_target_multiple_commands() {
+        let binding = PluginKeyBinding::new_many(
+            "Ctrl+d",
+            ["vim.scroll-half-page-down", "vim.center-current-line"],
+            PluginKeymapScope::Workspace,
+        )
+        .with_vim_mode(PluginVimMode::Normal);
+
+        assert_eq!(binding.chord(), "Ctrl+d");
+        assert_eq!(binding.command_name(), "vim.scroll-half-page-down");
+        assert_eq!(
+            binding
+                .command_names()
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vim.scroll-half-page-down", "vim.center-current-line"]
+        );
+        assert_eq!(binding.vim_mode(), PluginVimMode::Normal);
     }
 }

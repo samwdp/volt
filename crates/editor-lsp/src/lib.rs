@@ -15,10 +15,12 @@ use editor_path::{PathMatcher, PathPattern, normalize_extension};
 use serde_json::{Number, Value};
 
 pub use client::{
-    LspClientError, LspClientManager, LspCodeAction, LspCompletionItem, LspCompletionKind,
-    LspDocumentTextEdits, LspFormattingOptions, LspHoverContents, LspLocation, LspLogDirection,
-    LspLogEntry, LspLogSnapshot, LspNotification, LspNotificationEntry, LspNotificationLevel,
-    LspNotificationProgress, LspNotificationSnapshot, LspSignatureHelpContents, LspTextEdit,
+    CopilotDeviceCodePrompt, LspClientError, LspClientManager, LspCodeAction, LspCompletionItem,
+    LspCompletionKind, LspDocumentTextEdits, LspFormattingOptions, LspHoverContents,
+    LspInlineCompletionItem, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot,
+    LspNotification, LspNotificationAction, LspNotificationEntry, LspNotificationLevel,
+    LspNotificationProgress, LspNotificationSnapshot, LspServerCommand, LspSignatureHelpContents,
+    LspTextEdit,
 };
 
 /// Human-readable summary of this crate's responsibility.
@@ -409,9 +411,11 @@ pub struct LanguageServerSpec {
     program: String,
     args: Vec<String>,
     root_markers: Vec<String>,
+    activation_markers: Vec<String>,
     root_strategy: LanguageServerRootStrategy,
     env: Vec<(String, String)>,
     workspace_configuration: WorkspaceConfiguration,
+    enabled_by_default: bool,
     path_matcher: PathMatcher,
 }
 
@@ -449,9 +453,11 @@ impl LanguageServerSpec {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             root_markers: Vec::new(),
+            activation_markers: Vec::new(),
             root_strategy: LanguageServerRootStrategy::Workspace,
             env: Vec::new(),
             workspace_configuration: WorkspaceConfiguration::default(),
+            enabled_by_default: true,
             path_matcher: PathMatcher::from_parts(
                 &file_extensions,
                 [] as [&str; 0],
@@ -466,6 +472,15 @@ impl LanguageServerSpec {
         markers: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.root_markers = markers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds project markers required before this server may start for a file.
+    pub fn with_activation_markers(
+        mut self,
+        markers: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.activation_markers = markers.into_iter().map(Into::into).collect();
         self
     }
 
@@ -526,6 +541,12 @@ impl LanguageServerSpec {
             .workspace_configuration
             .with_section(section)
             .with_settings(settings);
+        self
+    }
+
+    /// Controls whether generic LSP startup should include this server by default.
+    pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
+        self.enabled_by_default = enabled_by_default;
         self
     }
 
@@ -627,6 +648,11 @@ impl LanguageServerSpec {
         &self.root_markers
     }
 
+    /// Returns project markers required before this server may start.
+    pub fn activation_markers(&self) -> &[String] {
+        &self.activation_markers
+    }
+
     /// Returns the path-matcher-to-language-id overrides.
     pub fn document_language_ids(&self) -> &BTreeMap<String, String> {
         &self.document_language_ids
@@ -660,6 +686,11 @@ impl LanguageServerSpec {
     /// Returns the workspace settings payload as a JSON value.
     pub fn workspace_configuration_settings_json(&self) -> Option<Value> {
         self.workspace_configuration.settings_json()
+    }
+
+    /// Returns whether generic LSP startup should include this server by default.
+    pub const fn enabled_by_default(&self) -> bool {
+        self.enabled_by_default
     }
 
     /// Returns whether this server should attach to the provided path.
@@ -700,6 +731,11 @@ impl LanguageServerSpec {
 
     fn path_match_score(&self, path: &Path) -> Option<usize> {
         self.path_matcher.best_match_score(path)
+    }
+
+    fn activation_matches_path(&self, path: &Path, workspace_root: Option<&Path>) -> bool {
+        self.activation_markers.is_empty()
+            || find_root_for_path(path, workspace_root, &self.activation_markers).is_some()
     }
 }
 
@@ -819,6 +855,8 @@ pub enum LspError {
     UnknownServer(String),
     /// Unknown extension lookup.
     UnknownExtension(String),
+    /// Matching server exists, but required project markers were not found.
+    ActivationMarkersNotFound { server_id: String, path: String },
 }
 
 impl fmt::Display for LspError {
@@ -842,6 +880,10 @@ impl fmt::Display for LspError {
             Self::UnknownExtension(extension) => {
                 write!(formatter, "no language server registered for `{extension}`")
             }
+            Self::ActivationMarkersNotFound { server_id, path } => write!(
+                formatter,
+                "language server `{server_id}` is not available for `{path}` because required project markers were not found"
+            ),
         }
     }
 }
@@ -928,11 +970,40 @@ impl LanguageServerRegistry {
 
     /// Returns all servers whose path matchers apply to the provided path.
     pub fn servers_for_path(&self, path: &Path) -> Vec<&LanguageServerSpec> {
+        self.matching_servers_for_path(path, true, None)
+    }
+
+    /// Returns all default-enabled servers whose path matchers apply to the provided path.
+    pub fn default_enabled_servers_for_path(&self, path: &Path) -> Vec<&LanguageServerSpec> {
+        self.default_enabled_servers_for_path_in_workspace(path, None)
+    }
+
+    /// Returns all default-enabled servers whose path matchers and activation markers apply.
+    pub fn default_enabled_servers_for_path_in_workspace(
+        &self,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Vec<&LanguageServerSpec> {
+        self.matching_servers_for_path(path, false, workspace_root)
+    }
+
+    fn matching_servers_for_path(
+        &self,
+        path: &Path,
+        include_default_disabled: bool,
+        workspace_root: Option<&Path>,
+    ) -> Vec<&LanguageServerSpec> {
         let mut best_score: Option<usize> = None;
         for server_id in &self.server_order {
             let Some(server) = self.servers.get(server_id) else {
                 continue;
             };
+            if !include_default_disabled && !server.enabled_by_default() {
+                continue;
+            }
+            if !include_default_disabled && !server.activation_matches_path(path, workspace_root) {
+                continue;
+            }
             let Some(score) = server.path_match_score(path) else {
                 continue;
             };
@@ -947,6 +1018,14 @@ impl LanguageServerRegistry {
             .iter()
             .filter_map(|server_id| {
                 let server = self.servers.get(server_id)?;
+                if !include_default_disabled && !server.enabled_by_default() {
+                    return None;
+                }
+                if !include_default_disabled
+                    && !server.activation_matches_path(path, workspace_root)
+                {
+                    return None;
+                }
                 (server.path_match_score(path) == Some(best_score)).then_some(server)
             })
             .collect()
@@ -984,6 +1063,12 @@ impl LanguageServerRegistry {
             .servers
             .get(server_id)
             .ok_or_else(|| LspError::UnknownServer(server_id.to_owned()))?;
+        if !spec.activation_matches_path(path, workspace_root) {
+            return Err(LspError::ActivationMarkersNotFound {
+                server_id: server_id.to_owned(),
+                path: path.display().to_string(),
+            });
+        }
         let root = spec.planned_root_for_path(path, workspace_root);
         Ok(LanguageServerSession {
             server_id: spec.id().to_owned(),
@@ -1033,7 +1118,7 @@ impl LanguageServerRegistry {
         path: &Path,
         workspace_root: Option<&Path>,
     ) -> Result<Vec<LanguageServerSession>, LspError> {
-        let servers = self.servers_for_path(path);
+        let servers = self.default_enabled_servers_for_path_in_workspace(path, workspace_root);
         if servers.is_empty() {
             return Err(LspError::UnknownExtension(path.display().to_string()));
         }
@@ -1192,7 +1277,7 @@ mod tests {
 
     use super::{
         Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerRootStrategy,
-        LanguageServerSpec, WorkspaceConfigurationValue,
+        LanguageServerSpec, LspError, WorkspaceConfigurationValue,
     };
 
     fn rust_analyzer() -> LanguageServerSpec {
@@ -1229,7 +1314,7 @@ mod tests {
             "csharp-ls",
             ["--features", "razor-support,metadata-uris"],
         )
-        .with_root_markers(["*.sln", "*.csproj", "global.json"])
+        .with_root_markers(["*.sln", "global.json"])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
     }
 
@@ -1248,6 +1333,41 @@ mod tests {
 
     fn dev_extension_server() -> LanguageServerSpec {
         LanguageServerSpec::new("dev-server", "dev", ["dev"], "dev-server", ["--stdio"])
+    }
+
+    fn tailwind_language_server() -> LanguageServerSpec {
+        LanguageServerSpec::new(
+            "tailwindcss-language-server",
+            "html",
+            ["html", "js", "jsx", "ts", "tsx"],
+            "tailwindcss-language-server",
+            ["--stdio"],
+        )
+        .with_document_language_ids([
+            ("js", "javascript"),
+            ("jsx", "javascriptreact"),
+            ("ts", "typescript"),
+            ("tsx", "typescriptreact"),
+        ])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "tailwind.config.js",
+            "tailwind.config.cjs",
+            "tailwind.config.mjs",
+            "tailwind.config.ts",
+            "tailwind.config.cts",
+            "tailwind.config.mts",
+            "node_modules/tailwindcss/package.json",
+        ])
+        .with_activation_markers([
+            "tailwind.config.js",
+            "tailwind.config.cjs",
+            "tailwind.config.mjs",
+            "tailwind.config.ts",
+            "tailwind.config.cts",
+            "tailwind.config.mts",
+            "node_modules/tailwindcss/package.json",
+        ])
     }
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -1554,7 +1674,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_session_for_path_prefers_nearest_matching_root_marker() {
+    fn prepared_session_for_path_prefers_solution_root_over_nested_csharp_project() {
         let root = temp_dir();
         let project_dir = root.join("src").join("AssetFusion.Api");
         fs::create_dir_all(&project_dir).expect("project dir");
@@ -1567,8 +1687,8 @@ mod tests {
         must(registry.register(csharp_language_server()));
         let session =
             must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
-        assert_eq!(session.root(), Some(&project_dir));
-        assert_eq!(session.launch().cwd(), Some(&project_dir));
+        assert_eq!(session.root(), Some(&root));
+        assert_eq!(session.launch().cwd(), Some(&root));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1625,5 +1745,89 @@ mod tests {
         );
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].server_id(), "dockerfile-language-server");
+    }
+
+    #[test]
+    fn prepare_sessions_for_path_skips_servers_disabled_by_default() {
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(rust_analyzer()));
+        must(
+            registry.register(
+                LanguageServerSpec::new(
+                    "copilot-language-server",
+                    "plaintext",
+                    ["rs"],
+                    "copilot",
+                    std::iter::empty::<&str>(),
+                )
+                .with_enabled_by_default(false),
+            ),
+        );
+
+        let matching = registry.servers_for_path(Path::new("lib.rs"));
+        assert_eq!(matching.len(), 2);
+        assert_eq!(matching[0].id(), "rust-analyzer");
+        assert_eq!(matching[1].id(), "copilot-language-server");
+
+        let sessions =
+            must(registry.prepare_sessions_for_path(Path::new("lib.rs"), Some(Path::new("P:\\"))));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].server_id(), "rust-analyzer");
+    }
+
+    #[test]
+    fn prepare_sessions_for_path_requires_activation_markers_when_declared() {
+        let root = temp_dir();
+        let src_dir = root.join("src");
+        let file_path = src_dir.join("app.tsx");
+        fs::create_dir_all(&src_dir).expect("src dir");
+        fs::write(&file_path, "export default function App() {}").expect("tsx file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(tailwind_language_server()));
+
+        let error = registry
+            .prepare_sessions_for_path(&file_path, Some(root.as_path()))
+            .expect_err("missing activation markers should block startup");
+        assert_eq!(
+            error,
+            LspError::UnknownExtension(file_path.display().to_string())
+        );
+
+        fs::write(root.join("tailwind.config.ts"), "export default {}").expect("config");
+        let sessions = must(registry.prepare_sessions_for_path(&file_path, Some(root.as_path())));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].server_id(), "tailwindcss-language-server");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepare_session_for_path_reports_missing_activation_markers_for_explicit_server() {
+        let root = temp_dir();
+        let src_dir = root.join("src");
+        let file_path = src_dir.join("app.tsx");
+        fs::create_dir_all(&src_dir).expect("src dir");
+        fs::write(&file_path, "export default function App() {}").expect("tsx file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(tailwind_language_server()));
+
+        let error = registry
+            .prepare_session_for_path(
+                "tailwindcss-language-server",
+                &file_path,
+                Some(root.as_path()),
+            )
+            .expect_err("missing activation markers should block explicit startup");
+        assert_eq!(
+            error,
+            LspError::ActivationMarkersNotFound {
+                server_id: "tailwindcss-language-server".to_owned(),
+                path: file_path.display().to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

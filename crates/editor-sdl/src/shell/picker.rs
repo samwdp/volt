@@ -363,26 +363,35 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
         .bindings()
         .into_iter()
         .map(|binding| {
-            let description = runtime
-                .commands()
-                .get(binding.command_name())
-                .map(|definition| definition.description().to_owned())
-                .unwrap_or_else(|| "Command description unavailable.".to_owned());
+            let command_names = binding.command_names();
+            let description = command_names
+                .iter()
+                .map(|command_name| {
+                    runtime
+                        .commands()
+                        .get(command_name)
+                        .map(|definition| definition.description().to_owned())
+                        .unwrap_or_else(|| {
+                            format!("{command_name}: command description unavailable.")
+                        })
+                })
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            let command_label = command_names.join(" -> ");
             let scope = binding.scope().to_string();
             let mode = binding.vim_mode().to_string();
             PickerEntry {
                 item: PickerItem::new(
                     format!("{scope}:{mode}:{}", binding.chord()),
-                    format!("{} {}", binding.chord(), binding.command_name()),
-                    format!(
-                        "{} [{}] -> {}",
-                        binding.scope(),
-                        mode,
-                        binding.command_name()
-                    ),
+                    format!("{} {}", binding.chord(), command_label),
+                    format!("{} [{}] -> {}", binding.scope(), mode, command_label),
                     Some(description),
                 ),
-                action: PickerAction::ExecuteCommand(binding.command_name().to_owned()),
+                action: if command_names.len() == 1 {
+                    PickerAction::ExecuteCommand(binding.command_name().to_owned())
+                } else {
+                    PickerAction::ExecuteCommands(command_names.to_vec())
+                },
             }
         })
         .collect();
@@ -824,14 +833,29 @@ const OIL_KEYBINDINGS: &[ContextKeybinding] = &[
         description: "Opens the file or enters the selected directory.",
     },
     ContextKeybinding {
-        chord: "Ctrl+s",
+        chord: "Ctrl+\\",
         action: "open vertical split",
         description: "Opens the selection in a vertical split.",
     },
     ContextKeybinding {
-        chord: "Ctrl+h",
+        chord: "Ctrl+|",
         action: "open horizontal split",
         description: "Opens the selection in a horizontal split.",
+    },
+    ContextKeybinding {
+        chord: "yy",
+        action: "copy entry",
+        description: "Copies the selected file or directory.",
+    },
+    ContextKeybinding {
+        chord: "Visual y",
+        action: "copy entries",
+        description: "Copies the selected files and directories.",
+    },
+    ContextKeybinding {
+        chord: "p",
+        action: "paste copies",
+        description: "Copies the yanked files and directories into the current oil root.",
     },
     ContextKeybinding {
         chord: "Ctrl+t",
@@ -897,6 +921,11 @@ const OIL_KEYBINDINGS: &[ContextKeybinding] = &[
         chord: "g?",
         action: "help",
         description: "Shows the oil help popup.",
+    },
+    ContextKeybinding {
+        chord: "gwn",
+        action: "create git worktree",
+        description: "Creates a git worktree from the current oil buffer.",
     },
 ];
 

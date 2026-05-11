@@ -29,10 +29,14 @@ pub(super) fn render_shell_state(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let pane_rects = match state.pane_split_direction() {
-        PaneSplitDirection::Vertical => vertical_pane_rects(width, pane_height, panes.len()),
-        PaneSplitDirection::Horizontal => horizontal_pane_rects(width, pane_height, panes.len()),
-    };
+    let pane_rects = runtime_pane_rects(
+        user_library,
+        state.pane_split_direction(),
+        width,
+        pane_height,
+        panes.len(),
+        state.active_pane_index(),
+    );
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);

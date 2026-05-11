@@ -7,11 +7,11 @@ use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLogDirection};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, OilDefaults, OilKeyAction,
-    OilKeybindings, PdfOpenMode, PluginBuffer, PluginBufferSections, TerminalConfig, Theme,
-    WorkspaceRoot,
+    OilKeybindings, PaneConfig, PdfOpenMode, PluginBuffer, PluginBufferSections, TerminalConfig,
+    Theme, WorkspaceRoot,
 };
 use editor_plugin_host::StatuslineContext;
-use editor_render::horizontal_pane_rects;
+use editor_render::{horizontal_pane_rects, vertical_pane_rects};
 use sdl3::mouse::MouseState;
 use sdl3::video::WindowFlags;
 use std::{
@@ -185,6 +185,12 @@ impl UserLibrary for HeaderlineTestUserLibrary {
         true
     }
 
+    fn pane_config(&self) -> PaneConfig {
+        PaneConfig {
+            golden_ratio: false,
+        }
+    }
+
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
     }
@@ -216,6 +222,7 @@ impl UserLibrary for HeaderlineTestUserLibrary {
             toggle_trash: "gt",
             open_external: "gx",
             set_tab_local_root: "gl",
+            create_git_worktree: "gwn",
         }
     }
 
@@ -1454,6 +1461,101 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
 }
 
 #[test]
+fn oil_normal_mode_yy_p_copies_file_immediately() -> Result<(), String> {
+    let root = unique_temp_dir("oil-normal-copy-file");
+    let source = root.join("source");
+    let dest = root.join("dest");
+    std::fs::create_dir_all(&source).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dest).map_err(|error| error.to_string())?;
+    let source_file = source.join("alpha.txt");
+    std::fs::write(&source_file, "alpha\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    open_workspace_from_project(&mut state.runtime, "oil-copy-file", &root)?;
+    open_oil_directory(&mut state.runtime, source.clone())?;
+    let source_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_buffer_mut(&mut state.runtime, source_buffer_id)?.set_cursor(TextPoint::new(1, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(source_buffer_id);
+
+    state
+        .handle_text_input("y")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("y")
+        .map_err(|error| error.to_string())?;
+
+    open_oil_directory(&mut state.runtime, dest.clone())?;
+    let dest_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(dest_buffer_id);
+    state
+        .handle_text_input("p")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("alpha.txt")).map_err(|error| error.to_string())?,
+        "alpha\n"
+    );
+    assert!(
+        shell_buffer(&state.runtime, dest_buffer_id)?
+            .directory_state()
+            .ok_or_else(|| "destination directory state missing".to_owned())?
+            .entries
+            .iter()
+            .any(|entry| entry.path() == dest.join("alpha.txt"))
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_visual_line_y_p_copies_multiple_entries_immediately() -> Result<(), String> {
+    let root = unique_temp_dir("oil-visual-copy-multiple");
+    let source = root.join("source");
+    let dest = root.join("dest");
+    std::fs::create_dir_all(source.join("folder")).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dest).map_err(|error| error.to_string())?;
+    std::fs::write(source.join("folder").join("nested.txt"), "nested\n")
+        .map_err(|error| error.to_string())?;
+    std::fs::write(source.join("plain.txt"), "plain\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    open_workspace_from_project(&mut state.runtime, "oil-copy-multiple", &root)?;
+    open_oil_directory(&mut state.runtime, source.clone())?;
+    let source_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_buffer_mut(&mut state.runtime, source_buffer_id)?.set_cursor(TextPoint::new(1, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(source_buffer_id);
+
+    state
+        .handle_text_input("V")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("y")
+        .map_err(|error| error.to_string())?;
+
+    open_oil_directory(&mut state.runtime, dest.clone())?;
+    state
+        .handle_text_input("p")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("folder").join("nested.txt"))
+            .map_err(|error| error.to_string())?,
+        "nested\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("plain.txt")).map_err(|error| error.to_string())?,
+        "plain\n"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn oil_open_parent_command_uses_parent_root() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let root = unique_temp_dir("oil-open-parent");
@@ -1479,6 +1581,101 @@ fn oil_open_parent_command_uses_parent_root() -> Result<(), String> {
     );
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_action_commands_are_registered_and_execute() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("oil-command-actions");
+    std::fs::write(root.join(".hidden"), "hidden\n").map_err(|error| error.to_string())?;
+
+    open_workspace_from_project(&mut state.runtime, "oil-command-actions", &root)?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    for command_name in [
+        "oil.open-entry",
+        "oil.open-vertical-split",
+        "oil.open-horizontal-split",
+        "oil.open-new-pane",
+        "oil.preview-entry",
+        "oil.refresh",
+        "oil.close",
+        "oil.open-workspace-root",
+        "oil.set-root",
+        "oil.show-help",
+        "oil.cycle-sort",
+        "oil.toggle-hidden",
+        "oil.toggle-trash",
+        "oil.open-external",
+        "oil.set-tab-local-root",
+    ] {
+        assert!(
+            state.runtime.commands().contains(command_name),
+            "missing command {command_name}"
+        );
+    }
+
+    state
+        .runtime
+        .execute_command("oil.toggle-hidden")
+        .map_err(|error| error.to_string())?;
+
+    assert!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .directory_state()
+            .ok_or_else(|| "directory state missing".to_owned())?
+            .show_hidden
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_git_worktree_command_opens_branch_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let remote = unique_temp_dir("oil-worktree-remote");
+    let repo = init_git_repo_with_commit("oil-worktree-repo")?;
+
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap_or("")],
+    )?;
+    run_git_in_dir(&repo, &["push", "-u", "origin", "HEAD:master"])?;
+    run_git_in_dir(&repo, &["checkout", "-qb", "feature/oil-worktree"])?;
+    std::fs::write(repo.join("feature.txt"), "feature\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "feature.txt"])?;
+    run_git_in_dir(&repo, &["commit", "-qm", "feature"])?;
+    run_git_in_dir(&repo, &["push", "-u", "origin", "feature/oil-worktree"])?;
+    run_git_in_dir(&repo, &["checkout", "-q", "master"])?;
+
+    let workspace_root = repo
+        .parent()
+        .ok_or_else(|| "repo parent missing".to_owned())?
+        .to_path_buf();
+    open_workspace_from_project(&mut state.runtime, "oil-worktree", &workspace_root)?;
+    open_oil_directory(&mut state.runtime, repo.clone())?;
+    state
+        .runtime
+        .execute_command("oil.git-worktree")
+        .map_err(|error| error.to_string())?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "oil.git-worktree did not open picker".to_owned())?;
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .any(|entry| entry.item().label() == "origin/feature/oil-worktree")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&remote);
     Ok(())
 }
 
@@ -5769,6 +5966,90 @@ fn notification_action_at_point_returns_acp_permission_action() -> Result<(), St
 }
 
 #[test]
+fn notification_action_at_point_returns_copilot_sign_in_action() -> Result<(), String> {
+    let now = Instant::now();
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "copilot.sign-in".to_owned(),
+            severity: NotificationSeverity::Error,
+            title: "Copilot authentication required".to_owned(),
+            body_lines: vec!["Click notification to sign in.".to_owned()],
+            progress: None,
+            active: true,
+            action: Some(NotificationAction::CopilotSignIn {
+                root: Some(PathBuf::from(r"P:\volt")),
+            }),
+        },
+        now,
+    );
+
+    let ui = shell_ui(&state.runtime)?;
+    let layouts = notification_overlay_layouts(
+        &ui.visible_notifications(now),
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    );
+    let rect = layouts
+        .first()
+        .map(|layout| layout.rect)
+        .ok_or_else(|| "notification layout missing".to_owned())?;
+    let action = notification_action_at_point(
+        ui,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+        now,
+        (rect.x() + 4, rect.y() + 4),
+    );
+
+    assert_eq!(
+        action,
+        Some(NotificationAction::CopilotSignIn {
+            root: Some(PathBuf::from(r"P:\volt")),
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn copilot_auth_notification_shows_device_code_and_stays_active() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let key = copilot_status_notification_key(Some(Path::new(r"P:\volt")));
+    apply_copilot_auth_notification(
+        &mut state.runtime,
+        &key,
+        NotificationSeverity::Info,
+        "Copilot sign-in started",
+        vec![
+            "Device code: ABCD-EFGH".to_owned(),
+            "Code copied to clipboard.".to_owned(),
+            "Enter code in GitHub browser flow.".to_owned(),
+        ],
+        true,
+    )?;
+
+    let now = Instant::now();
+    let ui = shell_ui(&state.runtime)?;
+    let notification = ui
+        .visible_notifications(now)
+        .into_iter()
+        .find(|notification| notification.key == key)
+        .ok_or_else(|| "copilot auth notification missing".to_owned())?;
+
+    assert_eq!(notification.body_lines[0], "Device code: ABCD-EFGH");
+    assert!(notification.active);
+    Ok(())
+}
+
+#[test]
 fn acp_section_layout_orders_output_input_footer_and_statusline() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(
@@ -7913,6 +8194,78 @@ fn acp_plan_entries_populate_static_plan_pane() -> Result<(), String> {
 }
 
 #[test]
+fn acp_plan_entries_normalize_completed_prefix_when_later_step_is_active() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_set_plan(Plan::new(vec![
+        PlanEntry::new(
+            "First step",
+            PlanEntryPriority::High,
+            PlanEntryStatus::Pending,
+        ),
+        PlanEntry::new(
+            "Second step",
+            PlanEntryPriority::High,
+            PlanEntryStatus::InProgress,
+        ),
+        PlanEntry::new(
+            "Third step",
+            PlanEntryPriority::Medium,
+            PlanEntryStatus::Pending,
+        ),
+    ]));
+
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    assert_eq!(acp.plan_entries[0].status, PlanEntryStatus::Completed);
+    assert_eq!(acp.plan_entries[1].status, PlanEntryStatus::InProgress);
+    assert_eq!(acp.plan_entries[2].status, PlanEntryStatus::Pending);
+    Ok(())
+}
+
+#[test]
+fn acp_plan_entries_normalize_completed_prefix_without_active_step() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_set_plan(Plan::new(vec![
+        PlanEntry::new(
+            "First step",
+            PlanEntryPriority::High,
+            PlanEntryStatus::Pending,
+        ),
+        PlanEntry::new(
+            "Second step",
+            PlanEntryPriority::High,
+            PlanEntryStatus::Completed,
+        ),
+        PlanEntry::new(
+            "Third step",
+            PlanEntryPriority::Medium,
+            PlanEntryStatus::Pending,
+        ),
+    ]));
+
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    assert_eq!(acp.plan_entries[0].status, PlanEntryStatus::Completed);
+    assert_eq!(acp.plan_entries[1].status, PlanEntryStatus::Completed);
+    assert_eq!(acp.plan_entries[2].status, PlanEntryStatus::Pending);
+    Ok(())
+}
+
+#[test]
 fn acp_tool_call_updates_replace_existing_output_item() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
@@ -8969,6 +9322,50 @@ fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
 }
 
 #[test]
+fn compile_buffer_submit_runs_command_via_shell() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    open_compile_buffer(&mut state.runtime, None)?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let command = if cfg!(windows) {
+        "Write-Output volt-compile"
+    } else {
+        "printf 'volt-compile\\n'"
+    };
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "compile shell buffer missing".to_owned())?;
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "compile input field missing".to_owned())?;
+        input.set_text(command);
+    }
+
+    submit_input_buffer(&mut state.runtime)?;
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "compile shell buffer missing".to_owned())?;
+    let text = buffer.text.text();
+    assert!(
+        text.contains("volt-compile"),
+        "compile output should include shell transcript"
+    );
+    assert!(
+        text.contains("Build succeeded"),
+        "compile output should include success marker"
+    );
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "compile input field missing".to_owned())?
+            .text(),
+        ""
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_escape_from_insert_keeps_input_cursor_position() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;
@@ -9626,6 +10023,120 @@ fn markdown_table_enter_inserts_a_new_row() -> Result<(), String> {
 }
 
 #[test]
+fn insert_mode_closing_brace_does_not_reindent_inline_block() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*inline-closing-brace*",
+        vec!["fn main() {".to_owned(), "    ".to_owned(), "}".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(1, 4));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    state
+        .handle_text_input("if true {")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("}")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    if true {}"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(1, 14));
+    Ok(())
+}
+
+#[test]
+fn insert_mode_enter_splits_brace_pair_into_indented_line() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*brace-pair-enter*",
+        vec!["if true {}".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 9));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("if true {"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    "));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("}"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(1, 4));
+    Ok(())
+}
+
+#[test]
+fn insert_mode_enter_splits_bracket_pair_into_indented_line() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*bracket-pair-enter*",
+        vec!["let items = [];".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 13));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("let items = ["));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    "));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("];"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(1, 4));
+    Ok(())
+}
+
+#[test]
 fn format_current_line_indent_uses_syntax_queries_for_blank_lines() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     syntax_registry_mut(&mut state.runtime)?
@@ -10082,6 +10593,56 @@ fn focused_hover_gg_and_g_scroll_to_expected_bounds() -> Result<(), String> {
             .cursor_point(),
         cursor_before
     );
+    Ok(())
+}
+
+#[test]
+fn vim_repeat_search_preserves_forward_and_backward_bindings() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*vim-search-repeat*",
+        vec![
+            "alpha".to_owned(),
+            "beta".to_owned(),
+            "alpha".to_owned(),
+            "beta".to_owned(),
+            "alpha".to_owned(),
+        ],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 0));
+
+    run_vim_search(&mut state.runtime, VimSearchDirection::Forward, "alpha")?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(2, 0)
+    );
+
+    repeat_vim_search(&mut state.runtime, true)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(0, 0)
+    );
+    assert!(matches!(
+        shell_ui(&state.runtime)?.vim().last_search,
+        Some(LastSearch {
+            direction: VimSearchDirection::Forward,
+            ..
+        })
+    ));
+
+    repeat_vim_search(&mut state.runtime, false)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.cursor_point(),
+        TextPoint::new(2, 0)
+    );
+    assert!(matches!(
+        shell_ui(&state.runtime)?.vim().last_search,
+        Some(LastSearch {
+            direction: VimSearchDirection::Forward,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -11005,6 +11566,94 @@ fn visual_join_merges_selected_lines() -> Result<(), String> {
     assert_eq!(buffer.text.line(1).as_deref(), Some("gamma"));
     assert_eq!(buffer.cursor_point(), TextPoint::new(0, 5));
     assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn visual_move_down_reorders_selected_lines_and_keeps_visual_selection() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-move-down*",
+        vec![
+            "fn main() {".to_owned(),
+            "    if ready {".to_owned(),
+            "        alpha();".to_owned(),
+            "    }".to_owned(),
+            "}".to_owned(),
+        ],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(2, 0), VisualSelectionKind::Line);
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("visual-move-down"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("fn main() {"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    if ready {"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("    }"));
+    assert_eq!(buffer.text.line(3).as_deref(), Some("    alpha();"));
+    assert_eq!(buffer.text.line(4).as_deref(), Some("}"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(3, 0));
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_kind, VisualSelectionKind::Line);
+    assert_eq!(ui.vim().visual_anchor, Some(TextPoint::new(3, 0)));
+    Ok(())
+}
+
+#[test]
+fn visual_move_up_reorders_selected_lines_and_reindents() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*visual-move-up*",
+        vec![
+            "fn main() {".to_owned(),
+            "    if ready {".to_owned(),
+            "    }".to_owned(),
+            "    alpha();".to_owned(),
+            "}".to_owned(),
+        ],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.set_cursor(TextPoint::new(3, 0));
+    }
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(3, 0), VisualSelectionKind::Line);
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("visual-move-up"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("fn main() {"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("    if ready {"));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("        alpha();"));
+    assert_eq!(buffer.text.line(3).as_deref(), Some("    }"));
+    assert_eq!(buffer.text.line(4).as_deref(), Some("}"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 0));
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.input_mode(), InputMode::Visual);
+    assert_eq!(ui.vim().visual_kind, VisualSelectionKind::Line);
+    assert_eq!(ui.vim().visual_anchor, Some(TextPoint::new(2, 0)));
     Ok(())
 }
 

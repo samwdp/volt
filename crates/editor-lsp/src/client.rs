@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -21,11 +20,12 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
     Documentation, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
-    HoverParams, InitializeParams, InitializedParams, Location, LocationLink, MarkedString,
-    MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, ReferenceContext,
-    ReferenceParams, SignatureHelp, SignatureHelpParams, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, TraceValue,
-    Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
+    HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, LocationLink,
+    MarkedString, MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, Range,
+    ReferenceContext, ReferenceParams, SignatureHelp, SignatureHelpParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TraceValue, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
         Initialized, Notification,
@@ -46,11 +46,14 @@ use crate::{
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
 const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CODE_ACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const INLINE_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_millis(1200);
 const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
+const COPILOT_SERVER_ID: &str = "copilot-language-server";
 const CSHARP_SERVER_ID: &str = "csharp-ls";
 const CSHARP_WORKSPACE_SECTION: &str = "csharp";
 const CSHARP_METADATA_REQUEST_METHOD: &str = "csharp/metadata";
+const INLINE_COMPLETION_METHOD: &str = "textDocument/inlineCompletion";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -69,6 +72,45 @@ pub struct LspCompletionItem {
     insert_text: String,
     detail: Option<String>,
     documentation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspInlineCompletionItem {
+    server_id: String,
+    root: Option<PathBuf>,
+    insert_text: String,
+    range: TextRange,
+    raw_item: Value,
+}
+
+impl LspInlineCompletionItem {
+    fn new(
+        server_id: impl Into<String>,
+        root: Option<PathBuf>,
+        insert_text: impl Into<String>,
+        range: TextRange,
+        raw_item: Value,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            root,
+            insert_text: insert_text.into(),
+            range,
+            raw_item,
+        }
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn insert_text(&self) -> &str {
+        &self.insert_text
+    }
+
+    pub const fn range(&self) -> TextRange {
+        self.range
+    }
 }
 
 impl LspCompletionItem {
@@ -494,36 +536,111 @@ impl LspNotificationProgress {
     }
 }
 
+/// UI action attached to an LSP notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspNotificationAction {
+    /// Starts Copilot device authentication for the emitting session.
+    CopilotSignIn,
+    /// Opens the provided URL in Volt's browser popup.
+    OpenBrowserPopup { url: String },
+}
+
+/// Executable LSP command returned by a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspServerCommand {
+    title: String,
+    command: String,
+    arguments: Vec<Value>,
+}
+
+impl LspServerCommand {
+    fn new(title: impl Into<String>, command: impl Into<String>, arguments: Vec<Value>) -> Self {
+        Self {
+            title: title.into(),
+            command: command.into(),
+            arguments,
+        }
+    }
+
+    /// Returns the label the server suggests for this command.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the command identifier to execute.
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// Returns the JSON arguments supplied by the server.
+    pub fn arguments(&self) -> &[Value] {
+        &self.arguments
+    }
+}
+
+/// Copilot device-flow prompt returned by `signIn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotDeviceCodePrompt {
+    user_code: String,
+    command: LspServerCommand,
+}
+
+impl CopilotDeviceCodePrompt {
+    fn new(user_code: impl Into<String>, command: LspServerCommand) -> Self {
+        Self {
+            user_code: user_code.into(),
+            command,
+        }
+    }
+
+    /// Returns the device code the user must enter in GitHub's auth page.
+    pub fn user_code(&self) -> &str {
+        &self.user_code
+    }
+
+    /// Returns the command that continues the device flow.
+    pub fn command(&self) -> &LspServerCommand {
+        &self.command
+    }
+}
+
 /// UI-facing LSP notification entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspNotification {
     key: String,
     server_id: String,
+    root: Option<PathBuf>,
     level: LspNotificationLevel,
     title: String,
     body_lines: Vec<String>,
     progress: Option<LspNotificationProgress>,
     active: bool,
+    action: Option<LspNotificationAction>,
 }
 
 impl LspNotification {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         key: impl Into<String>,
         server_id: impl Into<String>,
+        root: Option<PathBuf>,
         level: LspNotificationLevel,
         title: impl Into<String>,
         body_lines: Vec<String>,
         progress: Option<LspNotificationProgress>,
         active: bool,
+        action: Option<LspNotificationAction>,
     ) -> Self {
         Self {
             key: key.into(),
             server_id: server_id.into(),
+            root,
             level,
             title: title.into(),
             body_lines,
             progress,
             active,
+            action,
         }
     }
 
@@ -535,6 +652,11 @@ impl LspNotification {
     /// Returns the originating language server id.
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    /// Returns the session root that emitted the notification, if any.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// Returns the notification severity level.
@@ -560,6 +682,11 @@ impl LspNotification {
     /// Returns whether the notification is still active and should stay pinned.
     pub const fn active(&self) -> bool {
         self.active
+    }
+
+    /// Returns the UI action attached to this notification, if any.
+    pub fn action(&self) -> Option<&LspNotificationAction> {
+        self.action.as_ref()
     }
 }
 
@@ -831,6 +958,8 @@ struct LspSessionHandle {
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingResponseMap,
     diagnostics: DiagnosticsByPath,
+    open_documents: Mutex<BTreeMap<PathBuf, String>>,
+    text_document_sync_kind: Mutex<TextDocumentSyncKind>,
     workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
     transport_log: TransportLog,
     next_request_id: AtomicU64,
@@ -964,6 +1093,15 @@ impl LspClientManager {
     }
 
     pub fn needs_sync(&self, path: &Path, revision: u64) -> bool {
+        self.needs_sync_in_workspace(path, revision, None)
+    }
+
+    pub fn needs_sync_in_workspace(
+        &self,
+        path: &Path,
+        revision: u64,
+        workspace_root: Option<&Path>,
+    ) -> bool {
         let Ok(state) = self.state.lock() else {
             return false;
         };
@@ -979,7 +1117,9 @@ impl LspClientManager {
                 return false;
             }
         }
-        let servers = self.registry.servers_for_path(path);
+        let servers = self
+            .registry
+            .default_enabled_servers_for_path_in_workspace(path, workspace_root);
         if servers.is_empty() {
             return false;
         }
@@ -1184,13 +1324,35 @@ impl LspClientManager {
     }
 
     pub fn supports_path(&self, path: &Path) -> bool {
-        !self.registry.servers_for_path(path).is_empty()
+        self.supports_path_in_workspace(path, None)
+    }
+
+    pub fn supports_path_in_workspace(&self, path: &Path, workspace_root: Option<&Path>) -> bool {
+        !self
+            .registry
+            .default_enabled_servers_for_path_in_workspace(path, workspace_root)
+            .is_empty()
     }
 
     pub fn registered_server_ids_for_path(&self, path: &Path) -> Vec<String> {
+        self.registered_server_ids_for_path_in_workspace(path, None)
+    }
+
+    pub fn registered_server_ids_for_path_in_workspace(
+        &self,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Vec<String> {
         self.registry
             .servers_for_path(path)
             .into_iter()
+            .filter(|server| {
+                server.activation_markers().is_empty()
+                    || self
+                        .registry
+                        .prepare_session_for_path(server.id(), path, workspace_root)
+                        .is_ok()
+            })
             .map(|server| server.id().to_owned())
             .collect()
     }
@@ -1253,6 +1415,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut results = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             if let Some(hover) = session.hover(path, position)? {
                 results.push(hover);
             }
@@ -1268,6 +1433,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut results = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             if let Some(signature_help) = session.signature_help(path, position)? {
                 results.push(signature_help);
             }
@@ -1283,9 +1451,87 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut items = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             items.extend(session.completions(path, position)?);
         }
         Ok(items)
+    }
+
+    pub fn inline_completion(
+        &self,
+        path: &Path,
+        position: TextPoint,
+        options: LspFormattingOptions,
+    ) -> Result<Option<LspInlineCompletionItem>, LspClientError> {
+        let (version, sessions) = self.tracked_sessions_and_version_for_path(path)?;
+        for session in sessions {
+            if !is_copilot_server(session.server_id()) {
+                continue;
+            }
+            session.did_focus(path)?;
+            if let Some(item) = session.inline_completion(path, version, position, options)? {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn did_show_inline_completion(
+        &self,
+        item: &LspInlineCompletionItem,
+    ) -> Result<(), LspClientError> {
+        if let Some(session) =
+            self.live_session_for_server(&item.server_id, item.root.as_deref())?
+        {
+            session.did_show_inline_completion(item)?;
+        }
+        Ok(())
+    }
+
+    pub fn execute_server_command(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        command: &LspServerCommand,
+    ) -> Result<(), LspClientError> {
+        let session = self
+            .live_session_for_server(server_id, root)?
+            .ok_or_else(|| {
+                LspClientError::Protocol(format!("language server `{server_id}` is not running"))
+            })?;
+        session.execute_server_command(command)
+    }
+
+    pub fn copilot_sign_in(
+        &self,
+        root: Option<&Path>,
+    ) -> Result<Option<CopilotDeviceCodePrompt>, LspClientError> {
+        let Some(session) = self.live_session_for_server(COPILOT_SERVER_ID, root)? else {
+            return Ok(None);
+        };
+        session.copilot_sign_in()
+    }
+
+    pub fn copilot_sign_out(&self, root: Option<&Path>) -> Result<bool, LspClientError> {
+        let Some(session) = self.live_session_for_server(COPILOT_SERVER_ID, root)? else {
+            return Ok(false);
+        };
+        session.copilot_sign_out()?;
+        Ok(true)
+    }
+
+    pub fn accept_inline_completion(
+        &self,
+        item: &LspInlineCompletionItem,
+    ) -> Result<(), LspClientError> {
+        if let Some(session) =
+            self.live_session_for_server(&item.server_id, item.root.as_deref())?
+        {
+            session.accept_inline_completion(item)?;
+        }
+        Ok(())
     }
 
     pub fn definitions(
@@ -1296,6 +1542,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut locations = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             locations.extend(session.definitions(path, position)?);
         }
         sort_locations(&mut locations);
@@ -1310,6 +1559,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut locations = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             locations.extend(session.references(path, position)?);
         }
         sort_locations(&mut locations);
@@ -1324,6 +1576,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut locations = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             locations.extend(session.implementations(path, position)?);
         }
         sort_locations(&mut locations);
@@ -1338,6 +1593,9 @@ impl LspClientManager {
         let sessions = self.tracked_sessions_for_path(path)?;
         let mut actions = Vec::new();
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             actions.extend(session.code_actions(path, range)?);
         }
         actions.sort_by(|left, right| {
@@ -1358,6 +1616,9 @@ impl LspClientManager {
     ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             if let Some(edits) = session.formatting(path, options)? {
                 return Ok(Some(edits));
             }
@@ -1373,6 +1634,9 @@ impl LspClientManager {
     ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
         for session in sessions {
+            if is_copilot_server(session.server_id()) {
+                continue;
+            }
             if let Some(edits) = session.range_formatting(path, range, options)? {
                 return Ok(Some(edits));
             }
@@ -1416,7 +1680,7 @@ impl LspClientManager {
             .iter()
             .map(|session| session.key.clone())
             .collect::<BTreeSet<_>>();
-        let (version, previously_open) = {
+        let version = {
             let mut state = self
                 .state
                 .lock()
@@ -1425,11 +1689,10 @@ impl LspClientManager {
                 .tracked_buffers
                 .entry(path.to_path_buf())
                 .or_insert_with(TrackedBufferState::default);
-            let previously_open = tracked.sessions.clone();
             tracked.version = tracked.version.saturating_add(1).max(1);
             tracked.revision = revision;
             tracked.sessions = session_keys;
-            (tracked.version, previously_open)
+            tracked.version
         };
 
         let session_count = sessions.len();
@@ -1440,11 +1703,7 @@ impl LspClientManager {
             } else {
                 text.as_ref().cloned().unwrap_or_default()
             };
-            if previously_open.contains(&session.key) {
-                session.did_change(path, version, text)?;
-            } else {
-                session.did_open(path, version, text)?;
-            }
+            session.sync_text_document(path, version, text)?;
         }
 
         let mut labels = sessions
@@ -1484,6 +1743,34 @@ impl LspClientManager {
         Ok(sessions)
     }
 
+    fn tracked_sessions_and_version_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<(i32, Vec<Arc<LspSessionHandle>>), LspClientError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        let Some(tracked) = state.tracked_buffers.get(path).cloned() else {
+            return Ok((0, Vec::new()));
+        };
+        let mut sessions = Vec::new();
+        let mut stale_keys = Vec::new();
+        for key in tracked.sessions {
+            if let Some(session) = state.sessions.get(&key) {
+                if session.is_disconnected() {
+                    stale_keys.push(key);
+                } else {
+                    sessions.push(Arc::clone(session));
+                }
+            }
+        }
+        for key in stale_keys {
+            state.sessions.remove(&key);
+        }
+        Ok((tracked.version, sessions))
+    }
+
     fn ensure_sessions_for_path(
         &self,
         path: &Path,
@@ -1491,21 +1778,36 @@ impl LspClientManager {
         preferred_server_id: Option<&str>,
         force_retry: bool,
     ) -> Result<Vec<Arc<LspSessionHandle>>, LspClientError> {
+        let mut handles = if preferred_server_id.is_none() {
+            self.tracked_sessions_for_path(path)?
+        } else {
+            Vec::new()
+        };
+        let mut handled_keys = handles
+            .iter()
+            .map(|handle| handle.key.clone())
+            .collect::<BTreeSet<_>>();
         let session_plans = if let Some(server_id) = preferred_server_id {
             vec![
                 self.registry
                     .prepare_session_for_path(server_id, path, root)?,
             ]
         } else {
-            self.registry.prepare_sessions_for_path(path, root)?
+            match self.registry.prepare_sessions_for_path(path, root) {
+                Ok(session_plans) => session_plans,
+                Err(LspError::UnknownExtension(_)) if !handles.is_empty() => Vec::new(),
+                Err(error) => return Err(error.into()),
+            }
         };
 
-        let mut handles = Vec::new();
         for session in session_plans {
             let key = SessionKey {
                 server_id: session.server_id().to_owned(),
                 root: session.root().cloned(),
             };
+            if handled_keys.contains(&key) {
+                continue;
+            }
             let (existing, runtime_override, start_failed) = {
                 let mut state = self
                     .state
@@ -1529,6 +1831,7 @@ impl LspClientManager {
                 )
             };
             if let Some(existing) = existing {
+                handled_keys.insert(key);
                 handles.push(existing);
                 continue;
             }
@@ -1549,6 +1852,7 @@ impl LspClientManager {
                         })?
                         .sessions
                         .insert(key, Arc::clone(&handle));
+                    handled_keys.insert(handle.key.clone());
                     handles.push(handle);
                 }
                 Err(error) => {
@@ -1644,6 +1948,8 @@ impl LspSessionHandle {
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             diagnostics: Arc::clone(&diagnostics),
+            open_documents: Mutex::new(BTreeMap::new()),
+            text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration: Arc::clone(&workspace_configuration),
             transport_log: Arc::clone(&transport_log),
             next_request_id: AtomicU64::new(1),
@@ -1673,6 +1979,7 @@ impl LspSessionHandle {
         );
         spawn_reader_thread(
             handle.server_id().to_owned(),
+            handle.key.root.clone(),
             stdout,
             writer,
             pending,
@@ -1739,7 +2046,15 @@ impl LspSessionHandle {
             locale: None,
             work_done_progress_params: self.work_done_progress_params(Initialize::METHOD),
         };
-        let _ = self.request_typed::<Initialize>(initialize_params)?;
+        let initialize_result = self.request_typed::<Initialize>(initialize_params)?;
+        let initialize_result: InitializeResult = serde_json::from_value(initialize_result)
+            .map_err(|error| {
+                LspClientError::Protocol(format!(
+                    "failed to decode initialize response for `{}`: {error}",
+                    self.server_id()
+                ))
+            })?;
+        self.set_text_document_sync_kind(initialize_result)?;
         self.notify_typed::<Initialized>(InitializedParams {})?;
         if let Some(settings) = self.workspace_configuration_notification_payload(false)? {
             self.notify(
@@ -1750,25 +2065,74 @@ impl LspSessionHandle {
         Ok(())
     }
 
+    fn has_open_document(&self, path: &Path) -> bool {
+        self.open_documents
+            .lock()
+            .map(|open_documents| open_documents.contains_key(path))
+            .unwrap_or(false)
+    }
+
+    fn set_text_document_sync_kind(
+        &self,
+        initialize_result: InitializeResult,
+    ) -> Result<(), LspClientError> {
+        let kind = text_document_sync_kind(initialize_result.capabilities.text_document_sync);
+        *self.text_document_sync_kind.lock().map_err(|_| {
+            LspClientError::Protocol("LSP text sync kind mutex poisoned".to_owned())
+        })? = kind;
+        Ok(())
+    }
+
+    fn sync_text_document(
+        &self,
+        path: &Path,
+        version: i32,
+        text: String,
+    ) -> Result<(), LspClientError> {
+        if self.has_open_document(path) {
+            self.did_change(path, version, text)
+        } else {
+            self.did_open(path, version, text)
+        }
+    }
+
     fn did_open(&self, path: &Path, version: i32, text: String) -> Result<(), LspClientError> {
         self.notify_typed::<DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem::new(
                 path_to_uri(path)?,
                 self.session.document_language_id_for_path(path).to_owned(),
                 version,
-                text,
+                text.clone(),
             ),
-        })
+        })?;
+        self.open_documents
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP open documents mutex poisoned".to_owned()))?
+            .insert(path.to_path_buf(), text);
+        Ok(())
     }
 
     fn did_change(&self, path: &Path, version: i32, text: String) -> Result<(), LspClientError> {
+        let content_change = {
+            let mut open_documents = self.open_documents.lock().map_err(|_| {
+                LspClientError::Protocol("LSP open documents mutex poisoned".to_owned())
+            })?;
+            let previous_text = open_documents.get(path).cloned().ok_or_else(|| {
+                LspClientError::Protocol(format!(
+                    "cannot send didChange for unopened document `{}`",
+                    path.display()
+                ))
+            })?;
+            let sync_kind = *self.text_document_sync_kind.lock().map_err(|_| {
+                LspClientError::Protocol("LSP text sync kind mutex poisoned".to_owned())
+            })?;
+            let content_change = text_document_content_change(sync_kind, &previous_text, &text);
+            open_documents.insert(path.to_path_buf(), text.clone());
+            content_change
+        };
         self.notify_typed::<DidChangeTextDocument>(DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path)?, version),
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text,
-            }],
+            content_changes: vec![content_change],
         })
     }
 
@@ -1780,9 +2144,28 @@ impl LspSessionHandle {
     }
 
     fn did_close(&self, path: &Path) -> Result<(), LspClientError> {
+        if !self.has_open_document(path) {
+            return Ok(());
+        }
         self.notify_typed::<DidCloseTextDocument>(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
-        })
+        })?;
+        self.open_documents
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP open documents mutex poisoned".to_owned()))?
+            .remove(path);
+        Ok(())
+    }
+
+    fn did_focus(&self, path: &Path) -> Result<(), LspClientError> {
+        self.notify(
+            "textDocument/didFocus",
+            json!({
+                "textDocument": {
+                    "uri": path_to_uri(path)?,
+                }
+            }),
+        )
     }
 
     fn set_runtime_settings_override(
@@ -1808,17 +2191,6 @@ impl LspSessionHandle {
             )?;
         }
         Ok(())
-    }
-
-    fn csharp_metadata(&self, uri: &str) -> Result<Option<Value>, LspClientError> {
-        if !is_csharp_server(self.server_id()) || !is_csharp_metadata_uri(uri) {
-            return Ok(None);
-        }
-        let response = self.request(
-            CSHARP_METADATA_REQUEST_METHOD,
-            csharp_metadata_request_params(uri),
-        )?;
-        parse_csharp_metadata_response(uri, &response)
     }
 
     fn workspace_configuration_notification_payload(
@@ -1876,6 +2248,93 @@ impl LspSessionHandle {
             context: None,
         })?;
         Ok(parse_completion_response(self.server_id(), &response))
+    }
+
+    fn inline_completion(
+        &self,
+        path: &Path,
+        version: i32,
+        position: TextPoint,
+        options: LspFormattingOptions,
+    ) -> Result<Option<LspInlineCompletionItem>, LspClientError> {
+        let response = match self.request_with_timeout(
+            INLINE_COMPLETION_METHOD,
+            inline_completion_params(path, version, position, options)?,
+            INLINE_COMPLETION_REQUEST_TIMEOUT,
+        ) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(parse_inline_completion_response(
+            self.server_id(),
+            self.key.root.clone(),
+            position,
+            &response,
+        )
+        .into_iter()
+        .next())
+    }
+
+    fn did_show_inline_completion(
+        &self,
+        item: &LspInlineCompletionItem,
+    ) -> Result<(), LspClientError> {
+        self.notify(
+            "textDocument/didShowCompletion",
+            json!({
+                "item": item.raw_item.clone(),
+            }),
+        )
+    }
+
+    fn accept_inline_completion(
+        &self,
+        item: &LspInlineCompletionItem,
+    ) -> Result<(), LspClientError> {
+        let Some(params) = execute_command_params_from_inline_item(&item.raw_item) else {
+            return Ok(());
+        };
+        let _ = self.request("workspace/executeCommand", params)?;
+        Ok(())
+    }
+
+    fn execute_server_command(&self, command: &LspServerCommand) -> Result<(), LspClientError> {
+        let _ = self.request("workspace/executeCommand", execute_command_params(command))?;
+        Ok(())
+    }
+
+    fn copilot_sign_in(&self) -> Result<Option<CopilotDeviceCodePrompt>, LspClientError> {
+        if !is_copilot_server(self.server_id()) {
+            return Ok(None);
+        }
+        let response = self.request("signIn", json!({}))?;
+        let prompt = parse_copilot_sign_in_response(&response).ok_or_else(|| {
+            LspClientError::Protocol(format!(
+                "language server `{}` returned an invalid Copilot sign-in response",
+                self.server_id()
+            ))
+        })?;
+        Ok(Some(prompt))
+    }
+
+    fn copilot_sign_out(&self) -> Result<(), LspClientError> {
+        if !is_copilot_server(self.server_id()) {
+            return Ok(());
+        }
+        let _ = self.request("signOut", json!({}))?;
+        Ok(())
+    }
+
+    fn csharp_metadata(&self, uri: &str) -> Result<Option<Value>, LspClientError> {
+        if !is_csharp_server(self.server_id()) || !is_csharp_metadata_uri(uri) {
+            return Ok(None);
+        }
+        let response = self.request(
+            CSHARP_METADATA_REQUEST_METHOD,
+            csharp_metadata_request_params(uri),
+        )?;
+        parse_csharp_metadata_response(uri, &response)
     }
 
     fn definitions(
@@ -2118,6 +2577,7 @@ fn cleanup_unused_sessions(state: &mut LspClientState, removed_keys: &BTreeSet<S
 #[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     server_id: String,
+    root: Option<PathBuf>,
     stdout: impl Read + Send + 'static,
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingResponseMap,
@@ -2164,16 +2624,21 @@ fn spawn_reader_thread(
                     .lock()
                     .ok()
                     .map(|workspace_configuration| workspace_configuration.clone());
-                let response = server_request_response(
+                let handling = server_request_response(
+                    &server_id,
+                    root.as_deref(),
                     object.get("method"),
                     object.get("params"),
                     workspace_configuration.as_ref(),
                 );
+                if let Some(notification) = handling.notification {
+                    record_notification(&notifications, notification);
+                }
                 let id = object.get("id").cloned().unwrap_or(Value::Null);
                 let response_message = json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": response,
+                    "result": handling.result,
                 });
                 if let Err(error) =
                     write_response(&server_id, &transport_log, &writer, response_message)
@@ -2213,15 +2678,36 @@ fn spawn_reader_thread(
                 }
                 if method == "$/progress"
                     && let Some(params) = object.get("params")
-                    && let Some(notification) =
-                        parse_progress_notification(&server_id, params, &mut progress_tracks)
+                    && let Some(notification) = parse_progress_notification(
+                        &server_id,
+                        root.as_deref(),
+                        params,
+                        &mut progress_tracks,
+                    )
                 {
                     record_notification(&notifications, notification);
                     continue;
                 }
                 if method == "window/showMessage"
                     && let Some(params) = object.get("params")
-                    && let Some(notification) = parse_show_message_notification(&server_id, params)
+                    && let Some(notification) =
+                        parse_show_message_notification(&server_id, root.as_deref(), params)
+                {
+                    record_notification(&notifications, notification);
+                    continue;
+                }
+                if method == "window/logMessage"
+                    && let Some(params) = object.get("params")
+                    && let Some(notification) =
+                        parse_log_message_notification(&server_id, root.as_deref(), params)
+                {
+                    record_notification(&notifications, notification);
+                    continue;
+                }
+                if method == "didChangeStatus"
+                    && let Some(params) = object.get("params")
+                    && let Some(notification) =
+                        parse_copilot_status_notification(&server_id, root.as_deref(), params)
                 {
                     record_notification(&notifications, notification);
                     continue;
@@ -2599,9 +3085,13 @@ fn record_notification(notifications: &NotificationLog, notification: LspNotific
 }
 
 fn session_notification_key(server_id: &str, root: Option<&Path>) -> String {
+    format!("session:{server_id}:{}", notification_root_key(root))
+}
+
+fn notification_root_key(root: Option<&Path>) -> String {
     match root {
-        Some(root) => format!("session:{server_id}:{}", root.display()),
-        None => format!("session:{server_id}:global"),
+        Some(root) => root.display().to_string(),
+        None => "global".to_owned(),
     }
 }
 
@@ -2615,7 +3105,10 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
             "workspaceFolders": true
         },
         "window": {
-            "workDoneProgress": true
+            "workDoneProgress": true,
+            "showDocument": {
+                "support": true
+            }
         },
         "textDocument": {
             "hover": {
@@ -2635,6 +3128,9 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
                     "documentationFormat": ["markdown"],
                     "snippetSupport": true
                 }
+            },
+            "inlineCompletion": {
+                "dynamicRegistration": false
             },
             "codeAction": {
                 "dynamicRegistration": false,
@@ -2689,6 +3185,8 @@ fn request_timeout_for_method(method: &str) -> Duration {
         INITIALIZE_REQUEST_TIMEOUT
     } else if method == CodeActionRequest::METHOD {
         CODE_ACTION_REQUEST_TIMEOUT
+    } else if method == INLINE_COMPLETION_METHOD {
+        INLINE_COMPLETION_REQUEST_TIMEOUT
     } else {
         REQUEST_TIMEOUT
     }
@@ -2750,6 +3248,54 @@ fn settings_contains_key(settings: Option<&Value>, key: &str) -> bool {
     }
 }
 
+fn text_document_sync_kind(capability: Option<TextDocumentSyncCapability>) -> TextDocumentSyncKind {
+    match capability {
+        Some(TextDocumentSyncCapability::Kind(kind)) => kind,
+        Some(TextDocumentSyncCapability::Options(options)) => {
+            options.change.unwrap_or(TextDocumentSyncKind::FULL)
+        }
+        None => TextDocumentSyncKind::FULL,
+    }
+}
+
+fn text_document_content_change(
+    sync_kind: TextDocumentSyncKind,
+    previous_text: &str,
+    text: &str,
+) -> TextDocumentContentChangeEvent {
+    if sync_kind == TextDocumentSyncKind::INCREMENTAL {
+        TextDocumentContentChangeEvent {
+            range: Some(full_document_range(previous_text)),
+            range_length: None,
+            text: text.to_owned(),
+        }
+    } else {
+        TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_owned(),
+        }
+    }
+}
+
+fn full_document_range(text: &str) -> Range {
+    Range::new(Position::new(0, 0), text_end_position(text))
+}
+
+fn text_end_position(text: &str) -> Position {
+    let mut line = 0u32;
+    let mut character = 0u32;
+    for ch in text.chars() {
+        if ch == '\n' {
+            line = line.saturating_add(1);
+            character = 0;
+        } else if ch != '\r' {
+            character = character.saturating_add(ch.len_utf16() as u32);
+        }
+    }
+    Position::new(line, character)
+}
+
 fn merge_json_values(base: &Value, override_value: &Value) -> Value {
     match (base, override_value) {
         (Value::Object(base), Value::Object(override_value)) => {
@@ -2778,12 +3324,6 @@ fn workspace_configuration_null_response(params: Option<&Value>) -> Value {
 
 fn configuration_item_section(item: &Value) -> Option<&str> {
     normalize_configuration_section(item.get("section").and_then(Value::as_str))
-}
-
-fn wrap_workspace_configuration_settings(section: &str, settings: Value) -> Value {
-    let mut object = serde_json::Map::new();
-    object.insert(section.to_owned(), settings);
-    Value::Object(object)
 }
 
 fn with_csharp_solution_path_override(
@@ -2823,7 +3363,7 @@ fn resolve_single_solution_path(root: Option<&Path>) -> Option<PathBuf> {
     if path_is_solution(root) {
         return Some(root.to_path_buf());
     }
-    let mut solutions = fs::read_dir(root)
+    let mut solutions = std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -2838,6 +3378,16 @@ fn path_is_solution(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("sln"))
 }
 
+fn wrap_workspace_configuration_settings(section: &str, settings: Value) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(section.to_owned(), settings);
+    Value::Object(object)
+}
+
+fn is_copilot_server(server_id: &str) -> bool {
+    server_id == COPILOT_SERVER_ID
+}
+
 fn is_csharp_server(server_id: &str) -> bool {
     server_id == CSHARP_SERVER_ID
 }
@@ -2847,13 +3397,28 @@ fn is_csharp_metadata_uri(uri: &str) -> bool {
 }
 
 fn initialization_options_for_server(server_id: &str) -> Option<Value> {
-    is_csharp_server(server_id).then_some(json!({
-        "experimental": {
-            "csharp": {
-                "metadataUris": true,
+    if is_copilot_server(server_id) {
+        return Some(json!({
+            "editorInfo": {
+                "name": "Volt",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "editorPluginInfo": {
+                "name": "Volt Copilot",
+                "version": env!("CARGO_PKG_VERSION"),
             }
-        }
-    }))
+        }));
+    }
+    if is_csharp_server(server_id) {
+        return Some(json!({
+            "experimental": {
+                "csharp": {
+                    "metadataUris": true,
+                }
+            }
+        }));
+    }
+    None
 }
 
 fn csharp_metadata_request_params(uri: &str) -> Value {
@@ -2911,16 +3476,21 @@ fn session_lifecycle_notification(
     LspNotification::new(
         session_notification_key(server_id, root),
         server_id,
+        root.map(Path::to_path_buf),
         level,
         format!("LSP · {server_id}"),
         lines,
         None,
         active,
+        None,
     )
 }
 
-fn progress_notification_key(server_id: &str, token: &str) -> String {
-    format!("progress:{server_id}:{token}")
+fn progress_notification_key(server_id: &str, root: Option<&Path>, token: &str) -> String {
+    format!(
+        "progress:{server_id}:{}:{token}",
+        notification_root_key(root)
+    )
 }
 
 fn parse_progress_token_key(value: Option<&Value>) -> Option<String> {
@@ -2981,6 +3551,7 @@ fn completion_level_for_message(message: Option<&str>) -> LspNotificationLevel {
 
 fn parse_progress_notification(
     server_id: &str,
+    root: Option<&Path>,
     params: &Value,
     progress_tracks: &mut BTreeMap<String, ProgressTrack>,
 ) -> Option<LspNotification> {
@@ -3001,13 +3572,15 @@ fn parse_progress_notification(
             let body_lines = progress_body_lines(&track);
             progress_tracks.insert(token.clone(), track);
             Some(LspNotification::new(
-                progress_notification_key(server_id, &token),
+                progress_notification_key(server_id, root, &token),
                 server_id,
+                root.map(Path::to_path_buf),
                 LspNotificationLevel::Info,
                 format!("LSP · {server_id}"),
                 body_lines,
                 Some(LspNotificationProgress::new(progress)),
                 true,
+                None,
             ))
         }
         "report" => {
@@ -3022,13 +3595,15 @@ fn parse_progress_notification(
                 track.percentage = percentage;
             }
             Some(LspNotification::new(
-                progress_notification_key(server_id, &token),
+                progress_notification_key(server_id, root, &token),
                 server_id,
+                root.map(Path::to_path_buf),
                 LspNotificationLevel::Info,
                 format!("LSP · {server_id}"),
                 progress_body_lines(track),
                 Some(LspNotificationProgress::new(track.percentage)),
                 true,
+                None,
             ))
         }
         "end" => {
@@ -3037,8 +3612,9 @@ fn parse_progress_notification(
                 track.message = message;
             }
             Some(LspNotification::new(
-                progress_notification_key(server_id, &token),
+                progress_notification_key(server_id, root, &token),
                 server_id,
+                root.map(Path::to_path_buf),
                 completion_level_for_message(track.message.as_deref()),
                 format!("LSP · {server_id}"),
                 progress_body_lines(&track),
@@ -3046,13 +3622,18 @@ fn parse_progress_notification(
                     .percentage
                     .map(|percentage| LspNotificationProgress::new(Some(percentage))),
                 false,
+                None,
             ))
         }
         _ => None,
     }
 }
 
-fn parse_show_message_notification(server_id: &str, params: &Value) -> Option<LspNotification> {
+fn parse_show_message_notification(
+    server_id: &str,
+    root: Option<&Path>,
+    params: &Value,
+) -> Option<LspNotification> {
     let level = match params.get("type").and_then(Value::as_u64) {
         Some(1) => LspNotificationLevel::Error,
         Some(2) => LspNotificationLevel::Warning,
@@ -3065,32 +3646,157 @@ fn parse_show_message_notification(server_id: &str, params: &Value) -> Option<Ls
         .map(str::trim)
         .filter(|message| !message.is_empty())?
         .to_owned();
+    let mut lines = vec![message.clone()];
+    if let Some(root) = root {
+        lines.push(root.display().to_string());
+    }
     Some(LspNotification::new(
-        format!("message:{server_id}:{level:?}:{message}"),
+        format!(
+            "message:{server_id}:{}:{level:?}:{message}",
+            notification_root_key(root)
+        ),
         server_id,
+        root.map(Path::to_path_buf),
         level,
         format!("LSP · {server_id}"),
-        vec![message],
+        lines,
         None,
         false,
+        None,
     ))
 }
 
+fn parse_log_message_notification(
+    server_id: &str,
+    root: Option<&Path>,
+    params: &Value,
+) -> Option<LspNotification> {
+    parse_show_message_notification(server_id, root, params)
+}
+
+fn status_notification_key(server_id: &str, root: Option<&Path>) -> String {
+    format!("status:{server_id}:{}", notification_root_key(root))
+}
+
+fn parse_copilot_status_notification(
+    server_id: &str,
+    root: Option<&Path>,
+    params: &Value,
+) -> Option<LspNotification> {
+    let kind = params
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("Normal");
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let level = match kind {
+        "Error" => LspNotificationLevel::Error,
+        "Warning" => LspNotificationLevel::Warning,
+        "Inactive" => LspNotificationLevel::Info,
+        _ => LspNotificationLevel::Success,
+    };
+    let mut lines = vec![kind.to_owned()];
+    if !message.is_empty() {
+        lines.push(message.to_owned());
+    }
+    if let Some(root) = root {
+        lines.push(root.display().to_string());
+    }
+    let action = (is_copilot_server(server_id) && kind == "Error")
+        .then_some(LspNotificationAction::CopilotSignIn);
+    Some(LspNotification::new(
+        status_notification_key(server_id, root),
+        server_id,
+        root.map(Path::to_path_buf),
+        level,
+        format!("LSP · {server_id}"),
+        lines,
+        None,
+        matches!(kind, "Error" | "Warning" | "Inactive"),
+        action,
+    ))
+}
+
+struct ServerRequestHandling {
+    result: Value,
+    notification: Option<LspNotification>,
+}
+
 fn server_request_response(
+    server_id: &str,
+    root: Option<&Path>,
     method: Option<&Value>,
     params: Option<&Value>,
     workspace_configuration: Option<&SessionWorkspaceConfiguration>,
-) -> Value {
-    match method.and_then(Value::as_str) {
+) -> ServerRequestHandling {
+    let result = match method.and_then(Value::as_str) {
         Some("workspace/configuration") => workspace_configuration
             .map(|workspace_configuration| workspace_configuration.response_for_request(params))
             .unwrap_or_else(|| workspace_configuration_null_response(params)),
         Some("workspace/workspaceFolders") => Value::Array(Vec::new()),
+        Some("window/showMessageRequest") => params
+            .and_then(|params| params.get("actions"))
+            .and_then(Value::as_array)
+            .and_then(|actions| actions.first())
+            .cloned()
+            .unwrap_or(Value::Null),
+        Some("window/showDocument") => json!({ "success": false }),
         Some("client/registerCapability")
         | Some("client/unregisterCapability")
         | Some("window/workDoneProgress/create") => Value::Null,
         _ => Value::Null,
+    };
+    let notification = if matches!(method.and_then(Value::as_str), Some("window/showDocument")) {
+        show_document_notification(server_id, root, params)
+    } else {
+        None
+    };
+    let result = if notification.is_some() {
+        json!({ "success": true })
+    } else {
+        result
+    };
+    ServerRequestHandling {
+        result,
+        notification,
     }
+}
+
+fn show_document_notification(
+    server_id: &str,
+    root: Option<&Path>,
+    params: Option<&Value>,
+) -> Option<LspNotification> {
+    if !is_copilot_server(server_id) {
+        return None;
+    }
+    let uri = params
+        .and_then(|params| params.get("uri"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|uri| uri.starts_with("http://") || uri.starts_with("https://"))?
+        .to_owned();
+    let mut lines = vec!["Opening browser popup".to_owned(), uri.clone()];
+    if let Some(root) = root {
+        lines.push(root.display().to_string());
+    }
+    Some(LspNotification::new(
+        format!(
+            "show-document:{server_id}:{}:{uri}",
+            notification_root_key(root)
+        ),
+        server_id,
+        root.map(Path::to_path_buf),
+        LspNotificationLevel::Info,
+        format!("LSP · {server_id}"),
+        lines,
+        None,
+        false,
+        Some(LspNotificationAction::OpenBrowserPopup { url: uri }),
+    ))
 }
 
 fn parse_publish_diagnostics(params: &Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
@@ -3656,6 +4362,110 @@ fn parse_completion_response(server_id: &str, value: &Value) -> Vec<LspCompletio
         .collect()
 }
 
+fn inline_completion_params(
+    path: &Path,
+    version: i32,
+    position: TextPoint,
+    options: LspFormattingOptions,
+) -> Result<Value, LspClientError> {
+    let position = text_document_position_params(path, position)?.position;
+    Ok(json!({
+        "textDocument": {
+            "uri": path_to_uri(path)?,
+            "version": version,
+        },
+        "position": position,
+        "context": {
+            "triggerKind": 2,
+        },
+        "formattingOptions": {
+            "tabSize": options.tab_size(),
+            "insertSpaces": options.insert_spaces(),
+        }
+    }))
+}
+
+fn parse_inline_completion_response(
+    server_id: &str,
+    root: Option<PathBuf>,
+    position: TextPoint,
+    value: &Value,
+) -> Vec<LspInlineCompletionItem> {
+    let empty = Vec::new();
+    let items = match value {
+        Value::Array(items) => items,
+        Value::Object(map) => map.get("items").and_then(Value::as_array).unwrap_or(&empty),
+        _ => return Vec::new(),
+    };
+    items
+        .iter()
+        .filter_map(|item| parse_inline_completion_item(server_id, root.clone(), position, item))
+        .collect::<Vec<_>>()
+}
+
+fn parse_inline_completion_item(
+    server_id: &str,
+    root: Option<PathBuf>,
+    position: TextPoint,
+    value: &Value,
+) -> Option<LspInlineCompletionItem> {
+    let insert_text = value.get("insertText")?.as_str()?.replace("\r\n", "\n");
+    if insert_text.is_empty() {
+        return None;
+    }
+    let range = value
+        .get("range")
+        .and_then(parse_inline_text_range)
+        .unwrap_or_else(|| TextRange::new(position, position));
+    Some(LspInlineCompletionItem::new(
+        server_id,
+        root,
+        insert_text,
+        range,
+        value.clone(),
+    ))
+}
+
+fn execute_command_params_from_inline_item(value: &Value) -> Option<Value> {
+    let command = parse_lsp_server_command(value.get("command"))?;
+    Some(execute_command_params(&command))
+}
+
+fn execute_command_params(command: &LspServerCommand) -> Value {
+    json!({
+        "command": command.command(),
+        "arguments": command.arguments(),
+    })
+}
+
+fn parse_lsp_server_command(value: Option<&Value>) -> Option<LspServerCommand> {
+    let value = value?;
+    let title = value.get("title").and_then(Value::as_str)?.trim();
+    let command = value.get("command").and_then(Value::as_str)?.trim();
+    if title.is_empty() || command.is_empty() {
+        return None;
+    }
+    let arguments = value
+        .get("arguments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some(LspServerCommand::new(
+        title.to_owned(),
+        command.to_owned(),
+        arguments,
+    ))
+}
+
+fn parse_copilot_sign_in_response(value: &Value) -> Option<CopilotDeviceCodePrompt> {
+    let user_code = value.get("userCode").and_then(Value::as_str)?.trim();
+    let command = parse_lsp_server_command(value.get("command"))?;
+    if user_code.is_empty() {
+        return None;
+    }
+    Some(CopilotDeviceCodePrompt::new(user_code.to_owned(), command))
+}
+
 fn parse_completion_item(server_id: &str, value: &Value) -> Option<LspCompletionItem> {
     let label = value.get("label")?.as_str()?.to_owned();
     let kind = value
@@ -4083,6 +4893,8 @@ mod tests {
         };
 
         let response = server_request_response(
+            CSHARP_SERVER_ID,
+            Some(Path::new(r"P:\volt")),
             Some(&Value::String("workspace/configuration".to_owned())),
             Some(&json!({
                 "items": [
@@ -4095,7 +4907,7 @@ mod tests {
         );
 
         assert_eq!(
-            response,
+            response.result,
             json!([
                 {
                     "formatting": {
@@ -4108,6 +4920,7 @@ mod tests {
                 null
             ])
         );
+        assert!(response.notification.is_none());
         assert_eq!(
             workspace_configuration.did_change_configuration_payload(false),
             Some(json!({
@@ -4137,6 +4950,8 @@ mod tests {
         };
 
         let response = server_request_response(
+            "rust-analyzer",
+            None,
             Some(&Value::String("workspace/configuration".to_owned())),
             Some(&json!({
                 "items": [
@@ -4148,7 +4963,7 @@ mod tests {
         );
 
         assert_eq!(
-            response,
+            response.result,
             json!([
                 {
                     "featureFlag": false,
@@ -4157,89 +4972,55 @@ mod tests {
                 null
             ])
         );
+        assert!(response.notification.is_none());
     }
 
     #[test]
-    fn csharp_solution_fallback_applies_when_settings_are_scalar() {
-        let workspace_configuration = SessionWorkspaceConfiguration {
-            section: Some("csharp".to_owned()),
-            base_settings: Some(Value::Bool(true)),
-            runtime_override: None,
-            csharp_solution_fallback: Some(r"P:\volt\Volt.sln".to_owned()),
-        };
-
+    fn server_request_response_turns_copilot_show_document_into_browser_action() {
         let response = server_request_response(
-            Some(&Value::String("workspace/configuration".to_owned())),
+            COPILOT_SERVER_ID,
+            Some(Path::new(r"P:\volt")),
+            Some(&Value::String("window/showDocument".to_owned())),
             Some(&json!({
-                "items": [
-                    { "section": "csharp" },
-                    { "section": "other" }
-                ]
+                "uri": "https://github.com/login/device"
             })),
-            Some(&workspace_configuration),
+            None,
         );
 
+        assert_eq!(response.result, json!({ "success": true }));
+        let notification = response.notification.expect("showDocument notification");
+        assert_eq!(notification.server_id(), COPILOT_SERVER_ID);
+        assert_eq!(notification.root(), Some(Path::new(r"P:\volt")));
         assert_eq!(
-            response,
-            json!([
-                {
-                    "solutionPathOverride": r"P:\volt\Volt.sln",
-                },
-                null
-            ])
-        );
-        assert_eq!(
-            workspace_configuration.did_change_configuration_payload(false),
-            Some(json!({
-                "csharp": {
-                    "solutionPathOverride": r"P:\volt\Volt.sln",
-                }
-            }))
-        );
-    }
-
-    #[test]
-    fn csharp_metadata_request_params_use_text_document_uri() {
-        assert_eq!(
-            csharp_metadata_request_params("csharp:/metadata/Volt/Program"),
-            json!({
-                "textDocument": {
-                    "uri": "csharp:/metadata/Volt/Program",
-                }
+            notification.action(),
+            Some(&LspNotificationAction::OpenBrowserPopup {
+                url: "https://github.com/login/device".to_owned()
             })
         );
     }
 
     #[test]
-    fn csharp_metadata_response_normalizes_source_text() {
-        let metadata = parse_csharp_metadata_response(
-            "csharp:/metadata/Volt/Program",
+    fn copilot_status_notifications_offer_sign_in_action() {
+        let notification = parse_copilot_status_notification(
+            COPILOT_SERVER_ID,
+            Some(Path::new(r"P:\volt")),
             &json!({
-                "projectName": "Volt",
-                "assemblyName": "Volt",
-                "symbolName": "Program",
-                "text": "public class Program {}",
+                "kind": "Error",
+                "message": "Sign in to use GitHub Copilot."
             }),
         )
-        .expect("metadata response")
-        .expect("metadata");
+        .expect("copilot status notification");
 
+        assert_eq!(notification.level(), LspNotificationLevel::Error);
+        assert_eq!(notification.root(), Some(Path::new(r"P:\volt")));
         assert_eq!(
-            metadata.get("uri"),
-            Some(&Value::String("csharp:/metadata/Volt/Program".to_owned()))
-        );
-        assert_eq!(
-            metadata.get("source"),
-            Some(&Value::String("public class Program {}".to_owned()))
-        );
-        assert_eq!(
-            metadata.get("projectName"),
-            Some(&Value::String("Volt".to_owned()))
+            notification.action(),
+            Some(&LspNotificationAction::CopilotSignIn)
         );
     }
 
     #[test]
-    fn csharp_initialization_options_enable_metadata_uris() {
+    fn csharp_and_copilot_servers_receive_initialization_options() {
         assert_eq!(
             initialization_options_for_server(CSHARP_SERVER_ID),
             Some(json!({
@@ -4250,7 +5031,25 @@ mod tests {
                 }
             }))
         );
+        assert_eq!(
+            initialization_options_for_server(COPILOT_SERVER_ID),
+            Some(json!({
+                "editorInfo": {
+                    "name": "Volt",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "editorPluginInfo": {
+                    "name": "Volt Copilot",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn non_csharp_non_copilot_servers_do_not_receive_initialization_options() {
         assert_eq!(initialization_options_for_server("rust-analyzer"), None);
+        assert_eq!(initialization_options_for_server("marksman"), None);
     }
 
     #[test]
@@ -4596,29 +5395,35 @@ mod tests {
         log.record(LspNotification::new(
             "session:rust-analyzer:global",
             "rust-analyzer",
+            None,
             LspNotificationLevel::Info,
             "LSP · rust-analyzer",
             vec!["Starting".to_owned()],
             None,
             true,
+            None,
         ));
         log.record(LspNotification::new(
             "progress:rust-analyzer:token-1",
             "rust-analyzer",
+            None,
             LspNotificationLevel::Info,
             "LSP · rust-analyzer",
             vec!["Indexing".to_owned()],
             Some(LspNotificationProgress::new(Some(25))),
             true,
+            None,
         ));
         log.record(LspNotification::new(
             "session:rust-analyzer:global",
             "rust-analyzer",
+            None,
             LspNotificationLevel::Success,
             "LSP · rust-analyzer",
             vec!["Ready".to_owned()],
             None,
             false,
+            None,
         ));
 
         let snapshot = log.snapshot();
@@ -4662,7 +5467,7 @@ mod tests {
         });
         let mut tracks = BTreeMap::new();
 
-        let begin = parse_progress_notification("rust-analyzer", &begin, &mut tracks)
+        let begin = parse_progress_notification("rust-analyzer", None, &begin, &mut tracks)
             .expect("begin progress notification");
         assert!(begin.active());
         assert_eq!(begin.body_lines(), ["Indexing", "Scanning workspace"]);
@@ -4673,7 +5478,7 @@ mod tests {
             Some(12)
         );
 
-        let report = parse_progress_notification("rust-analyzer", &report, &mut tracks)
+        let report = parse_progress_notification("rust-analyzer", None, &report, &mut tracks)
             .expect("report progress notification");
         assert!(report.active());
         assert_eq!(report.body_lines(), ["Indexing", "Building symbol graph"]);
@@ -4684,7 +5489,7 @@ mod tests {
             Some(58)
         );
 
-        let end = parse_progress_notification("rust-analyzer", &end, &mut tracks)
+        let end = parse_progress_notification("rust-analyzer", None, &end, &mut tracks)
             .expect("end progress notification");
         assert!(!end.active());
         assert_eq!(
@@ -4696,12 +5501,20 @@ mod tests {
     }
 
     #[test]
-    fn client_capabilities_enable_window_work_done_progress() {
+    fn client_capabilities_enable_window_work_done_progress_and_show_document() {
         let capabilities = client_capabilities().expect("client capabilities");
         assert_eq!(
             capabilities
                 .window
+                .as_ref()
                 .and_then(|window| window.work_done_progress),
+            Some(true)
+        );
+        assert_eq!(
+            capabilities
+                .window
+                .and_then(|window| window.show_document)
+                .map(|show_document| show_document.support),
             Some(true)
         );
     }
@@ -4769,6 +5582,66 @@ mod tests {
         assert!(!manager.has_live_sessions_for_path(&path));
     }
 
+    #[test]
+    fn sync_buffer_preserves_manually_started_default_disabled_sessions() {
+        let path = PathBuf::from("src").join("main.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+        registry
+            .register(
+                crate::LanguageServerSpec::new(
+                    COPILOT_SERVER_ID,
+                    "rust",
+                    ["rs"],
+                    "dummy-lsp",
+                    std::iter::empty::<&str>(),
+                )
+                .with_enabled_by_default(false),
+            )
+            .expect("register copilot");
+        let manager = LspClientManager::new(registry);
+        let rust_session = test_session_handle("rust-analyzer", &path, BTreeMap::new());
+        let copilot_session = test_session_handle(COPILOT_SERVER_ID, &path, BTreeMap::new());
+
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state
+                .sessions
+                .insert(rust_session.key.clone(), Arc::clone(&rust_session));
+            state
+                .sessions
+                .insert(copilot_session.key.clone(), Arc::clone(&copilot_session));
+            let mut tracked = TrackedBufferState {
+                revision: 1,
+                version: 1,
+                ..TrackedBufferState::default()
+            };
+            tracked.sessions.insert(rust_session.key.clone());
+            tracked.sessions.insert(copilot_session.key.clone());
+            state.tracked_buffers.insert(path.clone(), tracked);
+        }
+
+        let labels = manager
+            .sync_buffer(&path, "fn main() {}".to_owned(), 2, None)
+            .expect("sync buffer");
+        assert_eq!(
+            labels,
+            vec![COPILOT_SERVER_ID.to_owned(), "rust-analyzer".to_owned()]
+        );
+        assert_eq!(
+            manager.session_labels_for_path(&path),
+            vec![COPILOT_SERVER_ID.to_owned(), "rust-analyzer".to_owned()]
+        );
+    }
+
     #[cfg(windows)]
     fn spawn_inert_child() -> (Child, ChildStdin) {
         let mut child = Command::new("cmd")
@@ -4827,6 +5700,8 @@ mod tests {
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
+            open_documents: Mutex::new(BTreeMap::new()),
+            text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration,
             transport_log: Arc::new(Mutex::new(LspTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
             next_request_id: AtomicU64::new(1),
@@ -4903,131 +5778,77 @@ mod tests {
     }
 
     #[test]
-    fn csharp_solution_path_override_api_merges_and_clears_runtime_overrides() {
-        let manager = LspClientManager::new(LanguageServerRegistry::new());
-        let root = Path::new(r"P:\volt");
-        let key = SessionKey {
-            server_id: CSHARP_SERVER_ID.to_owned(),
-            root: Some(root.to_path_buf()),
-        };
+    fn sync_buffer_reopens_document_for_restarted_session_with_same_key() {
+        let path = PathBuf::from("src").join("main.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+        let manager = LspClientManager::new(registry);
+        let old_session = test_session_handle("rust-analyzer", &path, BTreeMap::new());
+        let new_session = test_session_handle("rust-analyzer", &path, BTreeMap::new());
 
-        assert!(
-            !manager
-                .has_csharp_solution_path_override(Some(root))
-                .expect("query solution override")
-        );
-        assert!(
-            manager
-                .set_server_settings_override(
-                    CSHARP_SERVER_ID,
-                    Some(root),
-                    json!({ "logging": true })
-                )
-                .expect("set override")
-        );
-        assert!(
-            !manager
-                .has_csharp_solution_path_override(Some(root))
-                .expect("query solution override")
-        );
-        assert!(
-            manager
-                .set_csharp_solution_path_override(Some(root), Path::new(r"P:\volt\Volt.sln"))
-                .expect("set solution override")
-        );
-        assert!(
-            manager
-                .has_csharp_solution_path_override(Some(root))
-                .expect("query solution override")
-        );
-        assert_eq!(
-            manager
-                .state
-                .lock()
-                .expect("state lock")
-                .settings_overrides
-                .get(&key),
-            Some(&json!({
-                "logging": true,
-                "solutionPathOverride": r"P:\volt\Volt.sln",
-            }))
-        );
+        old_session
+            .open_documents
+            .lock()
+            .expect("open documents lock")
+            .insert(path.clone(), "fn main() {}".to_owned());
 
-        assert!(
-            manager
-                .clear_csharp_solution_path_override(Some(root))
-                .expect("clear solution override")
-        );
-        assert!(
-            !manager
-                .has_csharp_solution_path_override(Some(root))
-                .expect("query solution override")
-        );
-        assert_eq!(
-            manager
-                .state
-                .lock()
-                .expect("state lock")
-                .settings_overrides
-                .get(&key),
-            Some(&json!({
-                "logging": true,
-            }))
-        );
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state
+                .sessions
+                .insert(old_session.key.clone(), Arc::clone(&old_session));
+            let mut tracked = TrackedBufferState {
+                revision: 1,
+                version: 1,
+                ..TrackedBufferState::default()
+            };
+            tracked.sessions.insert(old_session.key.clone());
+            state.tracked_buffers.insert(path.clone(), tracked);
 
-        assert!(
-            manager
-                .clear_server_settings_override(CSHARP_SERVER_ID, Some(root))
-                .expect("clear override")
-        );
-        assert!(
-            !manager
-                .state
-                .lock()
-                .expect("state lock")
-                .settings_overrides
-                .contains_key(&key)
-        );
+            state
+                .sessions
+                .insert(new_session.key.clone(), Arc::clone(&new_session));
+        }
+
+        manager
+            .sync_buffer(&path, "fn main() {}".to_owned(), 2, None)
+            .expect("sync buffer");
+
+        assert!(new_session.has_open_document(&path));
     }
 
     #[test]
-    fn planned_server_root_for_path_matches_prepared_csharp_session_root() {
-        let unique = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("volt-csharp-root-{unique}"));
-        let project_dir = root.join("src").join("App");
-        fs::create_dir_all(&project_dir).expect("create project directory");
-        fs::write(root.join("Volt.sln"), "").expect("write solution");
-        fs::write(project_dir.join("App.csproj"), "").expect("write project");
-        let file_path = project_dir.join("Program.cs");
-        fs::write(&file_path, "class Program {}").expect("write source file");
-
-        let mut registry = LanguageServerRegistry::new();
-        registry
-            .register(
-                crate::LanguageServerSpec::new(
-                    CSHARP_SERVER_ID,
-                    "csharp",
-                    ["cs"],
-                    "csharp-ls",
-                    std::iter::empty::<&str>(),
-                )
-                .with_root_strategy(crate::LanguageServerRootStrategy::MarkersOrWorkspace)
-                .with_root_markers(["*.sln", "*.csproj"]),
-            )
-            .expect("register csharp server");
-        let manager = LspClientManager::new(registry);
-
-        assert_eq!(
-            manager
-                .planned_server_root_for_path(CSHARP_SERVER_ID, &file_path, Some(root.as_path()))
-                .expect("plan csharp session root"),
-            Some(project_dir.clone())
+    fn incremental_sync_uses_full_document_replacement_range() {
+        let change = text_document_content_change(
+            TextDocumentSyncKind::INCREMENTAL,
+            "line one\nline two",
+            "updated",
         );
 
-        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            change.range,
+            Some(Range::new(Position::new(0, 0), Position::new(1, 8)))
+        );
+        assert_eq!(change.range_length, None);
+        assert_eq!(change.text, "updated");
+    }
+
+    #[test]
+    fn full_sync_uses_null_range_change() {
+        let change =
+            text_document_content_change(TextDocumentSyncKind::FULL, "line one", "updated");
+
+        assert_eq!(change.range, None);
+        assert_eq!(change.range_length, None);
+        assert_eq!(change.text, "updated");
     }
 
     #[cfg(windows)]
@@ -5155,7 +5976,7 @@ mod tests {
             "message": "failed to load workspace"
         });
         let notification =
-            parse_show_message_notification("rust-analyzer", &params).expect("notification");
+            parse_show_message_notification("rust-analyzer", None, &params).expect("notification");
         assert_eq!(notification.level(), LspNotificationLevel::Error);
         assert_eq!(notification.body_lines(), ["failed to load workspace"]);
         assert!(!notification.active());

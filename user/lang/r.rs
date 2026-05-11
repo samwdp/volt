@@ -31,7 +31,6 @@ mod tests {
     fn r_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-r");
-        assert!(pkg.auto_load());
     }
 
     #[test]

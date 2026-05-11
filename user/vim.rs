@@ -147,6 +147,24 @@ pub fn package() -> PluginPackage {
             "last-line",
         ),
         hook_command(
+            "vim.current-line-top",
+            "Redraws with the current line at the top of the window.",
+            "editor.vim.current-line-top",
+            "current-line-top",
+        ),
+        hook_command(
+            "vim.center-current-line",
+            "Redraws with the current line at the center of the window.",
+            "editor.vim.center-current-line",
+            "center-current-line",
+        ),
+        hook_command(
+            "vim.current-line-bottom",
+            "Redraws with the current line at the bottom of the window.",
+            "editor.vim.current-line-bottom",
+            "current-line-bottom",
+        ),
+        hook_command(
             "vim.enter-insert-mode",
             "Switches the editor into Vim insert mode.",
             "editor.mode.insert",
@@ -567,6 +585,18 @@ pub fn package() -> PluginPackage {
             "visual-join",
         ),
         hook_command(
+            "vim.visual-move-down",
+            "Moves selected visual lines down one line and reindents them.",
+            "editor.vim.edit",
+            "visual-move-down",
+        ),
+        hook_command(
+            "vim.visual-move-up",
+            "Moves selected visual lines up one line and reindents them.",
+            "editor.vim.edit",
+            "visual-move-up",
+        ),
+        hook_command(
             "vim.visual-swap-anchor",
             "Swaps the active and anchor ends of the current visual selection.",
             "editor.vim.edit",
@@ -766,15 +796,15 @@ pub fn package() -> PluginPackage {
         ),
         // Undo/Redo commands
         normal_binding("u", "vim.undo", PluginKeymapScope::Workspace),
-        normal_binding(
+        normal_binding_commands(
             "Ctrl+d",
-            "vim.scroll-half-page-down",
+            &["vim.scroll-half-page-down", "vim.center-current-line"],
             PluginKeymapScope::Workspace,
         ),
         normal_binding("Ctrl+r", "vim.redo", PluginKeymapScope::Workspace),
-        normal_binding(
+        normal_binding_commands(
             "Ctrl+u",
-            "vim.scroll-half-page-up",
+            &["vim.scroll-half-page-up", "vim.center-current-line"],
             PluginKeymapScope::Workspace,
         ),
         normal_binding(
@@ -789,6 +819,32 @@ pub fn package() -> PluginPackage {
         ),
         normal_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         normal_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
+        normal_binding(
+            "z Enter",
+            "vim.current-line-top",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding("z t", "vim.current-line-top", PluginKeymapScope::Workspace),
+        normal_binding(
+            "z .",
+            "vim.center-current-line",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "z z",
+            "vim.center-current-line",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "z -",
+            "vim.current-line-bottom",
+            PluginKeymapScope::Workspace,
+        ),
+        normal_binding(
+            "z b",
+            "vim.current-line-bottom",
+            PluginKeymapScope::Workspace,
+        ),
         // Window navigation
         normal_binding(
             "Ctrl+h",
@@ -932,14 +988,14 @@ pub fn package() -> PluginPackage {
         ),
         // Registers
         visual_binding("\"", "vim.select-register", PluginKeymapScope::Workspace),
-        visual_binding(
+        visual_binding_commands(
             "Ctrl+d",
-            "vim.scroll-half-page-down",
+            &["vim.scroll-half-page-down", "vim.center-current-line"],
             PluginKeymapScope::Workspace,
         ),
-        visual_binding(
+        visual_binding_commands(
             "Ctrl+u",
-            "vim.scroll-half-page-up",
+            &["vim.scroll-half-page-up", "vim.center-current-line"],
             PluginKeymapScope::Workspace,
         ),
         visual_binding(
@@ -954,6 +1010,32 @@ pub fn package() -> PluginPackage {
         ),
         visual_binding("Ctrl+b", "vim.scroll-page-up", PluginKeymapScope::Workspace),
         visual_binding("Ctrl+y", "vim.scroll-line-up", PluginKeymapScope::Workspace),
+        visual_binding(
+            "z Enter",
+            "vim.current-line-top",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding("z t", "vim.current-line-top", PluginKeymapScope::Workspace),
+        visual_binding(
+            "z .",
+            "vim.center-current-line",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "z z",
+            "vim.center-current-line",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "z -",
+            "vim.current-line-bottom",
+            PluginKeymapScope::Workspace,
+        ),
+        visual_binding(
+            "z b",
+            "vim.current-line-bottom",
+            PluginKeymapScope::Workspace,
+        ),
         // Deleting text
         visual_binding("d", "vim.visual-delete", PluginKeymapScope::Workspace),
         visual_binding("x", "vim.visual-delete", PluginKeymapScope::Workspace),
@@ -969,8 +1051,10 @@ pub fn package() -> PluginPackage {
         visual_binding("A", "vim.visual-block-append", PluginKeymapScope::Workspace),
         visual_binding(">", "vim.visual-indent", PluginKeymapScope::Workspace),
         visual_binding("<", "vim.visual-outdent", PluginKeymapScope::Workspace),
-        visual_binding("J", "vim.visual-join", PluginKeymapScope::Workspace),
+        visual_binding("J", "vim.visual-move-down", PluginKeymapScope::Workspace),
+        visual_binding("K", "vim.visual-move-up", PluginKeymapScope::Workspace),
         visual_binding("=", "vim.visual-format", PluginKeymapScope::Workspace),
+        visual_binding("g J", "vim.visual-join", PluginKeymapScope::Workspace),
         visual_binding("g q", "vim.visual-format", PluginKeymapScope::Workspace),
         visual_binding("u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
         visual_binding("g u", "vim.visual-lowercase", PluginKeymapScope::Workspace),
@@ -1051,6 +1135,15 @@ fn normal_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> 
     PluginKeyBinding::new(chord, command_name, scope).with_vim_mode(PluginVimMode::Normal)
 }
 
+fn normal_binding_commands(
+    chord: &str,
+    command_names: &[&str],
+    scope: PluginKeymapScope,
+) -> PluginKeyBinding {
+    PluginKeyBinding::new_many(chord, command_names.iter().copied(), scope)
+        .with_vim_mode(PluginVimMode::Normal)
+}
+
 fn leader_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
     PluginKeyBinding::new(format!("{LEADER_KEY} {chord}"), command_name, scope)
         .with_vim_mode(PluginVimMode::Normal)
@@ -1058,6 +1151,15 @@ fn leader_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> 
 
 fn visual_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
     PluginKeyBinding::new(chord, command_name, scope).with_vim_mode(PluginVimMode::Visual)
+}
+
+fn visual_binding_commands(
+    chord: &str,
+    command_names: &[&str],
+    scope: PluginKeymapScope,
+) -> PluginKeyBinding {
+    PluginKeyBinding::new_many(chord, command_names.iter().copied(), scope)
+        .with_vim_mode(PluginVimMode::Visual)
 }
 
 #[cfg(test)]
@@ -1116,6 +1218,26 @@ mod tests {
                 && binding.vim_mode() == PluginVimMode::Normal
         }));
         assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+d"
+                && binding.vim_mode() == PluginVimMode::Normal
+                && binding
+                    .command_names()
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["vim.scroll-half-page-down", "vim.center-current-line"]
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+u"
+                && binding.vim_mode() == PluginVimMode::Normal
+                && binding
+                    .command_names()
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["vim.scroll-half-page-up", "vim.center-current-line"]
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
             binding.chord() == "Ctrl+b"
                 && binding.command_name() == "vim.scroll-page-up"
                 && binding.vim_mode() == PluginVimMode::Normal
@@ -1126,10 +1248,50 @@ mod tests {
                 && binding.vim_mode() == PluginVimMode::Visual
         }));
         assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+d"
+                && binding.vim_mode() == PluginVimMode::Visual
+                && binding
+                    .command_names()
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["vim.scroll-half-page-down", "vim.center-current-line"]
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+u"
+                && binding.vim_mode() == PluginVimMode::Visual
+                && binding
+                    .command_names()
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["vim.scroll-half-page-up", "vim.center-current-line"]
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
             binding.chord() == "Ctrl+b"
                 && binding.command_name() == "vim.scroll-page-up"
                 && binding.vim_mode() == PluginVimMode::Visual
         }));
+        for (chord, command_name, vim_mode) in [
+            ("z Enter", "vim.current-line-top", PluginVimMode::Normal),
+            ("z t", "vim.current-line-top", PluginVimMode::Normal),
+            ("z .", "vim.center-current-line", PluginVimMode::Normal),
+            ("z z", "vim.center-current-line", PluginVimMode::Normal),
+            ("z -", "vim.current-line-bottom", PluginVimMode::Normal),
+            ("z b", "vim.current-line-bottom", PluginVimMode::Normal),
+            ("z Enter", "vim.current-line-top", PluginVimMode::Visual),
+            ("z t", "vim.current-line-top", PluginVimMode::Visual),
+            ("z .", "vim.center-current-line", PluginVimMode::Visual),
+            ("z z", "vim.center-current-line", PluginVimMode::Visual),
+            ("z -", "vim.current-line-bottom", PluginVimMode::Visual),
+            ("z b", "vim.current-line-bottom", PluginVimMode::Visual),
+        ] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command_name
+                    && binding.vim_mode() == vim_mode
+            }));
+        }
     }
 
     #[test]
@@ -1137,6 +1299,7 @@ mod tests {
         let package = package();
         for (chord, command_name, vim_mode) in [
             ("g c", "vim.visual-toggle-comment", PluginVimMode::Visual),
+            ("g J", "vim.visual-join", PluginVimMode::Visual),
             ("g q", "vim.start-format-operator", PluginVimMode::Normal),
             ("g q", "vim.visual-format", PluginVimMode::Visual),
             ("g u", "vim.visual-lowercase", PluginVimMode::Visual),
@@ -1160,7 +1323,8 @@ mod tests {
             ("r", "vim.visual-replace-char"),
             (">", "vim.visual-indent"),
             ("<", "vim.visual-outdent"),
-            ("J", "vim.visual-join"),
+            ("J", "vim.visual-move-down"),
+            ("K", "vim.visual-move-up"),
         ] {
             assert!(package.key_bindings().iter().any(|binding| {
                 binding.chord() == chord

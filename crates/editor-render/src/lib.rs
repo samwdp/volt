@@ -375,6 +375,65 @@ pub fn vertical_pane_rects(width: u32, content_height: u32, pane_count: usize) -
     ]
 }
 
+const GOLDEN_RATIO: f64 = 1.618_033_988_75;
+
+fn golden_split_size(total: u32) -> u32 {
+    if total <= 1 {
+        return total;
+    }
+    ((total as f64 / GOLDEN_RATIO).round() as u32).clamp(1, total - 1)
+}
+
+/// Splits the available content area into one or two stacked pane rectangles,
+/// optionally sizing the active pane using the golden ratio.
+pub fn horizontal_pane_rects_for_active(
+    width: u32,
+    content_height: u32,
+    pane_count: usize,
+    active_pane_index: usize,
+    golden_ratio: bool,
+) -> Vec<PixelRect> {
+    if pane_count != 2 || !golden_ratio || active_pane_index > 1 {
+        return horizontal_pane_rects(width, content_height, pane_count);
+    }
+
+    let active_height = golden_split_size(content_height);
+    let first_height = if active_pane_index == 0 {
+        active_height
+    } else {
+        content_height - active_height
+    };
+    vec![
+        PixelRect::new(0, 0, width, first_height),
+        PixelRect::new(0, first_height as i32, width, content_height - first_height),
+    ]
+}
+
+/// Splits the available content area into one or two side-by-side pane rectangles,
+/// optionally sizing the active pane using the golden ratio.
+pub fn vertical_pane_rects_for_active(
+    width: u32,
+    content_height: u32,
+    pane_count: usize,
+    active_pane_index: usize,
+    golden_ratio: bool,
+) -> Vec<PixelRect> {
+    if pane_count != 2 || !golden_ratio || active_pane_index > 1 {
+        return vertical_pane_rects(width, content_height, pane_count);
+    }
+
+    let active_width = golden_split_size(width);
+    let first_width = if active_pane_index == 0 {
+        active_width
+    } else {
+        width - active_width
+    };
+    vec![
+        PixelRect::new(0, 0, first_width, content_height),
+        PixelRect::new(first_width as i32, 0, width - first_width, content_height),
+    ]
+}
+
 /// Returns a centered rectangle of the requested size inside the container.
 pub fn centered_rect(
     container_width: u32,
@@ -403,8 +462,9 @@ pub fn path_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_rect, font_data_matches_name, horizontal_pane_rects, normalize_font_name,
-        preferred_font_search_roots, rect_tuple, vertical_pane_rects,
+        centered_rect, font_data_matches_name, horizontal_pane_rects,
+        horizontal_pane_rects_for_active, normalize_font_name, preferred_font_search_roots,
+        rect_tuple, vertical_pane_rects, vertical_pane_rects_for_active,
     };
 
     #[test]
@@ -439,6 +499,34 @@ mod tests {
         let rects = vertical_pane_rects(120, 60, 2);
         assert_eq!(rect_tuple(rects[0]), (0, 0, 60, 60));
         assert_eq!(rect_tuple(rects[1]), (60, 0, 60, 60));
+    }
+
+    #[test]
+    fn vertical_golden_ratio_grows_the_first_active_pane() {
+        let rects = vertical_pane_rects_for_active(160, 120, 2, 0, true);
+        assert_eq!(rect_tuple(rects[0]), (0, 0, 99, 120));
+        assert_eq!(rect_tuple(rects[1]), (99, 0, 61, 120));
+    }
+
+    #[test]
+    fn vertical_golden_ratio_grows_the_second_active_pane() {
+        let rects = vertical_pane_rects_for_active(160, 120, 2, 1, true);
+        assert_eq!(rect_tuple(rects[0]), (0, 0, 61, 120));
+        assert_eq!(rect_tuple(rects[1]), (61, 0, 99, 120));
+    }
+
+    #[test]
+    fn horizontal_golden_ratio_grows_the_first_active_pane() {
+        let rects = horizontal_pane_rects_for_active(200, 100, 2, 0, true);
+        assert_eq!(rect_tuple(rects[0]), (0, 0, 200, 62));
+        assert_eq!(rect_tuple(rects[1]), (0, 62, 200, 38));
+    }
+
+    #[test]
+    fn horizontal_golden_ratio_grows_the_second_active_pane() {
+        let rects = horizontal_pane_rects_for_active(200, 100, 2, 1, true);
+        assert_eq!(rect_tuple(rects[0]), (0, 0, 200, 38));
+        assert_eq!(rect_tuple(rects[1]), (0, 38, 200, 62));
     }
 
     #[test]

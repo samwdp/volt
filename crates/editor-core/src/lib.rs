@@ -146,14 +146,36 @@ impl EditorRuntime {
         vim_mode: KeymapVimMode,
         source: CommandSource,
     ) -> Result<(), KeymapError> {
-        let command_name = command_name.into();
+        self.register_key_binding_for_mode_many(
+            chord,
+            vec![command_name.into()],
+            scope,
+            vim_mode,
+            source,
+        )
+    }
 
-        if !self.commands.contains(&command_name) {
-            return Err(KeymapError::UnknownCommand(command_name));
+    /// Registers a keybinding for already-known commands in a specific Vim mode.
+    pub fn register_key_binding_for_mode_many(
+        &mut self,
+        chord: impl Into<String>,
+        command_names: Vec<String>,
+        scope: KeymapScope,
+        vim_mode: KeymapVimMode,
+        source: CommandSource,
+    ) -> Result<(), KeymapError> {
+        assert!(
+            !command_names.is_empty(),
+            "keybinding requires at least one command"
+        );
+        for command_name in &command_names {
+            if !self.commands.contains(command_name) {
+                return Err(KeymapError::UnknownCommand(command_name.clone()));
+            }
         }
 
         self.keymaps
-            .register_for_mode(chord, command_name, scope, vim_mode, source)
+            .register_for_mode_many(chord, command_names, scope, vim_mode, source)
     }
 
     /// Resolves a keybinding and executes its target command.
@@ -173,14 +195,18 @@ impl EditorRuntime {
         chord: &str,
     ) -> Result<(), KeymapError> {
         let binding = self.keymaps.resolve_for_mode(scope, vim_mode, chord)?;
-        let command_name = binding.command_name().to_owned();
+        let command_names = binding.command_names().to_vec();
 
-        self.execute_command(&command_name)
-            .map_err(|error| KeymapError::CommandExecution {
-                chord: chord.to_owned(),
-                command: command_name,
-                message: error.to_string(),
-            })
+        for command_name in command_names {
+            self.execute_command(&command_name)
+                .map_err(|error| KeymapError::CommandExecution {
+                    chord: chord.to_owned(),
+                    command: command_name.clone(),
+                    message: error.to_string(),
+                })?;
+        }
+
+        Ok(())
     }
 
     /// Registers a new custom hook.
@@ -581,6 +607,64 @@ mod tests {
                 "normal-x".to_owned(),
                 "visual-x".to_owned(),
                 "undo".to_owned(),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_executes_stacked_keybinding_commands_in_order() -> Result<(), String> {
+        let mut runtime = EditorRuntime::new();
+        runtime.services_mut().insert(EventLog::default());
+
+        for (command_name, entry) in [
+            ("vim.scroll-half-page-down", "half-page-down"),
+            ("vim.center-current-line", "center-current-line"),
+        ] {
+            runtime
+                .register_command(
+                    command_name,
+                    command_name,
+                    CommandSource::Core,
+                    move |runtime| {
+                        let log = runtime
+                            .services_mut()
+                            .get_mut::<EventLog>()
+                            .ok_or_else(|| "event log service missing".to_owned())?;
+                        log.0.push(entry.to_owned());
+                        Ok(())
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        runtime
+            .register_key_binding_for_mode_many(
+                "Ctrl+d",
+                vec![
+                    "vim.scroll-half-page-down".to_owned(),
+                    "vim.center-current-line".to_owned(),
+                ],
+                KeymapScope::Workspace,
+                KeymapVimMode::Normal,
+                CommandSource::Core,
+            )
+            .map_err(|error| error.to_string())?;
+
+        runtime
+            .execute_key_binding_for_mode(&KeymapScope::Workspace, KeymapVimMode::Normal, "Ctrl+d")
+            .map_err(|error| error.to_string())?;
+
+        let log = runtime
+            .services()
+            .get::<EventLog>()
+            .ok_or_else(|| "event log service missing".to_owned())?;
+        assert_eq!(
+            log.0,
+            vec![
+                "half-page-down".to_owned(),
+                "center-current-line".to_owned(),
             ]
         );
 

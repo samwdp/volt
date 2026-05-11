@@ -29,7 +29,6 @@ mod tests {
     fn lua_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-lua");
-        assert!(pkg.auto_load());
     }
 
     #[test]

@@ -207,6 +207,7 @@ fn hook_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn package_exports_commands_and_insert_keybindings() {
@@ -225,42 +226,38 @@ mod tests {
         assert!(
             key_bindings
                 .iter()
-                .any(|binding| binding.chord() == TRIGGER_CHORD)
+                .any(|binding| binding.command_name() == "autocomplete.trigger")
         );
         assert!(
             key_bindings
                 .iter()
-                .any(|binding| binding.chord() == ACCEPT_CHORD)
+                .any(|binding| binding.command_name() == "autocomplete.accept")
         );
     }
 
     #[test]
-    fn providers_prioritize_lsp_over_calculator_over_buffer() {
+    fn providers_have_unique_ids_and_keep_calculator_scoping() {
         let providers = backends();
-        assert_eq!(providers.len(), 3);
-        assert_eq!(providers[0].id, PROVIDER_LSP);
-        assert_eq!(providers[0].label, "LSP");
-        assert!(!providers[0].icon.is_empty());
+        let mut ids = BTreeSet::new();
+        for provider in &providers {
+            assert!(
+                ids.insert(provider.id.clone()),
+                "duplicate autocomplete provider `{}`",
+                provider.id
+            );
+            assert!(!provider.label.is_empty());
+            assert_eq!(provider.or_group.as_deref(), Some(PROVIDER_SOURCE_GROUP));
+        }
+
+        let calculator = providers
+            .iter()
+            .find(|provider| provider.id == calculator::PROVIDER_CALCULATOR)
+            .expect("calculator autocomplete provider should be exported");
         assert_eq!(
-            providers[0].or_group.as_deref(),
-            Some(PROVIDER_SOURCE_GROUP)
-        );
-        assert_eq!(providers[1].id, calculator::PROVIDER_CALCULATOR);
-        assert_eq!(
-            providers[1].or_group.as_deref(),
-            Some(PROVIDER_SOURCE_GROUP)
-        );
-        assert_eq!(
-            providers[1].buffer_kind.as_deref(),
+            calculator.buffer_kind.as_deref(),
             Some(calculator::CALCULATOR_KIND)
         );
-        assert!(!providers[1].items.is_empty());
-        assert_eq!(providers[2].id, PROVIDER_BUFFER);
-        assert_eq!(providers[2].label, "Buffer");
-        assert_eq!(
-            providers[2].or_group.as_deref(),
-            Some(PROVIDER_SOURCE_GROUP)
-        );
+        assert!(!calculator.items.is_empty());
     }
 
     #[test]

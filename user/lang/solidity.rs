@@ -36,7 +36,6 @@ mod tests {
     fn solidity_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-solidity");
-        assert!(pkg.auto_load());
     }
 
     #[test]

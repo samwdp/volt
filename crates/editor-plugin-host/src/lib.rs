@@ -8,8 +8,8 @@ use editor_core::{
 use editor_path::PathPattern;
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, GitStatusPrefix, HoverProvider, LigatureConfig, OilKeyAction,
-    PdfOpenMode, PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage, PluginVimMode,
-    TerminalConfig, WorkspaceRoot,
+    PaneConfig, PdfOpenMode, PluginAction, PluginActionKind, PluginKeymapScope, PluginPackage,
+    PluginVimMode, TerminalConfig, WorkspaceRoot,
 };
 pub use editor_plugin_api::{StatuslineContext, UserLibrary};
 
@@ -133,6 +133,11 @@ impl UserLibrary for NullUserLibrary {
     fn commandline_enabled(&self) -> bool {
         true
     }
+    fn pane_config(&self) -> PaneConfig {
+        PaneConfig {
+            golden_ratio: false,
+        }
+    }
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
     }
@@ -162,6 +167,7 @@ impl UserLibrary for NullUserLibrary {
             toggle_trash: "gt",
             open_external: "gx",
             set_tab_local_root: "gl",
+            create_git_worktree: "gwn",
         }
     }
     fn oil_keydown_action(&self, _chord: &str) -> Option<OilKeyAction> {
@@ -378,9 +384,13 @@ fn register_package(runtime: &mut EditorRuntime, package: &PluginPackage) -> Res
     }
 
     for binding in package.key_bindings() {
-        runtime.register_key_binding_for_mode(
+        runtime.register_key_binding_for_mode_many(
             binding.chord(),
-            binding.command_name(),
+            binding
+                .command_names()
+                .iter()
+                .map(|command_name| command_name.as_str().to_owned())
+                .collect(),
             map_scope(binding.scope()),
             map_vim_mode(binding.vim_mode()),
             CommandSource::UserPackage(package.name().to_owned()),

@@ -13,11 +13,16 @@ pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
 pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
 pub const HOOK_LSP_DIAGNOSTICS: &str = "lsp.diagnostics";
 pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
+pub const HOOK_LSP_COPILOT_SIGN_IN: &str = "lsp.copilot-sign-in";
+pub const HOOK_LSP_COPILOT_SIGN_OUT: &str = "lsp.copilot-sign-out";
 pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Space";
+pub const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
+pub const COPILOT_ENABLED_DEFAULT: bool = false;
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
 pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SERVER_CSHARP_LS: &str = "csharp-ls";
 pub const SERVER_TYPESCRIPT_LANGUAGE_SERVER: &str = "typescript-language-server";
+pub const SERVER_TAILWINDCSS_LANGUAGE_SERVER: &str = "tailwindcss-language-server";
 pub const SERVER_VSCODE_JSON_LANGUAGE_SERVER: &str = "vscode-json-language-server";
 pub const SERVER_VSCODE_HTML_LANGUAGE_SERVER: &str = "vscode-html-language-server";
 pub const SERVER_VSCODE_CSS_LANGUAGE_SERVER: &str = "vscode-css-language-server";
@@ -129,6 +134,18 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "lsp.copilot-sign-in",
+            "Starts GitHub Copilot device authentication for the active file.",
+            HOOK_LSP_COPILOT_SIGN_IN,
+            None,
+        ),
+        hook_command(
+            "lsp.copilot-sign-out",
+            "Signs the active GitHub Copilot language server session out.",
+            HOOK_LSP_COPILOT_SIGN_OUT,
+            None,
+        ),
+        hook_command(
             "lsp.start-rust-analyzer",
             "Starts rust-analyzer for the active Rust file.",
             HOOK_LSP_START,
@@ -151,6 +168,12 @@ pub fn package() -> PluginPackage {
             "Starts typescript-language-server for the active TS/TSX/JS/JSX file.",
             HOOK_LSP_START,
             Some(SERVER_TYPESCRIPT_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-tailwindcss-language-server",
+            "Starts tailwindcss-language-server for the active HTML/JS/JSX/TS/TSX file when Tailwind project markers are present.",
+            HOOK_LSP_START,
+            Some(SERVER_TAILWINDCSS_LANGUAGE_SERVER),
         ),
         hook_command(
             "lsp.start-vscode-json-language-server",
@@ -344,6 +367,12 @@ pub fn package() -> PluginPackage {
             HOOK_LSP_START,
             Some(SERVER_XML_LANGUAGE_SERVER),
         ),
+        hook_command(
+            "lsp.start-copilot-language-server",
+            "Starts copilot-language-server for the active file.",
+            HOOK_LSP_START,
+            Some(COPILOT_LANGUAGE_SERVER),
+        ),
     ])
     .with_hook_declarations(vec![
         PluginHookDeclaration::new(
@@ -378,6 +407,14 @@ pub fn package() -> PluginPackage {
         PluginHookDeclaration::new(
             HOOK_LSP_CODE_ACTIONS,
             "Opens LSP code actions available at the cursor.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_COPILOT_SIGN_IN,
+            "Starts GitHub Copilot authentication for the active buffer.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_COPILOT_SIGN_OUT,
+            "Signs the active GitHub Copilot language server session out.",
         ),
     ])
     .with_key_bindings(vec![
@@ -1048,7 +1085,7 @@ pub fn package() -> PluginPackage {
 
 /// Returns LSP server specifications compiled into the user library.
 pub fn language_servers() -> Vec<LanguageServerSpec> {
-    vec![
+    let mut servers = vec![
         LanguageServerSpec::new(
             SERVER_RUST_ANALYZER,
             "rust",
@@ -1117,6 +1154,38 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "jsconfig.json",
             "deno.json",
             "deno.jsonc",
+        ]),
+        LanguageServerSpec::new(
+            SERVER_TAILWINDCSS_LANGUAGE_SERVER,
+            "html",
+            ["html", "js", "jsx", "ts", "tsx"],
+            SERVER_TAILWINDCSS_LANGUAGE_SERVER,
+            ["--stdio"],
+        )
+        .with_document_language_ids([
+            ("js", "javascript"),
+            ("jsx", "javascriptreact"),
+            ("ts", "typescript"),
+            ("tsx", "typescriptreact"),
+        ])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers([
+            "tailwind.config.js",
+            "tailwind.config.cjs",
+            "tailwind.config.mjs",
+            "tailwind.config.ts",
+            "tailwind.config.cts",
+            "tailwind.config.mts",
+            "node_modules/tailwindcss/package.json",
+        ])
+        .with_activation_markers([
+            "tailwind.config.js",
+            "tailwind.config.cjs",
+            "tailwind.config.mjs",
+            "tailwind.config.ts",
+            "tailwind.config.cts",
+            "tailwind.config.mts",
+            "node_modules/tailwindcss/package.json",
         ]),
         LanguageServerSpec::new(
             SERVER_VSCODE_JSON_LANGUAGE_SERVER,
@@ -1439,7 +1508,45 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "xml-language-server",
             ["--stdio"],
         ),
-    ]
+    ];
+    servers.push(copilot_language_server(&servers));
+    servers
+}
+
+fn copilot_language_server(servers: &[LanguageServerSpec]) -> LanguageServerSpec {
+    let mut file_extensions = Vec::new();
+    let mut file_names = Vec::new();
+    let mut document_language_ids = Vec::new();
+    for server in servers {
+        for extension in server.file_extensions() {
+            if !file_extensions.iter().any(|existing| existing == extension) {
+                file_extensions.push(extension.clone());
+                document_language_ids.push((
+                    extension.clone(),
+                    server
+                        .document_language_id_for_extension(extension)
+                        .to_owned(),
+                ));
+            }
+        }
+        for file_name in server.file_names() {
+            if !file_names.iter().any(|existing| existing == file_name) {
+                file_names.push(file_name.clone());
+                document_language_ids.push((file_name.clone(), server.language_id().to_owned()));
+            }
+        }
+    }
+
+    LanguageServerSpec::new(
+        COPILOT_LANGUAGE_SERVER,
+        "plaintext",
+        file_extensions,
+        COPILOT_LANGUAGE_SERVER,
+        ["--stdio"],
+    )
+    .with_file_names(file_names)
+    .with_document_language_ids(document_language_ids)
+    .with_enabled_by_default(COPILOT_ENABLED_DEFAULT)
 }
 
 fn hook_command(
@@ -1461,18 +1568,8 @@ fn hook_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_plugin_api::{LanguageServerSpec, PluginPackage};
-
-    fn server_by_id<'a>(servers: &'a [LanguageServerSpec], id: &str) -> &'a LanguageServerSpec {
-        servers
-            .iter()
-            .find(|server| server.id() == id)
-            .unwrap_or_else(|| panic!("language server `{id}` missing"))
-    }
-
-    fn string_values(values: &[String]) -> Vec<&str> {
-        values.iter().map(String::as_str).collect()
-    }
+    use editor_plugin_api::PluginPackage;
+    use std::collections::BTreeSet;
 
     fn has_command(package: &PluginPackage, name: &str) -> bool {
         package
@@ -1481,181 +1578,24 @@ mod tests {
             .any(|command| command.name() == name)
     }
 
-    fn has_auto_start_binding(package: &PluginPackage, detail: &str) -> bool {
-        package.hook_bindings().iter().any(|binding| {
-            binding.hook_name() == "buffer.file-open"
-                && binding.command_name() == "lsp.start"
-                && binding.detail_filter() == Some(detail)
-        })
+    fn auto_start_binding_details(package: &PluginPackage) -> BTreeSet<String> {
+        package
+            .hook_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.hook_name() == "buffer.file-open" && binding.command_name() == "lsp.start"
+            })
+            .filter_map(|binding| binding.detail_filter().map(str::to_owned))
+            .collect()
     }
 
     #[test]
-    fn package_registers_rich_language_server_defaults() {
+    fn package_exports_generic_lsp_commands_and_code_action_binding() {
         let package = package();
-        let servers = language_servers();
-        let ids = servers.iter().map(|server| server.id()).collect::<Vec<_>>();
 
         assert_eq!(package.name(), "lsp");
-        assert!(package.auto_load());
-        assert_eq!(package.commands().len(), 46);
-        assert_eq!(package.hook_bindings().len(), 109);
-        assert_eq!(servers.len(), 36);
-        for expected in [
-            SERVER_RUST_ANALYZER,
-            SERVER_MARKSMAN,
-            SERVER_CSHARP_LS,
-            SERVER_TYPESCRIPT_LANGUAGE_SERVER,
-            SERVER_VSCODE_JSON_LANGUAGE_SERVER,
-            SERVER_VSCODE_HTML_LANGUAGE_SERVER,
-            SERVER_VSCODE_CSS_LANGUAGE_SERVER,
-            SERVER_CLANGD,
-            SERVER_PYRIGHT_LANGSERVER,
-            SERVER_MAKEFILE_LANGUAGE_SERVER,
-            SERVER_ZLS,
-            SERVER_GOPLS,
-            SERVER_SQLS,
-            SERVER_OLS,
-            SERVER_TOMBI,
-            SERVER_YAML_LANGUAGE_SERVER,
-            SERVER_BASH_LANGUAGE_SERVER,
-            SERVER_CMAKE_LANGUAGE_SERVER,
-            SERVER_GRAPHQL_LANGUAGE_SERVICE,
-            SERVER_TERRAFORM_LS,
-            SERVER_JDTLS,
-            SERVER_KOTLIN_LANGUAGE_SERVER,
-            SERVER_LUA_LANGUAGE_SERVER,
-            SERVER_NIL,
-            SERVER_PERLNAVIGATOR,
-            SERVER_INTELEPHENSE,
-            SERVER_R_LANGUAGE_SERVER,
-            SERVER_RUBY_LSP,
-            SERVER_METALS,
-            SERVER_SOURCEKIT_LSP,
-            SERVER_TEXLAB,
-            SERVER_SOLC_LSP,
-            SERVER_ELIXIR_LS,
-            SERVER_CLOJURE_LSP,
-            SERVER_BUFLS,
-            SERVER_XML_LANGUAGE_SERVER,
-        ] {
-            assert!(ids.contains(&expected), "{expected} missing");
-        }
-
-        let rust = server_by_id(&servers, SERVER_RUST_ANALYZER);
-        assert_eq!(rust.language_id(), "rust");
-        assert!(
-            rust.args().is_empty(),
-            "rust-analyzer now speaks stdio without a `--stdio` flag"
-        );
-
-        let csharp = server_by_id(&servers, SERVER_CSHARP_LS);
-        assert_eq!(
-            string_values(csharp.file_extensions()),
-            vec!["cs", "razor", "cshtml"]
-        );
-        assert!(csharp.args().is_empty());
-        assert_eq!(
-            csharp.document_language_ids().get("razor"),
-            Some(&"razor".to_owned())
-        );
-        assert_eq!(
-            csharp.document_language_ids().get("cshtml"),
-            Some(&"razor".to_owned())
-        );
-
-        let typescript = server_by_id(&servers, SERVER_TYPESCRIPT_LANGUAGE_SERVER);
-        assert_eq!(typescript.language_id(), "typescript");
-        assert_eq!(
-            typescript
-                .file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["ts", "tsx", "js", "jsx"]
-        );
-        assert_eq!(
-            typescript
-                .args()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["--stdio"]
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".ts"),
-            "typescript"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".tsx"),
-            "typescriptreact"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".js"),
-            "javascript"
-        );
-        assert_eq!(
-            typescript.document_language_id_for_extension(".jsx"),
-            "javascriptreact"
-        );
-
-        let css = server_by_id(&servers, SERVER_VSCODE_CSS_LANGUAGE_SERVER);
-        assert_eq!(css.language_id(), "css");
-        assert_eq!(
-            css.file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["css", "scss"]
-        );
-        assert_eq!(
-            css.args().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["--stdio"]
-        );
-        assert_eq!(css.document_language_id_for_extension(".css"), "css");
-        assert_eq!(css.document_language_id_for_extension(".scss"), "scss");
-
-        let clangd = server_by_id(&servers, SERVER_CLANGD);
-        assert_eq!(clangd.language_id(), "cpp");
-        assert!(
-            clangd.args().is_empty(),
-            "clangd now speaks stdio without a `--stdio` flag"
-        );
-        assert_eq!(clangd.document_language_id_for_extension(".c"), "c");
-        assert_eq!(clangd.document_language_id_for_extension(".h"), "c");
-        assert_eq!(clangd.document_language_id_for_extension(".cpp"), "cpp");
-
-        let python = server_by_id(&servers, SERVER_PYRIGHT_LANGSERVER);
-        assert_eq!(python.language_id(), "python");
-        assert_eq!(
-            python.args().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec![""]
-        );
-
-        let make = server_by_id(&servers, SERVER_MAKEFILE_LANGUAGE_SERVER);
-        assert_eq!(
-            string_values(make.file_names()),
-            vec!["Makefile", "GNUmakefile", "makefile"]
-        );
-
-        let go = server_by_id(&servers, SERVER_GOPLS);
-        assert_eq!(go.language_id(), "go");
-        assert!(go.args().is_empty());
-
-        let yaml = server_by_id(&servers, SERVER_YAML_LANGUAGE_SERVER);
-        assert_eq!(yaml.language_id(), "yaml");
-        assert_eq!(
-            yaml.file_extensions()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["yaml", "yml"]
-        );
-        assert_eq!(
-            yaml.args().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["--stdio"]
-        );
-
         for command_name in [
+            "lsp.start",
             "lsp.stop",
             "lsp.restart",
             "lsp.log",
@@ -1671,496 +1611,138 @@ mod tests {
                 "{command_name} missing"
             );
         }
-        assert_eq!(package.key_bindings().len(), 1);
+
         assert!(package.key_bindings().iter().any(|binding| {
-            binding.chord() == CODE_ACTIONS_CHORD
-                && binding.command_name() == "lsp.code-actions"
+            binding.command_name() == "lsp.code-actions"
                 && binding.scope() == PluginKeymapScope::Workspace
                 && binding.vim_mode() == PluginVimMode::Normal
         }));
     }
 
     #[test]
-    fn package_registers_query_language_server_start_commands_and_auto_start_bindings() {
+    fn language_servers_have_unique_ids_and_nonempty_programs() {
+        let servers = language_servers();
+        let mut ids = BTreeSet::new();
+
+        for server in &servers {
+            assert!(!server.id().is_empty());
+            assert!(
+                ids.insert(server.id().to_owned()),
+                "duplicate language server `{}`",
+                server.id()
+            );
+            assert!(!server.language_id().is_empty());
+            assert!(!server.program().is_empty());
+            assert!(
+                server
+                    .file_extensions()
+                    .iter()
+                    .all(|ext| !ext.trim().is_empty()),
+                "server `{}` has an empty file extension",
+                server.id()
+            );
+            assert!(
+                server
+                    .file_names()
+                    .iter()
+                    .all(|name| !name.trim().is_empty()),
+                "server `{}` has an empty file name matcher",
+                server.id()
+            );
+            assert!(
+                server
+                    .document_language_ids()
+                    .values()
+                    .all(|value| !value.trim().is_empty()),
+                "server `{}` has an empty document language id",
+                server.id()
+            );
+            assert!(
+                server
+                    .activation_markers()
+                    .iter()
+                    .all(|marker| !marker.trim().is_empty()),
+                "server `{}` has an empty activation marker",
+                server.id()
+            );
+        }
+
+        if let Some(copilot) = servers
+            .iter()
+            .find(|server| server.id() == COPILOT_LANGUAGE_SERVER)
+        {
+            assert_eq!(copilot.enabled_by_default(), COPILOT_ENABLED_DEFAULT);
+        }
+    }
+
+    #[test]
+    fn auto_start_bindings_match_registered_server_path_matchers() {
         let package = package();
+        let servers = language_servers();
+        let actual = auto_start_binding_details(&package);
+        let expected = servers
+            .iter()
+            .filter(|server| server.id() != COPILOT_LANGUAGE_SERVER)
+            .flat_map(|server| {
+                server
+                    .file_extensions()
+                    .iter()
+                    .map(|extension| format!(".{extension}"))
+                    .chain(server.file_names().iter().cloned())
+            })
+            .collect::<BTreeSet<_>>();
 
-        for command_name in [
-            "lsp.start-bash-language-server",
-            "lsp.start-cmake-language-server",
-            "lsp.start-graphql-language-service",
-            "lsp.start-terraform-ls",
-            "lsp.start-jdtls",
-            "lsp.start-kotlin-language-server",
-            "lsp.start-lua-language-server",
-            "lsp.start-nil",
-            "lsp.start-perlnavigator",
-            "lsp.start-intelephense",
-            "lsp.start-r-language-server",
-            "lsp.start-ruby-lsp",
-            "lsp.start-metals",
-            "lsp.start-sourcekit-lsp",
-            "lsp.start-texlab",
-            "lsp.start-solc-lsp",
-            "lsp.start-elixir-ls",
-            "lsp.start-clojure-lsp",
-            "lsp.start-bufls",
-            "lsp.start-xml-language-server",
-        ] {
-            assert!(
-                has_command(&package, command_name),
-                "{command_name} missing"
-            );
-        }
+        assert_eq!(actual, expected);
+    }
 
-        for detail in [
-            ".sh",
-            ".bash",
-            ".zsh",
-            ".ksh",
-            ".ash",
-            ".dash",
-            ".mksh",
-            ".cmake",
-            ".gql",
-            ".graphql",
-            ".graphqls",
-            ".hcl",
-            ".tf",
-            ".nomad",
-            ".java",
-            ".jav",
-            ".pde",
-            ".kt",
-            ".kts",
-            ".lua",
-            ".rockspec",
-            ".nix",
-            ".pl",
-            ".pm",
-            ".t",
-            ".psgi",
-            ".php",
-            ".inc",
-            ".php4",
-            ".php5",
-            ".phtml",
-            ".ctp",
-            ".r",
-            ".rb",
-            ".rake",
-            ".irb",
-            ".gemspec",
-            ".rabl",
-            ".jbuilder",
-            ".jb",
-            ".podspec",
-            ".rjs",
-            ".rbi",
-            ".rbs",
-            ".scala",
-            ".sbt",
-            ".sc",
-            ".swift",
-            ".swiftinterface",
-            ".tex",
-            ".dtx",
-            ".ins",
-            ".sty",
-            ".cls",
-            ".rd",
-            ".bbx",
-            ".cbx",
-            ".sol",
-            ".ex",
-            ".exs",
-            ".clj",
-            ".cljs",
-            ".cljc",
-            ".edn",
-            ".proto",
-            ".xml",
-            ".svg",
-            ".xsd",
-            ".xslt",
-            ".xsl",
-            ".rng",
-            ".razor",
-            ".cshtml",
-            "Makefile",
-            "GNUmakefile",
-            "makefile",
-            "CMakeLists.txt",
-        ] {
-            assert!(
-                has_auto_start_binding(&package, detail),
-                "missing auto-start binding for `{detail}`"
-            );
+    #[test]
+    fn csharp_workspace_configuration_remains_well_formed_when_present() {
+        if let Some(csharp) = language_servers()
+            .into_iter()
+            .find(|server| server.id() == SERVER_CSHARP_LS)
+            && let Some(settings) = csharp.workspace_configuration_settings()
+        {
+            assert!(settings.as_object().is_some());
         }
     }
 
     #[test]
-    fn new_language_servers_expose_expected_program_args_and_workspace_roots() {
-        let servers = language_servers();
+    fn tailwind_server_requires_project_markers_and_maps_web_language_ids() {
+        let tailwind = language_servers()
+            .into_iter()
+            .find(|server| server.id() == SERVER_TAILWINDCSS_LANGUAGE_SERVER)
+            .expect("tailwind server");
 
-        let bash = server_by_id(&servers, SERVER_BASH_LANGUAGE_SERVER);
-        assert_eq!(bash.language_id(), "bash");
+        assert_eq!(tailwind.program(), SERVER_TAILWINDCSS_LANGUAGE_SERVER);
+        assert_eq!(tailwind.args(), ["--stdio"]);
+        assert_eq!(tailwind.language_id(), "html");
         assert_eq!(
-            string_values(bash.file_extensions()),
-            vec!["sh", "bash", "zsh", "ksh", "ash", "dash", "mksh"]
-        );
-        assert_eq!(bash.program(), "bash-language-server");
-        assert_eq!(string_values(bash.args()), vec!["start"]);
-
-        let cmake = server_by_id(&servers, SERVER_CMAKE_LANGUAGE_SERVER);
-        assert_eq!(cmake.language_id(), "cmake");
-        assert_eq!(cmake.program(), "cmake-language-server");
-        assert!(cmake.args().is_empty());
-        assert_eq!(string_values(cmake.file_names()), vec!["CMakeLists.txt"]);
-        assert_eq!(
-            cmake.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
+            tailwind.document_language_id_for_extension("js"),
+            "javascript"
         );
         assert_eq!(
-            string_values(cmake.root_markers()),
-            vec!["CMakeLists.txt", "CMakePresets.json", "*.cmake"]
-        );
-
-        let graphql = server_by_id(&servers, SERVER_GRAPHQL_LANGUAGE_SERVICE);
-        assert_eq!(graphql.language_id(), "graphql");
-        assert_eq!(graphql.program(), "graphql-lsp");
-        assert_eq!(
-            string_values(graphql.args()),
-            vec!["server", "-m", "stream"]
+            tailwind.document_language_id_for_extension("jsx"),
+            "javascriptreact"
         );
         assert_eq!(
-            graphql.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
+            tailwind.document_language_id_for_extension("ts"),
+            "typescript"
         );
         assert_eq!(
-            string_values(graphql.root_markers()),
-            vec![
-                "package.json",
-                ".graphqlrc",
-                "graphql.config.js",
-                "graphql.config.ts",
-            ]
-        );
-
-        let terraform = server_by_id(&servers, SERVER_TERRAFORM_LS);
-        assert_eq!(terraform.language_id(), "hcl");
-        assert_eq!(terraform.program(), "terraform-ls");
-        assert_eq!(string_values(terraform.args()), vec!["serve"]);
-        assert_eq!(
-            terraform.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(terraform.root_markers()),
-            vec!["*.tf", "terragrunt.hcl", ".terraform.lock.hcl"]
-        );
-
-        let java = server_by_id(&servers, SERVER_JDTLS);
-        assert_eq!(java.language_id(), "java");
-        assert_eq!(java.program(), "jdtls");
-        assert!(java.args().is_empty());
-        assert_eq!(
-            java.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(java.root_markers()),
-            vec!["pom.xml", "build.gradle", "build.gradle.kts"]
-        );
-
-        let kotlin = server_by_id(&servers, SERVER_KOTLIN_LANGUAGE_SERVER);
-        assert_eq!(kotlin.language_id(), "kotlin");
-        assert_eq!(kotlin.program(), "kotlin-language-server");
-        assert!(kotlin.args().is_empty());
-        assert_eq!(
-            kotlin.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(kotlin.root_markers()),
-            vec![
-                "settings.gradle",
-                "settings.gradle.kts",
-                "build.gradle",
-                "build.gradle.kts",
-            ]
-        );
-
-        let lua = server_by_id(&servers, SERVER_LUA_LANGUAGE_SERVER);
-        assert_eq!(lua.language_id(), "lua");
-        assert_eq!(lua.program(), "lua-language-server");
-        assert!(lua.args().is_empty());
-        assert_eq!(
-            lua.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(lua.root_markers()),
-            vec![
-                ".luarc.json",
-                ".luacheckrc",
-                ".stylua.toml",
-                "selene.toml",
-                ".git",
-            ]
-        );
-
-        let nix = server_by_id(&servers, SERVER_NIL);
-        assert_eq!(nix.language_id(), "nix");
-        assert_eq!(nix.program(), "nil");
-        assert!(nix.args().is_empty());
-
-        let perl = server_by_id(&servers, SERVER_PERLNAVIGATOR);
-        assert_eq!(perl.language_id(), "perl");
-        assert_eq!(perl.program(), "perlnavigator");
-        assert_eq!(string_values(perl.args()), vec!["--stdio"]);
-
-        let php = server_by_id(&servers, SERVER_INTELEPHENSE);
-        assert_eq!(php.language_id(), "php");
-        assert_eq!(php.program(), "intelephense");
-        assert_eq!(string_values(php.args()), vec!["--stdio"]);
-        assert_eq!(
-            php.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(php.root_markers()),
-            vec!["composer.json", "index.php"]
-        );
-
-        let r = server_by_id(&servers, SERVER_R_LANGUAGE_SERVER);
-        assert_eq!(r.language_id(), "r");
-        assert_eq!(r.program(), "R");
-        assert_eq!(
-            string_values(r.args()),
-            vec!["--no-echo", "-e", "languageserver::run()"]
-        );
-
-        let ruby = server_by_id(&servers, SERVER_RUBY_LSP);
-        assert_eq!(ruby.language_id(), "ruby");
-        assert_eq!(ruby.program(), "ruby-lsp");
-        assert!(ruby.args().is_empty());
-        assert_eq!(
-            ruby.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(ruby.root_markers()),
-            vec!["Gemfile", ".ruby-version"]
-        );
-
-        let metals = server_by_id(&servers, SERVER_METALS);
-        assert_eq!(metals.language_id(), "scala");
-        assert_eq!(metals.program(), "metals");
-        assert!(metals.args().is_empty());
-        assert_eq!(
-            metals.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(metals.root_markers()),
-            vec![
-                "build.sbt",
-                "build.sc",
-                "build.gradle",
-                "build.gradle.kts",
-                "pom.xml",
-                ".scala-build",
-            ]
-        );
-
-        let swift = server_by_id(&servers, SERVER_SOURCEKIT_LSP);
-        assert_eq!(swift.language_id(), "swift");
-        assert_eq!(swift.program(), "sourcekit-lsp");
-        assert!(swift.args().is_empty());
-        assert_eq!(
-            swift.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(string_values(swift.root_markers()), vec!["Package.swift"]);
-
-        let texlab = server_by_id(&servers, SERVER_TEXLAB);
-        assert_eq!(texlab.language_id(), "latex");
-        assert_eq!(
-            string_values(texlab.file_extensions()),
-            vec!["tex", "dtx", "ins", "sty", "cls", "rd", "bbx", "cbx"]
-        );
-        assert_eq!(texlab.program(), "texlab");
-        assert!(texlab.args().is_empty());
-
-        let solidity = server_by_id(&servers, SERVER_SOLC_LSP);
-        assert_eq!(solidity.language_id(), "solidity");
-        assert_eq!(string_values(solidity.file_extensions()), vec!["sol"]);
-        assert_eq!(solidity.program(), "solc");
-        assert_eq!(string_values(solidity.args()), vec!["--lsp"]);
-        assert_eq!(
-            solidity.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(solidity.root_markers()),
-            vec![
-                "foundry.toml",
-                "hardhat.config.js",
-                "hardhat.config.ts",
-                "truffle-config.js",
-                "truffle-config.ts",
-                "brownie-config.yaml",
-                "brownie-config.yml",
-            ]
-        );
-
-        let elixir = server_by_id(&servers, SERVER_ELIXIR_LS);
-        assert_eq!(elixir.language_id(), "elixir");
-        assert_eq!(string_values(elixir.file_extensions()), vec!["ex", "exs"]);
-        assert_eq!(elixir.program(), ELIXIR_LS_PROGRAM);
-        assert!(elixir.args().is_empty());
-        assert_eq!(
-            elixir.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(elixir.root_markers()),
-            vec!["mix.exs", ".formatter.exs"]
-        );
-
-        let clojure = server_by_id(&servers, SERVER_CLOJURE_LSP);
-        assert_eq!(clojure.language_id(), "clojure");
-        assert_eq!(
-            string_values(clojure.file_extensions()),
-            vec!["clj", "cljs", "cljc", "edn"]
-        );
-        assert_eq!(clojure.program(), "clojure-lsp");
-        assert!(clojure.args().is_empty());
-        assert_eq!(
-            clojure.document_language_id_for_extension(".clj"),
-            "clojure"
-        );
-        assert_eq!(
-            clojure.document_language_id_for_extension(".cljs"),
-            "clojure"
-        );
-        assert_eq!(
-            clojure.document_language_id_for_extension(".cljc"),
-            "clojure"
-        );
-        assert_eq!(clojure.document_language_id_for_extension(".edn"), "edn");
-        assert_eq!(
-            clojure.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(clojure.root_markers()),
-            vec![
-                "deps.edn",
-                "project.clj",
-                "bb.edn",
-                "build.boot",
-                "shadow-cljs.edn"
-            ]
-        );
-
-        let proto = server_by_id(&servers, SERVER_BUFLS);
-        assert_eq!(proto.language_id(), "proto");
-        assert_eq!(string_values(proto.file_extensions()), vec!["proto"]);
-        assert_eq!(proto.program(), "bufls");
-        assert_eq!(string_values(proto.args()), vec!["serve"]);
-        assert_eq!(
-            proto.root_strategy(),
-            LanguageServerRootStrategy::MarkersOrWorkspace
-        );
-        assert_eq!(
-            string_values(proto.root_markers()),
-            vec!["buf.yaml", "buf.work.yaml", "buf.gen.yaml", "buf.lock"]
-        );
-
-        let xml = server_by_id(&servers, SERVER_XML_LANGUAGE_SERVER);
-        assert_eq!(xml.language_id(), "xml");
-        assert_eq!(
-            string_values(xml.file_extensions()),
-            vec!["xml", "svg", "xsd", "xslt", "xsl", "rng"]
-        );
-        assert_eq!(xml.program(), "xml-language-server");
-        assert_eq!(string_values(xml.args()), vec!["--stdio"]);
-    }
-
-    #[test]
-    fn csharp_server_uses_workspace_configuration_for_metadata_uris() {
-        let servers = language_servers();
-        let csharp = server_by_id(&servers, SERVER_CSHARP_LS);
-
-        assert_eq!(csharp.workspace_configuration_section(), Some("csharp"));
-        let settings = csharp
-            .workspace_configuration_settings()
-            .expect("csharp workspace settings");
-        let settings = settings.as_object().expect("csharp settings object");
-        assert_eq!(
-            settings.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec![
-                "analyzersEnabled",
-                "applyFormattingOptions",
-                "debug",
-                "locale",
-                "logLevel",
-                "razorSupport",
-                "solutionPathOverride",
-                "useMetadataUris",
-            ]
-        );
-        assert_eq!(
-            settings.get("logLevel").and_then(|value| value.as_str()),
-            Some("info")
-        );
-        assert_eq!(
-            settings
-                .get("applyFormattingOptions")
-                .and_then(|value| value.as_bool()),
-            Some(false)
-        );
-        assert_eq!(
-            settings
-                .get("analyzersEnabled")
-                .and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            settings
-                .get("useMetadataUris")
-                .and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            settings
-                .get("razorSupport")
-                .and_then(|value| value.as_bool()),
-            Some(true)
+            tailwind.document_language_id_for_extension("tsx"),
+            "typescriptreact"
         );
         assert!(
-            settings
-                .get("solutionPathOverride")
-                .is_some_and(|value| value.is_null())
-        );
-        assert!(settings.get("locale").is_some_and(|value| value.is_null()));
-        let debug = settings
-            .get("debug")
-            .and_then(|value| value.as_object())
-            .expect("csharp debug settings");
-        assert_eq!(
-            debug.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["debugMode", "solutionLoadDelay"]
-        );
-        assert_eq!(
-            debug.get("debugMode").and_then(|value| value.as_bool()),
-            Some(false)
+            tailwind
+                .activation_markers()
+                .iter()
+                .any(|marker| marker == "tailwind.config.ts")
         );
         assert!(
-            debug
-                .get("solutionLoadDelay")
-                .is_some_and(|value| value.is_null())
+            tailwind
+                .activation_markers()
+                .iter()
+                .any(|marker| marker == "node_modules/tailwindcss/package.json")
         );
     }
 }

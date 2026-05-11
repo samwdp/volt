@@ -388,6 +388,8 @@ pub(super) struct NotificationUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NotificationAction {
     OpenAcpPermissionPicker { request_id: u64 },
+    OpenBrowserPopup { url: String },
+    CopilotSignIn { root: Option<PathBuf> },
 }
 
 #[derive(Debug, Clone, Default)]

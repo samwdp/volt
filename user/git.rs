@@ -27,6 +27,7 @@ pub const SECTION_STASHES: &str = "git.status.stashes";
 pub const SECTION_UNPULLED: &str = "git.status.unpulled";
 pub const SECTION_UNPUSHED: &str = "git.status.unpushed";
 pub const SECTION_REMOTE: &str = "git.status.remote";
+pub const SECTION_RECENT: &str = "git.status.recent";
 pub const SECTION_COMMIT: &str = "git.status.commit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +78,7 @@ pub fn status_command_name(prefix: Option<GitStatusPrefix>, chord: &str) -> Opti
         (Some(GitStatusPrefix::Fetch), "a") => Some("git.status.fetch-all"),
         (Some(GitStatusPrefix::Pull), "u") => Some("git.status.pull-upstream"),
         (Some(GitStatusPrefix::Branch), "b") => Some("git.status.branches"),
+        (Some(GitStatusPrefix::Branch), "w") => Some("git.worktree.create"),
         (Some(GitStatusPrefix::Merge), "m") => Some("git.status.merge"),
         (Some(GitStatusPrefix::Merge), "e") => Some("git.status.merge-edit"),
         (Some(GitStatusPrefix::Merge), "n") => Some("git.status.merge-no-commit"),
@@ -248,6 +250,9 @@ pub fn status_sections(snapshot: &GitStatusSnapshot) -> SectionTree {
     if let Some(section) = remote_section(snapshot) {
         sections.push(section);
     }
+    if let Some(section) = recent_section(snapshot) {
+        sections.push(section);
+    }
     sections.push(commit_section(snapshot));
     SectionTree::new(sections)
 }
@@ -402,22 +407,9 @@ fn stashes_section(snapshot: &GitStatusSnapshot) -> Section {
 }
 
 fn unpulled_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
-    let (title, entries) = if snapshot.upstream().is_some() {
-        (
-            format!(
-                "Unpulled from {} ({})",
-                snapshot.upstream().unwrap_or("<upstream>"),
-                snapshot.unpulled().len()
-            ),
-            snapshot.unpulled(),
-        )
-    } else {
-        (
-            format!("Recent commits ({})", snapshot.recent().len()),
-            snapshot.recent(),
-        )
-    };
-    let items = entries
+    let upstream = snapshot.upstream()?;
+    let items = snapshot
+        .unpulled()
         .iter()
         .map(|entry| {
             let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
@@ -432,28 +424,18 @@ fn unpulled_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .collect::<Vec<_>>();
     section_with_placeholder(
         SECTION_UNPULLED,
-        git_section_title(SECTION_UNPULLED, title),
+        git_section_title(
+            SECTION_UNPULLED,
+            format!("Unpulled from {upstream} ({})", snapshot.unpulled().len()),
+        ),
         items,
     )
 }
 
 fn unpushed_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
-    let (title, entries) = if snapshot.upstream().is_some() {
-        (
-            format!(
-                "Unpushed to {} ({})",
-                snapshot.upstream().unwrap_or("<upstream>"),
-                snapshot.unpushed().len()
-            ),
-            snapshot.unpushed(),
-        )
-    } else {
-        (
-            format!("Recent commits ({})", snapshot.recent().len()),
-            snapshot.recent(),
-        )
-    };
-    let items = entries
+    let upstream = snapshot.upstream()?;
+    let items = snapshot
+        .unpushed()
         .iter()
         .map(|entry| {
             let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
@@ -468,7 +450,43 @@ fn unpushed_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .collect::<Vec<_>>();
     section_with_placeholder(
         SECTION_UNPUSHED,
-        git_section_title(SECTION_UNPUSHED, title),
+        git_section_title(
+            SECTION_UNPUSHED,
+            format!("Unpushed to {upstream} ({})", snapshot.unpushed().len()),
+        ),
+        items,
+    )
+}
+
+fn recent_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
+    if snapshot.recent().is_empty() {
+        return None;
+    }
+    if snapshot.upstream().is_some()
+        && (!snapshot.unpulled().is_empty() || !snapshot.unpushed().is_empty())
+    {
+        return None;
+    }
+    let items = snapshot
+        .recent()
+        .iter()
+        .map(|entry| {
+            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            SectionItem::new(format!(
+                "{} {} {}",
+                crate::icon_font::symbols::cod::COD_HISTORY,
+                entry.hash(),
+                entry.summary()
+            ))
+            .with_action(action)
+        })
+        .collect::<Vec<_>>();
+    section_with_placeholder(
+        SECTION_RECENT,
+        git_section_title(
+            SECTION_RECENT,
+            format!("Recent commits ({})", snapshot.recent().len()),
+        ),
         items,
     )
 }
@@ -547,6 +565,7 @@ fn git_section_title(id: &str, title: impl AsRef<str>) -> String {
         SECTION_UNPULLED => crate::icon_font::symbols::cod::COD_ARROW_DOWN,
         SECTION_UNPUSHED => crate::icon_font::symbols::cod::COD_ARROW_UP,
         SECTION_REMOTE => crate::icon_font::symbols::cod::COD_ARROW_DOWN,
+        SECTION_RECENT => crate::icon_font::symbols::cod::COD_HISTORY,
         SECTION_COMMIT => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
         _ => crate::icon_font::symbols::cod::COD_GIT_COMMIT,
     };
@@ -564,6 +583,11 @@ fn section_with_placeholder(id: &str, title: String, items: Vec<SectionItem>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor_git::GitLogEntry;
+
+    fn log_entry(hash: &str, summary: &str) -> GitLogEntry {
+        GitLogEntry::new(hash.to_owned(), summary.to_owned())
+    }
 
     #[test]
     fn git_status_keymaps_export_prefix_starters_and_commands() {
@@ -648,5 +672,59 @@ mod tests {
                 crate::icon_font::symbols::cod::COD_ARROW_DOWN
             )
         );
+    }
+
+    #[test]
+    fn status_sections_show_recent_commits_once_without_upstream() {
+        let snapshot = GitStatusSnapshot::default().with_recent(vec![log_entry("abc123", "seed")]);
+        let sections = status_sections(&snapshot);
+        let ids = sections
+            .sections()
+            .iter()
+            .map(|section| section.id())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&SECTION_RECENT));
+        assert!(!ids.contains(&SECTION_UNPULLED));
+        assert!(!ids.contains(&SECTION_UNPUSHED));
+    }
+
+    #[test]
+    fn status_sections_show_recent_commits_when_tracking_lists_are_empty() {
+        let snapshot = GitStatusSnapshot::default()
+            .with_upstreams(Some("feature/TASK-123-abc".to_owned()), None)
+            .with_recent(vec![log_entry("abc123", "seed")]);
+        let sections = status_sections(&snapshot);
+        let recent = sections
+            .sections()
+            .iter()
+            .find(|section| section.id() == SECTION_RECENT)
+            .expect("recent section should be present");
+        assert_eq!(
+            recent.title(),
+            &git_section_title(SECTION_RECENT, "Recent commits (1)")
+        );
+        assert_eq!(
+            recent.items()[0].text(),
+            format!(
+                "{} abc123 seed",
+                crate::icon_font::symbols::cod::COD_HISTORY
+            )
+        );
+    }
+
+    #[test]
+    fn status_sections_hide_recent_commits_when_tracking_lists_have_entries() {
+        let snapshot = GitStatusSnapshot::default()
+            .with_upstreams(Some("feature/TASK-123-abc".to_owned()), None)
+            .with_recent(vec![log_entry("abc123", "seed")])
+            .with_unpushed(vec![log_entry("def456", "ahead")]);
+        let sections = status_sections(&snapshot);
+        let ids = sections
+            .sections()
+            .iter()
+            .map(|section| section.id())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&SECTION_UNPUSHED));
+        assert!(!ids.contains(&SECTION_RECENT));
     }
 }

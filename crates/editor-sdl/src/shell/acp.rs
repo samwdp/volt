@@ -42,6 +42,8 @@ use super::*;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+const ACP_EVENT_DRAIN_LIMIT: usize = 64;
+
 fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]
     {
@@ -95,19 +97,52 @@ async fn spawn_background_command(
         }
     }
 
+    let mut launch_env = None;
     let should_retry = matches!(
         &spawn_result,
         Err(error) if background_spawn_should_retry(error)
     );
-    if should_retry && let Some(launch_env) = refreshed_launch_environment(cwd).await {
-        for candidate in background_command_candidates(program, env, Some(&launch_env)) {
-            spawn_result =
-                build_background_command(&candidate, args, cwd, env, pipes, Some(&launch_env))
-                    .spawn();
-            match &spawn_result {
-                Ok(_) => break,
-                Err(error) if background_spawn_should_retry(error) => {}
-                Err(_) => break,
+    if should_retry {
+        launch_env = refreshed_launch_environment(cwd).await;
+        if let Some(launch_env) = launch_env.as_deref() {
+            for candidate in background_command_candidates(program, env, Some(launch_env)) {
+                spawn_result =
+                    build_background_command(&candidate, args, cwd, env, pipes, Some(launch_env))
+                        .spawn();
+                match &spawn_result {
+                    Ok(_) => break,
+                    Err(error) if background_spawn_should_retry(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let should_retry_with_node_manager = matches!(
+            &spawn_result,
+            Err(error) if background_spawn_should_retry(error)
+        );
+        if should_retry_with_node_manager
+            && let Some(node_manager_env) =
+                windows_node_manager_environment(cwd, env, launch_env.as_deref()).await
+        {
+            for candidate in background_command_candidates(program, &[], Some(&node_manager_env)) {
+                spawn_result = build_background_command(
+                    &candidate,
+                    args,
+                    cwd,
+                    &[],
+                    pipes,
+                    Some(&node_manager_env),
+                )
+                .spawn();
+                match &spawn_result {
+                    Ok(_) => break,
+                    Err(error) if background_spawn_should_retry(error) => {}
+                    Err(_) => break,
+                }
             }
         }
     }
@@ -317,6 +352,107 @@ fn background_spawn_should_retry(error: &std::io::Error) -> bool {
 }
 
 #[cfg(windows)]
+async fn windows_node_manager_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<Vec<(String, String)>> {
+    if let Some(fnm_env) = windows_fnm_environment(cwd, env, launch_env).await {
+        return Some(merge_node_manager_environment(env, launch_env, fnm_env));
+    }
+    windows_nvm_environment(cwd, env, launch_env)
+        .await
+        .map(|nvm_env| merge_node_manager_environment(env, launch_env, nvm_env))
+}
+
+#[cfg(windows)]
+async fn windows_fnm_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<Vec<(String, String)>> {
+    let program = editor_jobs::resolve_command_path("fnm", env, launch_env)?;
+    let mut command = Command::new(program);
+    configure_background_command(&mut command);
+    command
+        .args(["env", "--shell", "cmd"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if let Some(launch_env) = launch_env {
+        apply_launch_environment(&mut command, env, launch_env);
+    } else {
+        apply_command_environment(&mut command, env);
+    }
+    let output = command.output().await.ok()?;
+    output.status.success().then_some(())?;
+    parse_windows_cmd_environment(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(windows)]
+async fn windows_nvm_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<Vec<(String, String)>> {
+    let settings = windows_nvm_settings(env, launch_env);
+    let nvm_program = editor_jobs::resolve_command_path("nvm", env, launch_env);
+    let current = if let Some(program) = nvm_program.as_deref() {
+        windows_nvm_command_stdout(program, ["current"], cwd, env, launch_env)
+            .await
+            .and_then(|output| parse_windows_nvm_current_output(&output))
+    } else {
+        None
+    };
+    let command_root = if let Some(program) = nvm_program.as_deref() {
+        windows_nvm_command_stdout(program, ["root"], cwd, env, launch_env)
+            .await
+            .and_then(|output| parse_windows_nvm_root_output(&output))
+    } else {
+        None
+    };
+    let root = command_root
+        .or(settings.root)
+        .or_else(|| environment_value(env, launch_env, "NVM_HOME").map(PathBuf::from))
+        .or_else(|| windows_default_nvm_home(env, launch_env));
+    let symlink = settings
+        .path
+        .or_else(|| environment_value(env, launch_env, "NVM_SYMLINK").map(PathBuf::from));
+    windows_nvm_environment_from_parts(root, symlink, current.as_deref(), env, launch_env)
+}
+
+#[cfg(windows)]
+async fn windows_nvm_command_stdout(
+    program: &str,
+    args: impl IntoIterator<Item = &'static str>,
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<String> {
+    let mut command = Command::new(program);
+    configure_background_command(&mut command);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if let Some(launch_env) = launch_env {
+        apply_launch_environment(&mut command, env, launch_env);
+    } else {
+        apply_command_environment(&mut command, env);
+    }
+    let output = command.output().await.ok()?;
+    output.status.success().then_some(())?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(windows)]
 async fn refreshed_launch_environment(cwd: Option<&Path>) -> Option<Vec<(String, String)>> {
     let system_root = env::var_os("SystemRoot")
         .or_else(|| env::var_os("WINDIR"))
@@ -421,6 +557,218 @@ fn parse_line_environment(output: &str) -> Option<Vec<(String, String)>> {
         })
         .collect::<Vec<_>>();
     (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(windows)]
+fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> {
+    let vars = output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("SET ")?;
+            let (key, value) = rest.split_once('=')?;
+            (!key.is_empty()).then_some((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsNvmSettings {
+    root: Option<PathBuf>,
+    path: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+fn windows_nvm_settings(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> WindowsNvmSettings {
+    windows_nvm_settings_paths(env, launch_env)
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|content| parse_windows_nvm_settings(&content))
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn windows_nvm_settings_paths(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = environment_value(env, launch_env, "NVM_HOME") {
+        paths.push(PathBuf::from(home).join("settings.txt"));
+    }
+    if let Some(appdata) = environment_value(env, launch_env, "APPDATA") {
+        let path = PathBuf::from(appdata).join("nvm").join("settings.txt");
+        if !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+#[cfg(windows)]
+fn parse_windows_nvm_settings(content: &str) -> WindowsNvmSettings {
+    let mut settings = WindowsNvmSettings::default();
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "root" => settings.root = Some(PathBuf::from(value)),
+            "path" => settings.path = Some(PathBuf::from(value)),
+            _ => {}
+        }
+    }
+    settings
+}
+
+#[cfg(windows)]
+fn parse_windows_nvm_current_output(output: &str) -> Option<String> {
+    let current = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    (!current.to_ascii_lowercase().starts_with("no current")).then(|| current.to_owned())
+}
+
+#[cfg(windows)]
+fn parse_windows_nvm_root_output(output: &str) -> Option<PathBuf> {
+    let root = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let root = root
+        .strip_prefix("Current Root:")
+        .unwrap_or(root)
+        .trim()
+        .trim_matches('"');
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+#[cfg(windows)]
+fn windows_default_nvm_home(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<PathBuf> {
+    environment_value(env, launch_env, "APPDATA").map(|appdata| PathBuf::from(appdata).join("nvm"))
+}
+
+#[cfg(windows)]
+fn windows_nvm_environment_from_parts(
+    root: Option<PathBuf>,
+    symlink: Option<PathBuf>,
+    current: Option<&str>,
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+) -> Option<Vec<(String, String)>> {
+    let mut node_dirs = Vec::new();
+    if let (Some(root), Some(current)) = (root.as_ref(), current) {
+        for candidate in windows_nvm_version_dir_candidates(root, current) {
+            if candidate.join("node.exe").is_file() {
+                push_unique_path(&mut node_dirs, candidate);
+            }
+        }
+    }
+    if let Some(symlink) = symlink.as_ref()
+        && symlink.join("node.exe").is_file()
+    {
+        push_unique_path(&mut node_dirs, symlink.clone());
+    }
+    if node_dirs.is_empty() {
+        return None;
+    }
+
+    let existing_path = environment_value(env, launch_env, "PATH").unwrap_or_default();
+    let mut path_parts = node_dirs
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if !existing_path.is_empty() {
+        path_parts.push(existing_path);
+    }
+
+    let mut vars = vec![("PATH".to_owned(), path_parts.join(";"))];
+    if let Some(root) = root {
+        vars.push(("NVM_HOME".to_owned(), root.to_string_lossy().into_owned()));
+    }
+    if let Some(symlink) = symlink {
+        vars.push((
+            "NVM_SYMLINK".to_owned(),
+            symlink.to_string_lossy().into_owned(),
+        ));
+    }
+    Some(vars)
+}
+
+#[cfg(windows)]
+fn windows_nvm_version_dir_candidates(root: &Path, current: &str) -> Vec<PathBuf> {
+    let current = current.trim();
+    let without_v = current.strip_prefix('v').unwrap_or(current);
+    let with_v = format!("v{without_v}");
+    let mut candidates = Vec::new();
+    push_unique_path(&mut candidates, root.join(current));
+    push_unique_path(&mut candidates, root.join(without_v));
+    push_unique_path(&mut candidates, root.join(with_v));
+    candidates
+}
+
+#[cfg(windows)]
+fn merge_node_manager_environment(
+    env: &[(String, String)],
+    launch_env: Option<&[(String, String)]>,
+    manager_env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let explicit_path = explicit_environment_value(env, "PATH");
+    let mut merged = launch_env.map_or_else(Vec::new, |vars| vars.to_vec());
+    let mut manager_path_seen = false;
+
+    for (key, value) in manager_env {
+        if key.eq_ignore_ascii_case("PATH") {
+            manager_path_seen = true;
+            let value = explicit_path
+                .map(|path| format!("{value};{path}"))
+                .unwrap_or(value);
+            upsert_environment_value(&mut merged, key, value);
+        } else {
+            upsert_environment_value(&mut merged, key, value);
+        }
+    }
+
+    for (key, value) in env {
+        if !key.eq_ignore_ascii_case("PATH") {
+            upsert_environment_value(&mut merged, key.clone(), value.clone());
+        }
+    }
+    if !manager_path_seen && let Some(path) = explicit_path {
+        upsert_environment_value(&mut merged, "PATH".to_owned(), path.clone());
+    }
+    merged
+}
+
+#[cfg(windows)]
+fn upsert_environment_value(env: &mut Vec<(String, String)>, key: String, value: String) {
+    if let Some((_, existing_value)) = env
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
+    {
+        *existing_value = value;
+    } else {
+        env.push((key, value));
+    }
+}
+
+#[cfg(windows)]
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1600,6 +1948,7 @@ fn open_slash_command_picker(
 struct AcpManager {
     runtime: AcpRuntime,
     events: mpsc::Receiver<AcpEvent>,
+    deferred_events: VecDeque<AcpEvent>,
     sessions: HashMap<agent_client_protocol::SessionId, AcpSessionInfo>,
     buffers: HashMap<BufferId, agent_client_protocol::SessionId>,
     workspace_client_buffers: HashMap<(WorkspaceId, String), BufferId>,
@@ -1618,6 +1967,7 @@ impl AcpManager {
         Ok(Self {
             runtime,
             events: event_rx,
+            deferred_events: VecDeque::new(),
             sessions: HashMap::new(),
             buffers: HashMap::new(),
             workspace_client_buffers: HashMap::new(),
@@ -1998,7 +2348,22 @@ impl AcpManager {
     }
 
     fn drain_events(&mut self, runtime: &mut EditorRuntime) -> Result<bool, String> {
-        let events: Vec<AcpEvent> = self.events.try_iter().collect();
+        let mut events = Vec::new();
+        while events.len() < ACP_EVENT_DRAIN_LIMIT {
+            let Some(event) = self.deferred_events.pop_front() else {
+                break;
+            };
+            events.push(event);
+        }
+        if events.len() < ACP_EVENT_DRAIN_LIMIT {
+            events.extend(drain_acp_event_batch(
+                &self.events,
+                ACP_EVENT_DRAIN_LIMIT - events.len(),
+            ));
+        }
+        let events = coalesce_acp_events(events);
+        let (events, deferred) = split_acp_events_for_render(events);
+        self.deferred_events.extend(deferred);
         let changed = !events.is_empty();
         for event in events {
             self.handle_event(runtime, event)?;
@@ -2214,6 +2579,9 @@ impl AcpManager {
             }
             AcpEvent::SessionFinished { session_id } => {
                 if let Some(session) = self.sessions.get(&session_id) {
+                    if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
+                        buffer.acp_complete_plan();
+                    }
                     let title = session
                         .title
                         .clone()
@@ -2741,6 +3109,72 @@ enum AcpEvent {
         session_id: agent_client_protocol::SessionId,
         message: String,
     },
+}
+
+fn drain_acp_event_batch(events: &mpsc::Receiver<AcpEvent>, limit: usize) -> Vec<AcpEvent> {
+    let mut batch = Vec::new();
+    for _ in 0..limit {
+        match events.try_recv() {
+            Ok(event) => batch.push(event),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    batch
+}
+
+fn coalesce_acp_events(events: Vec<AcpEvent>) -> Vec<AcpEvent> {
+    let mut coalesced = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            AcpEvent::SessionAgentChunk {
+                session_id,
+                content: ContentBlock::Text(text),
+            } => {
+                if let Some(AcpEvent::SessionAgentChunk {
+                    session_id: last_session_id,
+                    content: ContentBlock::Text(last_text),
+                }) = coalesced.last_mut()
+                    && last_session_id == &session_id
+                {
+                    last_text.text.push_str(&text.text);
+                    continue;
+                }
+                coalesced.push(AcpEvent::SessionAgentChunk {
+                    session_id,
+                    content: ContentBlock::Text(text),
+                });
+            }
+            event => coalesced.push(event),
+        }
+    }
+    coalesced
+}
+
+fn throttled_acp_session_id(event: &AcpEvent) -> Option<&agent_client_protocol::SessionId> {
+    match event {
+        AcpEvent::SessionPlan { session_id, .. } | AcpEvent::SessionFinished { session_id } => {
+            Some(session_id)
+        }
+        _ => None,
+    }
+}
+
+fn split_acp_events_for_render(events: Vec<AcpEvent>) -> (Vec<AcpEvent>, VecDeque<AcpEvent>) {
+    let mut throttled_sessions = HashSet::new();
+    let mut ready = Vec::new();
+    let mut deferred = VecDeque::new();
+    for event in events {
+        let Some(session_id) = throttled_acp_session_id(&event) else {
+            ready.push(event);
+            continue;
+        };
+        if !throttled_sessions.insert(session_id.clone()) {
+            deferred.push_back(event);
+            continue;
+        }
+        ready.push(event);
+    }
+    (ready, deferred)
 }
 
 enum AcpCommand {
@@ -3884,7 +4318,7 @@ fn apply_output_limit(output: &str, limit: Option<u64>) -> (String, bool) {
 mod tests {
     use super::*;
     use agent_client_protocol::{
-        AvailableCommandInput, PermissionOptionId, ToolCallLocation, ToolCallStatus,
+        AvailableCommandInput, PermissionOptionId, TextContent, ToolCallLocation, ToolCallStatus,
         ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
     };
 
@@ -3895,6 +4329,7 @@ mod tests {
             AcpManager {
                 runtime: AcpRuntime { sender: command_tx },
                 events: event_rx,
+                deferred_events: VecDeque::new(),
                 sessions: HashMap::new(),
                 buffers: HashMap::new(),
                 workspace_client_buffers: HashMap::new(),
@@ -3937,6 +4372,42 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn install_acp_test_buffer(state: &mut ShellState) -> Result<(WorkspaceId, BufferId), String> {
+        let workspace_id = state
+            .runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let buffer_id = state
+            .runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                "*acp test*",
+                BufferKind::Plugin(ACP_BUFFER_KIND.to_owned()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .runtime
+            .model_mut()
+            .focus_buffer(workspace_id, buffer_id)
+            .map_err(|error| error.to_string())?;
+        let buffer = state
+            .runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
+        let mut shell_buffer =
+            ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &NullUserLibrary);
+        shell_buffer.init_acp_view("GitHub Copilot");
+        shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
+        shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+        Ok((workspace_id, buffer_id))
+    }
+
     fn test_permission_options() -> Vec<PermissionOption> {
         vec![
             PermissionOption::new(
@@ -3973,6 +4444,310 @@ mod tests {
             tool_call: test_tool_call_update(title),
             options: test_permission_options(),
         }
+    }
+
+    fn text_chunk_event(session_id: &str, text: &str) -> AcpEvent {
+        AcpEvent::SessionAgentChunk {
+            session_id: agent_client_protocol::SessionId::new(session_id),
+            content: ContentBlock::Text(TextContent::new(text)),
+        }
+    }
+
+    #[test]
+    fn drain_acp_event_batch_limits_per_frame_work() {
+        let (tx, rx) = mpsc::channel();
+        let session_id = agent_client_protocol::SessionId::new("session");
+        for _ in 0..(ACP_EVENT_DRAIN_LIMIT + 3) {
+            tx.send(AcpEvent::SessionFinished {
+                session_id: session_id.clone(),
+            })
+            .expect("send event");
+        }
+
+        let batch = drain_acp_event_batch(&rx, ACP_EVENT_DRAIN_LIMIT);
+        assert_eq!(batch.len(), ACP_EVENT_DRAIN_LIMIT);
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn coalesce_acp_events_merges_adjacent_agent_text_chunks() {
+        let events = vec![
+            text_chunk_event("session-1", "hel"),
+            text_chunk_event("session-1", "lo"),
+            text_chunk_event("session-2", "x"),
+            text_chunk_event("session-1", "!"),
+        ];
+
+        let coalesced = coalesce_acp_events(events);
+        assert_eq!(coalesced.len(), 3);
+        match &coalesced[0] {
+            AcpEvent::SessionAgentChunk {
+                content: ContentBlock::Text(text),
+                ..
+            } => assert_eq!(text.text, "hello"),
+            _ => panic!("expected merged text chunk"),
+        }
+    }
+
+    #[test]
+    fn split_acp_events_for_render_defers_later_plan_transitions() {
+        let session_id = agent_client_protocol::SessionId::new("session");
+        let plan = Plan::new(vec![PlanEntry::new(
+            "Step",
+            PlanEntryPriority::High,
+            PlanEntryStatus::InProgress,
+        )]);
+        let events = vec![
+            text_chunk_event("session", "hello"),
+            AcpEvent::SessionPlan {
+                session_id: session_id.clone(),
+                plan: plan.clone(),
+            },
+            AcpEvent::SessionPlan {
+                session_id: session_id.clone(),
+                plan: plan.clone(),
+            },
+            AcpEvent::SessionFinished { session_id },
+        ];
+
+        let (ready, deferred) = split_acp_events_for_render(events);
+        assert_eq!(ready.len(), 2);
+        assert_eq!(deferred.len(), 2);
+        assert!(matches!(ready[1], AcpEvent::SessionPlan { .. }));
+        assert!(matches!(deferred[0], AcpEvent::SessionPlan { .. }));
+        assert!(matches!(deferred[1], AcpEvent::SessionFinished { .. }));
+    }
+
+    #[test]
+    fn drain_events_shows_incremental_plan_progress_across_frames() -> Result<(), String> {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (command_tx, _command_rx) = tokio_mpsc::unbounded_channel();
+        let mut manager = AcpManager {
+            runtime: AcpRuntime { sender: command_tx },
+            events: event_rx,
+            deferred_events: VecDeque::new(),
+            sessions: HashMap::new(),
+            buffers: HashMap::new(),
+            workspace_client_buffers: HashMap::new(),
+            pending_clients: HashMap::new(),
+            pending_slash: HashMap::new(),
+            pending_ui_actions: Vec::new(),
+            pending_permissions: VecDeque::new(),
+            active_permission_request: None,
+            permission_queue_paused: false,
+        };
+        let session_id = agent_client_protocol::SessionId::new("session-progress");
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+
+        manager.sessions.insert(
+            session_id.clone(),
+            AcpSessionInfo {
+                client_id: "copilot".to_owned(),
+                buffer_id,
+                workspace_id,
+                workspace_name: "project".to_owned(),
+                title: Some("Plan run".to_owned()),
+                available_commands: Vec::new(),
+                mode_state: None,
+                model_state: None,
+                config_options: Vec::new(),
+                mode_config_id: None,
+                model_config_id: None,
+            },
+        );
+
+        event_tx
+            .send(AcpEvent::SessionPlan {
+                session_id: session_id.clone(),
+                plan: Plan::new(vec![
+                    PlanEntry::new(
+                        "Step one",
+                        PlanEntryPriority::High,
+                        PlanEntryStatus::InProgress,
+                    ),
+                    PlanEntry::new(
+                        "Step two",
+                        PlanEntryPriority::Medium,
+                        PlanEntryStatus::Pending,
+                    ),
+                ]),
+            })
+            .map_err(|error| error.to_string())?;
+        event_tx
+            .send(AcpEvent::SessionPlan {
+                session_id: session_id.clone(),
+                plan: Plan::new(vec![
+                    PlanEntry::new(
+                        "Step one",
+                        PlanEntryPriority::High,
+                        PlanEntryStatus::Completed,
+                    ),
+                    PlanEntry::new(
+                        "Step two",
+                        PlanEntryPriority::Medium,
+                        PlanEntryStatus::InProgress,
+                    ),
+                ]),
+            })
+            .map_err(|error| error.to_string())?;
+        event_tx
+            .send(AcpEvent::SessionFinished {
+                session_id: session_id.clone(),
+            })
+            .map_err(|error| error.to_string())?;
+
+        assert!(manager.drain_events(&mut state.runtime)?);
+        {
+            let buffer = shell_buffer(&state.runtime, buffer_id)?;
+            let acp = buffer
+                .acp_state
+                .as_ref()
+                .ok_or_else(|| "ACP state missing".to_owned())?;
+            assert_eq!(acp.plan_entries[0].status, PlanEntryStatus::InProgress);
+            assert_eq!(acp.plan_entries[1].status, PlanEntryStatus::Pending);
+        }
+
+        assert!(manager.drain_events(&mut state.runtime)?);
+        {
+            let buffer = shell_buffer(&state.runtime, buffer_id)?;
+            let acp = buffer
+                .acp_state
+                .as_ref()
+                .ok_or_else(|| "ACP state missing".to_owned())?;
+            assert_eq!(acp.plan_entries[0].status, PlanEntryStatus::Completed);
+            assert_eq!(acp.plan_entries[1].status, PlanEntryStatus::InProgress);
+        }
+
+        assert!(manager.drain_events(&mut state.runtime)?);
+        {
+            let buffer = shell_buffer(&state.runtime, buffer_id)?;
+            let acp = buffer
+                .acp_state
+                .as_ref()
+                .ok_or_else(|| "ACP state missing".to_owned())?;
+            assert!(
+                acp.plan_entries
+                    .iter()
+                    .all(|entry| entry.status == PlanEntryStatus::Completed)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_windows_cmd_environment_reads_fnm_env_output() {
+        let parsed = parse_windows_cmd_environment(
+            "SET PATH=C:\\fnm-node;C:\\tools\r\nSET FNM_DIR=C:\\Users\\sam\\AppData\\Roaming\\fnm\r\n",
+        )
+        .expect("fnm env output should parse");
+
+        assert_eq!(
+            parsed,
+            vec![
+                ("PATH".to_owned(), "C:\\fnm-node;C:\\tools".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned()
+                )
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    fn temp_dir(prefix: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be available")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_windows_nvm_helpers_read_current_root_and_settings() {
+        let settings = parse_windows_nvm_settings(
+            "root: C:\\Users\\sam\\AppData\\Roaming\\nvm\r\npath: C:\\Program Files\\nodejs\r\narch: 64\r\n",
+        );
+
+        assert_eq!(
+            parse_windows_nvm_current_output("v20.11.1\r\n"),
+            Some("v20.11.1".to_owned())
+        );
+        assert_eq!(
+            parse_windows_nvm_current_output("No current version\r\n"),
+            None
+        );
+        assert_eq!(
+            parse_windows_nvm_root_output(
+                "Current Root: C:\\Users\\sam\\AppData\\Roaming\\nvm\r\n"
+            ),
+            Some(PathBuf::from("C:\\Users\\sam\\AppData\\Roaming\\nvm"))
+        );
+        assert_eq!(
+            settings.root,
+            Some(PathBuf::from("C:\\Users\\sam\\AppData\\Roaming\\nvm"))
+        );
+        assert_eq!(
+            settings.path,
+            Some(PathBuf::from("C:\\Program Files\\nodejs"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nvm_environment_prepends_current_node_path() {
+        let root = temp_dir("volt-nvm-root");
+        let version_dir = root.join("v20.11.1");
+        std::fs::create_dir_all(&version_dir).expect("create nvm version directory");
+        std::fs::File::create(version_dir.join("node.exe")).expect("create node shim");
+        let env = vec![("PATH".to_owned(), "C:\\tools".to_owned())];
+
+        let nvm_env = windows_nvm_environment_from_parts(
+            Some(root.clone()),
+            None,
+            Some("v20.11.1"),
+            &env,
+            None,
+        )
+        .expect("nvm environment should resolve");
+        let path = explicit_environment_value(&nvm_env, "PATH").expect("PATH should be present");
+
+        assert!(path.starts_with(&version_dir.to_string_lossy().into_owned()));
+        assert!(path.ends_with(";C:\\tools"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn merge_node_manager_environment_keeps_manager_path_first() {
+        let env = vec![
+            ("PATH".to_owned(), "C:\\explicit".to_owned()),
+            ("CUSTOM".to_owned(), "1".to_owned()),
+        ];
+        let launch_env = vec![("PATH".to_owned(), "C:\\launch".to_owned())];
+        let manager_env = vec![
+            ("PATH".to_owned(), "C:\\node".to_owned()),
+            ("NVM_HOME".to_owned(), "C:\\nvm".to_owned()),
+        ];
+
+        let merged = merge_node_manager_environment(&env, Some(&launch_env), manager_env);
+
+        assert_eq!(
+            explicit_environment_value(&merged, "PATH"),
+            Some(&"C:\\node;C:\\explicit".to_owned())
+        );
+        assert_eq!(
+            explicit_environment_value(&merged, "NVM_HOME"),
+            Some(&"C:\\nvm".to_owned())
+        );
+        assert_eq!(
+            explicit_environment_value(&merged, "CUSTOM"),
+            Some(&"1".to_owned())
+        );
     }
 
     #[test]
@@ -4193,6 +4968,59 @@ mod tests {
             shell_ui(&state.runtime)?.picker_kind(),
             Some(PickerKind::AcpPermission { request_id: 2 })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn session_finished_marks_plan_entries_completed() -> Result<(), String> {
+        let (mut manager, _command_rx) = test_acp_manager();
+        let session_id = agent_client_protocol::SessionId::new("session-finish");
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+        manager.sessions.insert(
+            session_id.clone(),
+            AcpSessionInfo {
+                client_id: "copilot".to_owned(),
+                buffer_id,
+                workspace_id,
+                workspace_name: "project".to_owned(),
+                title: Some("Plan run".to_owned()),
+                available_commands: Vec::new(),
+                mode_state: None,
+                model_state: None,
+                config_options: Vec::new(),
+                mode_config_id: None,
+                model_config_id: None,
+            },
+        );
+
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.acp_set_plan(Plan::new(vec![
+            PlanEntry::new(
+                "Map state",
+                PlanEntryPriority::High,
+                PlanEntryStatus::InProgress,
+            ),
+            PlanEntry::new(
+                "Finalize output",
+                PlanEntryPriority::Medium,
+                PlanEntryStatus::Pending,
+            ),
+        ]));
+
+        manager.handle_event(&mut state.runtime, AcpEvent::SessionFinished { session_id })?;
+
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let acp = buffer
+            .acp_state
+            .as_ref()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        assert!(
+            acp.plan_entries
+                .iter()
+                .all(|entry| entry.status == PlanEntryStatus::Completed)
+        );
+
         Ok(())
     }
 

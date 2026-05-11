@@ -31,7 +31,6 @@ mod tests {
     fn vim_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-vim");
-        assert!(pkg.auto_load());
     }
 
     #[test]

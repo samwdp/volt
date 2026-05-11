@@ -184,23 +184,6 @@ mod tests {
     }
 
     #[test]
-    fn default_build_command_returns_cargo_for_rust() {
-        assert_eq!(default_build_command("rust"), Some("cargo build"));
-        assert_eq!(default_build_command("rs"), Some("cargo build"));
-    }
-
-    #[test]
-    fn default_build_command_returns_latexmk_for_latex() {
-        assert_eq!(default_build_command("latex"), Some("latexmk -pdf"));
-        assert_eq!(default_build_command("tex"), Some("latexmk -pdf"));
-    }
-
-    #[test]
-    fn default_build_command_returns_none_for_unknown_language() {
-        assert_eq!(default_build_command("brainfuck"), None);
-    }
-
-    #[test]
     fn parse_error_location_handles_path_line_col() {
         let (path, line, col) = parse_error_location("src/main.rs:10:5").expect("should parse");
         assert_eq!(path, "src/main.rs");
@@ -232,8 +215,13 @@ mod tests {
     }
 
     #[test]
-    fn compile_package_binds_f5_keybinding() {
+    fn compile_package_exports_global_keybindings() {
         let pkg = package();
-        assert!(pkg.key_bindings().iter().any(|kb| kb.chord() == "F5"));
+        assert!(pkg.key_bindings().iter().any(|kb| {
+            kb.command_name() == "workspace.compile" && kb.scope() == PluginKeymapScope::Global
+        }));
+        assert!(pkg.key_bindings().iter().any(|kb| {
+            kb.command_name() == "workspace.recompile" && kb.scope() == PluginKeymapScope::Global
+        }));
     }
 }

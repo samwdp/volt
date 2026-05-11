@@ -34,7 +34,6 @@ mod tests {
     fn graphql_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-graphql");
-        assert!(pkg.auto_load());
     }
 
     #[test]

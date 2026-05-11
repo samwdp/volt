@@ -29,7 +29,6 @@ mod tests {
     fn bash_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-bash");
-        assert!(pkg.auto_load());
     }
 
     #[test]

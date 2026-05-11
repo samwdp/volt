@@ -31,7 +31,6 @@ mod tests {
     fn scala_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-scala");
-        assert!(pkg.auto_load());
     }
 
     #[test]

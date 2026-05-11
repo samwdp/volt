@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Volt Docs</title>
+    <meta name="description" content="Volt editor documentation covering the architecture, runtime model, workspace crates, and launch paths.">
+    <link rel="icon" type="image/x-icon" href="assets/logo.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0d0e12;
+            --bg-elevated: #14151a;
+            --bg-card: #1a1c24;
+            --text: #e4e6f0;
+            --text-muted: #8a8fa4;
+            --accent: #7c6ff4;
+            --accent-glow: rgba(124, 111, 244, 0.15);
+            --accent-soft: rgba(124, 111, 244, 0.07);
+            --border: rgba(255,255,255,0.06);
+            --radius: 16px;
+            --radius-sm: 10px;
+            --transition: 200ms ease;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ── Top Bar ── */
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 40px;
+            background: rgba(13,14,18,0.82);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            font-size: 14px;
+        }
+
+        .topbar .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            color: var(--text);
+            font-weight: 700;
+            font-size: 15px;
+            letter-spacing: -0.3px;
+        }
+
+        .topbar .brand img {
+            width: 26px;
+            height: 26px;
+        }
+
+        .topbar .brand span {
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 400;
+            margin-left: 2px;
+        }
+
+        .topbar-nav {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .topbar-nav a {
+            padding: 7px 14px;
+            border-radius: 8px;
+            text-decoration: none;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 500;
+            transition: background var(--transition), color var(--transition);
+        }
+
+        .topbar-nav a:hover {
+            background: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        .topbar-nav .cta {
+            background: var(--accent);
+            color: #fff !important;
+            font-weight: 600;
+        }
+
+        .topbar-nav .cta:hover {
+            opacity: 0.85;
+        }
+
+        /* ── Hero ── */
+        .hero {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 60px;
+            padding: 80px 40px 80px 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .hero-eyebrow {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            color: var(--accent);
+            margin-bottom: 18px;
+        }
+
+        .hero-title {
+            font-size: 46px;
+            font-weight: 800;
+            line-height: 1.1;
+            letter-spacing: -1.2px;
+            background: linear-gradient(135deg, #fff 0%, #a89eff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-sub {
+            margin-top: 20px;
+            font-size: 16px;
+            color: var(--text-muted);
+            max-width: 480px;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 28px;
+            flex-wrap: wrap;
+        }
+
+        .hero-buttons a {
+            padding: 11px 22px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+
+        .hero-buttons a.btn-primary {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .hero-buttons a.btn-ghost {
+            background: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        .hero-buttons a:hover {
+            transform: translateY(-2px);
+        }
+
+        /* Hero stats row */
+        .hero-stats {
+            display: flex;
+            gap: 16px;
+            margin-top: 40px;
+        }
+
+        .stat {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 20px 24px;
+            flex: 1;
+            text-align: center;
+        }
+
+        .stat-num {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        /* ── Architecture Graphic ── */
+        .arch-graphic {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            justify-content: center;
+        }
+
+        .arch-block {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 18px 22px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--bg-elevated);
+            transition: transform var(--transition), box-shadow var(--transition);
+            cursor: default;
+        }
+
+        .arch-block:hover {
+            transform: translateX(6px);
+            box-shadow: 0 0 24px var(--accent-glow);
+        }
+
+        .arch-block .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .arch-block .dot.purple { background: #7c6ff4; }
+        .arch-block .dot.cyan { background: #38d0f1; }
+        .arch-block .dot.green { background: #6ee7a2; }
+        .arch-block .dot.orange { background: #f5a34e; }
+
+        .arch-block h3 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .arch-block p {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* ── Sections ── */
+        .section-block {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 60px 40px;
+        }
+
+        .section-block + .section-block {
+            border-top: 1px solid var(--border);
+        }
+
+        .section-eyebrow {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            color: var(--accent);
+            margin-bottom: 10px;
+        }
+
+        .section-title {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: -0.8px;
+        }
+
+        .section-desc {
+            margin-top: 10px;
+            color: var(--text-muted);
+            font-size: 15px;
+        }
+
+        /* ── Feature Cards ── */
+        .feature-cards {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-top: 36px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px;
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+        }
+
+        .feature-card h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            font-size: 14px;
+            color: var(--text-muted);
+            line-height: 1.65;
+        }
+
+        .feature-card .pill {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .pill.purple { background: var(--accent-soft); color: var(--accent); }
+        .pill.cyan { background: rgba(56,208,241,0.1); color: #38d0f1; }
+        .pill.green { background: rgba(110,231,162,0.1); color: #6ee7a2; }
+
+        /* ── Crates Grid ── */
+        .crates-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 20px;
+            margin-top: 36px;
+        }
+
+        .crate-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 26px;
+        }
+
+        .crate-box h3 {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+
+        .crate-box ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .crate-box ul li {
+            padding: 6px 0;
+            font-size: 14px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .crate-box ul li:last-child {
+            border-bottom: none;
+        }
+
+        .crate-box ul li code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--accent);
+            background: var(--accent-soft);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        /* ── Commands Table ── */
+        .cmd-table {
+            margin-top: 36px;
+            border-collapse: separate;
+            border-spacing: 0;
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .cmd-table thead {
+            background: var(--bg-card);
+        }
+
+        .cmd-table th {
+            padding: 14px 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            text-align: left;
+        }
+
+        .cmd-table td {
+            padding: 18px 20px;
+            font-size: 14px;
+            border-top: 1px solid var(--border);
+            vertical-align: middle;
+        }
+
+        .cmd-table td:first-child {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--accent);
+            background: var(--accent-soft);
+            white-space: nowrap;
+        }
+
+        .cmd-table .cmd-desc {
+            color: var(--text-muted);
+        }
+
+        .cmd-table tr:hover td {
+            background: rgba(124,111,244,0.04);
+        }
+
+        /* ── Workflows ── */
+        .workflow-list {
+            display: flex;
+            gap: 20px;
+            margin-top: 36px;
+        }
+
+        .workflow-step-card {
+            flex: 1;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+            position: relative;
+        }
+
+        .workflow-step-card .step-num {
+            position: absolute;
+            top: -14px;
+            left: 20px;
+            background: var(--accent);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 7px;
+        }
+
+        .workflow-step-card h3 {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .workflow-step-card p {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        /* ── Footer ── */
+        .site-footer {
+            text-align: center;
+            padding: 48px 40px;
+            font-size: 14px;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+        }
+
+        .site-footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .site-footer strong {
+            color: var(--text);
+        }
+
+        /* ── Responsive ── */
+        @media (max-width: 800px) {
+            .hero {
+                grid-template-columns: 1fr;
+                gap: 40px;
+            }
+
+            .hero-title { font-size: 32px; }
+
+            .hero-stats { flex-direction: column; }
+
+            .feature-cards { grid-template-columns: 1fr; }
+
+            .crates-grid { grid-template-columns: 1fr; }
+
+            .workflow-list { flex-direction: column; }
+
+            .topbar { padding: 12px 20px; flex-wrap: wrap; gap: 10px; }
+
+            .topbar-nav { flex-wrap: wrap; gap: 4px; }
+
+            .section-block { padding: 40px 20px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="topbar" id="top">
+        <a class="brand" href="#top" aria-label="Volt Docs home">
+            <img class="brand-logo" src="assets/logo.svg" alt="Volt logo" width="26" height="26">
+            <span>Volt Docs</span>
+        </a>
+        <nav class="topbar-nav">
+            <a href="architecture-diagram.html">Open Diagram</a>
+            <a href="user-packages.html">User Packages</a>
+            <a href="language.html">Add a Language</a>
+            <a href="changelog.html">Changelog</a>
+            <a class="cta" href="#commands">Get Started</a>
+        </nav>
+    </div>
+
+    <!-- ── Hero ── -->
+    <section class="hero">
+        <div class="hero-left">
+            <p class="hero-eyebrow">Rust-powered modal editor platform</p>
+            <h1 class="hero-title">Volt is a modal editor with a layered, programmable core.</h1>
+            <p class="hero-sub">
+                Volt combines a central runtime, compiled user packages, language tooling,
+                and an SDL shell into one cohesive editing environment. The architecture is
+                intentionally modular so the editor can grow without losing its shape.
+            </p>
+            <div class="hero-buttons">
+                <a class="btn-primary" href="#architecture">Explore the system</a>
+                <a class="btn-ghost" href="architecture-diagram.html">View full diagram</a>
+            </div>
+            <div class="hero-stats">
+                <div class="stat">
+                    <div class="stat-num">16</div>
+                    <div class="stat-label">workspace crates</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-num">1</div>
+                    <div class="stat-label">compiled user layer</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-num">3</div>
+                    <div class="stat-label">primary launch paths</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="arch-graphic">
+            <div class="arch-block">
+                <div class="dot purple"></div>
+                <div>
+                    <h3>Experience Layer</h3>
+                    <p>SDL shell, pickers, hover, terminal buffers.</p>
+                </div>
+            </div>
+            <div class="arch-block">
+                <div class="dot cyan"></div>
+                <div>
+                    <h3>Package Layer</h3>
+                    <p>Commands, hooks, keymaps, themes, LSP and DAP.</p>
+                </div>
+            </div>
+            <div class="arch-block">
+                <div class="dot green"></div>
+                <div>
+                    <h3>Core Layer</h3>
+                    <p>Runtime, buffers, syntax, rendering, Git, jobs.</p>
+                </div>
+            </div>
+            <div class="arch-block">
+                <div class="dot orange"></div>
+                <div>
+                    <h3>Systems Layer</h3>
+                    <p>Tokio, plugin host, message flow, SDL platform.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ── Overview / Feature Cards ── -->
+    <div class="section-block" id="overview">
+        <p class="section-eyebrow">Overview</p>
+        <h2 class="section-title">Editor identity, customization model, workspace shape.</h2>
+        <div class="feature-cards">
+            <article class="feature-card">
+                <span class="pill purple">Editor identity</span>
+                <h3>Modal muscle with modern editor systems.</h3>
+                <p>
+                    Volt aims to bridge fast modal editing with the capabilities people expect
+                    from a modern IDE: workspace discovery, external tooling, rich overlays,
+                    and programmable runtime services.
+                </p>
+            </article>
+            <article class="feature-card">
+                <span class="pill cyan">Customization model</span>
+                <h3>User packages shape the experience.</h3>
+                <p>
+                    Themes, language registrations, hook declarations, keybindings, and package
+                    metadata live in the compiled user layer so behavior stays declarative where
+                    possible instead of being scattered across the core.
+                </p>
+                <p style="margin-top:10px;">
+                    <a href="user-packages.html" style="color:var(--accent);text-decoration:none;font-weight:600;font-size:13px;">Read the user packages guide →</a>
+                </p>
+            </article>
+            <article class="feature-card">
+                <span class="pill green">Workspace shape</span>
+                <h3>Small crates, clear boundaries.</h3>
+                <p>
+                    The workspace is split by domain: text buffers, rendering, themes, syntax,
+                    terminal execution, Git, language servers, debugging, plugins, and the SDL
+                    shell all have explicit homes.
+                </p>
+            </article>
+        </div>
+    </div>
+
+    <!-- ── Architecture ── -->
+    <div class="section-block" id="architecture">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+            <div>
+                <p class="section-eyebrow">Architecture</p>
+                <h2 class="section-title">The system map that drives everything else.</h2>
+            </div>
+            <a href="architecture-diagram.html" style="color:var(--accent);text-decoration:none;font-size:14px;font-weight:500;">Open the full architecture diagram →</a>
+        </div>
+
+        <div class="feature-cards" style="margin-top:36px;">
+            <article class="feature-card">
+                <h3>01 — Thin executable, rich bootstrap.</h3>
+                <p>
+                    <code>volt</code> stays intentionally lean while the bootstrap flow
+                    assembles the runtime, user packages, registries, and shell entry
+                    points.
+                </p>
+            </article>
+            <article class="feature-card">
+                <h3>02 — EditorRuntime is the gravity well.</h3>
+                <p>
+                    The runtime binds model state, services, commands, hooks, and
+                    keymaps into one programmable center of the editor.
+                </p>
+            </article>
+            <article class="feature-card">
+                <h3>03 — User packages shape the experience.</h3>
+                <p>
+                    Themes, keybindings, language tools, hooks, and package metadata
+                    live in the compiled <code>user</code> layer rather than being hard-wired into
+                    the core.
+                </p>
+            </article>
+        </div>
+    </div>
+
+    <!-- ── Crates ── -->
+    <div class="section-block" id="crates">
+        <p class="section-eyebrow">Workspace crates</p>
+        <h2 class="section-title">The pieces that make up Volt.</h2>
+        <p class="section-desc">The workspace is organized by domain so each subsystem stays legible and can evolve independently.</p>
+        <div class="crates-grid">
+            <article class="crate-box">
+                <h3>Application entry</h3>
+                <ul>
+                    <li><code>volt</code> executable</li>
+                    <li><code>editor-sdl</code> shell frontend</li>
+                    <li><code>user</code> compiled customization layer</li>
+                    <li><code>xtask</code> workflow automation</li>
+                </ul>
+            </article>
+            <article class="crate-box">
+                <h3>Core model</h3>
+                <ul>
+                    <li><code>editor-core</code></li>
+                    <li><code>editor-buffer</code></li>
+                    <li><code>editor-render</code></li>
+                    <li><code>editor-theme</code></li>
+                    <li><code>editor-syntax</code></li>
+                    <li><code>editor-icons</code></li>
+                </ul>
+            </article>
+            <article class="crate-box">
+                <h3>Workspace services</h3>
+                <ul>
+                    <li><code>editor-fs</code></li>
+                    <li><code>editor-picker</code></li>
+                    <li><code>editor-jobs</code></li>
+                    <li><code>editor-terminal</code></li>
+                    <li><code>editor-git</code></li>
+                </ul>
+            </article>
+            <article class="crate-box">
+                <h3>Language tooling</h3>
+                <ul>
+                    <li><code>editor-lsp</code></li>
+                    <li><code>editor-dap</code></li>
+                    <li><code>user/sdk</code></li>
+                    <li><code>editor-plugin-host</code></li>
+                </ul>
+            </article>
+        </div>
+    </div>
+
+    <!-- ── Workflows ── -->
+    <div class="section-block" id="workflows">
+        <p class="section-eyebrow">Operator workflows</p>
+        <h2 class="section-title">Common ways to understand and validate the editor.</h2>
+        <div class="workflow-list">
+            <article class="workflow-step-card">
+                <div class="step-num">01</div>
+                <h3>Boot the hidden shell smoke test</h3>
+                <p>Use the single-frame shell path to confirm the runtime launches cleanly without staying interactive.</p>
+            </article>
+            <article class="workflow-step-card">
+                <div class="step-num">02</div>
+                <h3>Exercise the bootstrap path</h3>
+                <p>The non-UI bootstrap demo is the clearest snapshot of runtime registration for commands, hooks, themes, syntax, and external tooling.</p>
+            </article>
+            <article class="workflow-step-card">
+                <div class="step-num">03</div>
+                <h3>Validate the workspace pipeline</h3>
+                <p><code>cargo xtask ci</code> matches the CI-quality path when you need the full formatting, lint, and test sweep across the workspace.</p>
+            </article>
+        </div>
+    </div>
+
+    <!-- ── Commands ── -->
+    <div class="section-block" id="commands">
+        <p class="section-eyebrow">Commands</p>
+        <h2 class="section-title">High-signal entry points.</h2>
+
+        <table class="cmd-table">
+            <thead>
+                <tr>
+                    <th>Command</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>cargo run -p volt</td>
+                    <td class="cmd-desc">Starts the SDL shell demo and lets you explore the interactive editor surface.</td>
+                </tr>
+                <tr>
+                    <td>cargo run -p volt -- --shell-hidden</td>
+                    <td class="cmd-desc">Useful for runtime verification when you want a non-interactive shell boot.</td>
+                </tr>
+                <tr>
+                    <td>cargo run -p volt -- --bootstrap-demo</td>
+                    <td class="cmd-desc">Prints the subsystem summary for the clearest non-UI runtime overview.</td>
+                </tr>
+                <tr>
+                    <td>cargo xtask ci</td>
+                    <td class="cmd-desc">Executes the CI-grade format, lint, and test pipeline used across the workspace.</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ── Footer ── -->
+    <footer class="site-footer">
+        <p>
+            <strong>Volt</strong> pairs Vim-style editing with a layered Rust runtime, compiled
+            customization, and modern tooling integration.
+        </p>
+        <p style="margin-top:12px;">
+            <a href="#top">Back to top ↑</a>
+        </p>
+    </footer>
+
+</body>
+</html>

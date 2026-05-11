@@ -340,14 +340,14 @@ pub(super) fn active_terminal_dimensions(
         let panes = ui
             .panes()
             .ok_or_else(|| "active workspace view is missing".to_owned())?;
-        let pane_rects = match ui.pane_split_direction() {
-            PaneSplitDirection::Vertical => {
-                vertical_pane_rects(render_width, pane_height, panes.len())
-            }
-            PaneSplitDirection::Horizontal => {
-                horizontal_pane_rects(render_width, pane_height, panes.len())
-            }
-        };
+        let pane_rects = runtime_pane_rects(
+            &*shell_user_library(runtime),
+            ui.pane_split_direction(),
+            render_width,
+            pane_height,
+            panes.len(),
+            ui.active_pane_index(),
+        );
         let rect = pane_rects
             .get(ui.active_pane_index())
             .ok_or_else(|| "active pane rect is missing".to_owned())?;

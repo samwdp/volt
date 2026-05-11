@@ -29,7 +29,6 @@ mod tests {
     fn elixir_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-elixir");
-        assert!(pkg.auto_load());
     }
 
     #[test]

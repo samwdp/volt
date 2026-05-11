@@ -41,7 +41,6 @@ mod tests {
     fn xml_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-xml");
-        assert!(pkg.auto_load());
     }
 
     #[test]

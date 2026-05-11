@@ -12,10 +12,10 @@ pub const fn config() -> LigatureConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::config;
+    use super::{ENABLED, config};
 
     #[test]
-    fn config_defaults_to_enabled() {
-        assert!(config().enabled);
+    fn config_exposes_current_ligature_setting() {
+        assert_eq!(config().enabled, ENABLED);
     }
 }

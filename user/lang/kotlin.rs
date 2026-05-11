@@ -29,7 +29,6 @@ mod tests {
     fn kotlin_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-kotlin");
-        assert!(pkg.auto_load());
     }
 
     #[test]

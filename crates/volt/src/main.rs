@@ -19,11 +19,11 @@ use editor_git::parse_status;
 use editor_jobs::{CompilationRunner, JobManager, JobSpec};
 use editor_lsp::{LanguageServerRegistry, LanguageServerSession};
 use editor_picker::{PickerItem, PickerSession};
-use editor_plugin_api::PdfOpenMode;
 use editor_plugin_api::abi::{
     AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
     UserLibraryModuleRef,
 };
+use editor_plugin_api::{PaneConfig, PdfOpenMode};
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
@@ -197,6 +197,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn commandline_enabled(&self) -> bool {
         self.module.commandline_enabled()()
+    }
+
+    fn pane_config(&self) -> PaneConfig {
+        self.module.pane_config_v1()().into()
     }
 
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {

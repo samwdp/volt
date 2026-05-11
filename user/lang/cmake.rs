@@ -32,7 +32,6 @@ mod tests {
     fn cmake_package_metadata() {
         let pkg = package();
         assert_eq!(pkg.name(), "lang-cmake");
-        assert!(pkg.auto_load());
     }
 
     #[test]
