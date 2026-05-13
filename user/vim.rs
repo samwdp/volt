@@ -1101,7 +1101,8 @@ pub fn package() -> PluginPackage {
         // Workspace
         leader_binding("p n", "workspace.new", PluginKeymapScope::Workspace),
         leader_binding("p s", "workspace.switch", PluginKeymapScope::Workspace),
-        leader_binding("p d", "workspace.delete", PluginKeymapScope::Workspace),
+        leader_binding("p d", "workspace.dashboard", PluginKeymapScope::Workspace),
+        leader_binding("p k", "workspace.delete", PluginKeymapScope::Workspace),
         // Open
         leader_binding(
             "o p",

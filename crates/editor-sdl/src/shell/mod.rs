@@ -353,6 +353,8 @@ const OPTION_FONT_SIZE: &str = "font_size";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_CORNER_RADIUS: &str = "corner_radius";
 const OPTION_SCROLL_OFF: &str = "scrolloff";
+const OPTION_EMOJI_FONT: &str = "emoji_font";
+const OPTION_EMOJI_FONT_SIZE: &str = "emoji_font_size";
 const SEARCH_PICKER_ITEM_LIMIT: usize = 512;
 const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
@@ -370,7 +372,30 @@ const BUNDLED_ICON_FONT_FILES: &[&str] = &[
     "weathericons.ttf",
 ];
 #[cfg(target_os = "windows")]
-const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[r"C:\Windows\Fonts\seguisym.ttf"];
+const SYSTEM_EMOJI_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\seguiemj.ttf",
+    r"C:\Windows\Fonts\segoeui.ttf",
+    r"C:\Windows\Fonts\segoeuil.ttf",
+    r"C:\Windows\Fonts\seguili.ttf",
+    r"C:\Windows\Fonts\eui.ttf",
+];
+#[cfg(target_os = "macos")]
+const SYSTEM_EMOJI_FONT_CANDIDATES: &[&str] =
+    &["/System/Library/Fonts/Supplemental/Apple Color Emoji.ttf"];
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+const SYSTEM_EMOJI_FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/Noto-Color-Emoji.ttf",
+    "/usr/share/fonts/opentype/noto/NotoColorEmoji-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+];
+
+#[cfg(target_os = "windows")]
+const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\seguisym.ttf",
+    r"C:\Windows\Fonts\eufont.ttf",
+];
 #[cfg(target_os = "macos")]
 const SYSTEM_ICON_FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
@@ -460,7 +485,9 @@ impl DrawTarget<'_> {
 #[derive(Debug, Clone, PartialEq)]
 struct ThemeRuntimeSettings {
     font_request: Option<String>,
+    emoji_font_request: Option<String>,
     font_size: u32,
+    emoji_font_size: u32,
     display_scale: f32,
     window_effects: WindowEffects,
 }
@@ -547,11 +574,20 @@ struct IconFont<'ttf> {
     pixel_size: f32,
 }
 
+#[allow(dead_code)]
+struct EmojiFont<'ttf> {
+    font: Font<'ttf>,
+    raster_font: RasterFont,
+    pixel_size: f32,
+    shape_face: ShapeFace<'static>,
+}
+
 struct FontSetInit<'ttf> {
     primary: Font<'ttf>,
     primary_raster_font: RasterFont,
     primary_shape_face: ShapeFace<'static>,
     primary_pixel_size: f32,
+    emoji_font: Option<(Font<'ttf>, RasterFont, f32, ShapeFace<'static>)>,
     ligatures_enabled: bool,
     icon_fonts: Vec<(String, Font<'ttf>, RasterFont, f32)>,
     icon_chars: BTreeSet<char>,
@@ -563,6 +599,7 @@ struct FontSet<'ttf> {
     primary_raster_font: RasterFont,
     primary_shape_face: ShapeFace<'static>,
     primary_pixel_size: f32,
+    emoji_font: Option<EmojiFont<'ttf>>,
     ligatures_enabled: bool,
     icon_fonts: Vec<IconFont<'ttf>>,
     icon_chars: BTreeSet<char>,
@@ -581,11 +618,20 @@ impl<'ttf> FontSet<'ttf> {
                 pixel_size,
             })
             .collect();
+        let emoji_font = init
+            .emoji_font
+            .map(|(font, raster_font, pixel_size, shape_face)| EmojiFont {
+                font,
+                raster_font,
+                pixel_size,
+                shape_face,
+            });
         Self {
             primary: init.primary,
             primary_raster_font: init.primary_raster_font,
             primary_shape_face: init.primary_shape_face,
             primary_pixel_size: init.primary_pixel_size,
+            emoji_font,
             ligatures_enabled: init.ligatures_enabled,
             icon_fonts,
             icon_chars: init.icon_chars,
@@ -633,6 +679,39 @@ impl<'ttf> FontSet<'ttf> {
 
     fn prefers_icon_font(&self, character: char) -> bool {
         self.icon_chars.contains(&character)
+    }
+
+    /// Returns the emoji font when configured.
+    #[allow(dead_code)]
+    pub(super) fn emoji_font(&self) -> Option<&EmojiFont<'ttf>> {
+        self.emoji_font.as_ref()
+    }
+
+    /// Returns the emoji font's raster font when configured.
+    #[allow(dead_code)]
+    pub(super) fn emoji_raster_font(&self) -> Option<&RasterFont> {
+        self.emoji_font.as_ref().map(|emoji| &emoji.raster_font)
+    }
+
+    /// Returns the emoji font's shaping face when configured.
+    #[allow(dead_code)]
+    pub(super) fn emoji_shape_face(&self) -> Option<&ShapeFace<'static>> {
+        self.emoji_font.as_ref().map(|emoji| &emoji.shape_face)
+    }
+
+    /// Returns the emoji font's pixel size when configured.
+    #[allow(dead_code)]
+    pub(super) fn emoji_pixel_size(&self) -> Option<f32> {
+        self.emoji_font.as_ref().map(|emoji| emoji.pixel_size)
+    }
+
+    /// Returns true if the emoji font supports the given character.
+    pub(super) fn emoji_font_has_char(&self, character: char) -> bool {
+        if let Some(emoji_font) = self.emoji_font.as_ref() {
+            emoji_font.font.find_glyph(character).is_some()
+        } else {
+            false
+        }
     }
 }
 
@@ -814,7 +893,14 @@ fn resolved_tab_width(tab_width: usize) -> usize {
 fn is_zero_width_display_character(character: char) -> bool {
     matches!(
         character as u32,
-        0xFEFF | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+        0x200C..=0x200D | 0xFEFF | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+    )
+}
+
+fn is_wide_display_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF
     )
 }
 
@@ -838,7 +924,9 @@ fn display_columns_for_character(character: char, display_col: usize, tab_width:
         } else {
             tab_width - remainder
         }
-    } else if ascii_control_caret_notation(character).is_some() {
+    } else if ascii_control_caret_notation(character).is_some()
+        || is_wide_display_character(character)
+    {
         2
     } else {
         1
@@ -6701,6 +6789,9 @@ enum PickerAction {
         buffer_id: BufferId,
         remote_branch: String,
         local_branch: String,
+    },
+    GitWorktreeDashboardCreate {
+        base_dir: PathBuf,
     },
     GitBranchAction {
         action: GitBranchActionKind,
@@ -12666,6 +12757,8 @@ fn update_theme_runtime<'ttf>(
     let mut fonts_changed = false;
     if updated.font_size != theme_settings.font_size
         || updated.font_request != theme_settings.font_request
+        || updated.emoji_font_request != theme_settings.emoji_font_request
+        || updated.emoji_font_size != theme_settings.emoji_font_size
         || updated.display_scale != theme_settings.display_scale
     {
         let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
@@ -12795,13 +12888,24 @@ fn theme_runtime_settings(
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
         .map(str::to_owned);
+    let emoji_font_request = theme_registry
+        .and_then(|registry| registry.resolve_string(OPTION_EMOJI_FONT))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let font_size = theme_registry
         .and_then(|registry| registry.resolve_number(OPTION_FONT_SIZE))
         .map(|value| value.max(1.0).round() as u32)
         .unwrap_or(config.font_size);
+    let emoji_font_size = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_EMOJI_FONT_SIZE))
+        .map(|value| value.max(1.0).round() as u32)
+        .unwrap_or(font_size);
     ThemeRuntimeSettings {
         font_request,
+        emoji_font_request,
         font_size,
+        emoji_font_size,
         display_scale: normalize_display_scale(display_scale),
         window_effects: current_window_effect_settings(theme_registry),
     }
@@ -12936,6 +13040,23 @@ fn resolve_system_icon_font_paths() -> Vec<PathBuf> {
         .collect()
 }
 
+fn resolve_system_emoji_font_paths() -> Vec<PathBuf> {
+    SYSTEM_EMOJI_FONT_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn resolve_emoji_font_path(request: Option<&str>) -> Option<PathBuf> {
+    if let Some(request) = request.and_then(|value| (!value.is_empty()).then_some(value))
+        && let Some(path) = resolve_font_request(request)
+    {
+        return Some(path);
+    }
+    resolve_system_emoji_font_paths().first().cloned()
+}
+
 fn resolve_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
     let mut paths = resolve_bundled_icon_font_paths()?;
     let mut seen = paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -12987,6 +13108,8 @@ fn load_font_set<'ttf>(
     user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
     let effective_font_size = scaled_font_size(settings.font_size, settings.display_scale);
+    let emoji_effective_font_size =
+        scaled_font_size(settings.emoji_font_size, settings.display_scale);
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
     let primary_font_data: &'static [u8] = Box::leak(
         fs::read(&primary_path)
@@ -13034,6 +13157,52 @@ fn load_font_set<'ttf>(
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
         .max(1) as i32;
+
+    // Load emoji font (best-effort, silently fails if not available)
+    let emoji_font: Option<(Font<'ttf>, RasterFont, f32, ShapeFace<'static>)> =
+        match resolve_emoji_font_path(settings.emoji_font_request.as_deref()) {
+            Some(emoji_path) => {
+                let emoji_font_data = fs::read(&emoji_path)
+                    .map_err(|error| {
+                        ShellError::Runtime(format!(
+                            "failed to read emoji font `{}`: {error}",
+                            emoji_path.display()
+                        ))
+                    })
+                    .ok()
+                    .unwrap_or_default();
+                let emoji_font_data: &'static [u8] = Box::leak(emoji_font_data.into_boxed_slice());
+                if emoji_font_data.is_empty() {
+                    None
+                } else {
+                    let emoji_raster_font = RasterFont::from_bytes(
+                        emoji_font_data,
+                        fontdue::FontSettings {
+                            scale: emoji_effective_font_size,
+                            ..fontdue::FontSettings::default()
+                        },
+                    )
+                    .ok();
+                    let emoji_shape_face = ShapeFace::from_slice(emoji_font_data, 0);
+                    if let (Some(font), Some(raster_font), Some(shape_face)) = (
+                        ttf.load_font(&emoji_path, emoji_effective_font_size).ok(),
+                        emoji_raster_font,
+                        emoji_shape_face,
+                    ) {
+                        let pixel_size = normalized_raster_pixel_size(
+                            emoji_effective_font_size,
+                            font.height().max(1),
+                            raster_font.horizontal_line_metrics(emoji_effective_font_size),
+                        );
+                        Some((font, raster_font, pixel_size, shape_face))
+                    } else {
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
     let icon_fonts = resolve_icon_font_paths()?
         .into_iter()
         .map(|path| {
@@ -13076,6 +13245,7 @@ fn load_font_set<'ttf>(
         primary_raster_font,
         primary_shape_face,
         primary_pixel_size,
+        emoji_font,
         ligatures_enabled: user_library.ligature_config().enabled,
         icon_fonts,
         icon_chars,
@@ -15154,6 +15324,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         &remote_branch,
                         &local_branch,
                     )?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::GitWorktreeDashboardCreate { base_dir } => {
+                    open_git_worktree_dashboard_create(runtime, &base_dir)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::GitBranchAction { action, branch } => match action {

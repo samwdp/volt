@@ -1217,7 +1217,9 @@ fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 24,
+            emoji_font_size: 24,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -1262,7 +1264,9 @@ fn compose_ligature_surface_uses_grayscale_glyph_coverage() -> Result<(), String
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 18,
+            emoji_font_size: 18,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -2758,7 +2762,7 @@ fn line_char_map_treats_variation_selectors_as_zero_width() {
     let line = "⚛️x";
     let char_map = LineCharMap::new(line);
 
-    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 2);
+    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 3);
     assert_eq!(char_map.display_text_for_range(line, 0, 2), "⚛");
     assert_eq!(
         char_map.display_text_for_range(line, 0, line.chars().count()),
@@ -2798,6 +2802,18 @@ fn line_char_map_cursor_anchor_skips_variation_selectors() {
     assert_eq!(char_map.cursor_anchor_col(0), 0);
     assert_eq!(char_map.cursor_anchor_col(1), 0);
     assert_eq!(char_map.cursor_anchor_col(2), 2);
+}
+
+#[test]
+fn line_char_map_treats_emoji_as_double_width() {
+    let line = "🙂x";
+    let char_map = LineCharMap::new(line);
+
+    assert_eq!(char_map.display_cols_between(0, 1), 2);
+    assert_eq!(char_map.display_cols_between(0, line.chars().count()), 3);
+    assert_eq!(char_map.char_col_for_display_col(0), 0);
+    assert_eq!(char_map.char_col_for_display_col(1), 0);
+    assert_eq!(char_map.char_col_for_display_col(2), 1);
 }
 
 #[test]
@@ -6620,7 +6636,9 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -6676,7 +6694,9 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -6746,7 +6766,9 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -6805,7 +6827,9 @@ fn render_shell_state_scene_with_docked_runtime_popup(
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -6950,7 +6974,9 @@ fn render_shell_state_scene_with_notification_overlay(
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -7054,7 +7080,9 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -7336,7 +7364,9 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 16,
+            emoji_font_size: 16,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -7532,7 +7562,9 @@ fn load_font_set_normalizes_icon_raster_sizes_to_primary_line_height() -> Result
         &ttf,
         &ThemeRuntimeSettings {
             font_request: None,
+            emoji_font_request: None,
             font_size: 18,
+            emoji_font_size: 18,
             display_scale: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
@@ -8858,7 +8890,7 @@ fn font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint() -> R
 
     assert!(is_private_use_character(branch));
     assert_eq!(
-        resolve_font_role_for_char(Some(0), true, false, branch),
+        resolve_font_role_for_char(Some(0), true, false, false, branch),
         FontRole::Icon(0)
     );
     Ok(())
@@ -8871,10 +8903,23 @@ fn font_role_prefers_icon_font_for_symbol_like_prompt_glyphs() -> Result<(), Str
     assert!(is_symbol_like_character(prompt));
     assert!(!is_private_use_character(prompt));
     assert_eq!(
-        resolve_font_role_for_char(Some(0), true, false, prompt),
+        resolve_font_role_for_char(Some(0), true, false, false, prompt),
         FontRole::Icon(0)
     );
     Ok(())
+}
+
+#[test]
+fn font_role_uses_emoji_when_emoji_font_has_glyph() {
+    assert_eq!(
+        resolve_font_role_for_char(None, false, false, true, '\u{1F642}'),
+        FontRole::Emoji
+    );
+}
+
+#[test]
+fn zero_width_display_characters_include_joiners() {
+    assert!(is_zero_width_display_character('\u{200D}'));
 }
 
 #[test]
@@ -8891,6 +8936,81 @@ fn strip_zero_width_display_characters_removes_byte_order_marks() {
         strip_zero_width_display_characters("\u{feff}<Project Sdk=\"Microsoft.NET.Sdk\">").as_ref(),
         "<Project Sdk=\"Microsoft.NET.Sdk\">"
     );
+}
+
+#[test]
+fn emoji_raster_font_rasterizes_simple_emoji() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: Some("Segoe UI Emoji".to_owned()),
+            font_size: 18,
+            emoji_font_size: 18,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let raster_font = fonts
+        .emoji_raster_font()
+        .ok_or_else(|| "emoji raster font missing".to_owned())?;
+    let (metrics, bitmap) =
+        raster_font.rasterize('\u{1F642}', fonts.emoji_pixel_size().unwrap_or(18.0));
+    assert!(metrics.width > 0, "emoji raster width should be non-zero");
+    assert!(metrics.height > 0, "emoji raster height should be non-zero");
+    assert!(
+        bitmap.iter().any(|alpha| *alpha != 0),
+        "emoji bitmap should contain visible coverage"
+    );
+    Ok(())
+}
+
+#[test]
+fn compose_emoji_surface_rasterizes_simple_emoji() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: Some("Segoe UI Emoji".to_owned()),
+            font_size: 18,
+            emoji_font_size: 18,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let layout = cached_emoji_layout(&fonts, "\u{1F642}", fonts.primary().ascent())
+        .ok_or_else(|| "emoji layout missing".to_owned())?;
+    let surface = compose_emoji_surface(&fonts, &layout, RenderColor::rgb(255, 255, 255))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "emoji surface missing".to_owned())?;
+    assert!(
+        surface.width() > 0,
+        "emoji surface width should be non-zero"
+    );
+    assert!(
+        surface.height() > 0,
+        "emoji surface height should be non-zero"
+    );
+
+    let mut has_visible_alpha = false;
+    surface.with_lock(|pixels| {
+        has_visible_alpha = pixels.chunks_exact(4).any(|rgba| rgba[3] != 0);
+    });
+    assert!(
+        has_visible_alpha,
+        "emoji surface should contain visible pixels"
+    );
+    Ok(())
 }
 
 #[test]

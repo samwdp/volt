@@ -2444,6 +2444,202 @@ pub(super) fn open_git_worktree_branch_picker(runtime: &mut EditorRuntime) -> Re
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GitWorktreeListEntry {
+    path: PathBuf,
+    branch: Option<String>,
+    head: Option<String>,
+    bare: bool,
+}
+
+impl GitWorktreeListEntry {
+    fn display_name(&self, base_dir: &Path) -> String {
+        if let Some(path) = self
+            .path
+            .strip_prefix(base_dir)
+            .ok()
+            .and_then(|path| path.to_str())
+            .filter(|path| !path.is_empty())
+        {
+            return path.to_owned();
+        }
+        if let Some(name) = self.path.file_name().and_then(|name| name.to_str()) {
+            return name.to_owned();
+        }
+        self.path.to_string_lossy().into_owned()
+    }
+
+    fn detail(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(branch) = &self.branch {
+            parts.push(branch.clone());
+        }
+        if let Some(head) = &self.head {
+            parts.push(head.chars().take(12).collect::<String>());
+        }
+        if self.bare {
+            parts.push("bare".to_owned());
+        }
+        parts.join(" | ")
+    }
+}
+
+pub(super) fn git_worktree_dashboard_picker_overlay(
+    runtime: &EditorRuntime,
+) -> Result<PickerOverlay, String> {
+    let base_dir = worktree_dashboard_base_dir(runtime)?;
+    let worktrees = git_worktree_list(&base_dir)?;
+    let mut entries = worktrees
+        .into_iter()
+        .filter(|entry| !entry.bare)
+        .map(|entry| {
+            let existing_workspace = find_workspace_by_root(runtime, &entry.path)?;
+            let name = entry.display_name(&base_dir);
+            let detail = {
+                let mut detail = entry.detail();
+                if existing_workspace.is_some() {
+                    if !detail.is_empty() {
+                        detail.push_str(" | ");
+                    }
+                    detail.push_str("open workspace");
+                }
+                detail
+            };
+            let action = existing_workspace.map_or(
+                PickerAction::CreateWorkspace {
+                    name: name.clone(),
+                    root: entry.path.clone(),
+                },
+                PickerAction::SwitchWorkspace,
+            );
+            Ok(PickerEntry {
+                item: PickerItem::new(
+                    entry.path.display().to_string(),
+                    name,
+                    detail,
+                    Some(entry.path.display().to_string()),
+                ),
+                action,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    entries.insert(
+        0,
+        PickerEntry {
+            item: PickerItem::new(
+                "git-worktree-dashboard:create",
+                "+ new worktree",
+                base_dir.display().to_string(),
+                Some("Open oil at the bare repo and choose a branch.".to_owned()),
+            ),
+            action: PickerAction::GitWorktreeDashboardCreate { base_dir },
+        },
+    );
+
+    Ok(PickerOverlay::from_entries("Workspace Dashboard", entries))
+}
+
+pub(super) fn open_git_worktree_dashboard_create(
+    runtime: &mut EditorRuntime,
+    base_dir: &Path,
+) -> Result<(), String> {
+    split_runtime_pane(runtime, PaneSplitDirection::Vertical)?;
+    open_oil_directory(runtime, base_dir.to_path_buf())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    begin_oil_worktree_request(runtime, buffer_id)
+}
+
+fn worktree_dashboard_base_dir(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    if let Some(root) = active_directory_root(runtime)? {
+        return git_common_dir(&root).or(Ok(root));
+    }
+    if let Some(root) = active_workspace_root(runtime)? {
+        return git_common_dir(&root).or_else(|_| {
+            root.parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| format!("workspace root `{}` has no parent", root.display()))
+        });
+    }
+    env::current_dir().map_err(|error| format!("workspace dashboard requires a root: {error}"))
+}
+
+fn git_common_dir(root: &Path) -> Result<PathBuf, String> {
+    let output = git_read_command_output(
+        root,
+        "rev-parse --git-common-dir",
+        &["rev-parse", "--git-common-dir"],
+    )?;
+    let common_dir = output.trim();
+    if common_dir.is_empty() {
+        return Err(format!(
+            "git rev-parse --git-common-dir returned no path for {}",
+            root.display()
+        ));
+    }
+    let path = PathBuf::from(common_dir);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    Ok(path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == ".git")
+        .and_then(|_| path.parent().map(Path::to_path_buf))
+        .unwrap_or(path))
+}
+
+fn git_worktree_list(root: &Path) -> Result<Vec<GitWorktreeListEntry>, String> {
+    parse_git_worktree_list(&git_read_command_output(
+        root,
+        "worktree list",
+        &["worktree", "list", "--porcelain"],
+    )?)
+}
+
+fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, String> {
+    let mut entries = Vec::new();
+    let mut current: Option<GitWorktreeListEntry> = None;
+    for line in output.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(GitWorktreeListEntry {
+                path: PathBuf::from(path),
+                branch: None,
+                head: None,
+                bare: false,
+            });
+        } else if let Some(entry) = current.as_mut() {
+            if let Some(branch) = line.strip_prefix("branch ") {
+                entry.branch = Some(branch.trim_start_matches("refs/heads/").to_owned());
+            } else if let Some(head) = line.strip_prefix("HEAD ") {
+                entry.head = Some(head.to_owned());
+            } else if line == "bare" {
+                entry.bare = true;
+            }
+        } else {
+            return Err(format!(
+                "git worktree list returned unexpected line `{line}`"
+            ));
+        }
+    }
+    if let Some(entry) = current {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
 pub(super) fn begin_oil_worktree_request(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,

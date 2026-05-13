@@ -4442,6 +4442,7 @@ pub(super) fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
 pub(super) enum FontRole {
     Primary,
     Icon(usize),
+    Emoji,
 }
 
 #[derive(Debug, Clone)]
@@ -4510,12 +4511,24 @@ pub(super) fn is_symbol_like_character(character: char) -> bool {
     )
 }
 
+pub(super) fn is_emoji_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE00..=0xFE0F
+    )
+}
+
 pub(super) fn resolve_font_role_for_char(
     icon_font_index: Option<usize>,
     primary_has_glyph: bool,
     prefers_icon_font: bool,
+    emoji_has_glyph: bool,
     character: char,
 ) -> FontRole {
+    // Emoji characters get their own font role when available
+    if emoji_has_glyph && is_emoji_character(character) {
+        return FontRole::Emoji;
+    }
     if let Some(index) = icon_font_index
         && (prefers_icon_font
             || is_private_use_character(character)
@@ -4536,6 +4549,7 @@ pub(super) fn font_role_for_char(fonts: &FontSet<'_>, character: char) -> FontRo
         fonts.icon_font_index_for_char(character),
         fonts.primary().find_glyph(character).is_some(),
         fonts.prefers_icon_font(character),
+        fonts.emoji_font_has_char(character),
         character,
     )
 }
@@ -4554,6 +4568,12 @@ pub(super) fn font_runs(text: &str, fonts: &FontSet<'_>) -> Vec<FontRun> {
     let mut current_role = FontRole::Primary;
     let mut current_text = String::new();
     for character in text.chars() {
+        if is_zero_width_display_character(character) {
+            if current_role == FontRole::Emoji && !current_text.is_empty() {
+                current_text.push(character);
+            }
+            continue;
+        }
         let next_role = font_role_for_char(fonts, character);
         if next_role != current_role && !current_text.is_empty() {
             runs.push(FontRun {
@@ -4745,6 +4765,10 @@ impl<'texture> RenderedTextTexture<'texture> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum TextTextureCacheKey {
     Primary {
+        text: String,
+        color: u32,
+    },
+    Emoji {
         text: String,
         color: u32,
     },
@@ -5280,6 +5304,29 @@ pub(super) fn render_primary_text_texture<'texture>(
     Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance))
 }
 
+pub(super) fn render_emoji_text_texture<'texture>(
+    texture_creator: &'texture WindowTextureCreator,
+    fonts: &FontSet<'_>,
+    text: &str,
+    primary_ascent: i32,
+    color: RenderColor,
+) -> Result<RenderedTextTexture<'texture>, ShellError> {
+    let advance = monospace_text_width(text, fonts.cell_width()) as i32;
+    let Some(layout) = cached_emoji_layout(fonts, text, primary_ascent) else {
+        return Ok(RenderedTextTexture::empty(advance));
+    };
+    let Some(surface) = compose_emoji_surface(fonts, &layout, color)? else {
+        return Ok(RenderedTextTexture::empty(layout.advance));
+    };
+    let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
+    Ok(RenderedTextTexture::from_texture(
+        texture,
+        layout.offset_x,
+        layout.offset_y,
+        layout.advance,
+    ))
+}
+
 pub(super) fn draw_text_texture_with_cache<'texture, F>(
     canvas: &mut Canvas<Window>,
     text_texture_cache: &mut TextTextureCache<'texture>,
@@ -5349,13 +5396,13 @@ pub(super) fn scale_shaping_units(value: i32, pixel_size: f32, units_per_em: i32
     value as f32 * (pixel_size / units_per_em.max(1) as f32)
 }
 
-pub(super) fn shape_ascii_ligature_run_with_face(
+pub(super) fn shape_text_run_with_face(
     face: &ShapeFace<'_>,
     pixel_size: f32,
-    ligatures_enabled: bool,
+    features: &[ShapeFeature],
     text: &str,
 ) -> Option<ShapedRun> {
-    if !ligatures_enabled || !text.is_ascii() || text.chars().count() < 2 {
+    if text.is_empty() {
         return None;
     }
 
@@ -5367,8 +5414,7 @@ pub(super) fn shape_ascii_ligature_run_with_face(
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(text);
     buffer.guess_segment_properties();
-    let features = [ShapeFeature::new(Tag::from_bytes(b"calt"), 1, ..)];
-    let glyph_buffer = shape(&face, &features, buffer);
+    let glyph_buffer = shape(&face, features, buffer);
     let glyph_infos = glyph_buffer.glyph_infos();
 
     let units_per_em = face.units_per_em();
@@ -5390,6 +5436,19 @@ pub(super) fn shape_ascii_ligature_run_with_face(
     })
 }
 
+pub(super) fn shape_ascii_ligature_run_with_face(
+    face: &ShapeFace<'_>,
+    pixel_size: f32,
+    ligatures_enabled: bool,
+    text: &str,
+) -> Option<ShapedRun> {
+    if !ligatures_enabled || !text.is_ascii() || text.chars().count() < 2 {
+        return None;
+    }
+    let features = [ShapeFeature::new(Tag::from_bytes(b"calt"), 1, ..)];
+    shape_text_run_with_face(face, pixel_size, &features, text)
+}
+
 pub(super) fn shape_ascii_ligature_run(fonts: &FontSet<'_>, text: &str) -> Option<ShapedRun> {
     let shaped = shape_ascii_ligature_run_with_face(
         fonts.primary_shape_face(),
@@ -5409,6 +5468,12 @@ pub(super) fn shape_ascii_ligature_run(fonts: &FontSet<'_>, text: &str) -> Optio
         .iter()
         .any(|glyph| glyph.x_offset.abs() > 0.01 || glyph.y_offset.abs() > 0.01);
     (has_substitution || has_positioning).then_some(shaped)
+}
+
+pub(super) fn shape_emoji_run(fonts: &FontSet<'_>, text: &str) -> Option<ShapedRun> {
+    let face = fonts.emoji_shape_face()?;
+    let pixel_size = fonts.emoji_pixel_size()?;
+    shape_text_run_with_face(face, pixel_size, &[], text)
 }
 
 fn glyphs_need_ligature_render_path(
@@ -5746,8 +5811,44 @@ pub(super) fn cached_ligature_layout(
     LigatureShapeCacheValue::Layout(build_cached_text_layout(glyphs, advance))
 }
 
-pub(super) fn compose_ligature_surface(
+pub(super) fn cached_emoji_layout(
     fonts: &FontSet<'_>,
+    text: &str,
+    primary_ascent: i32,
+) -> Option<CachedLigatureLayout> {
+    let shaped = shape_emoji_run(fonts, text)?;
+    let raster_font = fonts.emoji_raster_font()?;
+    let raster_pixel_size = fonts.emoji_pixel_size()?;
+
+    let mut pen_x = 0.0_f32;
+    let mut glyphs = Vec::new();
+    for glyph in &shaped.glyphs {
+        let metrics = raster_font.metrics_indexed(glyph.glyph_id, raster_pixel_size);
+        if metrics.width != 0 && metrics.height != 0 {
+            let draw_x = (pen_x + glyph.x_offset).round() as i32 + metrics.xmin;
+            let draw_y = primary_ascent
+                - metrics.height as i32
+                - metrics.ymin
+                - glyph.y_offset.round() as i32;
+            glyphs.push(CachedGlyphRasterPlacement {
+                glyph_id: glyph.glyph_id,
+                draw_x,
+                draw_y,
+                width: metrics.width as u32,
+                height: metrics.height as u32,
+                raster_px_64: encode_raster_px_64(raster_pixel_size),
+            });
+        }
+        pen_x += glyph.x_advance;
+    }
+
+    let advance = (shaped.total_advance.round() as i32)
+        .max(monospace_text_width(text, fonts.cell_width()) as i32);
+    Some(build_cached_text_layout(glyphs, advance))
+}
+
+pub(super) fn compose_raster_surface(
+    raster_font: &RasterFont,
     layout: &CachedLigatureLayout,
     color: RenderColor,
 ) -> Result<Option<Surface<'static>>, ShellError> {
@@ -5768,9 +5869,7 @@ pub(super) fn compose_ligature_surface(
         // CONTEXT: fontdue's LCD/subpixel mask assumes channel-local filtering.
         // Collapsing that back into a single alpha channel changed the apparent
         // color and weight of ligatures in compositor-backed windows.
-        let (_, bitmap) = fonts
-            .primary_raster_font()
-            .rasterize_indexed(glyph.glyph_id, raster_pixel_size);
+        let (_, bitmap) = raster_font.rasterize_indexed(glyph.glyph_id, raster_pixel_size);
         composite_alpha_bitmap(
             &mut composed,
             glyph.draw_x - layout.offset_x,
@@ -5782,6 +5881,25 @@ pub(super) fn compose_ligature_surface(
         );
     }
     Ok(Some(composed))
+}
+
+pub(super) fn compose_ligature_surface(
+    fonts: &FontSet<'_>,
+    layout: &CachedLigatureLayout,
+    color: RenderColor,
+) -> Result<Option<Surface<'static>>, ShellError> {
+    compose_raster_surface(fonts.primary_raster_font(), layout, color)
+}
+
+pub(super) fn compose_emoji_surface(
+    fonts: &FontSet<'_>,
+    layout: &CachedLigatureLayout,
+    color: RenderColor,
+) -> Result<Option<Surface<'static>>, ShellError> {
+    let raster_font = fonts
+        .emoji_raster_font()
+        .ok_or_else(|| ShellError::Runtime("emoji raster font is not configured".to_owned()))?;
+    compose_raster_surface(raster_font, layout, color)
 }
 
 pub(super) fn render_cached_ligature_texture<'texture>(
@@ -5860,22 +5978,29 @@ pub(super) fn render_text_with_fonts<'texture>(
     text: &str,
     color: RenderColor,
 ) -> Result<(), ShellError> {
-    let text = strip_zero_width_display_characters(text);
-    let text = text.as_ref();
-    if text.is_empty() {
-        return Ok(());
-    }
-    let mut draw_x = x;
-    let primary_line_height = fonts.primary().height().max(1);
-    let primary_ascent = fonts.primary().ascent();
     let runs = if fonts.icon_fonts().is_empty() || text.is_ascii() {
+        let text = strip_zero_width_display_characters(text);
+        let text = text.as_ref();
+        if text.is_empty() {
+            return Ok(());
+        }
         vec![FontRun {
             role: FontRole::Primary,
             text: text.to_owned(),
         }]
     } else {
-        font_runs(text, fonts)
+        let runs = font_runs(text, fonts);
+        if runs.is_empty() {
+            return Ok(());
+        }
+        runs
     };
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let mut draw_x = x;
+    let primary_line_height = fonts.primary().height().max(1);
+    let primary_ascent = fonts.primary().ascent();
     let color_key = render_color_cache_key(color);
     for run in runs {
         if run.text.is_empty() {
@@ -5976,6 +6101,30 @@ pub(super) fn render_text_with_fonts<'texture>(
                         y,
                     )?;
                 }
+            }
+            FontRole::Emoji => {
+                draw_x += draw_text_texture_with_cache(
+                    canvas,
+                    text_texture_cache,
+                    text_texture_cache_mode,
+                    TextTextureCacheKey::Emoji {
+                        text: run.text.clone(),
+                        color: color_key,
+                    },
+                    || {
+                        // SDL_ttf still returns tofu for Segoe UI Emoji here on Windows,
+                        // so emoji runs go through the fontdue/rustybuzz compositor path.
+                        render_emoji_text_texture(
+                            texture_creator,
+                            fonts,
+                            &run.text,
+                            primary_ascent,
+                            color,
+                        )
+                    },
+                    draw_x,
+                    y,
+                )?;
             }
         }
     }

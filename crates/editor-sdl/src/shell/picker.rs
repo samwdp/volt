@@ -40,6 +40,7 @@ pub(super) fn picker_overlay(
         "keybindings" => Ok(keybinding_picker_overlay(runtime)),
         "treesitter.languages" => treesitter_install_picker_overlay(runtime),
         "workspace.projects" => workspace_project_picker_overlay(runtime),
+        "workspace.dashboard" => git_worktree_dashboard_picker_overlay(runtime),
         "workspace.switch" => workspace_switch_picker_overlay(runtime),
         "workspace.delete" => workspace_delete_picker_overlay(runtime),
         "workspace.files" => workspace_file_picker_overlay(runtime),

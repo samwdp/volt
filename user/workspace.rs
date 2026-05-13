@@ -25,6 +25,11 @@ pub fn package() -> PluginPackage {
             "workspace.delete",
         ),
         picker_command(
+            "workspace.dashboard",
+            "Shows checked-out git worktrees for the active workspace.",
+            "workspace.dashboard",
+        ),
+        picker_command(
             "workspace.list-files",
             "Lists the current workspace files that are visible to Git.",
             "workspace.files",
