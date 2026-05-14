@@ -66,6 +66,30 @@ impl RenderColor {
     }
 }
 
+/// Backend-agnostic font styling for text runs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextStyle {
+    /// Draw text in bold.
+    pub bold: bool,
+    /// Draw text in italic.
+    pub italic: bool,
+}
+
+impl TextStyle {
+    /// Creates plain text styling.
+    pub const fn plain() -> Self {
+        Self {
+            bold: false,
+            italic: false,
+        }
+    }
+
+    /// Creates text styling from bold and italic flags.
+    pub const fn new(bold: bool, italic: bool) -> Self {
+        Self { bold, italic }
+    }
+}
+
 /// Backend-agnostic draw command emitted by the shell renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawCommand {
@@ -93,6 +117,14 @@ pub enum DrawCommand {
         y: i32,
         text: String,
         color: RenderColor,
+    },
+    /// Draws a styled text run at the given origin.
+    StyledText {
+        x: i32,
+        y: i32,
+        text: String,
+        color: RenderColor,
+        style: TextStyle,
     },
     /// Draws an RGBA image scaled into the given rectangle.
     Image {
@@ -193,7 +225,9 @@ fn preferred_font_search_roots() -> Vec<PathBuf> {
 }
 
 fn preferred_berkeley_mono_font() -> Option<PathBuf> {
+    let normalized = normalize_font_name("Berkeley Mono");
     let mut stack = preferred_font_search_roots();
+    let mut matches = Vec::new();
     while let Some(path) = stack.pop() {
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
@@ -226,11 +260,11 @@ fn preferred_berkeley_mono_font() -> Option<PathBuf> {
         let looks_like_berkeley_mono =
             file_name.contains("berkeleymono") || file_name.contains("berkeley mono");
         if looks_like_berkeley_mono {
-            return Some(path);
+            matches.push(path);
         }
     }
 
-    None
+    pick_best_matching_font_path(matches, &normalized)
 }
 
 /// Finds the first available system monospace font from the known candidates.
@@ -259,6 +293,7 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
         .into_iter()
         .map(|path| (path, 0usize))
         .collect::<Vec<_>>();
+    let mut matches = Vec::new();
     while let Some((path, depth)) = stack.pop() {
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
@@ -281,11 +316,56 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
         }
 
         if font_name_matches(&path, &normalized) {
-            return Some(path);
+            matches.push(path);
         }
     }
 
-    None
+    pick_best_matching_font_path(matches, &normalized)
+}
+
+fn pick_best_matching_font_path(matches: Vec<PathBuf>, normalized: &str) -> Option<PathBuf> {
+    matches
+        .into_iter()
+        .min_by_key(|path| font_match_sort_key(path, normalized))
+}
+
+fn font_match_sort_key(path: &Path, normalized: &str) -> (u8, usize, String) {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(normalize_font_name)
+        .unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    (
+        font_style_rank(&stem, normalized, &file_name),
+        file_name.len(),
+        file_name,
+    )
+}
+
+fn font_style_rank(stem: &str, normalized: &str, file_name: &str) -> u8 {
+    if stem == normalized {
+        return 0;
+    }
+    for suffix in ["regular", "book", "roman"] {
+        if stem == format!("{normalized}{suffix}") {
+            return 1;
+        }
+    }
+    if file_name.contains("variable") {
+        return 2;
+    }
+    let has_bold = stem.contains("bold");
+    let has_italic = stem.contains("italic") || stem.contains("oblique");
+    match (has_bold, has_italic) {
+        (false, false) => 3,
+        (false, true) => 4,
+        (true, false) => 5,
+        (true, true) => 6,
+    }
 }
 
 fn is_font_file(path: &Path) -> bool {
@@ -462,10 +542,11 @@ pub fn path_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_rect, font_data_matches_name, horizontal_pane_rects,
+        centered_rect, font_data_matches_name, font_match_sort_key, horizontal_pane_rects,
         horizontal_pane_rects_for_active, normalize_font_name, preferred_font_search_roots,
         rect_tuple, vertical_pane_rects, vertical_pane_rects_for_active,
     };
+    use std::path::Path;
 
     #[test]
     fn centered_rect_places_content_in_middle() {
@@ -492,6 +573,19 @@ mod tests {
             font_data,
             &normalize_font_name("MaterialIcons-Regular")
         ));
+    }
+
+    #[test]
+    fn font_match_sort_key_prefers_regular_faces_for_family_requests() {
+        let normalized = normalize_font_name("Liga Berkeley Mono");
+        assert!(
+            font_match_sort_key(Path::new("LigaBerkeleyMono-Regular.ttf"), &normalized,)
+                < font_match_sort_key(Path::new("LigaBerkeleyMono-Bold.ttf"), &normalized,)
+        );
+        assert!(
+            font_match_sort_key(Path::new("LigaBerkeleyMono-Regular.ttf"), &normalized,)
+                < font_match_sort_key(Path::new("Berkeley Mono Variable.ttf"), &normalized,)
+        );
     }
 
     #[test]

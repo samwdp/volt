@@ -104,8 +104,9 @@ use editor_plugin_host::{
     load_auto_loaded_packages,
 };
 use editor_render::{
-    DrawCommand, PixelRect, RenderBackend, RenderColor, centered_rect, find_font_by_name,
-    find_system_monospace_font, horizontal_pane_rects_for_active, vertical_pane_rects_for_active,
+    DrawCommand, PixelRect, RenderBackend, RenderColor, TextStyle, centered_rect,
+    find_font_by_name, find_system_monospace_font, horizontal_pane_rects_for_active,
+    vertical_pane_rects_for_active,
 };
 use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
@@ -115,7 +116,7 @@ use editor_terminal::{
     LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalRenderSnapshot,
     TerminalViewportScroll,
 };
-use editor_theme::{Color as ThemeColor, ThemeRegistry};
+use editor_theme::{Color as ThemeColor, ThemeRegistry, ThemeStyle};
 use fontdue::Font as RasterFont;
 use rustybuzz::{
     Face as ShapeFace, Feature as ShapeFeature, UnicodeBuffer, shape, ttf_parser::Tag,
@@ -128,7 +129,7 @@ use sdl3::{
     rect::Rect,
     render::{Canvas, FPoint, RenderTarget, ScaleMode, Texture, TextureCreator},
     surface::Surface,
-    ttf::{Font, Hinting},
+    ttf::{Font, FontStyle, Hinting},
     video::{Window, WindowContext},
 };
 use sdl3_ttf_sys as _;
@@ -584,6 +585,11 @@ struct EmojiFont<'ttf> {
 
 struct FontSetInit<'ttf> {
     primary: Font<'ttf>,
+    primary_bold: Font<'ttf>,
+    primary_italic: Font<'ttf>,
+    primary_bold_italic: Font<'ttf>,
+    primary_bold_is_synthetic: bool,
+    primary_bold_italic_is_synthetic: bool,
     primary_raster_font: RasterFont,
     primary_shape_face: ShapeFace<'static>,
     primary_pixel_size: f32,
@@ -596,6 +602,11 @@ struct FontSetInit<'ttf> {
 
 struct FontSet<'ttf> {
     primary: Font<'ttf>,
+    primary_bold: Font<'ttf>,
+    primary_italic: Font<'ttf>,
+    primary_bold_italic: Font<'ttf>,
+    primary_bold_is_synthetic: bool,
+    primary_bold_italic_is_synthetic: bool,
     primary_raster_font: RasterFont,
     primary_shape_face: ShapeFace<'static>,
     primary_pixel_size: f32,
@@ -628,6 +639,11 @@ impl<'ttf> FontSet<'ttf> {
             });
         Self {
             primary: init.primary,
+            primary_bold: init.primary_bold,
+            primary_italic: init.primary_italic,
+            primary_bold_italic: init.primary_bold_italic,
+            primary_bold_is_synthetic: init.primary_bold_is_synthetic,
+            primary_bold_italic_is_synthetic: init.primary_bold_italic_is_synthetic,
             primary_raster_font: init.primary_raster_font,
             primary_shape_face: init.primary_shape_face,
             primary_pixel_size: init.primary_pixel_size,
@@ -641,6 +657,23 @@ impl<'ttf> FontSet<'ttf> {
 
     fn primary(&self) -> &Font<'ttf> {
         &self.primary
+    }
+
+    fn primary_for_style(&self, style: TextStyle) -> &Font<'ttf> {
+        match (style.bold, style.italic) {
+            (true, true) => &self.primary_bold_italic,
+            (true, false) => &self.primary_bold,
+            (false, true) => &self.primary_italic,
+            (false, false) => &self.primary,
+        }
+    }
+
+    fn primary_style_uses_synthetic_bold(&self, style: TextStyle) -> bool {
+        match (style.bold, style.italic) {
+            (true, true) => self.primary_bold_italic_is_synthetic,
+            (true, false) => self.primary_bold_is_synthetic,
+            _ => false,
+        }
     }
 
     fn primary_raster_font(&self) -> &RasterFont {
@@ -13102,6 +13135,90 @@ fn validate_bundled_icon_fonts(
     )))
 }
 
+struct LoadedPrimaryFont<'ttf> {
+    font: Font<'ttf>,
+    synthetic_bold: bool,
+}
+
+fn load_primary_font<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    path: &Path,
+    effective_font_size: f32,
+    style: TextStyle,
+) -> Result<LoadedPrimaryFont<'ttf>, ShellError> {
+    let font_path = styled_primary_font_path(path, style);
+    let synthetic_bold = style.bold && font_path == path;
+    let mut font = ttf
+        .load_font(&font_path, effective_font_size)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    if let Some(hinting) = preferred_primary_font_hinting() {
+        font.set_hinting(hinting);
+    }
+    if style.italic && font_path == path {
+        font.set_style(FontStyle::ITALIC);
+    }
+    Ok(LoadedPrimaryFont {
+        font,
+        synthetic_bold,
+    })
+}
+
+fn styled_primary_font_path(path: &Path, style: TextStyle) -> PathBuf {
+    if style == TextStyle::plain() {
+        return path.to_path_buf();
+    }
+    styled_font_candidates(path, style)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn styled_font_candidates(path: &Path, style: TextStyle) -> Vec<PathBuf> {
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Vec::new();
+    };
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    let suffix = match (style.bold, style.italic) {
+        (true, true) => "BoldItalic",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (false, false) => return Vec::new(),
+    };
+    let mut stems = Vec::new();
+    for regular_suffix in ["-Regular", " Regular", "_Regular"] {
+        if let Some(base) = stem.strip_suffix(regular_suffix) {
+            stems.push(format!("{base}-{suffix}"));
+            stems.push(format!("{base} {suffix}"));
+            stems.push(format!("{base}_{suffix}"));
+        }
+    }
+    if style.bold && style.italic {
+        for italic_suffix in ["-Italic", " Italic", "_Italic"] {
+            if let Some(base) = stem.strip_suffix(italic_suffix) {
+                stems.push(format!("{base}-BoldItalic"));
+                stems.push(format!("{base} BoldItalic"));
+                stems.push(format!("{base}_BoldItalic"));
+            }
+        }
+    }
+    stems
+        .into_iter()
+        .map(|stem| {
+            if extension.is_empty() {
+                parent.join(stem)
+            } else {
+                parent.join(format!("{stem}.{extension}"))
+            }
+        })
+        .collect()
+}
+
 fn load_font_set<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     settings: &ThemeRuntimeSettings,
@@ -13140,19 +13257,33 @@ fn load_font_set<'ttf>(
             primary_path.display()
         ))
     })?;
-    let mut primary = ttf
-        .load_font(&primary_path, effective_font_size)
-        .map_err(|error| ShellError::Sdl(error.to_string()))?;
-    if let Some(hinting) = preferred_primary_font_hinting() {
-        primary.set_hinting(hinting);
-    }
-    let primary_line_height = primary.height().max(1);
+    let primary = load_primary_font(ttf, &primary_path, effective_font_size, TextStyle::plain())?;
+    let primary_bold = load_primary_font(
+        ttf,
+        &primary_path,
+        effective_font_size,
+        TextStyle::new(true, false),
+    )?;
+    let primary_italic = load_primary_font(
+        ttf,
+        &primary_path,
+        effective_font_size,
+        TextStyle::new(false, true),
+    )?;
+    let primary_bold_italic = load_primary_font(
+        ttf,
+        &primary_path,
+        effective_font_size,
+        TextStyle::new(true, true),
+    )?;
+    let primary_line_height = primary.font.height().max(1);
     let primary_pixel_size = normalized_raster_pixel_size(
         effective_font_size,
         primary_line_height,
         primary_raster_font.horizontal_line_metrics(effective_font_size),
     );
     let cell_width = primary
+        .font
         .size_of_char('M')
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
@@ -13241,7 +13372,12 @@ fn load_font_set<'ttf>(
         .flat_map(|symbol| symbol.glyph.chars())
         .collect();
     let fonts = FontSet::new(FontSetInit {
-        primary,
+        primary: primary.font,
+        primary_bold: primary_bold.font,
+        primary_italic: primary_italic.font,
+        primary_bold_italic: primary_bold_italic.font,
+        primary_bold_is_synthetic: primary_bold.synthetic_bold,
+        primary_bold_italic_is_synthetic: primary_bold_italic.synthetic_bold,
         primary_raster_font,
         primary_shape_face,
         primary_pixel_size,
@@ -17058,7 +17194,6 @@ struct AutocompleteBufferRequest {
     cursor: TextPoint,
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
-    result_limit: usize,
     lsp_client: Option<Arc<LspClientManager>>,
 }
 
@@ -17353,7 +17488,6 @@ struct AutocompleteWorkerRequest {
     cursor: TextPoint,
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
-    result_limit: usize,
     lsp_client: Option<Arc<LspClientManager>>,
 }
 
@@ -17429,7 +17563,6 @@ impl AutocompleteWorkerState {
                 cursor: request.cursor,
                 query: request.query,
                 providers: request.providers,
-                result_limit: request.result_limit,
                 lsp_client: request.lsp_client,
             },
         });
@@ -17511,9 +17644,6 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
             })
             .then_with(|| left.entry.replacement.cmp(&right.entry.replacement))
     });
-    if ranked.len() > request.result_limit {
-        ranked.truncate(request.result_limit);
-    }
     ranked.into_iter().map(|entry| entry.entry).collect()
 }
 
@@ -17719,6 +17849,7 @@ fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<Auto
     while end < characters.len() && is_completion_word_char(characters[end]) {
         end += 1;
     }
+    let allow_empty = allow_empty || is_member_access_completion_point(&characters, cursor_col);
     if !allow_empty && start == cursor_col && end == cursor_col {
         return None;
     }
@@ -17735,6 +17866,16 @@ fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<Auto
             TextPoint::new(cursor.line, end),
         ),
     })
+}
+
+fn is_member_access_completion_point(characters: &[char], cursor_col: usize) -> bool {
+    if cursor_col == 0 {
+        return false;
+    }
+    matches!(characters.get(cursor_col.saturating_sub(1)), Some('.'))
+        || (cursor_col >= 2
+            && matches!(characters.get(cursor_col - 2), Some('-'))
+            && matches!(characters.get(cursor_col - 1), Some('>')))
 }
 
 fn is_completion_word_char(character: char) -> bool {
@@ -17870,7 +18011,6 @@ fn autocomplete_request_for_buffer(
         cursor: buffer.cursor_point(),
         query,
         providers: registry.providers.clone(),
-        result_limit: registry.result_limit,
         lsp_client,
     })
 }

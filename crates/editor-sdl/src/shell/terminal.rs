@@ -589,12 +589,14 @@ pub(super) fn render_terminal_buffer(
             let run_x = text_x + run.col() as i32 * cell_width;
             let run_width = (run.width_cells() as i32 * cell_width).max(1) as u32;
             if run.text().chars().any(|character| character != ' ') {
-                draw_text(
+                draw_terminal_text_run(
                     target,
                     run_x,
                     y,
                     run.text(),
                     Color::RGB(run.foreground().r, run.foreground().g, run.foreground().b),
+                    cell_width,
+                    line_height,
                 )?;
             }
             if let Some(underline) = run.underline() {
@@ -688,6 +690,157 @@ pub(super) fn render_terminal_buffer(
         window_effects,
     )?;
     Ok(())
+}
+
+pub(super) fn draw_terminal_text_run(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    let mut text_chunk = String::new();
+    let mut text_chunk_col = 0_i32;
+    for (col, character) in text.chars().enumerate() {
+        let col = col as i32;
+        if let Some(segments) = box_drawing_segments(character) {
+            if !text_chunk.is_empty() {
+                draw_text(
+                    target,
+                    x + text_chunk_col * cell_width,
+                    y,
+                    &text_chunk,
+                    color,
+                )?;
+                text_chunk.clear();
+            }
+            draw_box_drawing_cell(
+                target,
+                x + col * cell_width,
+                y,
+                cell_width,
+                line_height,
+                color,
+                segments,
+            )?;
+        } else {
+            if text_chunk.is_empty() {
+                text_chunk_col = col;
+            }
+            text_chunk.push(character);
+        }
+    }
+    if !text_chunk.is_empty() {
+        draw_text(
+            target,
+            x + text_chunk_col * cell_width,
+            y,
+            &text_chunk,
+            color,
+        )?;
+    }
+    Ok(())
+}
+
+fn draw_box_drawing_cell(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    cell_width: i32,
+    line_height: i32,
+    color: Color,
+    segments: BoxDrawingSegments,
+) -> Result<(), ShellError> {
+    let width = cell_width.max(1);
+    let height = line_height.max(1);
+    let thickness = ((width.min(height) + 3) / 4).clamp(1, 2);
+    let half_thickness = thickness / 2;
+    let center_x = x + width / 2;
+    let center_y = y + height / 2;
+
+    if segments.up || segments.down {
+        let start_y = if segments.up {
+            y
+        } else {
+            center_y.saturating_sub(half_thickness)
+        };
+        let end_y = if segments.down {
+            y + height
+        } else {
+            center_y + thickness - half_thickness
+        };
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                center_x.saturating_sub(half_thickness),
+                start_y,
+                thickness as u32,
+                end_y.saturating_sub(start_y).max(1) as u32,
+            ),
+            color,
+        )?;
+    }
+    if segments.left || segments.right {
+        let start_x = if segments.left {
+            x
+        } else {
+            center_x.saturating_sub(half_thickness)
+        };
+        let end_x = if segments.right {
+            x + width
+        } else {
+            center_x + thickness - half_thickness
+        };
+        fill_rect(
+            target,
+            PixelRectToRect::rect(
+                start_x,
+                center_y.saturating_sub(half_thickness),
+                end_x.saturating_sub(start_x).max(1) as u32,
+                thickness as u32,
+            ),
+            color,
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoxDrawingSegments {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl BoxDrawingSegments {
+    const fn new(up: bool, down: bool, left: bool, right: bool) -> Self {
+        Self {
+            up,
+            down,
+            left,
+            right,
+        }
+    }
+}
+
+fn box_drawing_segments(character: char) -> Option<BoxDrawingSegments> {
+    Some(match character {
+        '│' | '┃' | '║' => BoxDrawingSegments::new(true, true, false, false),
+        '─' | '━' | '═' => BoxDrawingSegments::new(false, false, true, true),
+        '┌' | '┏' | '╔' | '╭' => BoxDrawingSegments::new(false, true, false, true),
+        '┐' | '┓' | '╗' | '╮' => BoxDrawingSegments::new(false, true, true, false),
+        '└' | '┗' | '╚' | '╰' => BoxDrawingSegments::new(true, false, false, true),
+        '┘' | '┛' | '╝' | '╯' => BoxDrawingSegments::new(true, false, true, false),
+        '├' | '┣' | '╠' => BoxDrawingSegments::new(true, true, false, true),
+        '┤' | '┫' | '╣' => BoxDrawingSegments::new(true, true, true, false),
+        '┬' | '┳' | '╦' => BoxDrawingSegments::new(false, true, true, true),
+        '┴' | '┻' | '╩' => BoxDrawingSegments::new(true, false, true, true),
+        '┼' | '╋' | '╬' => BoxDrawingSegments::new(true, true, true, true),
+        _ => return None,
+    })
 }
 
 fn terminal_cursor_shape_for_input_mode(

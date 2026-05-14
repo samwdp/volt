@@ -1,4 +1,4 @@
-use editor_theme::{Color, Theme, ThemeOption};
+use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -185,8 +185,8 @@ fn parse_theme(
     }
     if let Some(tokens) = table.get("tokens").and_then(toml::Value::as_table) {
         for (token, value) in tokens {
-            let color = parse_color(token, value, &palette)?;
-            theme = theme.with_token(token, color);
+            let (color, style) = parse_token_value(token, value, &palette)?;
+            theme = theme.with_token_style(token, color, style);
         }
     }
 
@@ -370,20 +370,49 @@ fn resolve_palette_color<'a>(
     Ok(color)
 }
 
-fn parse_color(
+fn parse_token_value(
     token: &str,
     value: &toml::Value,
     palette: &BTreeMap<String, Color>,
-) -> Result<Color, String> {
+) -> Result<(Color, ThemeStyle), String> {
     let raw = value
         .as_str()
         .ok_or_else(|| format!("token `{token}` must be a string"))?;
+    let mut parts = raw.split(';');
+    let color_part = parts.next().unwrap_or_default().trim();
+    let color = parse_color_part(token, color_part, palette)?;
+    let mut style = ThemeStyle::plain();
+    for part in parts {
+        match part.trim() {
+            "" => continue,
+            "bold" => style.bold = true,
+            "italic" => style.italic = true,
+            unsupported => {
+                return Err(format!(
+                    "token `{token}` style `{unsupported}` is not supported; expected `bold` or `italic`"
+                ));
+            }
+        }
+    }
+    Ok((color, style))
+}
+
+fn parse_color_part(
+    token: &str,
+    raw: &str,
+    palette: &BTreeMap<String, Color>,
+) -> Result<Color, String> {
+    if raw.is_empty() {
+        return Err(format!(
+            "token `{token}` must start with a 6 or 8 digit hex value or a palette reference"
+        ));
+    }
     if let Some(color) = parse_hex_color(raw).map_err(|error| format!("token `{token}` {error}"))? {
         return Ok(color);
     }
     let Some(reference) = parse_palette_reference(raw) else {
         return Err(format!(
-            "token `{token}` must be a 6 or 8 digit hex value or a palette reference"
+            "token `{token}` must start with a 6 or 8 digit hex value or a palette reference"
         ));
     };
     palette
@@ -513,8 +542,9 @@ mod tests {
             let raw = value.as_str().unwrap_or_else(|| {
                 panic!("theme {} token `{token}` must be a string", path.display())
             });
+            let color_part = raw.trim().split(';').next().unwrap_or_default().trim();
             assert!(
-                raw.trim().starts_with("pallet."),
+                color_part.starts_with("pallet."),
                 "theme {} token `{token}` must use a pallet.* reference, found `{raw}`",
                 path.display()
             );
@@ -613,6 +643,55 @@ blue = "#83a598"
             theme.color("ui.cursor"),
             Some(Color::rgba(0x44, 0x55, 0x66, 0x77))
         );
+    }
+
+    #[test]
+    fn parse_theme_accepts_token_style_suffixes() {
+        let source = r##"
+[pallet]
+red = "#cc241d"
+
+[tokens]
+"syntax.markup.heading" = "pallet.red;bold;italic"
+"syntax.text.strong" = "pallet.red;bold"
+"syntax.text.emphasis" = "#cc241d;italic"
+"##;
+        let theme = parse_theme(std::path::Path::new("test.toml"), source, None)
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+        let heading = theme
+            .token_style("syntax.markup.heading")
+            .unwrap_or_else(|| panic!("missing heading style"));
+        assert_eq!(heading.color, Color::rgb(0xcc, 0x24, 0x1d));
+        assert!(heading.style.bold);
+        assert!(heading.style.italic);
+
+        let strong = theme
+            .token_style("syntax.text.strong")
+            .unwrap_or_else(|| panic!("missing strong style"));
+        assert!(strong.style.bold);
+        assert!(!strong.style.italic);
+
+        let emphasis = theme
+            .token_style("syntax.text.emphasis")
+            .unwrap_or_else(|| panic!("missing emphasis style"));
+        assert!(!emphasis.style.bold);
+        assert!(emphasis.style.italic);
+    }
+
+    #[test]
+    fn parse_theme_rejects_unsupported_token_style_suffixes() {
+        let source = r##"
+[pallet]
+red = "#cc241d"
+
+[tokens]
+"syntax.markup.heading" = "pallet.red;underline"
+"##;
+        let error = parse_theme(std::path::Path::new("test.toml"), source, None)
+            .expect_err("unsupported style should fail");
+
+        assert!(error.contains("style `underline` is not supported"));
     }
 
     #[test]

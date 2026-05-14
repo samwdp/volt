@@ -475,9 +475,9 @@ pub(super) fn render_autocomplete_overlay(
         .min(width.saturating_sub((cell_width.max(1) as u32) * 18));
     let docs_width = width.saturating_sub(list_width).saturating_sub(1);
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
-    let result_limit = user_library.autocomplete_result_limit().max(1);
+    let visible_result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
-        .clamp(4, result_limit.max(6) as u32 + 2) as usize;
+        .clamp(4, visible_result_limit.max(6) as u32 + 2) as usize;
     let preview_lines = autocomplete_preview_lines(
         autocomplete.selected(),
         &autocomplete.query.token,
@@ -532,9 +532,21 @@ pub(super) fn render_autocomplete_overlay(
         return Ok(());
     }
     let list_text_width = list_width.saturating_sub(24);
-    for (index, entry) in autocomplete.entries().iter().take(body_rows).enumerate() {
+    let visible_start = autocomplete_visible_start(
+        autocomplete.entries().len(),
+        autocomplete.selected_index,
+        body_rows,
+    );
+    for (row_index, entry) in autocomplete
+        .entries()
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(body_rows)
+    {
+        let index = row_index - visible_start;
         let row_y = y + 8 + index as i32 * row_height;
-        if index == autocomplete.selected_index {
+        if row_index == autocomplete.selected_index {
             fill_overlay_surface_rect(
                 target,
                 PixelRectToRect::rect(
@@ -561,6 +573,19 @@ pub(super) fn render_autocomplete_overlay(
         draw_text(target, x + list_width as i32 + 11, row_y, &clipped, color)?;
     }
     Ok(())
+}
+
+fn autocomplete_visible_start(
+    entry_count: usize,
+    selected_index: usize,
+    visible_rows: usize,
+) -> usize {
+    if entry_count <= visible_rows {
+        return 0;
+    }
+    selected_index
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(entry_count - visible_rows)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4091,7 +4116,7 @@ pub(super) fn draw_buffer_text(
 
     let mut draw_x = x;
     let mut segment_char_offset = 0usize;
-    for (colored_segment, color) in line_color_segments(
+    for (colored_segment, color, style) in line_color_segments(
         segment_text,
         clipped_spans,
         theme_registry,
@@ -4109,7 +4134,16 @@ pub(super) fn draw_buffer_text(
             segment_start_col + segment_char_offset,
             segment_start_col + segment_char_offset + colored_segment_chars,
         );
-        draw_text(target, draw_x, y, &rendered_segment, color)?;
+        if style == TextStyle::plain() {
+            draw_text(target, draw_x, y, &rendered_segment, color)?;
+        } else {
+            let mut character_x = draw_x;
+            for character in rendered_segment.chars() {
+                let character_text = character.to_string();
+                draw_styled_text(target, character_x, y, &character_text, color, style)?;
+                character_x += monospace_text_width(&character_text, cell_width) as i32;
+            }
+        }
         draw_x += monospace_text_width(&rendered_segment, cell_width) as i32;
         segment_char_offset = segment_char_offset.saturating_add(colored_segment_chars);
     }
@@ -4166,9 +4200,9 @@ pub(super) fn line_color_segments(
     default_color: Color,
     column_byte_offsets: &[usize],
     base_byte: usize,
-) -> Vec<(String, Color)> {
+) -> Vec<(String, Color, TextStyle)> {
     let Some(line_syntax_spans) = line_syntax_spans else {
-        return vec![(line.to_owned(), default_color)];
+        return vec![(line.to_owned(), default_color, TextStyle::plain())];
     };
 
     let relevant_spans = line_syntax_spans
@@ -4194,7 +4228,7 @@ pub(super) fn line_color_segments(
         })
         .collect::<Vec<_>>();
     if relevant_spans.is_empty() {
-        return vec![(line.to_owned(), default_color)];
+        return vec![(line.to_owned(), default_color, TextStyle::plain())];
     }
 
     let mut breakpoints = vec![0, line.len()];
@@ -4215,18 +4249,24 @@ pub(super) fn line_color_segments(
         let Some(text) = line.get(start..end) else {
             continue;
         };
-        let color = relevant_spans
+        let token_style = relevant_spans
             .iter()
             .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
             .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
-            .and_then(|(_, _, token)| theme_registry.and_then(|registry| registry.resolve(token)))
-            .map(to_sdl_color)
+            .and_then(|(_, _, token)| {
+                theme_registry.and_then(|registry| registry.resolve_style(token))
+            });
+        let color = token_style
+            .map(|token_style| to_sdl_color(token_style.color))
             .unwrap_or(default_color);
-        segments.push((text.to_owned(), color));
+        let style = token_style
+            .map(|token_style| text_style_from_theme_style(token_style.style))
+            .unwrap_or_else(TextStyle::plain);
+        segments.push((text.to_owned(), color, style));
     }
 
     if segments.is_empty() {
-        vec![(line.to_owned(), default_color)]
+        vec![(line.to_owned(), default_color, TextStyle::plain())]
     } else {
         segments
     }
@@ -4617,6 +4657,10 @@ pub(super) fn to_render_color(color: Color) -> RenderColor {
     RenderColor::rgba(color.r, color.g, color.b, color.a)
 }
 
+pub(super) fn text_style_from_theme_style(style: ThemeStyle) -> TextStyle {
+    TextStyle::new(style.bold, style.italic)
+}
+
 pub(super) fn from_render_color(color: RenderColor) -> Color {
     Color::RGBA(color.r, color.g, color.b, color.a)
 }
@@ -4702,6 +4746,18 @@ impl<'texture> ManagedTexture<'texture> {
         Ok(())
     }
 
+    fn copy_to_canvas_clipped(
+        &self,
+        canvas: &mut Canvas<Window>,
+        src: Rect,
+        dst: Rect,
+    ) -> Result<(), ShellError> {
+        canvas
+            .copy(&self.texture, src, dst)
+            .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        Ok(())
+    }
+
     const fn width(&self) -> u32 {
         self.width
     }
@@ -4715,6 +4771,7 @@ pub(super) struct RenderedTextTexture<'texture> {
     texture: Option<ManagedTexture<'texture>>,
     offset_x: i32,
     offset_y: i32,
+    draw_width: Option<u32>,
     advance: i32,
 }
 
@@ -4729,6 +4786,23 @@ impl<'texture> RenderedTextTexture<'texture> {
             texture: Some(texture),
             offset_x,
             offset_y,
+            draw_width: None,
+            advance,
+        }
+    }
+
+    fn from_texture_with_draw_width(
+        texture: ManagedTexture<'texture>,
+        offset_x: i32,
+        offset_y: i32,
+        advance: i32,
+        draw_width: u32,
+    ) -> Self {
+        Self {
+            texture: Some(texture),
+            offset_x,
+            offset_y,
+            draw_width: Some(draw_width),
             advance,
         }
     }
@@ -4738,6 +4812,7 @@ impl<'texture> RenderedTextTexture<'texture> {
             texture: None,
             offset_x: 0,
             offset_y: 0,
+            draw_width: None,
             advance,
         }
     }
@@ -4748,12 +4823,17 @@ impl<'texture> RenderedTextTexture<'texture> {
 
     fn blit(&self, canvas: &mut Canvas<Window>, x: i32, y: i32) -> Result<i32, ShellError> {
         if let Some(texture) = self.texture.as_ref() {
-            texture.copy_to_canvas(
+            let draw_width = self
+                .draw_width
+                .map(|width| width.min(texture.width()))
+                .unwrap_or_else(|| texture.width());
+            texture.copy_to_canvas_clipped(
                 canvas,
+                Rect::new(0, 0, draw_width, texture.height()),
                 Rect::new(
                     x.saturating_add(self.offset_x),
                     y.saturating_add(self.offset_y),
-                    texture.width(),
+                    draw_width,
                     texture.height(),
                 ),
             )?;
@@ -4767,6 +4847,7 @@ pub(super) enum TextTextureCacheKey {
     Primary {
         text: String,
         color: u32,
+        style: TextStyle,
     },
     Emoji {
         text: String,
@@ -5054,6 +5135,25 @@ pub(super) fn present_scene_to_canvas<'texture>(
                 *y,
                 text,
                 *color,
+                TextStyle::plain(),
+            )?,
+            DrawCommand::StyledText {
+                x,
+                y,
+                text,
+                color,
+                style,
+            } => render_text_with_fonts(
+                canvas,
+                texture_creator,
+                text_texture_cache,
+                text_texture_cache_mode,
+                fonts,
+                *x,
+                *y,
+                text,
+                *color,
+                *style,
             )?,
             DrawCommand::Image {
                 rect,
@@ -5214,9 +5314,10 @@ pub(super) fn render_primary_text_surface(
     fonts: &FontSet<'_>,
     text: &str,
     color: RenderColor,
+    style: TextStyle,
 ) -> Result<Surface<'static>, ShellError> {
     let surface = fonts
-        .primary()
+        .primary_for_style(style)
         .render(text)
         .blended(from_render_color(color))
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
@@ -5295,13 +5396,25 @@ pub(super) fn render_primary_text_texture<'texture>(
     fonts: &FontSet<'_>,
     text: &str,
     color: RenderColor,
+    style: TextStyle,
 ) -> Result<RenderedTextTexture<'texture>, ShellError> {
     // SDL_ttf's blended glyph surfaces already use straight alpha, so upload
     // them as-is to avoid brightening partially transparent edge pixels.
-    let surface = render_primary_text_surface(fonts, text, color)?;
-    let advance = surface.width() as i32;
+    let surface = render_primary_text_surface(fonts, text, color, style)?;
     let texture = ManagedTexture::from_surface(texture_creator, &surface)?;
-    Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance))
+    if style == TextStyle::plain() {
+        let advance = surface.width() as i32;
+        return Ok(RenderedTextTexture::from_texture(texture, 0, 0, advance));
+    }
+
+    let advance = monospace_text_width(text, fonts.cell_width()) as i32;
+    Ok(RenderedTextTexture::from_texture_with_draw_width(
+        texture,
+        0,
+        0,
+        advance,
+        advance.max(0) as u32,
+    ))
 }
 
 pub(super) fn render_emoji_text_texture<'texture>(
@@ -5977,6 +6090,7 @@ pub(super) fn render_text_with_fonts<'texture>(
     y: i32,
     text: &str,
     color: RenderColor,
+    style: TextStyle,
 ) -> Result<(), ShellError> {
     let runs = if fonts.icon_fonts().is_empty() || text.is_ascii() {
         let text = strip_zero_width_display_characters(text);
@@ -6008,12 +6122,20 @@ pub(super) fn render_text_with_fonts<'texture>(
         }
         match run.role {
             FontRole::Primary => {
-                for subrun in cached_primary_text_runs(
-                    text_texture_cache,
-                    text_texture_cache_mode,
-                    fonts,
-                    &run.text,
-                ) {
+                let primary_runs = if style == TextStyle::plain() {
+                    cached_primary_text_runs(
+                        text_texture_cache,
+                        text_texture_cache_mode,
+                        fonts,
+                        &run.text,
+                    )
+                } else {
+                    vec![PrimaryTextRun {
+                        render_mode: PrimaryTextRenderMode::Normal,
+                        text: run.text.clone(),
+                    }]
+                };
+                for subrun in primary_runs {
                     let advance = match subrun.render_mode {
                         PrimaryTextRenderMode::Ligature => {
                             if let Some(advance) = draw_primary_ligature_texture_if_available(
@@ -6037,6 +6159,7 @@ pub(super) fn render_text_with_fonts<'texture>(
                                     TextTextureCacheKey::Primary {
                                         text: subrun.text.clone(),
                                         color: color_key,
+                                        style,
                                     },
                                     || {
                                         render_primary_text_texture(
@@ -6044,6 +6167,7 @@ pub(super) fn render_text_with_fonts<'texture>(
                                             fonts,
                                             &subrun.text,
                                             color,
+                                            style,
                                         )
                                     },
                                     draw_x,
@@ -6051,25 +6175,56 @@ pub(super) fn render_text_with_fonts<'texture>(
                                 )?
                             }
                         }
-                        PrimaryTextRenderMode::Normal => draw_text_texture_with_cache(
-                            canvas,
-                            text_texture_cache,
-                            text_texture_cache_mode,
-                            TextTextureCacheKey::Primary {
-                                text: subrun.text.clone(),
-                                color: color_key,
-                            },
-                            || {
-                                render_primary_text_texture(
-                                    texture_creator,
-                                    fonts,
-                                    &subrun.text,
-                                    color,
-                                )
-                            },
-                            draw_x,
-                            y,
-                        )?,
+                        PrimaryTextRenderMode::Normal => {
+                            let advance = draw_text_texture_with_cache(
+                                canvas,
+                                text_texture_cache,
+                                text_texture_cache_mode,
+                                TextTextureCacheKey::Primary {
+                                    text: subrun.text.clone(),
+                                    color: color_key,
+                                    style,
+                                },
+                                || {
+                                    render_primary_text_texture(
+                                        texture_creator,
+                                        fonts,
+                                        &subrun.text,
+                                        color,
+                                        style,
+                                    )
+                                },
+                                draw_x,
+                                y,
+                            )?;
+                            if fonts.primary_style_uses_synthetic_bold(style) {
+                                let overlay =
+                                    RenderColor::rgba(color.r, color.g, color.b, color.a / 2);
+                                let overlay_key = render_color_cache_key(overlay);
+                                let _ = draw_text_texture_with_cache(
+                                    canvas,
+                                    text_texture_cache,
+                                    text_texture_cache_mode,
+                                    TextTextureCacheKey::Primary {
+                                        text: subrun.text.clone(),
+                                        color: overlay_key,
+                                        style,
+                                    },
+                                    || {
+                                        render_primary_text_texture(
+                                            texture_creator,
+                                            fonts,
+                                            &subrun.text,
+                                            overlay,
+                                            style,
+                                        )
+                                    },
+                                    draw_x.saturating_add(1),
+                                    y,
+                                )?;
+                            }
+                            advance
+                        }
                     };
                     draw_x += advance;
                 }
@@ -6138,17 +6293,40 @@ pub(super) fn draw_text(
     text: &str,
     color: Color,
 ) -> Result<(), ShellError> {
+    draw_styled_text(target, x, y, text, color, TextStyle::plain())
+}
+
+pub(super) fn draw_styled_text(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    style: TextStyle,
+) -> Result<(), ShellError> {
     if text.is_empty() {
         return Ok(());
     }
 
     match target {
-        DrawTarget::Scene(scene) => scene.push(DrawCommand::Text {
-            x,
-            y,
-            text: text.to_owned(),
-            color: to_render_color(color),
-        }),
+        DrawTarget::Scene(scene) => {
+            if style == TextStyle::plain() {
+                scene.push(DrawCommand::Text {
+                    x,
+                    y,
+                    text: text.to_owned(),
+                    color: to_render_color(color),
+                });
+            } else {
+                scene.push(DrawCommand::StyledText {
+                    x,
+                    y,
+                    text: text.to_owned(),
+                    color: to_render_color(color),
+                    style,
+                });
+            }
+        }
     }
 
     Ok(())

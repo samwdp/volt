@@ -14,7 +14,6 @@ pub(super) struct AutocompleteProviderSpec {
 
 #[derive(Debug, Clone)]
 pub(super) struct AutocompleteRegistry {
-    pub(super) result_limit: usize,
     pub(super) providers: Vec<AutocompleteProviderSpec>,
 }
 
@@ -45,10 +44,7 @@ impl AutocompleteRegistry {
                 })
             })
             .collect();
-        Self {
-            result_limit: user_library.autocomplete_result_limit().max(1),
-            providers,
-        }
+        Self { providers }
     }
 }
 

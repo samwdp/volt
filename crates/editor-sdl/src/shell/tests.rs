@@ -908,6 +908,34 @@ fn split_primary_text_by_ligature_ranges_respects_preexisting_color_boundaries()
 }
 
 #[test]
+fn styled_primary_font_path_prefers_real_style_files() {
+    let temp_root = env::temp_dir().join(format!(
+        "volt-styled-fonts-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis()
+    ));
+    fs::create_dir_all(&temp_root).expect("create temp font dir");
+    let regular = temp_root.join("ExampleMono-Regular.ttf");
+    let bold = temp_root.join("ExampleMono-Bold.ttf");
+    fs::write(&regular, []).expect("write regular font marker");
+    fs::write(&bold, []).expect("write bold font marker");
+
+    assert_eq!(
+        styled_primary_font_path(&regular, TextStyle::new(true, false)),
+        bold
+    );
+    assert_eq!(
+        styled_primary_font_path(&regular, TextStyle::new(false, true)),
+        regular
+    );
+
+    fs::remove_dir_all(&temp_root).expect("cleanup temp font dir");
+}
+
+#[test]
 fn text_texture_cache_keys_keep_same_text_separate_per_color() {
     let text = "=>".to_owned();
 
@@ -915,10 +943,12 @@ fn text_texture_cache_keys_keep_same_text_separate_per_color() {
         TextTextureCacheKey::Primary {
             text: text.clone(),
             color: render_color_cache_key(RenderColor::rgba(10, 20, 30, 255)),
+            style: TextStyle::plain(),
         },
         TextTextureCacheKey::Primary {
             text: text.clone(),
             color: render_color_cache_key(RenderColor::rgba(10, 20, 31, 255)),
+            style: TextStyle::plain(),
         }
     );
     assert_ne!(
@@ -1227,8 +1257,8 @@ fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<
     )
     .map_err(|error| error.to_string())?;
     let color = RenderColor::rgba(61, 122, 211, 255);
-    let surface =
-        render_primary_text_surface(&fonts, "Volt", color).map_err(|error| error.to_string())?;
+    let surface = render_primary_text_surface(&fonts, "Volt", color, TextStyle::plain())
+        .map_err(|error| error.to_string())?;
     assert_eq!(surface.pixel_format_enum(), PixelFormat::RGBA32);
     let width = surface.width() as usize;
     let height = surface.height() as usize;
@@ -9076,7 +9106,6 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
                 kind: AutocompleteProviderKind::Buffer,
             },
         ],
-        result_limit: 8,
         lsp_client: None,
     };
 
@@ -9084,6 +9113,84 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
     assert!(!entries.is_empty());
     assert!(entries.iter().all(|entry| entry.provider_id == "primary"));
     Ok(())
+}
+
+#[test]
+fn autocomplete_entries_are_not_limited_by_visible_result_limit() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("alpha alpine alphabet alchemy altar alto\nal");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(1, 2));
+
+    let (buffer_id, buffer_revision, text, cursor, query) = {
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        let buffer_id = ui
+            .active_buffer_id()
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        let buffer = ui
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let text = buffer.text.snapshot();
+        let query = autocomplete_query(&text, true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        (
+            buffer_id,
+            buffer.text.revision(),
+            text,
+            buffer.cursor_point(),
+            query,
+        )
+    };
+    let request = AutocompleteWorkerRequest {
+        request_id: 1,
+        buffer_id,
+        buffer_revision,
+        text,
+        plugin_kind: None,
+        path: None,
+        root: None,
+        cursor,
+        query,
+        providers: vec![AutocompleteProviderSpec {
+            id: "buffer".to_owned(),
+            label: "Buffer".to_owned(),
+            icon: "B".to_owned(),
+            item_icon: "T".to_owned(),
+            or_group: None,
+            buffer_kind: None,
+            items: Vec::new(),
+            kind: AutocompleteProviderKind::Buffer,
+        }],
+        lsp_client: None,
+    };
+
+    let entries = autocomplete_entries(&request);
+    assert_eq!(entries.len(), 6);
+    Ok(())
+}
+
+#[test]
+fn autocomplete_query_allows_empty_member_access_after_dot_and_arrow() {
+    let mut dot = TextBuffer::from_text("object.");
+    dot.set_cursor(TextPoint::new(0, 7));
+    let dot_query = autocomplete_query(&dot.snapshot(), false)
+        .expect("dot member access should allow empty autocomplete query");
+    assert_eq!(dot_query.prefix, "");
+    assert_eq!(dot_query.replace_range.start(), TextPoint::new(0, 7));
+    assert_eq!(dot_query.replace_range.end(), TextPoint::new(0, 7));
+
+    let mut arrow = TextBuffer::from_text("object->");
+    arrow.set_cursor(TextPoint::new(0, 8));
+    let arrow_query = autocomplete_query(&arrow.snapshot(), false)
+        .expect("arrow member access should allow empty autocomplete query");
+    assert_eq!(arrow_query.prefix, "");
+    assert_eq!(arrow_query.replace_range.start(), TextPoint::new(0, 8));
+    assert_eq!(arrow_query.replace_range.end(), TextPoint::new(0, 8));
 }
 
 #[test]
@@ -13170,6 +13277,36 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
             .iter()
             .any(|command| matches!(command, DrawCommand::FillRoundedRect { .. }))
     );
+    Ok(())
+}
+
+#[test]
+fn terminal_box_drawing_chars_render_as_strokes() -> Result<(), String> {
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    let color = Color::RGB(200, 205, 210);
+
+    draw_terminal_text_run(&mut target, 10, 20, "a│b", color, 8, 16)
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, color }
+            if rect.x == 21
+                && rect.y == 20
+                && rect.height == 16
+                && *color == to_render_color(Color::RGB(200, 205, 210))
+    )));
     Ok(())
 }
 

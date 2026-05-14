@@ -36,6 +36,51 @@ impl Color {
     }
 }
 
+/// Font styling applied to a theme token.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeStyle {
+    /// Draw token text in bold.
+    pub bold: bool,
+    /// Draw token text in italic.
+    pub italic: bool,
+}
+
+impl ThemeStyle {
+    /// Creates plain token styling.
+    pub const fn plain() -> Self {
+        Self {
+            bold: false,
+            italic: false,
+        }
+    }
+
+    /// Creates token styling from bold and italic flags.
+    pub const fn new(bold: bool, italic: bool) -> Self {
+        Self { bold, italic }
+    }
+
+    /// Returns whether no extra style is enabled.
+    pub const fn is_plain(self) -> bool {
+        !self.bold && !self.italic
+    }
+}
+
+/// Complete color and font styling for a theme token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeTokenStyle {
+    /// Foreground color.
+    pub color: Color,
+    /// Font styling.
+    pub style: ThemeStyle,
+}
+
+impl ThemeTokenStyle {
+    /// Creates token styling from a color and font style flags.
+    pub const fn new(color: Color, style: ThemeStyle) -> Self {
+        Self { color, style }
+    }
+}
+
 /// Theme option values parsed from theme definitions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThemeOption {
@@ -120,7 +165,7 @@ impl From<&str> for ThemeOption {
 pub struct Theme {
     id: String,
     name: String,
-    tokens: BTreeMap<String, Color>,
+    tokens: BTreeMap<String, ThemeTokenStyle>,
     options: BTreeMap<String, ThemeOption>,
 }
 
@@ -137,7 +182,22 @@ impl Theme {
 
     /// Adds or replaces a theme token color.
     pub fn with_token(mut self, token: impl Into<String>, color: Color) -> Self {
-        self.tokens.insert(token.into(), color);
+        self.tokens.insert(
+            token.into(),
+            ThemeTokenStyle::new(color, ThemeStyle::plain()),
+        );
+        self
+    }
+
+    /// Adds or replaces a theme token color and font style.
+    pub fn with_token_style(
+        mut self,
+        token: impl Into<String>,
+        color: Color,
+        style: ThemeStyle,
+    ) -> Self {
+        self.tokens
+            .insert(token.into(), ThemeTokenStyle::new(color, style));
         self
     }
 
@@ -157,8 +217,8 @@ impl Theme {
         &self.name
     }
 
-    /// Returns all registered token colors.
-    pub fn tokens(&self) -> &BTreeMap<String, Color> {
+    /// Returns all registered token styles.
+    pub fn tokens(&self) -> &BTreeMap<String, ThemeTokenStyle> {
         &self.tokens
     }
 
@@ -169,6 +229,11 @@ impl Theme {
 
     /// Resolves a token color.
     pub fn color(&self, token: &str) -> Option<Color> {
+        self.tokens.get(token).map(|style| style.color)
+    }
+
+    /// Resolves a token color and font style.
+    pub fn token_style(&self, token: &str) -> Option<ThemeTokenStyle> {
         self.tokens.get(token).copied()
     }
 
@@ -280,9 +345,15 @@ impl ThemeRegistry {
             .and_then(|theme_id| self.themes.get(theme_id))
     }
 
-    /// Resolves a token from the active theme.
+    /// Resolves a token color from the active theme.
     pub fn resolve(&self, token: &str) -> Option<Color> {
         self.active_theme().and_then(|theme| theme.color(token))
+    }
+
+    /// Resolves a token color and font style from the active theme.
+    pub fn resolve_style(&self, token: &str) -> Option<ThemeTokenStyle> {
+        self.active_theme()
+            .and_then(|theme| theme.token_style(token))
     }
 
     /// Resolves an option from the active theme.
@@ -316,12 +387,17 @@ impl ThemeRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Theme, ThemeOption, ThemeRegistry};
+    use super::{Color, Theme, ThemeOption, ThemeRegistry, ThemeStyle};
 
     fn volt_dark() -> Theme {
         Theme::new("volt-dark", "Volt Dark")
             .with_token("syntax.keyword", Color::rgb(198, 120, 221))
             .with_token("syntax.string", Color::rgb(152, 195, 121))
+            .with_token_style(
+                "syntax.markup.heading",
+                Color::rgb(224, 108, 117),
+                ThemeStyle::new(true, true),
+            )
             .with_option("ui.line-number.relative", true)
             .with_option("cursor_roundness", 3.0)
     }
@@ -367,5 +443,23 @@ mod tests {
         );
         assert_eq!(registry.resolve_bool("ui.line-number.relative"), Some(true));
         assert_eq!(registry.resolve_number("cursor_roundness"), Some(3.0));
+    }
+
+    #[test]
+    fn registry_resolves_token_styles() {
+        let mut registry = ThemeRegistry::new();
+        must(registry.register(volt_dark()));
+
+        let style = registry
+            .resolve_style("syntax.markup.heading")
+            .unwrap_or_else(|| panic!("missing token style"));
+        assert_eq!(style.color, Color::rgb(224, 108, 117));
+        assert!(style.style.bold);
+        assert!(style.style.italic);
+        assert!(
+            registry
+                .resolve_style("syntax.keyword")
+                .is_some_and(|style| style.style.is_plain())
+        );
     }
 }

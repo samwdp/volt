@@ -14,7 +14,7 @@ use editor_lsp::{
     WorkspaceConfigurationValue,
 };
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
-use editor_theme::{Color, Theme, ThemeOption};
+use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 use serde_json::Number;
 
 use crate::{
@@ -112,6 +112,8 @@ impl From<AbiThemeOption> for ThemeOption {
 pub struct AbiThemeToken {
     token: RString,
     color: AbiColor,
+    bold: bool,
+    italic: bool,
 }
 
 #[repr(C)]
@@ -138,9 +140,11 @@ impl From<Theme> for AbiTheme {
             tokens: value
                 .tokens()
                 .iter()
-                .map(|(token, color)| AbiThemeToken {
+                .map(|(token, style)| AbiThemeToken {
                     token: token.clone().into(),
-                    color: (*color).into(),
+                    color: style.color.into(),
+                    bold: style.style.bold,
+                    italic: style.style.italic,
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -161,7 +165,11 @@ impl From<AbiTheme> for Theme {
     fn from(value: AbiTheme) -> Self {
         let mut theme = Theme::new(value.id.into_string(), value.name.into_string());
         for token in value.tokens {
-            theme = theme.with_token(token.token.into_string(), Color::from(token.color));
+            theme = theme.with_token_style(
+                token.token.into_string(),
+                Color::from(token.color),
+                ThemeStyle::new(token.bold, token.italic),
+            );
         }
         for option in value.options {
             theme = theme.with_option(option.option.into_string(), ThemeOption::from(option.value));
