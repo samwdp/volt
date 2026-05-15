@@ -538,7 +538,7 @@ fn vim_search_prompt_supports_fuzzy_matches() -> Result<(), Box<dyn std::error::
 #[test]
 fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
 
@@ -583,7 +583,7 @@ fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dy
 
 #[test]
 fn autocomplete_opens_while_typing_buffer_tokens() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nal");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 2));
 
@@ -610,7 +610,7 @@ fn autocomplete_opens_while_typing_buffer_tokens() -> Result<(), Box<dyn std::er
 #[test]
 fn ctrl_space_triggers_autocomplete_without_inserting_space()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
 
@@ -640,7 +640,7 @@ fn ctrl_space_triggers_autocomplete_without_inserting_space()
 #[test]
 fn ctrl_n_and_ctrl_p_cycle_autocomplete_without_inserting_text()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     state.active_buffer_mut()?.text = TextBuffer::from_text("alpine alphabet alpha\nalp");
     state.active_buffer_mut()?.set_cursor(TextPoint::new(1, 3));
 
@@ -1441,7 +1441,7 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
         return Ok(());
     }
 
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     let root = temp_workspace_root("files");
     fs::create_dir_all(root.join("src"))?;
     fs::write(root.join(".gitignore"), "ignored.txt\n")?;
@@ -1464,13 +1464,11 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
         .picker()
         .ok_or("missing workspace file picker")?;
     assert_eq!(picker.session().title(), "Workspace Files");
-    assert!(
-        picker
-            .session()
-            .matches()
-            .iter()
-            .any(|matched| matched.item().label().contains("main.rs"))
-    );
+    let main_path = root.join("src").join("main.rs");
+    assert!(picker.session().matches().iter().any(|matched| {
+        matched.item().label().contains("main.rs")
+            && matched.item().fringe() == Some(editor_icons::seti_file_icon(&main_path))
+    }));
     assert!(
         picker
             .session()
@@ -1487,6 +1485,7 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     assert!(active.display_name().contains("main.rs"));
     assert_eq!(active.text.line(0).as_deref(), Some("fn main() {"));
 
+    drop(state);
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -1497,7 +1496,7 @@ fn workspace_file_picker_creates_missing_file() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let mut state = ShellState::new()?;
+    let mut state = user_shell_state()?;
     let root = temp_workspace_root("files-create");
     fs::create_dir_all(root.join("src"))?;
     fs::write(root.join(".gitignore"), "ignored.txt\n")?;
@@ -1527,6 +1526,64 @@ fn workspace_file_picker_creates_missing_file() -> Result<(), Box<dyn std::error
     assert_eq!(active.kind, BufferKind::File);
     assert!(active.display_name().contains("dir1/dir2/test.md"));
 
+    drop(state);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_file_picker_prioritizes_contiguous_file_name_matches()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !git_available() {
+        return Ok(());
+    }
+
+    let mut state = user_shell_state()?;
+    let root = temp_workspace_root("files-ranking");
+    for relative_path in [
+        "src/AssetFusion.Shared/Model/StaticData/AssetDefinition.cs",
+        "src/AssetFusion.Shared/Model/StaticData/ReportDefinition.cs",
+        "src/AssetFusion.Shared/Services/Sql/AssetDefinitionService.cs",
+        "src/AssetFusion.Shared/Services/Sql/ReportDefinitionService.cs",
+        "src/AssetFusion.Shared/Services/Sql/VehicleDefinitionService.cs",
+    ] {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, "// test\n")?;
+    }
+
+    run_git(&root, &["init", "-q"])?;
+    run_git(&root, &["add", "."])?;
+    open_workspace_from_project(&mut state.runtime, "files-ranking", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.list-files")
+        .map_err(|error| error.to_string())?;
+    state.handle_text_input("assetdefinition")?;
+
+    let labels = state
+        .ui()?
+        .picker()
+        .ok_or("missing workspace file picker")?
+        .session()
+        .matches()
+        .iter()
+        .map(|matched| matched.item().label().to_owned())
+        .collect::<Vec<_>>();
+    let first_non_asset = labels
+        .iter()
+        .position(|label| !label.contains("AssetDefinition"))
+        .ok_or("expected weaker fuzzy matches in picker results")?;
+    assert!(
+        labels[..first_non_asset]
+            .iter()
+            .all(|label| label.contains("AssetDefinition"))
+    );
+
+    drop(state);
     fs::remove_dir_all(root)?;
     Ok(())
 }

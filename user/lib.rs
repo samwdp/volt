@@ -33,6 +33,8 @@ pub mod commandline;
 pub mod compile;
 /// Debug adapter integration hooks and commands.
 pub mod dap;
+/// Database explorer commands, query buffers, and schema browsers.
+pub mod db;
 /// Git workflows and repository-oriented commands.
 pub mod git;
 /// Git fringe configuration.
@@ -117,6 +119,7 @@ pub fn packages() -> Vec<PluginPackage> {
         hover::package(),
         lsp::package(),
         dap::package(),
+        db::package(),
         oil::package(),
         multicursor::package(),
         picker::package(),

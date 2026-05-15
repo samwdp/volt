@@ -1982,7 +1982,6 @@ fn render_buffer_with_view_state(
         rect.width().saturating_sub(24),
         cell_width,
     );
-
     let layout = buffer_footer_layout_with_command_line(
         buffer,
         rect,
@@ -2689,7 +2688,6 @@ fn render_buffer_with_view_state(
         border_color,
         window_effects,
     )?;
-
     Ok(())
 }
 

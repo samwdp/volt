@@ -102,6 +102,11 @@ impl Buffer {
         self.path.as_deref()
     }
 
+    /// Updates the file system path attached to the buffer.
+    pub fn set_path(&mut self, path: Option<PathBuf>) {
+        self.path = path;
+    }
+
     /// Reports whether the buffer contains unsaved changes.
     pub const fn is_dirty(&self) -> bool {
         self.dirty
@@ -601,6 +606,22 @@ impl EditorModel {
             .get_mut(&buffer_id)
             .ok_or(ModelError::BufferNotFound(buffer_id))?;
         buffer.set_name(name);
+        Ok(())
+    }
+
+    /// Updates the file system path attached to a buffer.
+    pub fn set_buffer_path(
+        &mut self,
+        workspace_id: WorkspaceId,
+        buffer_id: BufferId,
+        path: Option<PathBuf>,
+    ) -> Result<(), ModelError> {
+        let workspace = self.workspace_mut(workspace_id)?;
+        let buffer = workspace
+            .buffers
+            .get_mut(&buffer_id)
+            .ok_or(ModelError::BufferNotFound(buffer_id))?;
+        buffer.set_path(path);
         Ok(())
     }
 

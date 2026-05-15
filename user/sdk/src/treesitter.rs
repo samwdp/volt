@@ -33,6 +33,13 @@ thread_local! {
         RefCell::new(AncestorContextCache::default());
 }
 
+fn context_queries_enabled(language_id: &str) -> bool {
+    // These grammars currently crash when we run the separate ancestor-context
+    // query path used for ghost text / sticky headers. Skip context overlays so
+    // normal file opening, editing, LSP, and syntax highlighting can keep working.
+    !matches!(language_id, "sql" | "toml")
+}
+
 /// Returns named tree-sitter ancestor contexts for the provided cursor position.
 pub fn ancestor_contexts_for_cursor(
     languages: &[LanguageConfiguration],
@@ -47,6 +54,9 @@ pub fn ancestor_contexts_for_cursor(
         return Vec::new();
     };
     if buffer_text.is_empty() {
+        return Vec::new();
+    }
+    if !context_queries_enabled(language_id) {
         return Vec::new();
     }
     let query = AncestorContextQuery {
@@ -139,4 +149,18 @@ fn ensure_cached_buffer(
     cache.parse_session = None;
     cache.last_query = None;
     cache.last_contexts.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ancestor_contexts_for_cursor;
+
+    #[test]
+    fn ancestor_contexts_skip_sql_and_toml() {
+        assert!(ancestor_contexts_for_cursor(&[], Some("sql"), "SELECT 1;", 1, 1, 0, 0).is_empty());
+        assert!(
+            ancestor_contexts_for_cursor(&[], Some("toml"), "title = \"Volt\"", 1, 1, 0, 0)
+                .is_empty()
+        );
+    }
 }

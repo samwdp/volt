@@ -552,6 +552,23 @@ fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
                 }
             }
         }
+        let should_retry_with_nvm = matches!(
+            &output_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry_with_nvm
+            && let Some(nvm_env) =
+                windows_nvm_environment(spec.cwd().map(PathBuf::as_path), spec.env())
+        {
+            for candidate in windows_nvm_launch_program_candidates(spec.program(), &nvm_env) {
+                output_result = build_job_command(&spec, &candidate, Some(&nvm_env)).output();
+                match &output_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
     }
 
     let output = output_result?;
@@ -568,15 +585,15 @@ fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
 fn build_job_command(
     spec: &JobSpec,
     program: &str,
-    #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
-    #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
+    #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
+    #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
 ) -> Command {
     let (program, args) = supervised_command_if_resolved(
         program,
         spec.args(),
         spec.env(),
         #[cfg(windows)]
-        fnm_env,
+        runtime_env,
         #[cfg(not(windows))]
         None,
         ProcessSupervisionMode::Background,
@@ -590,8 +607,8 @@ fn build_job_command(
         command.current_dir(cwd);
     }
     #[cfg(windows)]
-    if let Some(fnm_env) = fnm_env {
-        apply_windows_fnm_environment(&mut command, spec.env(), fnm_env);
+    if let Some(runtime_env) = runtime_env {
+        apply_windows_runtime_environment(&mut command, spec.env(), runtime_env);
     } else {
         apply_command_environment(&mut command, spec.env());
     }
@@ -653,6 +670,58 @@ fn windows_fnm_launch_program_candidates(
     program: &str,
     fnm_env: &[(String, String)],
 ) -> Vec<String> {
+    windows_runtime_launch_program_candidates(program, fnm_env)
+}
+
+#[cfg(windows)]
+fn windows_nvm_environment(
+    cwd: Option<&std::path::Path>,
+    env: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let nvm_home = windows_nvm_home(env)?;
+    let nvm_exe = nvm_home.join("nvm.exe");
+    nvm_exe.is_file().then_some(())?;
+
+    let mut command = Command::new(&nvm_exe);
+    configure_background_command(&mut command);
+    command
+        .arg("current")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    apply_command_environment(&mut command, env);
+    let output = command.output().ok()?;
+    output.status.success().then_some(())?;
+    let version = parse_windows_nvm_current_version(&String::from_utf8_lossy(&output.stdout))?;
+    let node_dir = windows_nvm_node_dir(&nvm_home, &version)?;
+
+    let mut runtime_env = vec![("PATH".to_owned(), node_dir.to_string_lossy().into_owned())];
+    runtime_env.push((
+        "NVM_HOME".to_owned(),
+        nvm_home.to_string_lossy().into_owned(),
+    ));
+    if let Some(nvm_symlink) = environment_value(env, None, "NVM_SYMLINK") {
+        runtime_env.push(("NVM_SYMLINK".to_owned(), nvm_symlink));
+    }
+    Some(runtime_env)
+}
+
+#[cfg(windows)]
+fn windows_nvm_launch_program_candidates(
+    program: &str,
+    nvm_env: &[(String, String)],
+) -> Vec<String> {
+    windows_runtime_launch_program_candidates(program, nvm_env)
+}
+
+#[cfg(windows)]
+fn windows_runtime_launch_program_candidates(
+    program: &str,
+    runtime_env: &[(String, String)],
+) -> Vec<String> {
     if std::path::Path::new(program).components().count() != 1 {
         return Vec::new();
     }
@@ -661,7 +730,7 @@ fn windows_fnm_launch_program_candidates(
         .into_iter()
         .chain(std::iter::once(program.to_owned()))
         .collect::<Vec<_>>();
-    let Some(path_value) = explicit_windows_env_value(fnm_env, "PATH") else {
+    let Some(path_value) = explicit_windows_env_value(runtime_env, "PATH") else {
         return Vec::new();
     };
 
@@ -685,6 +754,50 @@ fn windows_fnm_launch_program_candidates(
 }
 
 #[cfg(windows)]
+fn windows_nvm_home(env: &[(String, String)]) -> Option<PathBuf> {
+    environment_value(env, None, "NVM_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            environment_value(env, None, "APPDATA").map(|appdata| Path::new(&appdata).join("nvm"))
+        })
+}
+
+#[cfg(windows)]
+fn parse_windows_nvm_current_version(output: &str) -> Option<String> {
+    let version = output
+        .split_whitespace()
+        .find(|token| {
+            !token.is_empty()
+                && !token.eq_ignore_ascii_case("none")
+                && !token.eq_ignore_ascii_case("n/a")
+                && token
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == 'v' || ch.is_ascii_digit())
+        })?
+        .trim();
+    Some(version.to_owned())
+}
+
+#[cfg(windows)]
+fn windows_nvm_node_dir(nvm_home: &Path, version: &str) -> Option<PathBuf> {
+    let mut candidates = vec![version.to_owned()];
+    if let Some(stripped) = version.strip_prefix('v') {
+        candidates.push(stripped.to_owned());
+    } else {
+        candidates.push(format!("v{version}"));
+    }
+
+    for candidate in candidates {
+        let node_dir = nvm_home.join(candidate);
+        if node_dir.join("node.exe").is_file() {
+            return Some(node_dir);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> {
     let vars = output
         .lines()
@@ -698,14 +811,14 @@ fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> 
 }
 
 #[cfg(windows)]
-fn apply_windows_fnm_environment(
+fn apply_windows_runtime_environment(
     command: &mut Command,
     env: &[(String, String)],
-    fnm_env: &[(String, String)],
+    runtime_env: &[(String, String)],
 ) {
     let explicit_path = explicit_windows_env_value(env, "PATH");
     let mut applied_path = false;
-    for (key, value) in fnm_env {
+    for (key, value) in runtime_env {
         if key.eq_ignore_ascii_case("PATH") {
             let merged_path = explicit_path
                 .map(|path| format!("{value};{path}"))
@@ -839,6 +952,49 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn build_job_command_keeps_nvm_path_ahead_of_explicit_path() {
+        let spec = JobSpec::command("node-version", "node", ["--version"])
+            .with_env("PATH", "C:\\custom")
+            .with_env("NODE_OPTIONS", "--trace-warnings");
+        let command = super::build_job_command(
+            &spec,
+            "node",
+            Some(&[
+                (
+                    "PATH".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0".to_owned(),
+                ),
+                (
+                    "NVM_HOME".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\nvm".to_owned(),
+                ),
+            ]),
+        );
+        let vars = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            vars.get("PATH").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0;C:\\custom")
+        );
+        assert_eq!(
+            vars.get("NVM_HOME").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\nvm")
+        );
+        assert_eq!(
+            vars.get("NODE_OPTIONS").map(String::as_str),
+            Some("--trace-warnings")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_should_retry_invalid_exe_format() {
         let error = std::io::Error::from_raw_os_error(193);
         assert!(super::windows_should_retry_spawn_error(&error));
@@ -884,6 +1040,30 @@ mod tests {
 
         let _ = std::fs::remove_file(script_path);
         let _ = std::fs::remove_file(shim_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_windows_nvm_current_version_extracts_active_version() {
+        let version = super::parse_windows_nvm_current_version("v22.1.0\r\n")
+            .expect("nvm current should parse");
+        assert_eq!(version, "v22.1.0");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nvm_node_dir_accepts_version_with_or_without_v_prefix() {
+        let temp_dir = temp_dir("volt-nvm-jobs");
+        let version_dir = temp_dir.join("v22.1.0");
+        std::fs::create_dir_all(&version_dir).expect("version dir");
+        std::fs::write(version_dir.join("node.exe"), []).expect("node exe");
+
+        let resolved = super::windows_nvm_node_dir(&temp_dir, "22.1.0").expect("node dir");
+        assert_eq!(resolved, version_dir);
+
+        let _ = std::fs::remove_file(version_dir.join("node.exe"));
+        let _ = std::fs::remove_dir(version_dir);
         let _ = std::fs::remove_dir(temp_dir);
     }
 }

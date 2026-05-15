@@ -1,5 +1,5 @@
 use crate::{
-    calculator,
+    calculator, db,
     icon_font::symbols::{cod, md},
 };
 use editor_plugin_api::{
@@ -14,6 +14,7 @@ pub const HOOK_AUTOCOMPLETE_ACCEPT: &str = "ui.autocomplete.accept";
 pub const HOOK_AUTOCOMPLETE_CANCEL: &str = "ui.autocomplete.cancel";
 
 pub const PROVIDER_BUFFER: &str = "buffer";
+pub const PROVIDER_DB: &str = "db";
 pub const PROVIDER_LSP: &str = "lsp";
 pub const TRIGGER_CHORD: &str = "Ctrl+Space";
 pub const NEXT_CHORD: &str = "Ctrl+n";
@@ -81,6 +82,9 @@ pub fn backends() -> Vec<AutocompleteProviderConfig> {
             LSP_ITEM_ICON,
         )
         .with_or_group(PROVIDER_SOURCE_GROUP),
+        AutocompleteProviderConfig::new(PROVIDER_DB, "Database", "DB", "DB")
+            .with_or_group(PROVIDER_SOURCE_GROUP)
+            .with_buffer_kind(db::QUERY_KIND),
         calculator::autocomplete_provider().with_or_group(PROVIDER_SOURCE_GROUP),
         AutocompleteProviderConfig::new(
             PROVIDER_BUFFER,
@@ -258,6 +262,13 @@ mod tests {
             Some(calculator::CALCULATOR_KIND)
         );
         assert!(!calculator.items.is_empty());
+
+        let database = providers
+            .iter()
+            .find(|provider| provider.id == PROVIDER_DB)
+            .expect("database autocomplete provider should be exported");
+        assert_eq!(database.buffer_kind.as_deref(), Some(db::QUERY_KIND));
+        assert!(database.items.is_empty());
     }
 
     #[test]

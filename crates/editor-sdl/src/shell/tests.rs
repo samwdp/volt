@@ -73,6 +73,47 @@ impl Drop for TempTestDir {
     }
 }
 
+fn wait_for_buffer_syntax_refresh(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        refresh_pending_syntax(runtime)?;
+        if !shell_buffer(runtime, buffer_id)?.syntax_dirty {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let worker_configured = shell_ui(runtime)?.syntax_refresh_worker.is_configured();
+    let pending_results = shell_ui(runtime)?
+        .syntax_refresh_worker
+        .results
+        .lock()
+        .map(|results| results.len())
+        .unwrap_or(usize::MAX);
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    Err(format!(
+        "syntax refresh did not complete for buffer `{}` (worker_configured={worker_configured}, pending_results={pending_results}, language_id={:?}, syntax_error={:?})",
+        buffer_id.get(),
+        buffer.language_id(),
+        buffer.syntax_error
+    ))
+}
+
+fn sync_active_buffer_layout_for_test(state: &mut ShellState) -> Result<(), String> {
+    const RENDER_WIDTH: u32 = 960;
+    const RENDER_HEIGHT: u32 = 640;
+    const CELL_WIDTH: i32 = 8;
+    const LINE_HEIGHT: i32 = 16;
+
+    state
+        .sync_active_viewport_for_render_size(RENDER_WIDTH, RENDER_HEIGHT, LINE_HEIGHT)
+        .map_err(|error| error.to_string())?;
+    state
+        .sync_visible_buffer_layouts(RENDER_WIDTH, RENDER_HEIGHT, CELL_WIDTH, LINE_HEIGHT)
+        .map_err(|error| error.to_string())
+}
+
 struct HeaderlineTestUserLibrary {
     scrolloff: f64,
     headerline_lines: Vec<String>,
@@ -404,6 +445,20 @@ fn resolve_default_workspace_root_falls_back_to_executable_user_dir() {
         resolve_default_workspace_root(Some(&exe_dir.join("volt")), Some(temp_root.path())),
         Some(exe_dir.join("user"))
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn normalize_git_output_path_converts_git_for_windows_drive_roots() {
+    assert_eq!(
+        normalize_git_output_path("/p/volt/target/release/user"),
+        PathBuf::from(r"P:\volt\target\release\user")
+    );
+    assert_eq!(
+        normalize_git_output_path(r"P:\volt\target\release\user"),
+        PathBuf::from(r"P:\volt\target\release\user")
+    );
+    assert_eq!(normalize_git_output_path(".git"), PathBuf::from(".git"));
 }
 
 #[test]
@@ -9080,6 +9135,7 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
         buffer_revision,
         text,
         plugin_kind: None,
+        db_candidates: Vec::new(),
         path: None,
         root: None,
         cursor,
@@ -9152,6 +9208,7 @@ fn autocomplete_entries_are_not_limited_by_visible_result_limit() -> Result<(), 
         buffer_revision,
         text,
         plugin_kind: None,
+        db_candidates: Vec::new(),
         path: None,
         root: None,
         cursor,
@@ -12260,6 +12317,192 @@ fn browser_host_new_window_event_routes_into_browser_popup() -> Result<(), Strin
             .as_ref()
             .and_then(|browser| browser.requested_url.as_deref()),
         Some("https://example.com/oauth/callback?code=test")
+    );
+    Ok(())
+}
+
+#[test]
+fn db_table_preview_buffer_exposes_hidden_sqls_path_without_file_open_hooks() -> Result<(), String>
+{
+    let state_dir = TempTestDir::new("db-preview-no-file-open-hooks");
+    fs::create_dir_all(state_dir.path()).map_err(|error| error.to_string())?;
+    let db_path = state_dir.path().join("preview.sqlite3");
+    let mut state = state_with_user_library()?;
+    let connection_string = format!("sqlite://{}", db_path.display());
+    let session = db_service_mut(&mut state.runtime)?
+        .connect_raw(&connection_string, Some("preview"))
+        .map_err(|error| error.to_string())?;
+    db_service_mut(&mut state.runtime)?
+        .attach_query_buffer(99, Some(session.id), None)
+        .map_err(|error| error.to_string())?;
+    db_service_mut(&mut state.runtime)?
+        .execute_sql_for_buffer(
+            99,
+            "CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .map_err(|error| error.to_string())?;
+
+    open_db_query_for_table_preview(
+        &mut state.runtime,
+        session.id,
+        &QualifiedName {
+            schema: None,
+            name: "widgets".to_owned(),
+        },
+    )?;
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert!(buffer_is_db_query(&buffer.kind));
+    assert_eq!(buffer.language_id(), Some("sql"));
+    assert!(
+        buffer.lsp_enabled(),
+        "DB scratch query buffers should opt into sqls syncs"
+    );
+    assert!(
+        buffer.desired_syntax_window().is_some(),
+        "DB scratch query buffers should be queued for tree-sitter highlighting"
+    );
+    assert!(
+        buffer.path().is_none(),
+        "DB scratch query buffers should not masquerade as file-backed workspace buffers",
+    );
+    assert!(
+        buffer
+            .lsp_path()
+            .is_some_and(|path| path.extension().and_then(|value| value.to_str()) == Some("sql")),
+        "DB scratch query buffers should expose a hidden .sql path for sqls",
+    );
+    assert!(
+        formatter_registry(&state.runtime)?
+            .formatter_for_language("sql")
+            .is_none(),
+        "DB scratch query buffers should not trigger generic file-open formatter hooks",
+    );
+    assert_eq!(
+        syntax_indent_for_buffer(&mut state.runtime, buffer_id, 0, 2, false)?,
+        None,
+        "DB scratch query buffers should use text-only indentation"
+    );
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.open_line_below();
+    }
+    format_current_line_indent(&mut state.runtime, buffer_id, 2, false)?;
+    assert!(
+        shell_user_library(&state.runtime)
+            .plugin_buffer_key_bindings(DB_QUERY_KIND)
+            .iter()
+            .any(|binding| binding.chord() == "Ctrl+c Ctrl+c"
+                && binding
+                    .command_names()
+                    .iter()
+                    .any(|command| command.as_str() == "db.execute-sql")),
+        "DB query buffers should expose the execute SQL chord"
+    );
+    Ok(())
+}
+
+#[test]
+fn db_query_buffer_receives_sql_highlighting_without_blocking() -> Result<(), String> {
+    let state_dir = TempTestDir::new("db-query-syntax-refresh");
+    fs::create_dir_all(state_dir.path()).map_err(|error| error.to_string())?;
+    let db_path = state_dir.path().join("query.sqlite3");
+    let mut state = state_with_user_library()?;
+    let connection_string = format!("sqlite://{}", db_path.display());
+    db_service_mut(&mut state.runtime)?
+        .connect_raw(&connection_string, Some("query"))
+        .map_err(|error| error.to_string())?;
+
+    open_db_query_buffer(&mut state.runtime)?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    wait_for_buffer_syntax_refresh(&mut state.runtime, buffer_id)?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert!(buffer_is_db_query(&buffer.kind));
+    assert_eq!(buffer.language_id(), Some("sql"));
+    assert!(buffer.syntax_error.is_none());
+    assert!(
+        buffer.line_syntax_spans(3).is_some_and(|spans| {
+            spans
+                .iter()
+                .any(|span| span.theme_token.starts_with("syntax.keyword"))
+        }),
+        "DB query starter SQL should receive keyword highlighting"
+    );
+    Ok(())
+}
+
+#[test]
+fn opened_sql_file_survives_layout_and_syntax_refresh() -> Result<(), String> {
+    let root = TempTestDir::new("file-tree-sitter-sql-highlighting");
+    fs::create_dir_all(root.path()).map_err(|error| error.to_string())?;
+    let path = root.path().join("query.sql");
+    fs::write(&path, "SELECT *\nFROM widgets\nWHERE id = 1;\n")
+        .map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    wait_for_buffer_syntax_refresh(&mut state.runtime, buffer_id)?;
+    sync_active_buffer_layout_for_test(&mut state)?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.language_id(), Some("sql"));
+    assert!(buffer.syntax_error.is_none());
+    assert!(
+        buffer.line_syntax_spans(0).is_some_and(|spans| {
+            spans
+                .iter()
+                .any(|span| span.theme_token.starts_with("syntax.keyword"))
+        }),
+        "opened SQL file should receive keyword highlight spans"
+    );
+    Ok(())
+}
+
+#[test]
+fn opened_toml_file_survives_layout_and_receives_tree_sitter_highlighting() -> Result<(), String> {
+    let root = TempTestDir::new("file-tree-sitter-toml-highlighting");
+    fs::create_dir_all(root.path()).map_err(|error| error.to_string())?;
+    let path = root.path().join("volt.toml");
+    fs::write(&path, "title = \"Volt\"\n[editor]\nmode = \"vim\"\n")
+        .map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    wait_for_buffer_syntax_refresh(&mut state.runtime, buffer_id)?;
+    sync_active_buffer_layout_for_test(&mut state)?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.language_id(), Some("toml"));
+    assert!(buffer.syntax_error.is_none());
+    assert!(
+        buffer.line_syntax_spans(0).is_some(),
+        "opened TOML file should receive syntax spans"
+    );
+    Ok(())
+}
+
+#[test]
+fn opened_file_receives_tree_sitter_highlighting() -> Result<(), String> {
+    let root = TempTestDir::new("file-tree-sitter-highlighting");
+    fs::create_dir_all(root.path()).map_err(|error| error.to_string())?;
+    let path = root.path().join("main.rs");
+    fs::write(&path, "fn main() {\n    let value = 1;\n}\n").map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    wait_for_buffer_syntax_refresh(&mut state.runtime, buffer_id)?;
+
+    assert!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .line_syntax_spans(0)
+            .is_some_and(|spans| {
+                spans
+                    .iter()
+                    .any(|span| span.theme_token.starts_with("syntax.keyword"))
+            }),
+        "opened file should receive syntax highlight spans"
     );
     Ok(())
 }

@@ -28,6 +28,7 @@ impl AutocompleteRegistry {
                 } else {
                     match provider.id.as_str() {
                         AUTOCOMPLETE_BUFFER_PROVIDER => AutocompleteProviderKind::Buffer,
+                        AUTOCOMPLETE_DB_PROVIDER => AutocompleteProviderKind::Database,
                         AUTOCOMPLETE_LSP_PROVIDER => AutocompleteProviderKind::Lsp,
                         _ => return None,
                     }

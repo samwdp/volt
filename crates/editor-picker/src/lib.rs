@@ -17,6 +17,7 @@ pub struct PickerItem {
     label: String,
     detail: String,
     preview: Option<String>,
+    fringe: Option<String>,
 }
 
 impl PickerItem {
@@ -32,6 +33,7 @@ impl PickerItem {
             label: label.into(),
             detail: detail.into(),
             preview: preview.map(Into::into),
+            fringe: None,
         }
     }
 
@@ -53,6 +55,17 @@ impl PickerItem {
     /// Returns the preview content, when available.
     pub fn preview(&self) -> Option<&str> {
         self.preview.as_deref()
+    }
+
+    /// Attaches optional left-fringe content such as an icon glyph.
+    pub fn with_fringe(mut self, fringe: impl Into<String>) -> Self {
+        self.fringe = Some(fringe.into());
+        self
+    }
+
+    /// Returns the left-fringe content, when available.
+    pub fn fringe(&self) -> Option<&str> {
+        self.fringe.as_deref()
     }
 }
 
@@ -265,6 +278,7 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
     for (term_index, term) in query_terms.iter().enumerate() {
         let matched = match_term(term, &label_chars, &label_lower)?;
         score += matched.score;
+        score += best_contiguous_substring_bonus(term, &label_chars, &label_lower);
         if term_index == 0 && label_lower.starts_with(term) {
             score += 24;
         }
@@ -285,6 +299,56 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
 struct TermMatch {
     score: i64,
     matched_positions: Vec<usize>,
+}
+
+fn best_contiguous_substring_bonus(term: &str, label_chars: &[char], label_lower: &str) -> i64 {
+    label_lower
+        .match_indices(term)
+        .map(|(start_byte, _)| {
+            contiguous_substring_bonus(start_byte, term, label_chars, label_lower)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn contiguous_substring_bonus(
+    start_byte: usize,
+    term: &str,
+    label_chars: &[char],
+    label_lower: &str,
+) -> i64 {
+    let start_index = label_lower[..start_byte].chars().count();
+    let end_index = start_index + term.chars().count();
+    let mut bonus = 48;
+
+    if is_match_boundary(label_chars, start_index) {
+        bonus += 24;
+    }
+    if is_match_end_boundary(label_chars, end_index) {
+        bonus += 18;
+    }
+
+    bonus
+}
+
+fn is_match_boundary(label_chars: &[char], index: usize) -> bool {
+    index == 0
+        || label_chars
+            .get(index.saturating_sub(1))
+            .copied()
+            .is_some_and(is_boundary_separator)
+}
+
+fn is_match_end_boundary(label_chars: &[char], index: usize) -> bool {
+    index >= label_chars.len()
+        || label_chars
+            .get(index)
+            .copied()
+            .is_some_and(is_boundary_separator)
+}
+
+fn is_boundary_separator(character: char) -> bool {
+    matches!(character, '.' | ':' | '-' | '_' | '/' | '\\' | ' ')
 }
 
 fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<TermMatch> {
@@ -320,11 +384,7 @@ fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<Ter
             score += 14;
         }
 
-        let boundary = label_index == 0
-            || matches!(
-                label_chars[label_index.saturating_sub(1)],
-                '.' | ':' | '-' | '_' | '/' | '\\' | ' '
-            );
+        let boundary = is_match_boundary(label_chars, label_index);
         if boundary {
             score += 10;
         }
@@ -413,6 +473,48 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_substring_beats_split_path_match() {
+        let mut session = PickerSession::new(
+            "Files",
+            vec![
+                item(
+                    "asset-model",
+                    "src/AssetFusion.Shared/Model/StaticData/AssetDefinition.cs",
+                ),
+                item(
+                    "report-model",
+                    "src/AssetFusion.Shared/Model/StaticData/ReportDefinition.cs",
+                ),
+                item(
+                    "asset-service",
+                    "src/AssetFusion.Shared/Services/Sql/AssetDefinitionService.cs",
+                ),
+                item(
+                    "vehicle-model",
+                    "src/AssetFusion.Shared/Model/StaticData/VehicleDefinition.cs",
+                ),
+            ],
+        );
+        session.set_query("assetdefinition");
+
+        let labels = session
+            .matches()
+            .iter()
+            .map(|matched| matched.item().label())
+            .collect::<Vec<_>>();
+        let first_non_asset = labels
+            .iter()
+            .position(|label| !label.contains("AssetDefinition"))
+            .expect("expected weaker non-asset fuzzy matches");
+
+        assert!(
+            labels[..first_non_asset]
+                .iter()
+                .all(|label| label.contains("AssetDefinition"))
+        );
+    }
+
+    #[test]
     fn selection_wraps_across_match_list() {
         let mut session = PickerSession::new(
             "Commands",
@@ -474,5 +576,20 @@ mod tests {
         session.set_query("acp files");
 
         assert_eq!(session.match_count(), 0);
+    }
+
+    #[test]
+    fn fringe_metadata_survives_matching() {
+        let session = PickerSession::new(
+            "Files",
+            vec![item("alpha", "src/main.rs").with_fringe("icon")],
+        );
+
+        assert_eq!(
+            session
+                .selected()
+                .and_then(|selected| selected.item().fringe()),
+            Some("icon")
+        );
     }
 }

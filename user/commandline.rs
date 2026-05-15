@@ -92,6 +92,48 @@ pub fn commands() -> Vec<PluginCommand> {
             Some("Terminal"),
         )],
     ));
+    commands.extend(hook_aliases(
+        &["dbconnect"],
+        "Opens the database connection prompt.",
+        "db.connect",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbdisconnect"],
+        "Disconnects the active database session.",
+        "db.disconnect",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbtables"],
+        "Opens the active database schema explorer.",
+        "db.show-tables",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbquery"],
+        "Creates a database query buffer.",
+        "db.new-query-buffer",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbconnections"],
+        "Shows database connections.",
+        "db.show-connections",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbhistory"],
+        "Shows database query history.",
+        "db.show-history",
+        None,
+    ));
+    commands.extend(hook_aliases(
+        &["dbsnippets"],
+        "Shows saved database SQL snippets.",
+        "db.show-snippets",
+        None,
+    ));
     commands
 }
 

@@ -1,6 +1,6 @@
 use editor_plugin_api::{PaneConfig, PluginAction, PluginCommand, PluginPackage};
 
-pub const GOLDEN_RATIO: bool = false;
+pub const GOLDEN_RATIO: bool = true;
 
 pub const fn config() -> PaneConfig {
     PaneConfig {

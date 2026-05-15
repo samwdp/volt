@@ -1291,6 +1291,7 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "sqls",
             std::iter::empty::<&str>(),
         )
+        .with_workspace_configuration_section("sqls")
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
         .with_root_markers([".sqls.json", ".sqls.yaml", ".sqls.yml"]),
         LanguageServerSpec::new(
@@ -1673,6 +1674,15 @@ mod tests {
         {
             assert_eq!(copilot.enabled_by_default(), COPILOT_ENABLED_DEFAULT);
         }
+    }
+
+    #[test]
+    fn sqls_server_uses_sqls_workspace_configuration_section() {
+        let sqls = language_servers()
+            .into_iter()
+            .find(|server| server.id() == SERVER_SQLS)
+            .expect("sqls server should be registered");
+        assert_eq!(sqls.workspace_configuration_section(), Some("sqls"));
     }
 
     #[test]

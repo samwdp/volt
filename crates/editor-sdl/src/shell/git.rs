@@ -147,6 +147,7 @@ pub(super) struct ActiveBufferEventContext {
     pub(super) is_directory: bool,
     pub(super) is_browser: bool,
     pub(super) is_terminal: bool,
+    pub(super) is_db_query: bool,
     pub(super) is_plugin_evaluatable: bool,
     pub(super) is_compilation: bool,
 }
@@ -4287,7 +4288,13 @@ fn run_direct_git_command(root: &Path, args: &[&str]) -> Result<std::process::Ou
         .current_dir(root)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("failed to run git {:?}: {error}", args))
+        .map_err(|error| {
+            format!(
+                "failed to run git {:?} in {}: {error}",
+                args,
+                root.display()
+            )
+        })
 }
 
 fn command_output_transcript(output: &std::process::Output) -> String {
@@ -4309,7 +4316,7 @@ pub(super) fn git_dir_path(_runtime: &mut EditorRuntime, root: &Path) -> Option<
     if trimmed.is_empty() {
         return None;
     }
-    let path = PathBuf::from(trimmed);
+    let path = normalize_git_output_path(trimmed);
     if path.is_absolute() {
         Some(path)
     } else {

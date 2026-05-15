@@ -857,6 +857,7 @@ struct LspClientState {
     sessions: BTreeMap<SessionKey, Arc<LspSessionHandle>>,
     tracked_buffers: BTreeMap<PathBuf, TrackedBufferState>,
     settings_overrides: BTreeMap<SessionKey, Value>,
+    initialization_options_overrides: BTreeMap<SessionKey, Value>,
     start_failures: BTreeMap<SessionKey, String>,
 }
 
@@ -961,6 +962,7 @@ struct LspSessionHandle {
     open_documents: Mutex<BTreeMap<PathBuf, String>>,
     text_document_sync_kind: Mutex<TextDocumentSyncKind>,
     workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
+    initialization_options: Option<Value>,
     transport_log: TransportLog,
     next_request_id: AtomicU64,
     next_progress_token: AtomicU64,
@@ -1033,6 +1035,25 @@ impl LspClientManager {
         root: Option<&Path>,
     ) -> Result<bool, LspClientError> {
         self.update_server_settings_override(server_id, root, |_| None)
+    }
+
+    pub fn set_server_initialization_options_override(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        initialization_options: Value,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_initialization_options_override(server_id, root, |_| {
+            Some(initialization_options)
+        })
+    }
+
+    pub fn clear_server_initialization_options_override(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<bool, LspClientError> {
+        self.update_server_initialization_options_override(server_id, root, |_| None)
     }
 
     pub fn set_csharp_solution_path_override(
@@ -1170,6 +1191,41 @@ impl LspClientManager {
         };
         if let Some(session) = session {
             session.set_runtime_settings_override(updated_override.clone())?;
+        }
+        Ok(true)
+    }
+
+    fn update_server_initialization_options_override<F>(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        update: F,
+    ) -> Result<bool, LspClientError>
+    where
+        F: FnOnce(Option<Value>) -> Option<Value>,
+    {
+        let key = SessionKey {
+            server_id: server_id.to_owned(),
+            root: root.map(Path::to_path_buf),
+        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        let current = state.initialization_options_overrides.get(&key).cloned();
+        let updated_override = update(current.clone());
+        if current == updated_override {
+            return Ok(false);
+        }
+        match updated_override {
+            Some(initialization_options) => {
+                state
+                    .initialization_options_overrides
+                    .insert(key, initialization_options);
+            }
+            None => {
+                state.initialization_options_overrides.remove(&key);
+            }
         }
         Ok(true)
     }
@@ -1808,7 +1864,7 @@ impl LspClientManager {
             if handled_keys.contains(&key) {
                 continue;
             }
-            let (existing, runtime_override, start_failed) = {
+            let (existing, runtime_override, initialization_options_override, start_failed) = {
                 let mut state = self
                     .state
                     .lock()
@@ -1827,6 +1883,7 @@ impl LspClientManager {
                 (
                     state.sessions.get(&key).cloned(),
                     state.settings_overrides.get(&key).cloned(),
+                    state.initialization_options_overrides.get(&key).cloned(),
                     state.start_failures.contains_key(&key),
                 )
             };
@@ -1841,6 +1898,7 @@ impl LspClientManager {
             match LspSessionHandle::start(
                 session,
                 runtime_override,
+                initialization_options_override,
                 Arc::clone(&self.transport_log),
                 Arc::clone(&self.notifications),
             ) {
@@ -1895,6 +1953,7 @@ impl LspSessionHandle {
     fn start(
         session: LanguageServerSession,
         runtime_override: Option<Value>,
+        initialization_options_override: Option<Value>,
         transport_log: TransportLog,
         notifications: NotificationLog,
     ) -> Result<Arc<Self>, LspClientError> {
@@ -1939,6 +1998,10 @@ impl LspSessionHandle {
             &session,
             runtime_override,
         )));
+        let initialization_options = initialization_options_for_server(
+            session.server_id(),
+            initialization_options_override.as_ref(),
+        );
         let disconnected = Arc::new(AtomicBool::new(false));
         let pid = child.id();
         let handle = Arc::new(Self {
@@ -1951,6 +2014,7 @@ impl LspSessionHandle {
             open_documents: Mutex::new(BTreeMap::new()),
             text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration: Arc::clone(&workspace_configuration),
+            initialization_options,
             transport_log: Arc::clone(&transport_log),
             next_request_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
@@ -2035,7 +2099,7 @@ impl LspSessionHandle {
             process_id: Some(std::process::id()),
             root_path: None,
             root_uri,
-            initialization_options: initialization_options_for_server(self.server_id()),
+            initialization_options: self.initialization_options.clone(),
             capabilities,
             trace: Some(TraceValue::Off),
             workspace_folders,
@@ -2776,6 +2840,21 @@ fn spawn_lsp_command(
                 }
             }
         }
+        let should_retry_with_nvm = matches!(
+            &spawn_result,
+            Err(error) if windows_should_retry_spawn_error(error)
+        );
+        if should_retry_with_nvm && let Some(nvm_env) = windows_nvm_environment(cwd, env) {
+            for candidate in windows_nvm_launch_program_candidates(program, &nvm_env) {
+                spawn_result =
+                    build_lsp_command(&candidate, args, cwd, env, Some(&nvm_env)).spawn();
+                match &spawn_result {
+                    Ok(_) => break,
+                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(_) => break,
+                }
+            }
+        }
     }
     spawn_result
 }
@@ -2785,15 +2864,15 @@ fn build_lsp_command(
     args: &[String],
     cwd: Option<&Path>,
     env: &[(String, String)],
-    #[cfg(windows)] fnm_env: Option<&[(String, String)]>,
-    #[cfg(not(windows))] _fnm_env: Option<&[(String, String)]>,
+    #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
+    #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
 ) -> Command {
     let (program, args) = supervised_command_if_resolved(
         program,
         args,
         env,
         #[cfg(windows)]
-        fnm_env,
+        runtime_env,
         #[cfg(not(windows))]
         None,
         ProcessSupervisionMode::Background,
@@ -2809,8 +2888,8 @@ fn build_lsp_command(
         command.current_dir(cwd);
     }
     #[cfg(windows)]
-    if let Some(fnm_env) = fnm_env {
-        apply_windows_fnm_environment(&mut command, env, fnm_env);
+    if let Some(runtime_env) = runtime_env {
+        apply_windows_runtime_environment(&mut command, env, runtime_env);
     } else {
         apply_command_environment(&mut command, env);
     }
@@ -2893,6 +2972,58 @@ fn windows_fnm_launch_program_candidates(
     program: &str,
     fnm_env: &[(String, String)],
 ) -> Vec<String> {
+    windows_runtime_launch_program_candidates(program, fnm_env)
+}
+
+#[cfg(windows)]
+fn windows_nvm_environment(
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let nvm_home = windows_nvm_home(env)?;
+    let nvm_exe = nvm_home.join("nvm.exe");
+    nvm_exe.is_file().then_some(())?;
+
+    let mut command = Command::new(&nvm_exe);
+    configure_lsp_command(&mut command);
+    command
+        .arg("current")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    apply_command_environment(&mut command, env);
+    let output = command.output().ok()?;
+    output.status.success().then_some(())?;
+    let version = parse_windows_nvm_current_version(&String::from_utf8_lossy(&output.stdout))?;
+    let node_dir = windows_nvm_node_dir(&nvm_home, &version)?;
+
+    let mut runtime_env = vec![("PATH".to_owned(), node_dir.to_string_lossy().into_owned())];
+    runtime_env.push((
+        "NVM_HOME".to_owned(),
+        nvm_home.to_string_lossy().into_owned(),
+    ));
+    if let Some(nvm_symlink) = windows_effective_environment_value(env, "NVM_SYMLINK") {
+        runtime_env.push(("NVM_SYMLINK".to_owned(), nvm_symlink));
+    }
+    Some(runtime_env)
+}
+
+#[cfg(windows)]
+fn windows_nvm_launch_program_candidates(
+    program: &str,
+    nvm_env: &[(String, String)],
+) -> Vec<String> {
+    windows_runtime_launch_program_candidates(program, nvm_env)
+}
+
+#[cfg(windows)]
+fn windows_runtime_launch_program_candidates(
+    program: &str,
+    runtime_env: &[(String, String)],
+) -> Vec<String> {
     if Path::new(program).components().count() != 1 {
         return Vec::new();
     }
@@ -2901,7 +3032,7 @@ fn windows_fnm_launch_program_candidates(
         .into_iter()
         .chain(std::iter::once(program.to_owned()))
         .collect::<Vec<_>>();
-    let Some(path_value) = explicit_windows_env_value(fnm_env, "PATH") else {
+    let Some(path_value) = explicit_windows_env_value(runtime_env, "PATH") else {
         return Vec::new();
     };
 
@@ -2925,6 +3056,51 @@ fn windows_fnm_launch_program_candidates(
 }
 
 #[cfg(windows)]
+fn windows_nvm_home(env: &[(String, String)]) -> Option<PathBuf> {
+    windows_effective_environment_value(env, "NVM_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            windows_effective_environment_value(env, "APPDATA")
+                .map(|appdata| Path::new(&appdata).join("nvm"))
+        })
+}
+
+#[cfg(windows)]
+fn parse_windows_nvm_current_version(output: &str) -> Option<String> {
+    let version = output
+        .split_whitespace()
+        .find(|token| {
+            !token.is_empty()
+                && !token.eq_ignore_ascii_case("none")
+                && !token.eq_ignore_ascii_case("n/a")
+                && token
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == 'v' || ch.is_ascii_digit())
+        })?
+        .trim();
+    Some(version.to_owned())
+}
+
+#[cfg(windows)]
+fn windows_nvm_node_dir(nvm_home: &Path, version: &str) -> Option<PathBuf> {
+    let mut candidates = vec![version.to_owned()];
+    if let Some(stripped) = version.strip_prefix('v') {
+        candidates.push(stripped.to_owned());
+    } else {
+        candidates.push(format!("v{version}"));
+    }
+
+    for candidate in candidates {
+        let node_dir = nvm_home.join(candidate);
+        if node_dir.join("node.exe").is_file() {
+            return Some(node_dir);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> {
     let vars = output
         .lines()
@@ -2938,14 +3114,14 @@ fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> 
 }
 
 #[cfg(windows)]
-fn apply_windows_fnm_environment(
+fn apply_windows_runtime_environment(
     command: &mut Command,
     env: &[(String, String)],
-    fnm_env: &[(String, String)],
+    runtime_env: &[(String, String)],
 ) {
     let explicit_path = explicit_windows_env_value(env, "PATH");
     let mut applied_path = false;
-    for (key, value) in fnm_env {
+    for (key, value) in runtime_env {
         if key.eq_ignore_ascii_case("PATH") {
             let merged_path = explicit_path
                 .map(|path| format!("{value};{path}"))
@@ -2970,6 +3146,13 @@ fn apply_windows_fnm_environment(
 fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a String> {
     env.iter()
         .find_map(|(entry_key, value)| entry_key.eq_ignore_ascii_case(key).then_some(value))
+}
+
+#[cfg(windows)]
+fn windows_effective_environment_value(env: &[(String, String)], key: &str) -> Option<String> {
+    explicit_windows_env_value(env, key)
+        .map(String::to_owned)
+        .or_else(|| std::env::var(key).ok())
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, LspClientError> {
@@ -3046,7 +3229,48 @@ fn launch_summary(
 }
 
 fn format_transport_message(message: &Value) -> String {
-    serde_json::to_string_pretty(message).unwrap_or_else(|_| message.to_string())
+    let sanitized = sanitize_transport_message(message);
+    serde_json::to_string_pretty(&sanitized).unwrap_or_else(|_| sanitized.to_string())
+}
+
+fn sanitize_transport_message(message: &Value) -> Value {
+    match message {
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_transport_message).collect()),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let value = if transport_key_is_sensitive(key) {
+                        Value::String("[redacted]".to_owned())
+                    } else {
+                        sanitize_transport_message(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        _ => message.clone(),
+    }
+}
+
+fn transport_key_is_sensitive(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "authorization"
+            | "connectionstring"
+            | "datasourcename"
+            | "passphrase"
+            | "passwd"
+            | "password"
+            | "privatekey"
+            | "secret"
+    )
 }
 
 fn record_transport_message(
@@ -3396,9 +3620,12 @@ fn is_csharp_metadata_uri(uri: &str) -> bool {
     uri.starts_with("csharp:/")
 }
 
-fn initialization_options_for_server(server_id: &str) -> Option<Value> {
-    if is_copilot_server(server_id) {
-        return Some(json!({
+fn initialization_options_for_server(
+    server_id: &str,
+    override_value: Option<&Value>,
+) -> Option<Value> {
+    let base = if is_copilot_server(server_id) {
+        Some(json!({
             "editorInfo": {
                 "name": "Volt",
                 "version": env!("CARGO_PKG_VERSION"),
@@ -3407,18 +3634,24 @@ fn initialization_options_for_server(server_id: &str) -> Option<Value> {
                 "name": "Volt Copilot",
                 "version": env!("CARGO_PKG_VERSION"),
             }
-        }));
-    }
-    if is_csharp_server(server_id) {
-        return Some(json!({
+        }))
+    } else if is_csharp_server(server_id) {
+        Some(json!({
             "experimental": {
                 "csharp": {
                     "metadataUris": true,
                 }
             }
-        }));
+        }))
+    } else {
+        None
+    };
+    match (base, override_value) {
+        (Some(base), Some(override_value)) => Some(merge_json_values(&base, override_value)),
+        (Some(base), None) => Some(base),
+        (None, Some(override_value)) => Some(override_value.clone()),
+        (None, None) => None,
     }
-    None
 }
 
 fn csharp_metadata_request_params(uri: &str) -> Value {
@@ -5022,7 +5255,7 @@ mod tests {
     #[test]
     fn csharp_and_copilot_servers_receive_initialization_options() {
         assert_eq!(
-            initialization_options_for_server(CSHARP_SERVER_ID),
+            initialization_options_for_server(CSHARP_SERVER_ID, None),
             Some(json!({
                 "experimental": {
                     "csharp": {
@@ -5032,7 +5265,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            initialization_options_for_server(COPILOT_SERVER_ID),
+            initialization_options_for_server(COPILOT_SERVER_ID, None),
             Some(json!({
                 "editorInfo": {
                     "name": "Volt",
@@ -5048,8 +5281,52 @@ mod tests {
 
     #[test]
     fn non_csharp_non_copilot_servers_do_not_receive_initialization_options() {
-        assert_eq!(initialization_options_for_server("rust-analyzer"), None);
-        assert_eq!(initialization_options_for_server("marksman"), None);
+        assert_eq!(
+            initialization_options_for_server("rust-analyzer", None),
+            None
+        );
+        assert_eq!(initialization_options_for_server("marksman", None), None);
+    }
+
+    #[test]
+    fn runtime_initialization_options_merge_with_server_defaults() {
+        assert_eq!(
+            initialization_options_for_server(
+                CSHARP_SERVER_ID,
+                Some(&json!({
+                    "experimental": {
+                        "csharp": {
+                            "solutionStyle": true,
+                        }
+                    }
+                })),
+            ),
+            Some(json!({
+                "experimental": {
+                    "csharp": {
+                        "metadataUris": true,
+                        "solutionStyle": true,
+                    }
+                }
+            }))
+        );
+        assert_eq!(
+            initialization_options_for_server(
+                "sqls",
+                Some(&json!({
+                    "connectionConfig": {
+                        "driver": "mssql",
+                        "dataSourceName": "Data Source=example.database.windows.net;Initial Catalog=volt",
+                    }
+                })),
+            ),
+            Some(json!({
+                "connectionConfig": {
+                    "driver": "mssql",
+                    "dataSourceName": "Data Source=example.database.windows.net;Initial Catalog=volt",
+                }
+            }))
+        );
     }
 
     #[test]
@@ -5390,6 +5667,36 @@ mod tests {
     }
 
     #[test]
+    fn transport_message_redacts_sqls_connection_secrets() {
+        let formatted = format_transport_message(&json!({
+            "method": "workspace/didChangeConfiguration",
+            "params": {
+                "settings": {
+                    "sqls": {
+                        "connections": [
+                            {
+                                "alias": "assetfusion",
+                                "driver": "mssql",
+                                "dataSourceName": "Data Source=assetfusion.database.windows.net;Password=secret;",
+                                "password": "secret",
+                                "passwd": "secret",
+                            }
+                        ]
+                    }
+                }
+            }
+        }));
+
+        assert!(formatted.contains("\"alias\": \"assetfusion\""));
+        assert!(formatted.contains("\"driver\": \"mssql\""));
+        assert!(formatted.contains("\"dataSourceName\": \"[redacted]\""));
+        assert!(formatted.contains("\"password\": \"[redacted]\""));
+        assert!(formatted.contains("\"passwd\": \"[redacted]\""));
+        assert!(!formatted.contains("assetfusion.database.windows.net"));
+        assert!(!formatted.contains("secret"));
+    }
+
+    #[test]
     fn notification_log_snapshot_is_bounded_and_tracks_revision() {
         let mut log = LspNotificationLog::new(2);
         log.record(LspNotification::new(
@@ -5703,6 +6010,7 @@ mod tests {
             open_documents: Mutex::new(BTreeMap::new()),
             text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration,
+            initialization_options: None,
             transport_log: Arc::new(Mutex::new(LspTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
             next_request_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
@@ -5921,6 +6229,51 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_nvm_environment_keeps_nvm_path_ahead_of_explicit_path() {
+        let command = build_lsp_command(
+            "node",
+            &["--version".to_owned()],
+            None,
+            &[
+                ("PATH".to_owned(), "C:\\custom".to_owned()),
+                ("NODE_OPTIONS".to_owned(), "--trace-warnings".to_owned()),
+            ],
+            Some(&[
+                (
+                    "PATH".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0".to_owned(),
+                ),
+                (
+                    "NVM_HOME".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\nvm".to_owned(),
+                ),
+            ]),
+        );
+        let vars = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            vars.get("PATH").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0;C:\\custom")
+        );
+        assert_eq!(
+            vars.get("NVM_HOME").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\nvm")
+        );
+        assert_eq!(
+            vars.get("NODE_OPTIONS").map(String::as_str),
+            Some("--trace-warnings")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_should_retry_invalid_exe_format() {
         let error = std::io::Error::from_raw_os_error(193);
         assert!(windows_should_retry_spawn_error(&error));
@@ -5966,6 +6319,30 @@ mod tests {
 
         let _ = std::fs::remove_file(script_path);
         let _ = std::fs::remove_file(shim_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_windows_nvm_current_version_extracts_active_version() {
+        let version =
+            parse_windows_nvm_current_version("v22.1.0\r\n").expect("nvm current should parse");
+        assert_eq!(version, "v22.1.0");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nvm_node_dir_accepts_version_with_or_without_v_prefix() {
+        let temp_dir = temp_dir();
+        let version_dir = temp_dir.join("v22.1.0");
+        std::fs::create_dir_all(&version_dir).expect("version dir");
+        std::fs::write(version_dir.join("node.exe"), []).expect("node exe");
+
+        let resolved = windows_nvm_node_dir(&temp_dir, "22.1.0").expect("node dir");
+        assert_eq!(resolved, version_dir);
+
+        let _ = std::fs::remove_file(version_dir.join("node.exe"));
+        let _ = std::fs::remove_dir(version_dir);
         let _ = std::fs::remove_dir(temp_dir);
     }
 

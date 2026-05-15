@@ -1,0 +1,20 @@
+[package]
+name = "editor-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+keyring = "4.0.1"
+keyring-core = "1.0.0"
+postgres = "0.19.13"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tiberius = { version = "0.12.3", default-features = false, features = ["rustls", "tds73", "tokio", "tokio-util"] }
+tokio = { version = "1.50.0", features = ["net", "rt-multi-thread"] }
+tokio-util = { version = "0.7.18", features = ["compat"] }

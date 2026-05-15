@@ -6,10 +6,10 @@ use std::env;
 /// Returns the default terminal program for the current platform.
 pub fn default_shell_program() -> String {
     if cfg!(target_os = "windows") {
-        "pwsh".to_owned()
+        // "pwsh".to_owned()
         // "bash".to_owned()
         // "zsh".to_owned()
-        // "nu".to_owned()
+        "nu".to_owned()
     } else {
         env::var("SHELL")
             .ok()
@@ -25,10 +25,10 @@ pub fn default_shell_program() -> String {
 /// Returns the default argument vector for the configured terminal shell.
 pub fn default_shell_args() -> Vec<String> {
     if cfg!(target_os = "windows") {
-        vec!["-NoLogo".to_owned()]
+        // vec!["-NoLogo".to_owned()]
         // vec!["-i".to_owned()] // bash
         // vec!["-i".to_owned()] // zsh
-        // Vec::new() // nu
+        Vec::new() // nu
     } else {
         Vec::new()
         // vec!["-i".to_owned()] // bash

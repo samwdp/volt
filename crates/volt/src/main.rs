@@ -6,6 +6,7 @@
 use std::{
     collections::BTreeSet,
     error::Error,
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -431,6 +432,37 @@ fn user_library_candidates(exe_path: Option<&Path>, env_path: Option<&str>) -> V
     candidates
 }
 
+fn catch_unwind_silently<F, T>(operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> T,
+{
+    // Runtime user-library validation happens during single-threaded startup.
+    // Suppress panic hook noise so incompatible DLLs can fall back cleanly.
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(operation));
+    panic::set_hook(hook);
+    result.map_err(panic_payload_message)
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "panic without message".to_owned(),
+        },
+    }
+}
+
+fn validate_runtime_user_library(library: &dyn UserLibrary) -> Result<(), String> {
+    catch_unwind_silently(|| {
+        let _ = library.syntax_languages();
+    })
+    .map(|_| ())
+    .map_err(|message| format!("syntax language export panicked: {message}"))
+}
+
 fn load_user_library() -> Arc<dyn UserLibrary> {
     let current_exe = std::env::current_exe().ok();
     for path in user_library_candidates(
@@ -442,8 +474,19 @@ fn load_user_library() -> Arc<dyn UserLibrary> {
         }
         match UserLibraryModuleRef::load_from_file(&path) {
             Ok(module) => {
-                eprintln!("loaded user library from `{}`", path.display());
-                return Arc::new(DynamicUserLibrary::new(module));
+                let library = Arc::new(DynamicUserLibrary::new(module));
+                match validate_runtime_user_library(library.as_ref()) {
+                    Ok(()) => {
+                        eprintln!("loaded user library from `{}`", path.display());
+                        return library;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "runtime user library `{}` is incompatible with this build: {error}",
+                            path.display()
+                        );
+                    }
+                }
             }
             Err(error) => {
                 eprintln!(
@@ -1222,5 +1265,19 @@ mod tests {
         assert!(!library.packages().is_empty());
         assert!(!library.themes().is_empty());
         assert!(!library.icon_symbols().is_empty());
+    }
+
+    #[test]
+    fn runtime_loaded_user_library_validation_rejects_static_syntax_languages() {
+        let library = DynamicUserLibrary::new(user::user_library_module());
+        let error = validate_runtime_user_library(&library)
+            .expect_err("runtime-loaded ABI wrapper should reject static syntax loaders");
+        assert!(error.contains("static tree-sitter loaders"));
+    }
+
+    #[test]
+    fn builtin_user_library_validation_accepts_static_syntax_languages() {
+        validate_runtime_user_library(&user::UserLibraryImpl)
+            .expect("built-in user library should use static syntax loaders directly");
     }
 }

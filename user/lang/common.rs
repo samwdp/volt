@@ -1,7 +1,7 @@
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
 };
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration, LanguageProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct GrammarSourceSpec<'a> {
@@ -139,6 +139,21 @@ pub(super) fn syntax_language(
         &[],
         &[],
         GrammarSourceSpec::new(repository, install_dir_name, symbol_name),
+    )
+}
+
+pub(super) fn static_syntax_language(
+    language_id: &str,
+    extensions: &[&str],
+    language_provider: LanguageProvider,
+    highlight_query: &str,
+) -> LanguageConfiguration {
+    LanguageConfiguration::new(
+        language_id,
+        extensions.iter().copied(),
+        language_provider,
+        highlight_query,
+        standard_capture_mappings(),
     )
 }
 

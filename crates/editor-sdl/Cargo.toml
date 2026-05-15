@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 editor-buffer = { path = "../editor-buffer" }
 editor-core = { path = "../editor-core" }
+editor-db = { path = "../editor-db" }
 editor-fs = { path = "../editor-fs" }
 editor-git = { path = "../editor-git" }
 editor-icons = { path = "../editor-icons" }

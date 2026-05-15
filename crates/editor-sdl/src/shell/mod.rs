@@ -79,6 +79,10 @@ use editor_core::{
     KeymapVimMode, PaneId, SectionAction, SectionCollapseState, SectionRenderLine,
     SectionRenderLineKind, WorkspaceId, builtins,
 };
+use editor_db::{
+    DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
+    DbSessionId, QualifiedName, parse_db_connect_prompt, sql_scope_from_text,
+};
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
     GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
@@ -243,6 +247,20 @@ const INTERACTIVE_INPUT_KIND: &str = "interactive-input";
 const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
+const SQLS_SERVER_ID: &str = "sqls";
+const DB_CONNECT_KIND: &str = "db-connect";
+const DB_QUERY_KIND: &str = "db-query";
+const DB_CONNECTIONS_KIND: &str = "db-connections";
+const DB_SCHEMA_KIND: &str = "db-schema";
+const DB_HISTORY_KIND: &str = "db-history";
+const DB_SNIPPETS_KIND: &str = "db-snippets";
+const DB_RESULTS_KIND: &str = "db-results";
+const DB_CONNECT_BUFFER_NAME: &str = "*db-connect*";
+const DB_CONNECTIONS_BUFFER_NAME: &str = "*db-connections*";
+const DB_SCHEMA_BUFFER_NAME: &str = "*db-schema*";
+const DB_HISTORY_BUFFER_NAME: &str = "*db-history*";
+const DB_SNIPPETS_BUFFER_NAME: &str = "*db-snippets*";
+const DB_RESULTS_BUFFER_NAME: &str = "*db-results*";
 const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
@@ -258,6 +276,7 @@ const HOOK_PDF_PREVIOUS_PAGE: &str = pdf_hooks::PREVIOUS_PAGE;
 const HOOK_PDF_ROTATE_CLOCKWISE: &str = pdf_hooks::ROTATE_CLOCKWISE;
 const HOOK_PDF_DELETE_PAGE: &str = pdf_hooks::DELETE_PAGE;
 const AUTOCOMPLETE_BUFFER_PROVIDER: &str = "buffer";
+const AUTOCOMPLETE_DB_PROVIDER: &str = "db";
 const AUTOCOMPLETE_LSP_PROVIDER: &str = "lsp";
 const HOVER_PROVIDER_TEST: &str = "test-hover";
 const HOVER_PROVIDER_LSP: &str = "lsp";
@@ -294,6 +313,17 @@ const HOOK_OIL_OPEN: &str = oil_hooks::OPEN;
 const HOOK_OIL_OPEN_PARENT: &str = oil_hooks::OPEN_PARENT;
 const HOOK_OIL_ACTION: &str = oil_hooks::ACTION;
 const HOOK_OIL_GIT_WORKTREE: &str = "ui.oil.git-worktree";
+const HOOK_DB_CONNECT: &str = "db.connect";
+const HOOK_DB_DISCONNECT: &str = "db.disconnect";
+const HOOK_DB_SHOW_TABLES: &str = "db.show-tables";
+const HOOK_DB_NEW_QUERY_BUFFER: &str = "db.new-query-buffer";
+const HOOK_DB_EXECUTE_SQL: &str = "db.execute-sql";
+const HOOK_DB_SHOW_CONNECTIONS: &str = "db.show-connections";
+const HOOK_DB_SHOW_HISTORY: &str = "db.show-history";
+const HOOK_DB_SHOW_SNIPPETS: &str = "db.show-snippets";
+const HOOK_DB_SAVE_SNIPPET: &str = "db.save-snippet";
+const HOOK_DB_REFRESH_SCHEMA: &str = "db.refresh-schema";
+const HOOK_DB_ACTIVATE_LINE: &str = "db.activate-line";
 const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
@@ -1033,6 +1063,9 @@ fn buffer_context_overlay_snapshot(
     typing_active: bool,
     user_library: &dyn UserLibrary,
 ) -> Option<BufferContextOverlaySnapshot> {
+    if buffer_is_db_query(&buffer.kind) {
+        return None;
+    }
     active.then(|| buffer.context_overlay_snapshot(user_library, typing_active))
 }
 
@@ -1281,6 +1314,9 @@ fn syntax_indent_for_buffer(
 ) -> Result<Option<String>, String> {
     let (text, language_id) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
+        if buffer_is_db_query(&buffer.kind) {
+            return Ok(None);
+        }
         (buffer.text.clone(), buffer.language_id().map(str::to_owned))
     };
     let Some(language_id) = language_id else {
@@ -2666,6 +2702,7 @@ pub(crate) struct ShellBuffer {
     directory_state: Option<DirectoryViewState>,
     terminal_render: Option<TerminalRenderSnapshot>,
     pub(crate) text: TextBuffer,
+    lsp_path: Option<PathBuf>,
     backing_file_fingerprint: Option<BackingFileFingerprint>,
     backing_file_reload_pending: bool,
     backing_file_check_in_flight: bool,
@@ -3511,6 +3548,7 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            lsp_path: None,
             backing_file_fingerprint: None,
             backing_file_reload_pending: false,
             backing_file_check_in_flight: false,
@@ -3577,6 +3615,7 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            lsp_path: None,
             backing_file_fingerprint,
             backing_file_reload_pending: false,
             backing_file_check_in_flight: false,
@@ -3645,6 +3684,7 @@ impl ShellBuffer {
             directory_state: None,
             terminal_render: None,
             text,
+            lsp_path: None,
             backing_file_fingerprint: None,
             backing_file_reload_pending: false,
             backing_file_check_in_flight: false,
@@ -3901,7 +3941,7 @@ impl ShellBuffer {
     }
 
     fn supports_text_file_actions(&self) -> bool {
-        self.kind == BufferKind::File || self.is_svg_source_mode()
+        self.kind == BufferKind::File || self.is_svg_source_mode() || buffer_is_db_query(&self.kind)
     }
 
     fn set_image_state(&mut self, state: ImageBufferState) {
@@ -4792,6 +4832,13 @@ impl ShellBuffer {
         self.text.path()
     }
 
+    fn lsp_path(&self) -> Option<&Path> {
+        if self.active_aux_text_pane_state().is_some() {
+            return None;
+        }
+        self.text.path().or(self.lsp_path.as_deref())
+    }
+
     fn is_dirty(&self) -> bool {
         self.text.is_dirty() || self.pdf_state().is_some_and(|state| state.dirty)
     }
@@ -4911,6 +4958,10 @@ impl ShellBuffer {
 
     fn set_lsp_enabled(&mut self, enabled: bool) {
         self.lsp_enabled = enabled;
+    }
+
+    fn set_lsp_path(&mut self, path: Option<PathBuf>) {
+        self.lsp_path = path;
     }
 
     fn lsp_diagnostics_revision(&self) -> u64 {
@@ -6872,6 +6923,7 @@ struct PickerEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutocompleteProviderKind {
     Buffer,
+    Database,
     Lsp,
     Manual,
 }
@@ -8795,6 +8847,9 @@ impl ShellState {
             .insert(Mutex::new(TerminalBufferState::default()));
         runtime.services_mut().insert(FormatterRegistry::default());
         runtime.services_mut().insert(Mutex::new(JobManager::new()));
+        runtime
+            .services_mut()
+            .insert(DbService::new().map_err(ShellError::Runtime)?);
         acp::init_acp_manager(&mut runtime)?;
         runtime
             .services_mut()
@@ -9167,6 +9222,36 @@ impl ShellState {
                             cancel_git_commit_buffer(&mut self.runtime, active_buffer.buffer_id)
                                 .map_err(ShellError::Runtime)?;
                         }
+                        return Ok(false);
+                    }
+                    if consume {
+                        return Ok(false);
+                    }
+                }
+                if active_buffer.is_db_query {
+                    let mut should_execute_sql = false;
+                    let mut consume = false;
+                    {
+                        let ui = self.ui_mut()?;
+                        if ui.pending_ctrl_c.is_some() {
+                            if is_ctrl_c {
+                                ui.pending_ctrl_c = None;
+                                should_execute_sql = true;
+                                consume = true;
+                            } else if is_ctrl_key {
+                                consume = true;
+                            } else {
+                                ui.pending_ctrl_c = None;
+                            }
+                        } else if is_ctrl_c {
+                            ui.pending_ctrl_c = Some(Instant::now());
+                            consume = true;
+                        }
+                    }
+                    if should_execute_sql {
+                        self.runtime
+                            .execute_command("db.execute-sql")
+                            .map_err(|error| ShellError::Runtime(error.to_string()))?;
                         return Ok(false);
                     }
                     if consume {
@@ -10949,12 +11034,21 @@ impl ShellState {
             let Some(buffer) = ui.buffer(buffer_id) else {
                 return Ok(());
             };
-            let root = if let Some(path) = buffer.path() {
-                workspace_root_for_path(&self.runtime, path).map_err(ShellError::Runtime)?
-            } else {
-                None
-            };
+            let root = lsp_root_for_buffer(&self.runtime, buffer).map_err(ShellError::Runtime)?;
+            if let (Some(lsp_client), Some(path)) = (lsp_client.as_ref(), buffer.lsp_path())
+                && let Err(error) = apply_sqls_workspace_settings_for_buffer(
+                    &self.runtime,
+                    buffer_id,
+                    buffer,
+                    path,
+                    root.as_deref(),
+                    lsp_client,
+                )
+            {
+                return Err(ShellError::Runtime(error));
+            }
             autocomplete_request_for_buffer(
+                &self.runtime,
                 buffer_id,
                 buffer,
                 root,
@@ -13847,6 +13941,61 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_DB_CONNECT,
+        "Opens the database connection prompt.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_DISCONNECT,
+        "Disconnects the active database session.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_SHOW_TABLES,
+        "Opens the active database schema explorer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_NEW_QUERY_BUFFER,
+        "Creates a database SQL query buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_EXECUTE_SQL,
+        "Executes SQL in the active database query buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_SHOW_CONNECTIONS,
+        "Opens the database connections browser.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_SHOW_HISTORY,
+        "Opens the database query history browser.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_SHOW_SNIPPETS,
+        "Opens the saved database snippets browser.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_SAVE_SNIPPET,
+        "Saves SQL from the active database query buffer as a snippet.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_REFRESH_SCHEMA,
+        "Refreshes the active database schema cache.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_ACTIVATE_LINE,
+        "Runs the action attached to the current database browser line.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PLUGIN_EVALUATE,
         "Evaluates the active plugin buffer's input section and writes the output section.",
     )?;
@@ -15140,6 +15289,101 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_DB_CONNECT, "shell.db-connect", |_, runtime| {
+            open_db_connect_prompt(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_DB_DISCONNECT, "shell.db-disconnect", |_, runtime| {
+            db_service_mut(runtime)?.disconnect(None)?;
+            refresh_all_db_browser_buffers(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_DB_SHOW_TABLES, "shell.db-show-tables", |_, runtime| {
+            open_db_schema_buffer(runtime, None)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_NEW_QUERY_BUFFER,
+            "shell.db-new-query-buffer",
+            |_, runtime| {
+                open_db_query_buffer(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_DB_EXECUTE_SQL, "shell.db-execute-sql", |_, runtime| {
+            execute_db_sql(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_SHOW_CONNECTIONS,
+            "shell.db-show-connections",
+            |_, runtime| {
+                open_db_connections_buffer(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_SHOW_HISTORY,
+            "shell.db-show-history",
+            |_, runtime| {
+                open_db_history_buffer(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_SHOW_SNIPPETS,
+            "shell.db-show-snippets",
+            |_, runtime| {
+                open_db_snippets_buffer(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_SAVE_SNIPPET,
+            "shell.db-save-snippet",
+            |_, runtime| {
+                save_db_snippet(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_REFRESH_SCHEMA,
+            "shell.db-refresh-schema",
+            |_, runtime| {
+                refresh_db_schema(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_DB_ACTIVATE_LINE,
+            "shell.db-activate-line",
+            |_, runtime| {
+                activate_db_browser_line(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_ACP_DISCONNECT, "shell.acp-disconnect", |_, runtime| {
             acp::acp_disconnect(runtime)?;
             Ok(())
@@ -15911,6 +16155,7 @@ fn execute_lsp_lifecycle_for_buffer(
     lifecycle: LspLifecycleAction,
 ) -> Result<(), String> {
     cancel_lsp_sync_for_path(runtime, &context.path)?;
+    apply_sqls_workspace_settings_for_active_buffer_context(runtime, manager, context)?;
     let labels = match (lifecycle, preferred_server_id) {
         (LspLifecycleAction::Start, Some(server_id)) => manager.start_buffer_server(
             &context.path,
@@ -16103,6 +16348,7 @@ fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     cancel_lsp_sync_for_path(runtime, &context.path)?;
+    apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
     let load_code_actions = || -> Result<(Vec<String>, Vec<LspCodeAction>), String> {
         let labels = lsp_client
             .sync_buffer(
@@ -16190,6 +16436,7 @@ fn navigate_to_lsp_locations(
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     cancel_lsp_sync_for_path(runtime, &context.path)?;
+    apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
     let (labels, locations) = {
         let labels = lsp_client
             .sync_buffer(
@@ -16351,12 +16598,22 @@ fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         if buffer.is_read_only() || buffer.has_input_field() {
             return Ok(());
         }
-        let root = if let Some(path) = buffer.path() {
-            workspace_root_for_path(runtime, path)?
-        } else {
-            None
-        };
-        autocomplete_request_for_buffer(buffer_id, buffer, root, &registry, lsp_client, true)
+        let root = lsp_root_for_buffer(runtime, buffer)?;
+        if let (Some(lsp_client), Some(path)) = (lsp_client.as_ref(), buffer.lsp_path())
+            && let Err(error) = apply_sqls_workspace_settings_for_buffer(
+                runtime,
+                buffer_id,
+                buffer,
+                path,
+                root.as_deref(),
+                lsp_client,
+            )
+        {
+            return Err(error);
+        }
+        autocomplete_request_for_buffer(
+            runtime, buffer_id, buffer, root, &registry, lsp_client, true,
+        )
     };
     let Some(request) = request else {
         shell_ui_mut(runtime)?.close_autocomplete();
@@ -16451,6 +16708,9 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
         .ok_or_else(|| "hover registry service missing".to_owned())?;
     let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
     let lsp_context = active_lsp_buffer_context(runtime).ok();
+    if let (Some(lsp_client), Some(lsp_context)) = (lsp_client.as_ref(), lsp_context.as_ref()) {
+        apply_sqls_workspace_settings_for_active_buffer_context(runtime, lsp_client, lsp_context)?;
+    }
     let user_library = shell_user_library(runtime);
     let overlay = {
         let ui = shell_ui(runtime)?;
@@ -16665,6 +16925,7 @@ fn active_buffer_event_context(
         is_directory: buffer_is_directory(&buffer.kind),
         is_browser: buffer_is_browser(&buffer.kind),
         is_terminal: buffer_is_terminal(&buffer.kind),
+        is_db_query: buffer_is_db_query(&buffer.kind),
         is_plugin_evaluatable: plugin_evaluatable_kind(&buffer.kind, runtime),
         is_compilation: buffer_is_compilation(&buffer.kind),
     })
@@ -16685,6 +16946,22 @@ fn active_lsp_buffer_context(runtime: &EditorRuntime) -> Result<ActiveLspBufferC
     lsp_buffer_context(runtime, workspace_id, buffer_id)
 }
 
+fn lsp_root_for_buffer(
+    runtime: &EditorRuntime,
+    buffer: &ShellBuffer,
+) -> Result<Option<PathBuf>, String> {
+    if buffer_is_db_query(&buffer.kind) {
+        return Ok(buffer
+            .lsp_path()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf));
+    }
+    let Some(path) = buffer.lsp_path() else {
+        return Ok(None);
+    };
+    workspace_root_for_path(runtime, path)
+}
+
 fn lsp_buffer_context(
     runtime: &EditorRuntime,
     workspace_id: WorkspaceId,
@@ -16695,7 +16972,7 @@ fn lsp_buffer_context(
         .buffer(buffer_id)
         .ok_or_else(|| "active shell buffer is missing".to_owned())?;
     let path = buffer
-        .path()
+        .lsp_path()
         .map(Path::to_path_buf)
         .ok_or_else(|| "active buffer does not have a file path for LSP".to_owned())?;
     Ok(ActiveLspBufferContext {
@@ -16704,8 +16981,79 @@ fn lsp_buffer_context(
         path: path.clone(),
         text: buffer.text.text(),
         revision: buffer.text.revision(),
-        root: workspace_root_for_path(runtime, &path)?,
+        root: lsp_root_for_buffer(runtime, buffer)?,
     })
+}
+
+fn apply_sqls_workspace_settings_for_active_buffer_context(
+    runtime: &EditorRuntime,
+    manager: &LspClientManager,
+    context: &ActiveLspBufferContext,
+) -> Result<(), String> {
+    let buffer = shell_buffer(runtime, context.buffer_id)?;
+    apply_sqls_workspace_settings_for_buffer(
+        runtime,
+        context.buffer_id,
+        buffer,
+        &context.path,
+        context.root.as_deref(),
+        manager,
+    )
+}
+
+fn apply_sqls_workspace_settings_for_buffer(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    buffer: &ShellBuffer,
+    path: &Path,
+    root: Option<&Path>,
+    manager: &LspClientManager,
+) -> Result<(), String> {
+    if !manager
+        .registered_server_ids_for_path_in_workspace(path, root)
+        .into_iter()
+        .any(|server_id| server_id == SQLS_SERVER_ID)
+    {
+        return Ok(());
+    }
+    let (settings, initialization_options) = runtime
+        .services()
+        .get::<DbService>()
+        .map(|db| {
+            if buffer_is_db_query(&buffer.kind) {
+                (
+                    db.sqls_workspace_settings_for_query_buffer(buffer_id.get()),
+                    db.sqls_initialization_options_for_query_buffer(buffer_id.get()),
+                )
+            } else {
+                (db.sqls_workspace_settings_for_active_session(), None)
+            }
+        })
+        .unwrap_or((None, None));
+    match initialization_options {
+        Some(initialization_options) => manager
+            .set_server_initialization_options_override(
+                SQLS_SERVER_ID,
+                root,
+                initialization_options,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())?,
+        None => manager
+            .clear_server_initialization_options_override(SQLS_SERVER_ID, root)
+            .map(|_| ())
+            .map_err(|error| error.to_string())?,
+    }
+    match settings {
+        Some(settings) => manager
+            .set_server_settings_override(SQLS_SERVER_ID, root, settings)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => manager
+            .clear_server_settings_override(SQLS_SERVER_ID, root)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    }
 }
 
 fn cancel_lsp_sync_for_path(runtime: &mut EditorRuntime, path: &Path) -> Result<(), String> {
@@ -16727,6 +17075,25 @@ fn buffer_is_acp(kind: &BufferKind) -> bool {
 
 fn buffer_is_browser(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND)
+}
+
+fn buffer_is_db_connect(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == DB_CONNECT_KIND)
+}
+
+fn buffer_is_db_query(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == DB_QUERY_KIND)
+}
+
+fn buffer_is_db_browser(kind: &BufferKind) -> bool {
+    matches!(
+        kind,
+        BufferKind::Plugin(plugin_kind)
+            if matches!(
+                plugin_kind.as_str(),
+                DB_CONNECTIONS_KIND | DB_SCHEMA_KIND | DB_HISTORY_KIND | DB_SNIPPETS_KIND
+            )
+    )
 }
 
 fn buffer_is_compilation(kind: &BufferKind) -> bool {
@@ -17189,6 +17556,7 @@ struct AutocompleteBufferRequest {
     buffer_revision: u64,
     text: TextSnapshot,
     plugin_kind: Option<String>,
+    db_candidates: Vec<DbAutocompleteCandidate>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -17483,6 +17851,7 @@ struct AutocompleteWorkerRequest {
     buffer_revision: u64,
     text: TextSnapshot,
     plugin_kind: Option<String>,
+    db_candidates: Vec<DbAutocompleteCandidate>,
     path: Option<PathBuf>,
     root: Option<PathBuf>,
     cursor: TextPoint,
@@ -17558,6 +17927,7 @@ impl AutocompleteWorkerState {
                 buffer_revision: request.buffer_revision,
                 text: request.text,
                 plugin_kind: request.plugin_kind,
+                db_candidates: request.db_candidates,
                 path: request.path,
                 root: request.root,
                 cursor: request.cursor,
@@ -17609,6 +17979,12 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
             AutocompleteProviderKind::Buffer => {
                 buffer_autocomplete_entries(&request.text, &request.query, provider)
             }
+            AutocompleteProviderKind::Database => db_autocomplete_entries(
+                &request.plugin_kind,
+                &request.db_candidates,
+                &request.query,
+                provider,
+            ),
             AutocompleteProviderKind::Lsp => {
                 lsp_autocomplete_entries(request, &request.query, provider)
             }
@@ -17809,6 +18185,47 @@ fn manual_autocomplete_entries(
         .collect()
 }
 
+fn db_autocomplete_entries(
+    plugin_kind: &Option<String>,
+    candidates: &[DbAutocompleteCandidate],
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    if provider.buffer_kind.as_ref() != plugin_kind.as_ref() {
+        return Vec::new();
+    }
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let label_lower = candidate.label.to_ascii_lowercase();
+            let replacement_lower = candidate.replacement.to_ascii_lowercase();
+            if !prefix_lower.is_empty()
+                && !label_lower.starts_with(&prefix_lower)
+                && !replacement_lower.starts_with(&prefix_lower)
+            {
+                return None;
+            }
+            if !query.token.is_empty() && candidate.replacement == query.token {
+                return None;
+            }
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: provider.item_icon.clone(),
+                    label: candidate.label.clone(),
+                    replacement: candidate.replacement.clone(),
+                    detail: candidate.detail.clone(),
+                    documentation: candidate.documentation.clone(),
+                },
+                autocomplete_score(&candidate.replacement, 1, query) + 100,
+            ))
+        })
+        .collect()
+}
+
 fn collect_autocomplete_token_counts(text: &str) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     let mut token = String::new();
@@ -17986,6 +18403,7 @@ fn hover_signature_skip_generic_arguments(
 }
 
 fn autocomplete_request_for_buffer(
+    runtime: &EditorRuntime,
     buffer_id: BufferId,
     buffer: &ShellBuffer,
     root: Option<PathBuf>,
@@ -17996,6 +18414,7 @@ fn autocomplete_request_for_buffer(
     if registry.providers.is_empty() {
         return None;
     }
+    let db_candidates = runtime_db_candidates_for_buffer(runtime, buffer_id, buffer);
     let text = buffer.text.snapshot();
     let query = autocomplete_query(&text, allow_empty_query)?;
     Some(AutocompleteBufferRequest {
@@ -18006,13 +18425,29 @@ fn autocomplete_request_for_buffer(
             BufferKind::Plugin(kind) => Some(kind.clone()),
             _ => None,
         },
-        path: buffer.path().map(Path::to_path_buf),
+        db_candidates,
+        path: buffer.lsp_path().map(Path::to_path_buf),
         root,
         cursor: buffer.cursor_point(),
         query,
         providers: registry.providers.clone(),
         lsp_client,
     })
+}
+
+fn runtime_db_candidates_for_buffer(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    buffer: &ShellBuffer,
+) -> Vec<DbAutocompleteCandidate> {
+    if !buffer_is_db_query(&buffer.kind) {
+        return Vec::new();
+    }
+    runtime
+        .services()
+        .get::<DbService>()
+        .map(|db| db.autocomplete_candidates_for_buffer(buffer_id.get()))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19075,6 +19510,8 @@ struct SyntaxRefreshStats {
     highlight_spans: usize,
 }
 
+const SYNTAX_REFRESH_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 struct SyntaxRefreshWorkerState {
     request_tx: Option<Sender<SyntaxRefreshWorkerRequest>>,
     results: Arc<Mutex<Vec<SyntaxRefreshWorkerResult>>>,
@@ -19097,68 +19534,51 @@ impl SyntaxRefreshWorkerState {
         let (request_tx, request_rx) = mpsc::channel::<SyntaxRefreshWorkerRequest>();
         let results = Arc::new(Mutex::new(Vec::new()));
         let worker_results = Arc::clone(&results);
-        std::thread::spawn(move || {
-            let mut registry = SyntaxRegistry::with_install_root(install_root);
-            registry.set_query_asset_root(query_asset_root);
-            let mut parse_sessions: BTreeMap<BufferId, Option<SyntaxParseSession>> =
-                BTreeMap::new();
-            if registry.register_all(configs).is_err() {
-                return;
-            }
-
-            while let Ok(request) = request_rx.recv() {
-                let mut latest_by_buffer = BTreeMap::new();
-                latest_by_buffer.insert(request.buffer_id, request);
-                while let Ok(newer_request) = request_rx.try_recv() {
-                    latest_by_buffer.insert(newer_request.buffer_id, newer_request);
-                }
-
-                for request in latest_by_buffer.into_values() {
-                    let compute_started = Instant::now();
-                    let parse_session = parse_sessions.entry(request.buffer_id).or_insert(None);
-                    let (language_id, syntax_result) = compute_buffer_syntax(
-                        &mut registry,
-                        request.path.as_deref(),
-                        &request.text,
-                        request.buffer_language_id.as_deref(),
-                        request.syntax_window,
-                        parse_session,
-                    );
-                    if language_id.is_none() {
-                        parse_sessions.remove(&request.buffer_id);
+        let spawn_result = std::thread::Builder::new()
+            .name("volt-syntax-refresh".to_owned())
+            // SQL grammar refresh can exhaust Windows' default thread stack.
+            // Give tree-sitter a larger worker stack and keep parsing off UI thread.
+            .stack_size(SYNTAX_REFRESH_WORKER_STACK_SIZE)
+            .spawn(move || {
+                let mut registry = SyntaxRegistry::with_install_root(install_root);
+                registry.set_query_asset_root(query_asset_root);
+                for config in configs {
+                    if let Err(error) = registry.register(config) {
+                        eprintln!("failed to register syntax worker language: {error}");
                     }
-                    let (highlight_span_count, syntax_result) = match syntax_result {
-                        Some(Ok(snapshot)) => {
-                            let highlight_span_count = snapshot.highlight_count();
-                            (
-                                highlight_span_count,
-                                Some(Ok(index_syntax_lines(snapshot, &request.text))),
-                            )
+                }
+                let mut parse_sessions = BTreeMap::<BufferId, SyntaxParseSession>::new();
+                while let Ok(request) = request_rx.recv() {
+                    let mut latest_by_buffer = BTreeMap::new();
+                    latest_by_buffer.insert(request.buffer_id, request);
+                    while let Ok(newer_request) = request_rx.try_recv() {
+                        latest_by_buffer.insert(newer_request.buffer_id, newer_request);
+                    }
+                    for request in latest_by_buffer.into_values() {
+                        let result = process_syntax_refresh_request(
+                            &mut registry,
+                            &mut parse_sessions,
+                            request,
+                        );
+                        if let Ok(mut results) = worker_results.lock() {
+                            results.push(result);
+                        } else {
+                            return;
                         }
-                        Some(Err(error)) => (0, Some(Err(error.to_string()))),
-                        None => (0, None),
-                    };
-                    if let Ok(mut results) = worker_results.lock() {
-                        results.push(SyntaxRefreshWorkerResult {
-                            buffer_id: request.buffer_id,
-                            buffer_revision: request.buffer_revision,
-                            path: request.path,
-                            buffer_language_id: request.buffer_language_id,
-                            language_id,
-                            syntax_window: request.syntax_window,
-                            compute_elapsed: compute_started.elapsed(),
-                            highlight_span_count,
-                            syntax_result,
-                        });
-                    } else {
-                        return;
                     }
                 }
+            });
+        match spawn_result {
+            Ok(_) => {
+                self.request_tx = Some(request_tx);
+                self.results = results;
             }
-        });
-
-        self.request_tx = Some(request_tx);
-        self.results = results;
+            Err(error) => {
+                eprintln!("failed to start syntax refresh worker: {error}");
+                self.request_tx = None;
+                self.results = Arc::new(Mutex::new(Vec::new()));
+            }
+        }
     }
 
     fn is_configured(&self) -> bool {
@@ -19176,6 +19596,48 @@ impl SyntaxRefreshWorkerState {
             return Vec::new();
         };
         results.drain(..).collect()
+    }
+}
+
+fn process_syntax_refresh_request(
+    registry: &mut SyntaxRegistry,
+    parse_sessions: &mut BTreeMap<BufferId, SyntaxParseSession>,
+    request: SyntaxRefreshWorkerRequest,
+) -> SyntaxRefreshWorkerResult {
+    let started = Instant::now();
+    let mut parse_session = parse_sessions.remove(&request.buffer_id);
+    let (language_id, syntax_result) = compute_buffer_syntax(
+        registry,
+        request.path.as_deref(),
+        &request.text,
+        request.buffer_language_id.as_deref(),
+        request.syntax_window,
+        &mut parse_session,
+    );
+    if let Some(parse_session) = parse_session {
+        parse_sessions.insert(request.buffer_id, parse_session);
+    }
+    let (highlight_span_count, syntax_result) = match syntax_result {
+        Some(Ok(snapshot)) => {
+            let highlight_span_count = snapshot.highlight_spans.len();
+            (
+                highlight_span_count,
+                Some(Ok(index_syntax_lines(snapshot, &request.text))),
+            )
+        }
+        Some(Err(error)) => (0, Some(Err(error.to_string()))),
+        None => (0, None),
+    };
+    SyntaxRefreshWorkerResult {
+        buffer_id: request.buffer_id,
+        buffer_revision: request.buffer_revision,
+        path: request.path,
+        buffer_language_id: request.buffer_language_id,
+        language_id,
+        syntax_window: request.syntax_window,
+        compute_elapsed: started.elapsed(),
+        highlight_span_count,
+        syntax_result,
     }
 }
 
@@ -21657,6 +22119,9 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     if buffer_is_browser(&kind) {
         return browser::submit_browser_input(runtime);
     }
+    if buffer_is_db_connect(&kind) {
+        return submit_db_connect_prompt(runtime, buffer_id, &text);
+    }
     if buffer_is_compilation(&kind) {
         return run_compile_command_in_buffer(runtime, buffer_id, &text);
     }
@@ -21666,6 +22131,457 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
         buffer.clear_input();
     }
     Ok(())
+}
+
+fn db_service(runtime: &EditorRuntime) -> Result<&DbService, String> {
+    runtime
+        .services()
+        .get::<DbService>()
+        .ok_or_else(|| "database service is missing".to_owned())
+}
+
+fn db_service_mut(runtime: &mut EditorRuntime) -> Result<&mut DbService, String> {
+    runtime
+        .services_mut()
+        .get_mut::<DbService>()
+        .ok_or_else(|| "database service is missing".to_owned())
+}
+
+fn open_or_focus_workspace_plugin_buffer(
+    runtime: &mut EditorRuntime,
+    name: &str,
+    kind: &'static str,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_kind = BufferKind::Plugin(kind.to_owned());
+    let buffer_id = if let Some(existing) =
+        find_workspace_named_buffer(runtime, workspace_id, name, &buffer_kind)?
+    {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        existing
+    } else {
+        runtime
+            .model_mut()
+            .create_buffer(workspace_id, name, buffer_kind.clone(), None)
+            .map_err(|error| error.to_string())?
+    };
+    ensure_shell_buffer(runtime, buffer_id)?;
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(buffer_id);
+    Ok(buffer_id)
+}
+
+fn open_or_focus_popup_plugin_buffer(
+    runtime: &mut EditorRuntime,
+    name: &str,
+    kind: &'static str,
+    title: &str,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_kind = BufferKind::Plugin(kind.to_owned());
+    let buffer_id = if let Some(existing) =
+        find_workspace_named_buffer(runtime, workspace_id, name, &buffer_kind)?
+    {
+        existing
+    } else {
+        runtime
+            .model_mut()
+            .create_popup_buffer(workspace_id, name, buffer_kind.clone(), None)
+            .map_err(|error| error.to_string())?
+    };
+    runtime
+        .model_mut()
+        .open_popup_buffer(workspace_id, title, buffer_id)
+        .map_err(|error| error.to_string())?;
+    ensure_shell_buffer(runtime, buffer_id)?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_focus(false);
+        ui.set_popup_buffer(buffer_id);
+    }
+    Ok(buffer_id)
+}
+
+fn apply_db_browser_view(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    view: DbBrowserBufferView,
+) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.replace_with_lines_preserve_view(view.lines);
+    Ok(())
+}
+
+fn refresh_db_browser_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let view = db_service_mut(runtime)?.rerender_browser_buffer(buffer_id.get())?;
+    apply_db_browser_view(runtime, buffer_id, view)
+}
+
+fn refresh_all_db_browser_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .filter_map(|buffer| buffer_is_db_browser(&buffer.kind).then_some(buffer.id()))
+            .collect::<Vec<_>>()
+    };
+    for buffer_id in buffer_ids {
+        let _ = refresh_db_browser_buffer(runtime, buffer_id);
+    }
+    Ok(())
+}
+
+fn open_db_connect_prompt(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = open_or_focus_popup_plugin_buffer(
+        runtime,
+        DB_CONNECT_BUFFER_NAME,
+        DB_CONNECT_KIND,
+        "DB Connect",
+    )?;
+    db_service_mut(runtime)?.attach_prompt_buffer(buffer_id.get());
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+    Ok(())
+}
+
+fn submit_db_connect_prompt(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    text: &str,
+) -> Result<(), String> {
+    let (remember_alias, connection_string) = parse_db_connect_prompt(text)?;
+    let persistence_available = db_service(runtime)?.secret_persistence_available();
+    let session =
+        db_service_mut(runtime)?.connect_raw(&connection_string, remember_alias.as_deref())?;
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.append_output_lines(&[format!(
+            "Connected {} session `{}`.",
+            session.engine.label(),
+            session.alias
+        )]);
+        if remember_alias.is_some() && !persistence_available {
+            buffer.append_output_lines(&[
+                "Remembered connections are unavailable here; session kept in memory only."
+                    .to_owned(),
+            ]);
+        }
+        buffer.clear_input();
+    }
+    let _ = close_popup_buffer_and_restore_focus(runtime, buffer_id);
+    refresh_all_db_browser_buffers(runtime)?;
+    open_db_schema_buffer(runtime, Some(session.id))
+}
+
+fn open_db_connections_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = open_or_focus_workspace_plugin_buffer(
+        runtime,
+        DB_CONNECTIONS_BUFFER_NAME,
+        DB_CONNECTIONS_KIND,
+    )?;
+    let view = db_service_mut(runtime)?.render_connections_buffer(buffer_id.get())?;
+    apply_db_browser_view(runtime, buffer_id, view)
+}
+
+fn open_db_schema_buffer(
+    runtime: &mut EditorRuntime,
+    session_id: Option<DbSessionId>,
+) -> Result<(), String> {
+    let buffer_id =
+        open_or_focus_workspace_plugin_buffer(runtime, DB_SCHEMA_BUFFER_NAME, DB_SCHEMA_KIND)?;
+    let view = db_service_mut(runtime)?.render_schema_buffer(buffer_id.get(), session_id)?;
+    apply_db_browser_view(runtime, buffer_id, view)
+}
+
+fn open_db_history_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id =
+        open_or_focus_workspace_plugin_buffer(runtime, DB_HISTORY_BUFFER_NAME, DB_HISTORY_KIND)?;
+    let view = db_service_mut(runtime)?.render_history_buffer(buffer_id.get())?;
+    apply_db_browser_view(runtime, buffer_id, view)
+}
+
+fn open_db_snippets_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id =
+        open_or_focus_workspace_plugin_buffer(runtime, DB_SNIPPETS_BUFFER_NAME, DB_SNIPPETS_KIND)?;
+    let view = db_service_mut(runtime)?.render_snippets_buffer(buffer_id.get())?;
+    apply_db_browser_view(runtime, buffer_id, view)
+}
+
+fn create_db_query_buffer(
+    runtime: &mut EditorRuntime,
+    session_id: Option<DbSessionId>,
+    sql: Option<&str>,
+    requested_name: Option<&str>,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let initial_name = requested_name.unwrap_or("*db-query*");
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            initial_name,
+            BufferKind::Plugin(DB_QUERY_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    let meta = db_service_mut(runtime)?.attach_query_buffer(
+        buffer_id.get(),
+        session_id,
+        requested_name,
+    )?;
+    if let Some(sql) = sql {
+        fs::write(&meta.temp_path, sql).map_err(|error| {
+            format!(
+                "failed to seed DB query buffer `{}`: {error}",
+                meta.temp_path.display()
+            )
+        })?;
+    }
+    runtime
+        .model_mut()
+        .set_buffer_name(workspace_id, buffer_id, meta.title.clone())
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let text = sql
+        .map(TextBuffer::from_text)
+        .unwrap_or_else(|| TextBuffer::from_text("-- SQL query buffer\n\nSELECT *\nFROM ;\n"));
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+    shell_buffer.set_language_id(Some(meta.dialect_id.clone()));
+    shell_buffer.set_lsp_path(Some(meta.temp_path.clone()));
+    shell_buffer.set_lsp_enabled(true);
+    shell_buffer.force_syntax_refresh();
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buffer);
+        ui.focus_buffer_in_active_pane(buffer_id);
+    }
+    Ok(buffer_id)
+}
+
+fn open_db_query_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    create_db_query_buffer(runtime, None, None, None).map(|_| ())
+}
+
+fn open_db_query_from_sql(
+    runtime: &mut EditorRuntime,
+    session_id: DbSessionId,
+    sql: &str,
+    requested_name: Option<&str>,
+) -> Result<(), String> {
+    create_db_query_buffer(runtime, Some(session_id), Some(sql), requested_name).map(|_| ())
+}
+
+fn open_db_query_for_table_preview(
+    runtime: &mut EditorRuntime,
+    session_id: DbSessionId,
+    table: &QualifiedName,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = runtime
+        .model_mut()
+        .create_buffer(
+            workspace_id,
+            "*db-query*",
+            BufferKind::Plugin(DB_QUERY_KIND.to_owned()),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    let (meta, sql) = db_service_mut(runtime)?.attach_table_preview_query_buffer(
+        buffer_id.get(),
+        session_id,
+        table,
+    )?;
+    runtime
+        .model_mut()
+        .set_buffer_name(workspace_id, buffer_id, meta.title.clone())
+        .map_err(|error| error.to_string())?;
+    let buffer = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?
+        .buffer(buffer_id)
+        .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
+    let text = TextBuffer::from_text(sql);
+    let user_library = shell_user_library(runtime);
+    let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+    shell_buffer.set_language_id(Some(meta.dialect_id.clone()));
+    shell_buffer.set_lsp_path(Some(meta.temp_path.clone()));
+    shell_buffer.set_lsp_enabled(true);
+    shell_buffer.force_syntax_refresh();
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.insert_buffer(shell_buffer);
+        ui.focus_buffer_in_active_pane(buffer_id);
+    }
+    Ok(())
+}
+
+fn db_query_scope_sql(runtime: &EditorRuntime, buffer_id: BufferId) -> Result<String, String> {
+    let ui = shell_ui(runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "active DB query buffer is missing".to_owned())?;
+    let text = buffer.text.text();
+    let cursor_char_index = buffer.text.point_to_char_index(buffer.cursor_point());
+    match ui.visual_selection_for_buffer(buffer, true) {
+        Some(VisualSelection::Range(range)) => {
+            let start = buffer.text.point_to_char_index(range.start());
+            let end = buffer.text.point_to_char_index(range.end());
+            sql_scope_from_text(&text, cursor_char_index, Some((start, end)))
+                .ok_or_else(|| "no SQL selected for execution".to_owned())
+        }
+        Some(VisualSelection::Block(block)) => {
+            let sql = block_selection_ranges(buffer, block)
+                .into_iter()
+                .map(|range| buffer.slice(range))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let sql = sql.trim().to_owned();
+            if sql.is_empty() {
+                Err("no SQL selected for execution".to_owned())
+            } else {
+                Ok(sql)
+            }
+        }
+        None => sql_scope_from_text(&text, cursor_char_index, None)
+            .ok_or_else(|| "no SQL selected for execution".to_owned()),
+    }
+}
+
+fn open_db_results_popup(
+    runtime: &mut EditorRuntime,
+    output: Result<DbExecutionOutput, String>,
+) -> Result<(), String> {
+    let buffer_id = open_or_focus_popup_plugin_buffer(
+        runtime,
+        DB_RESULTS_BUFFER_NAME,
+        DB_RESULTS_KIND,
+        "DB Results",
+    )?;
+    let lines = match output {
+        Ok(output) => {
+            let mut lines = vec![output.title];
+            if !output.lines.is_empty() {
+                lines.push(String::new());
+                lines.extend(output.lines);
+            }
+            lines
+        }
+        Err(error) => vec!["Query failed".to_owned(), String::new(), error],
+    };
+    shell_buffer_mut(runtime, buffer_id)?.replace_with_lines_preserve_view(lines);
+    Ok(())
+}
+
+fn execute_db_sql(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if !buffer_is_db_query(&kind) {
+        return Err("db.execute-sql requires an active DB query buffer".to_owned());
+    }
+    let sql = db_query_scope_sql(runtime, buffer_id)?;
+    let output = db_service_mut(runtime)?.execute_sql_for_buffer(buffer_id.get(), &sql);
+    open_db_results_popup(runtime, output)?;
+    refresh_all_db_browser_buffers(runtime)
+}
+
+fn snippet_name_from_sql(sql: &str) -> String {
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        "snippet".to_owned()
+    } else if compact.chars().count() <= 48 {
+        compact
+    } else {
+        let mut prefix = compact.chars().take(45).collect::<String>();
+        prefix.push_str("...");
+        prefix
+    }
+}
+
+fn save_db_snippet(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if !buffer_is_db_query(&kind) {
+        return Err("db.save-snippet requires an active DB query buffer".to_owned());
+    }
+    let sql = db_query_scope_sql(runtime, buffer_id)?;
+    let name = snippet_name_from_sql(&sql);
+    db_service_mut(runtime)?.save_snippet(buffer_id.get(), &name, &sql)?;
+    refresh_all_db_browser_buffers(runtime)
+}
+
+fn refresh_db_schema(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let session_id = {
+        let db = db_service(runtime)?;
+        db.query_buffer_session_id(buffer_id.get())
+            .or_else(|| db.active_session_summary().map(|summary| summary.id))
+            .ok_or_else(|| "no active database session".to_owned())?
+    };
+    db_service_mut(runtime)?.refresh_schema_cache(session_id)?;
+    refresh_all_db_browser_buffers(runtime)
+}
+
+fn activate_db_browser_line(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let line_index = shell_buffer(runtime, buffer_id)?.cursor_row();
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if !buffer_is_db_browser(&kind) {
+        return Err("db.activate-line requires an active DB browser buffer".to_owned());
+    }
+    let action = db_service(runtime)?
+        .browser_action(buffer_id.get(), line_index)
+        .ok_or_else(|| "no action is attached to the current database browser line".to_owned())?;
+    match db_service_mut(runtime)?.activate_browser_action(action)? {
+        DbActionOutcome::ActivatedSession(_) => {
+            refresh_all_db_browser_buffers(runtime)?;
+            refresh_db_browser_buffer(runtime, buffer_id)
+        }
+        DbActionOutcome::Disconnected => {
+            refresh_all_db_browser_buffers(runtime)?;
+            refresh_db_browser_buffer(runtime, buffer_id)
+        }
+        DbActionOutcome::OpenPreviewQuery { session_id, table } => {
+            open_db_query_for_table_preview(runtime, session_id, &table)
+        }
+        DbActionOutcome::ExploreRows { session_id, table } => {
+            open_db_query_for_table_preview(runtime, session_id, &table)
+        }
+        DbActionOutcome::SchemaRefreshed(_) => refresh_db_browser_buffer(runtime, buffer_id),
+        DbActionOutcome::OpenSql { session_id, sql } => {
+            open_db_query_from_sql(runtime, session_id, &sql, None)
+        }
+        DbActionOutcome::SnippetDeleted | DbActionOutcome::RememberedDeleted => {
+            refresh_all_db_browser_buffers(runtime)?;
+            refresh_db_browser_buffer(runtime, buffer_id)
+        }
+    }
 }
 
 fn clear_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -21819,7 +22735,7 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         .map_err(|error| error.to_string())?;
     let path = shell_ui(runtime)?
         .buffer(buffer_id)
-        .and_then(|buffer| buffer.path().map(Path::to_path_buf));
+        .and_then(|buffer| buffer.lsp_path().map(Path::to_path_buf));
     let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
     if let (Some(path), Some(lsp_client)) = (path, lsp_client) {
         cancel_lsp_sync_for_path(runtime, &path)?;
@@ -21829,6 +22745,9 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
     }
     acp::close_acp_buffer(runtime, buffer_id)?;
     close_terminal_buffer(runtime, buffer_id)?;
+    if let Some(db) = runtime.services_mut().get_mut::<DbService>() {
+        db.detach_buffer(buffer_id.get());
+    }
     runtime
         .model_mut()
         .close_buffer(workspace_id, buffer_id)
@@ -21884,7 +22803,7 @@ fn close_lsp_buffers_for_workspace(
                     .iter()
                     .filter_map(|buffer_id| {
                         ui.buffer(*buffer_id)
-                            .and_then(|buffer| buffer.path().map(Path::to_path_buf))
+                            .and_then(|buffer| buffer.lsp_path().map(Path::to_path_buf))
                     })
                     .collect::<Vec<_>>()
             })
@@ -22176,6 +23095,7 @@ fn try_format_buffer_entire_with_lsp(
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     cancel_lsp_sync_for_path(runtime, &context.path)?;
+    apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
     let (labels, edits) = {
         if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
             return Ok(false);
@@ -22221,6 +23141,7 @@ fn try_format_visual_selection_with_lsp(
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     cancel_lsp_sync_for_path(runtime, &context.path)?;
+    apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
     let (labels, edits) = {
         if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
             return Ok(false);
@@ -25285,7 +26206,7 @@ fn schedule_pending_lsp_syncs(
                 if !buffer.lsp_enabled() {
                     return Ok(None);
                 }
-                let Some(path) = buffer.path().map(Path::to_path_buf) else {
+                let Some(path) = buffer.lsp_path().map(Path::to_path_buf) else {
                     return Ok(None);
                 };
                 if path
@@ -25295,7 +26216,15 @@ fn schedule_pending_lsp_syncs(
                 {
                     return Ok(None);
                 }
-                let root = workspace_root_for_path(runtime, &path)?;
+                let root = lsp_root_for_buffer(runtime, buffer)?;
+                apply_sqls_workspace_settings_for_buffer(
+                    runtime,
+                    buffer.id(),
+                    buffer,
+                    &path,
+                    root.as_deref(),
+                    &lsp_client,
+                )?;
                 let revision = buffer.text.revision();
                 if !lsp_client.needs_sync_in_workspace(&path, revision, root.as_deref())
                     || ui.lsp_sync_worker.has_request(&path, revision)
@@ -25348,14 +26277,14 @@ fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> 
             .iter()
             .filter(|buffer| buffer.lsp_enabled())
             .filter_map(|buffer| {
-                let path = buffer.path()?;
+                let path = buffer.lsp_path()?;
                 Some((buffer.id(), lsp_client.diagnostics_for_path(path)))
             })
             .collect::<Vec<_>>();
         let active_server_label = ui
             .active_buffer_id()
             .and_then(|buffer_id| ui.buffer(buffer_id))
-            .and_then(ShellBuffer::path)
+            .and_then(ShellBuffer::lsp_path)
             .map(|path| lsp_client.session_labels_for_path(path))
             .filter(|labels| !labels.is_empty())
             .map(|labels| labels.join(", "));
@@ -25616,6 +26545,31 @@ fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     env::current_dir().map_err(|error| format!("git status requires a workspace root: {error}"))
 }
 
+fn normalize_git_output_path(raw_path: &str) -> PathBuf {
+    let trimmed = raw_path.trim();
+    #[cfg(windows)]
+    if let Some(converted) = normalize_git_output_path_windows(trimmed) {
+        return converted;
+    }
+    PathBuf::from(trimmed)
+}
+
+#[cfg(windows)]
+fn normalize_git_output_path_windows(trimmed: &str) -> Option<PathBuf> {
+    let trimmed = trimmed.strip_prefix('/')?;
+    let (drive, rest) = trimmed.split_once('/').unwrap_or((trimmed, ""));
+    if drive.len() != 1 || !drive.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    let drive = drive.chars().next()?.to_ascii_uppercase();
+    let rest = rest.replace('/', "\\");
+    Some(if rest.is_empty() {
+        PathBuf::from(format!("{drive}:\\"))
+    } else {
+        PathBuf::from(format!("{drive}:\\{rest}"))
+    })
+}
+
 fn resolve_git_root_from_path(path: &Path) -> Result<PathBuf, String> {
     let mut command = Command::new("git");
     configure_background_command(&mut command);
@@ -25649,7 +26603,7 @@ fn resolve_git_root_from_path(path: &Path) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    Ok(PathBuf::from(root))
+    Ok(normalize_git_output_path(root))
 }
 
 fn find_workspace_by_root(
@@ -27420,6 +28374,19 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))
         }
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_CONNECT_KIND => {
+            let mut input = InputField::new("DB > ");
+            input.set_placeholder(Some(
+                "sqlite://C:/data/app.db or remember prod :: postgres://user:pass@host/db"
+                    .to_owned(),
+            ));
+            (true, Some(input))
+        }
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_CONNECTIONS_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_SCHEMA_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_HISTORY_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_SNIPPETS_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_RESULTS_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == PDF_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => (true, None),

@@ -329,7 +329,8 @@ fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverla
                     label,
                     detail,
                     Some(path.display().to_string()),
-                ),
+                )
+                .with_fringe(editor_icons::seti_file_icon(&path)),
                 action: PickerAction::OpenFile(path),
             }
         })
@@ -1182,6 +1183,14 @@ pub(super) fn render_picker_overlay(
         .unwrap_or(0);
     let scroll_top =
         picker_scroll_top(picker.session().match_count(), selected_index, visible_rows);
+    let fringe_width_chars = picker_fringe_width_chars(picker.session().matches());
+    let fringe_width = if fringe_width_chars == 0 {
+        0
+    } else {
+        fringe_width_chars
+            .saturating_mul(cell_width.max(1) as usize)
+            .saturating_add(12) as u32
+    };
 
     if picker.session().matches().is_empty() {
         draw_text(target, popup_rect.x + 16, list_top, "No matches.", subtle)?;
@@ -1200,9 +1209,11 @@ pub(super) fn render_picker_overlay(
         let selected = selected_id.as_deref() == Some(matched.item().id());
         let content_left = popup_rect.x + 18;
         let content_width = popup_rect.width.saturating_sub(36);
-        let label_width = (content_width * 2 / 5).max(160);
-        let detail_x = content_left + label_width as i32 + 16;
-        let detail_width = content_width.saturating_sub(label_width + 16);
+        let label_x = content_left + fringe_width as i32;
+        let text_width = content_width.saturating_sub(fringe_width);
+        let label_width = (text_width * 2 / 5).max(160);
+        let detail_x = label_x + label_width as i32 + 16;
+        let detail_width = text_width.saturating_sub(label_width + 16);
         if selected {
             fill_overlay_surface_rect(
                 target,
@@ -1217,11 +1228,24 @@ pub(super) fn render_picker_overlay(
             )?;
         }
 
+        if let Some(fringe) = matched.item().fringe() {
+            draw_text(
+                target,
+                content_left,
+                row_y,
+                fringe,
+                if selected {
+                    foreground
+                } else {
+                    list_foreground
+                },
+            )?;
+        }
         let label = truncate_text_to_width(matched.item().label(), label_width, cell_width);
         let detail = truncate_text_to_width(matched.item().detail(), detail_width, cell_width);
         draw_text(
             target,
-            content_left,
+            label_x,
             row_y,
             &label,
             if selected {
@@ -1259,6 +1283,15 @@ fn picker_scroll_top(match_count: usize, selected_index: usize, visible_rows: us
     selected_index
         .saturating_sub(visible_rows.saturating_sub(1))
         .min(match_count - visible_rows)
+}
+
+fn picker_fringe_width_chars(matches: &[editor_picker::PickerMatch]) -> usize {
+    matches
+        .iter()
+        .filter_map(|matched| matched.item().fringe())
+        .map(|fringe| fringe.chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
