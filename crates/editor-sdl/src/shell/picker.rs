@@ -66,6 +66,7 @@ fn command_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
                 Some(definition.description()),
             ),
             action: PickerAction::ExecuteCommand(definition.name().to_owned()),
+            quickfix: None,
         })
         .collect();
 
@@ -92,6 +93,7 @@ fn buffer_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, Strin
                 )),
             ),
             action: PickerAction::FocusBuffer(buffer.id()),
+            quickfix: None,
         })
         .collect();
 
@@ -124,6 +126,7 @@ fn buffer_close_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay,
                     )),
                 ),
                 action: PickerAction::CloseBuffer(buffer.id()),
+                quickfix: None,
             }
         })
         .collect();
@@ -156,6 +159,7 @@ fn treesitter_install_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOv
             PickerEntry {
                 item: PickerItem::new(language.id(), language.id(), detail, preview),
                 action: PickerAction::InstallTreeSitterLanguage(language.id().to_owned()),
+                quickfix: None,
             }
         })
         .collect();
@@ -191,6 +195,7 @@ fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOve
                     Some(workspace_project_picker_preview(&project)),
                 ),
                 action,
+                quickfix: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -242,6 +247,7 @@ pub(crate) fn workspace_switch_picker_overlay(
                 workspace.root().map(|root| root.display().to_string()),
             ),
             action: PickerAction::SwitchWorkspace(workspace.id()),
+            quickfix: None,
         })
         .collect();
 
@@ -269,6 +275,7 @@ pub(crate) fn workspace_delete_picker_overlay(
                 Some("Deletes the selected workspace.".to_owned()),
             ),
             action: PickerAction::DeleteWorkspace(workspace.id()),
+            quickfix: None,
         })
         .collect();
 
@@ -332,6 +339,7 @@ fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverla
                 )
                 .with_fringe(editor_icons::seti_file_icon(&path)),
                 action: PickerAction::OpenFile(path),
+                quickfix: None,
             }
         })
         .collect();
@@ -394,6 +402,7 @@ fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
                 } else {
                     PickerAction::ExecuteCommands(command_names.to_vec())
                 },
+                quickfix: None,
             }
         })
         .collect();
@@ -421,6 +430,7 @@ fn icon_font_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
             PickerEntry {
                 item: PickerItem::new(symbol.id(), label, detail, Some(symbol.glyph.to_owned())),
                 action: PickerAction::CopyToClipboard(symbol.glyph.to_owned()),
+                quickfix: None,
             }
         })
         .collect();
@@ -436,6 +446,7 @@ fn acp_clients_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
             PickerEntry {
                 item: PickerItem::new(client.id.as_str(), client.label, detail, None::<String>),
                 action: PickerAction::OpenAcpClient(client.id),
+                quickfix: None,
             }
         })
         .collect();
@@ -942,6 +953,7 @@ fn contextual_keybinding_entries(scope: &str, bindings: &[ContextKeybinding]) ->
                 Some(binding.description.to_owned()),
             ),
             action: PickerAction::NoOp,
+            quickfix: None,
         })
         .collect()
 }
@@ -958,6 +970,7 @@ fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String
             PickerEntry {
                 item: PickerItem::new(&theme_id, theme.name(), "Theme", Some(theme_id.clone())),
                 action: PickerAction::ActivateTheme(theme_id),
+                quickfix: None,
             }
         })
         .collect();
@@ -1000,6 +1013,7 @@ fn undo_tree_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, St
     Ok(PickerOverlay {
         session,
         actions,
+        quickfix_entries: BTreeMap::new(),
         submit_action: None,
         mode: PickerMode::Static,
         kind: PickerKind::Generic,
@@ -1017,6 +1031,7 @@ fn message_picker_overlay(
         vec![PickerEntry {
             item: PickerItem::new(label, label, detail, preview),
             action: PickerAction::NoOp,
+            quickfix: None,
         }],
     )
 }
@@ -1034,6 +1049,7 @@ pub(super) fn buffer_close_confirm_overlay(
                 None::<String>,
             ),
             action: PickerAction::CloseBufferSave(buffer_id),
+            quickfix: None,
         },
         PickerEntry {
             item: PickerItem::new(
@@ -1043,6 +1059,7 @@ pub(super) fn buffer_close_confirm_overlay(
                 None::<String>,
             ),
             action: PickerAction::CloseBufferDiscard(buffer_id),
+            quickfix: None,
         },
         PickerEntry {
             item: PickerItem::new(
@@ -1052,6 +1069,7 @@ pub(super) fn buffer_close_confirm_overlay(
                 None::<String>,
             ),
             action: PickerAction::NoOp,
+            quickfix: None,
         },
     ];
     PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)

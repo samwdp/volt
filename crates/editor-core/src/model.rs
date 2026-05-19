@@ -52,6 +52,8 @@ pub enum BufferKind {
     Compilation,
     /// Diagnostics, messages, and structured status buffers.
     Diagnostics,
+    /// Quickfix result lists exported from pickers.
+    Quickfix,
     /// Extension-defined buffer categories.
     Plugin(String),
 }

@@ -1098,6 +1098,10 @@ pub fn package() -> PluginPackage {
         ),
         leader_binding("s d", "lsp.diagnostics", PluginKeymapScope::Workspace),
         leader_binding("s g", "workspace.search", PluginKeymapScope::Workspace),
+        // Quickfix
+        normal_binding("[ q", "quickfix.previous", PluginKeymapScope::Workspace),
+        normal_binding("] q", "quickfix.next", PluginKeymapScope::Workspace),
+        leader_binding("q o", "quickfix.open", PluginKeymapScope::Workspace),
         // Workspace
         leader_binding("p n", "workspace.new", PluginKeymapScope::Workspace),
         leader_binding("p s", "workspace.switch", PluginKeymapScope::Workspace),
@@ -1113,6 +1117,7 @@ pub fn package() -> PluginPackage {
         leader_binding("o t", "terminal.popup", PluginKeymapScope::Workspace),
         leader_binding("o T", "terminal.open", PluginKeymapScope::Workspace),
         leader_binding("o u", "browser.url", PluginKeymapScope::Workspace),
+        leader_binding("q m", "quickfix.toggle-mark", PluginKeymapScope::Popup),
     ];
 
     PluginPackage::new(
@@ -1207,6 +1212,35 @@ mod tests {
         let package = package();
         assert!(package.key_bindings().iter().any(|binding| {
             binding.chord() == "Alt+x" && binding.command_name() == "picker.open-commands"
+        }));
+    }
+
+    #[test]
+    fn package_exports_quickfix_bindings() {
+        let package = package();
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "[ q"
+                && binding.command_name() == "quickfix.previous"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "] q"
+                && binding.command_name() == "quickfix.next"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Space q o"
+                && binding.command_name() == "quickfix.open"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Space q m"
+                && binding.command_name() == "quickfix.toggle-mark"
+                && binding.scope() == PluginKeymapScope::Popup
+                && binding.vim_mode() == PluginVimMode::Normal
         }));
     }
 

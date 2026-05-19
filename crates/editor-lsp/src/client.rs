@@ -3873,6 +3873,9 @@ fn parse_show_message_notification(
         Some(3) | Some(4) => LspNotificationLevel::Info,
         _ => LspNotificationLevel::Info,
     };
+    if level != LspNotificationLevel::Error {
+        return None;
+    }
     let message = params
         .get("message")
         .and_then(Value::as_str)
@@ -3931,6 +3934,9 @@ fn parse_copilot_status_notification(
         "Inactive" => LspNotificationLevel::Info,
         _ => LspNotificationLevel::Success,
     };
+    if level != LspNotificationLevel::Error {
+        return None;
+    }
     let mut lines = vec![kind.to_owned()];
     if !message.is_empty() {
         lines.push(message.to_owned());
@@ -5253,6 +5259,32 @@ mod tests {
     }
 
     #[test]
+    fn copilot_status_notifications_ignore_non_error_updates() {
+        assert!(
+            parse_copilot_status_notification(
+                COPILOT_SERVER_ID,
+                Some(Path::new(r"P:\volt")),
+                &json!({
+                    "kind": "Normal",
+                    "message": "Getting code actions from Copilot."
+                }),
+            )
+            .is_none()
+        );
+        assert!(
+            parse_copilot_status_notification(
+                COPILOT_SERVER_ID,
+                Some(Path::new(r"P:\volt")),
+                &json!({
+                    "kind": "Warning",
+                    "message": "Transient warning."
+                }),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn csharp_and_copilot_servers_receive_initialization_options() {
         assert_eq!(
             initialization_options_for_server(CSHARP_SERVER_ID, None),
@@ -6357,5 +6389,31 @@ mod tests {
         assert_eq!(notification.level(), LspNotificationLevel::Error);
         assert_eq!(notification.body_lines(), ["failed to load workspace"]);
         assert!(!notification.active());
+    }
+
+    #[test]
+    fn show_message_notifications_ignore_non_error_levels() {
+        assert!(
+            parse_show_message_notification(
+                "rust-analyzer",
+                None,
+                &json!({
+                    "type": 2,
+                    "message": "workspace indexing warning"
+                }),
+            )
+            .is_none()
+        );
+        assert!(
+            parse_show_message_notification(
+                "rust-analyzer",
+                None,
+                &json!({
+                    "type": 3,
+                    "message": "background info"
+                }),
+            )
+            .is_none()
+        );
     }
 }

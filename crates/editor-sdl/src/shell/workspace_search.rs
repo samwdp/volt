@@ -282,6 +282,12 @@ pub(super) fn workspace_search_match_entry(
         preview.to_owned()
     };
     let detail = format!("{} | Ln {}, Col {}", relative_path, line_number, column + 1);
+    let quickfix = QuickfixEntry::new(
+        format!("quickfix:{}:{}:{}", path.display(), line_number, column + 1),
+        path.clone(),
+        target,
+        preview,
+    );
     PickerEntry {
         item: PickerItem::new(
             format!("{}:{}:{}", path.display(), line_number, column + 1),
@@ -290,6 +296,7 @@ pub(super) fn workspace_search_match_entry(
             Some(path.display().to_string()),
         ),
         action: PickerAction::OpenFileLocation { path, target },
+        quickfix: Some(quickfix),
     }
 }
 
@@ -307,6 +314,7 @@ pub(super) fn workspace_search_status_entry(
             preview,
         ),
         action: PickerAction::NoOp,
+        quickfix: None,
     }
 }
 
@@ -331,7 +339,7 @@ pub(super) fn lsp_location_picker_entry(
     let target = location.range().start();
     let line_number = target.line + 1;
     let column = target.column + 1;
-    let (label, detail, preview) = if let Some(path) = location.file_path() {
+    let (label, detail, preview, quickfix) = if let Some(path) = location.file_path() {
         let relative_path = workspace_relative_path(workspace_root, path);
         let preview = TextBuffer::load_from_path(path)
             .ok()
@@ -346,7 +354,13 @@ pub(super) fn lsp_location_picker_entry(
             location.server_id()
         );
         let preview = preview.or_else(|| Some(path.display().to_string()));
-        (label, detail, preview)
+        let quickfix = QuickfixEntry::new(
+            format!("quickfix:{}:{}:{}", path.display(), line_number, column),
+            path.to_path_buf(),
+            target,
+            label.clone(),
+        );
+        (label, detail, preview, Some(quickfix))
     } else {
         let uri_label = lsp_location_uri_label(location.uri());
         let detail = format!(
@@ -354,7 +368,7 @@ pub(super) fn lsp_location_picker_entry(
             lsp_location_uri_detail(location.uri()),
             location.server_id()
         );
-        (uri_label, detail, Some(location.uri().to_owned()))
+        (uri_label, detail, Some(location.uri().to_owned()), None)
     };
     PickerEntry {
         item: PickerItem::new(
@@ -366,6 +380,7 @@ pub(super) fn lsp_location_picker_entry(
         action: PickerAction::OpenLspLocation {
             location: location.clone(),
         },
+        quickfix,
     }
 }
 
@@ -479,6 +494,7 @@ pub(super) fn lsp_diagnostics_status_picker_overlay(
     lsp_diagnostics_picker_overlay_from_entries(vec![PickerEntry {
         item: PickerItem::new("lsp-diagnostics-status", label, detail, preview),
         action: PickerAction::NoOp,
+        quickfix: None,
     }])
 }
 
@@ -525,6 +541,17 @@ fn lsp_diagnostic_picker_entry(
             path: workspace_diagnostic.path().to_path_buf(),
             target,
         },
+        quickfix: Some(QuickfixEntry::new(
+            format!(
+                "quickfix:{}:{}:{}",
+                workspace_diagnostic.path().display(),
+                line_number,
+                column
+            ),
+            workspace_diagnostic.path().to_path_buf(),
+            target,
+            lsp_diagnostic_label(diagnostic),
+        )),
     }
 }
 
@@ -597,6 +624,7 @@ pub(super) fn lsp_code_actions_status_picker_overlay(
         vec![PickerEntry {
             item: PickerItem::new("lsp-code-action-status", label, detail, preview),
             action: PickerAction::NoOp,
+            quickfix: None,
         }],
     )
 }
@@ -640,6 +668,7 @@ pub(super) fn lsp_code_action_picker_entry(
             path: path.to_path_buf(),
             code_action: code_action.clone(),
         },
+        quickfix: None,
     }
 }
 
@@ -763,6 +792,7 @@ mod tests {
         PickerEntry {
             item: PickerItem::new(id, label, label, None::<&str>),
             action: PickerAction::NoOp,
+            quickfix: None,
         }
     }
 
@@ -861,5 +891,39 @@ mod tests {
                 "Info: info message",
             ]
         );
+    }
+
+    #[test]
+    fn workspace_search_match_entry_builds_open_file_location_action() {
+        let root = Path::new("C:\\workspace");
+        let entry = workspace_search_match_entry(root, ".\\src\\main.rs", 7, 5, "fn main() {}");
+
+        assert_eq!(entry.item.label(), "fn main() {}");
+        assert_eq!(entry.item.detail(), "src\\main.rs | Ln 7, Col 5");
+        assert_eq!(
+            entry.item.preview().map(ToOwned::to_owned),
+            Some(root.join("src\\main.rs").display().to_string())
+        );
+        assert!(matches!(
+            entry.action,
+            PickerAction::OpenFileLocation { path, target }
+                if path == root.join("src\\main.rs")
+                    && target == TextPoint::new(6, 4)
+        ));
+    }
+
+    #[test]
+    fn workspace_search_status_entry_is_noop() {
+        let entry = workspace_search_status_entry(
+            "needle",
+            "No matches found",
+            "No workspace results for `needle`.",
+            Some("C:\\workspace".to_owned()),
+        );
+
+        assert_eq!(entry.item.id(), "workspace-search:needle");
+        assert_eq!(entry.item.label(), "No matches found for needle");
+        assert_eq!(entry.item.detail(), "No workspace results for `needle`.");
+        assert!(matches!(entry.action, PickerAction::NoOp));
     }
 }

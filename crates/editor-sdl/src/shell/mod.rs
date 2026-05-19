@@ -211,6 +211,12 @@ const HOOK_PICKER_NEXT: &str = "ui.picker.next";
 const HOOK_PICKER_PREVIOUS: &str = "ui.picker.previous";
 const HOOK_PICKER_SUBMIT: &str = "ui.picker.submit";
 const HOOK_PICKER_CANCEL: &str = "ui.picker.cancel";
+const HOOK_QUICKFIX_OPEN: &str = "ui.quickfix.open";
+const HOOK_QUICKFIX_NEXT: &str = "ui.quickfix.next";
+const HOOK_QUICKFIX_PREVIOUS: &str = "ui.quickfix.previous";
+const HOOK_QUICKFIX_TOGGLE_MARK: &str = "ui.quickfix.toggle-mark";
+const HOOK_QUICKFIX_CLEAR_MARKS: &str = "ui.quickfix.clear-marks";
+const HOOK_QUICKFIX_MARK_ALL: &str = "ui.quickfix.mark-all";
 const HOOK_AUTOCOMPLETE_TRIGGER: &str = autocomplete_hooks::TRIGGER;
 const HOOK_AUTOCOMPLETE_NEXT: &str = autocomplete_hooks::NEXT;
 const HOOK_AUTOCOMPLETE_PREVIOUS: &str = autocomplete_hooks::PREVIOUS;
@@ -295,6 +301,8 @@ const HOOK_LSP_COPILOT_SIGN_IN: &str = lsp_hooks::COPILOT_SIGN_IN;
 const HOOK_LSP_COPILOT_SIGN_OUT: &str = lsp_hooks::COPILOT_SIGN_OUT;
 const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
 const ACP_INPUT_PLACEHOLDER: &str = "Type / for commands. Press M-x and `acp.` for other commands";
+const QUICKFIX_BUFFER_NAME: &str = "*quickfix*";
+const QUICKFIX_POPUP_TITLE: &str = "Quickfix";
 const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
 const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
 const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
@@ -6918,6 +6926,153 @@ enum PickerKind {
 struct PickerEntry {
     item: PickerItem,
     action: PickerAction,
+    quickfix: Option<QuickfixEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuickfixEntry {
+    id: String,
+    path: PathBuf,
+    target: TextPoint,
+    label: String,
+}
+
+impl QuickfixEntry {
+    fn new(
+        id: impl Into<String>,
+        path: PathBuf,
+        target: TextPoint,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            path,
+            target,
+            label: label.into(),
+        }
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn target(&self) -> TextPoint {
+        self.target
+    }
+
+    fn render_line(&self, marked: bool) -> String {
+        let mark = if marked { "x" } else { " " };
+        format!(
+            "[{mark}] {}:{}:{} | {}",
+            self.path.display(),
+            self.target.line + 1,
+            self.target.column + 1,
+            self.label
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct QuickfixState {
+    entries: Vec<QuickfixEntry>,
+    selected_index: usize,
+    marked_entry_ids: BTreeSet<String>,
+    buffer_id: Option<BufferId>,
+}
+
+impl QuickfixState {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn buffer_id(&self) -> Option<BufferId> {
+        self.buffer_id
+    }
+
+    fn set_buffer_id(&mut self, buffer_id: BufferId) {
+        self.buffer_id = Some(buffer_id);
+    }
+
+    fn set_entries(&mut self, entries: Vec<QuickfixEntry>) {
+        self.entries = entries;
+        self.selected_index = 0;
+        self.marked_entry_ids.clear();
+    }
+
+    fn entries(&self) -> &[QuickfixEntry] {
+        &self.entries
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected_index
+            .min(self.entries.len().saturating_sub(1))
+    }
+
+    fn set_selected_index(&mut self, index: usize) {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = index.min(self.entries.len() - 1);
+        }
+    }
+
+    fn selected_entry(&self) -> Option<QuickfixEntry> {
+        self.entries.get(self.selected_index()).cloned()
+    }
+
+    fn select_next(&mut self) -> Option<QuickfixEntry> {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+            return None;
+        }
+        self.selected_index = (self.selected_index + 1) % self.entries.len();
+        self.selected_entry()
+    }
+
+    fn select_previous(&mut self) -> Option<QuickfixEntry> {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+            return None;
+        }
+        self.selected_index = self
+            .selected_index
+            .checked_sub(1)
+            .unwrap_or(self.entries.len() - 1);
+        self.selected_entry()
+    }
+
+    fn toggle_mark_at(&mut self, index: usize) -> bool {
+        let Some(entry) = self.entries.get(index) else {
+            return false;
+        };
+        if !self.marked_entry_ids.insert(entry.id().to_owned()) {
+            self.marked_entry_ids.remove(entry.id());
+        }
+        true
+    }
+
+    fn clear_marks(&mut self) {
+        self.marked_entry_ids.clear();
+    }
+
+    fn mark_all(&mut self) {
+        self.marked_entry_ids = self
+            .entries
+            .iter()
+            .map(|entry| entry.id().to_owned())
+            .collect();
+    }
+
+    fn render_lines(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|entry| entry.render_line(self.marked_entry_ids.contains(entry.id())))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6932,6 +7087,7 @@ enum AutocompleteProviderKind {
 pub(crate) struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
+    quickfix_entries: BTreeMap<String, QuickfixEntry>,
     submit_action: Option<PickerAction>,
     mode: PickerMode,
     kind: PickerKind,
@@ -6941,10 +7097,14 @@ impl PickerOverlay {
     fn from_entries(title: impl Into<String>, entries: Vec<PickerEntry>) -> Self {
         let title = title.into();
         let mut actions = BTreeMap::new();
+        let mut quickfix_entries = BTreeMap::new();
         let items = entries
             .into_iter()
             .map(|entry| {
                 actions.insert(entry.item.id().to_owned(), entry.action);
+                if let Some(quickfix) = entry.quickfix {
+                    quickfix_entries.insert(entry.item.id().to_owned(), quickfix);
+                }
                 entry.item
             })
             .collect();
@@ -6952,6 +7112,7 @@ impl PickerOverlay {
         Self {
             session: PickerSession::new(title, items).with_result_limit(48),
             actions,
+            quickfix_entries,
             submit_action: None,
             mode: PickerMode::Static,
             kind: PickerKind::Generic,
@@ -6970,10 +7131,14 @@ impl PickerOverlay {
     ) -> Self {
         let title = title.into();
         let mut actions = BTreeMap::new();
+        let mut quickfix_entries = BTreeMap::new();
         let items = entries
             .into_iter()
             .map(|entry| {
                 actions.insert(entry.item.id().to_owned(), entry.action);
+                if let Some(quickfix) = entry.quickfix {
+                    quickfix_entries.insert(entry.item.id().to_owned(), quickfix);
+                }
                 entry.item
             })
             .collect();
@@ -6983,6 +7148,7 @@ impl PickerOverlay {
                 .with_result_limit(48)
                 .with_preserve_order(),
             actions,
+            quickfix_entries,
             submit_action: Some(PickerAction::VimSearch(direction)),
             mode: PickerMode::VimSearch(direction),
             kind: PickerKind::Generic,
@@ -6995,6 +7161,7 @@ impl PickerOverlay {
                 .with_result_limit(48)
                 .with_preserve_order(),
             actions: BTreeMap::new(),
+            quickfix_entries: BTreeMap::new(),
             submit_action: Some(PickerAction::NoOp),
             mode: PickerMode::WorkspaceSearch { root },
             kind: PickerKind::Generic,
@@ -7037,16 +7204,29 @@ impl PickerOverlay {
         }
     }
 
+    fn exportable_quickfix_entries(&self) -> Vec<QuickfixEntry> {
+        self.session
+            .matches()
+            .iter()
+            .filter_map(|matched| self.quickfix_entries.get(matched.item().id()).cloned())
+            .collect()
+    }
+
     fn set_entries(&mut self, entries: Vec<PickerEntry>, selected_index: usize) {
         let mut actions = BTreeMap::new();
+        let mut quickfix_entries = BTreeMap::new();
         let items = entries
             .into_iter()
             .map(|entry| {
                 actions.insert(entry.item.id().to_owned(), entry.action);
+                if let Some(quickfix) = entry.quickfix {
+                    quickfix_entries.insert(entry.item.id().to_owned(), quickfix);
+                }
                 entry.item
             })
             .collect();
         self.actions = actions;
+        self.quickfix_entries = quickfix_entries;
         self.session.set_items(items);
         self.session.set_selected_index(selected_index);
     }
@@ -8743,6 +8923,7 @@ impl FpsOverlayState {
 pub(crate) struct ShellState {
     pub(crate) runtime: EditorRuntime,
     pub(crate) user_library: Arc<dyn UserLibrary>,
+    deferred_startup_pending: bool,
     typing_profiler: Option<TypingProfiler>,
     last_text_input_profile: Option<Duration>,
     last_text_input_at: Option<Instant>,
@@ -8772,10 +8953,28 @@ impl ShellState {
         Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_with_user_library(
         log_file_path: PathBuf,
         profile_input_latency: bool,
         user_library: Arc<dyn UserLibrary>,
+    ) -> Result<Self, ShellError> {
+        Self::new_with_user_library_inner(log_file_path, profile_input_latency, user_library, false)
+    }
+
+    fn new_with_user_library_fast_start(
+        log_file_path: PathBuf,
+        profile_input_latency: bool,
+        user_library: Arc<dyn UserLibrary>,
+    ) -> Result<Self, ShellError> {
+        Self::new_with_user_library_inner(log_file_path, profile_input_latency, user_library, true)
+    }
+
+    fn new_with_user_library_inner(
+        log_file_path: PathBuf,
+        profile_input_latency: bool,
+        user_library: Arc<dyn UserLibrary>,
+        defer_optional_services: bool,
     ) -> Result<Self, ShellError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
@@ -8842,34 +9041,12 @@ impl ShellState {
             record_runtime_error(&mut runtime, "error-log", error);
         }
         runtime.services_mut().insert(LspLogBufferState::default());
+        runtime.services_mut().insert(QuickfixState::default());
         runtime
             .services_mut()
             .insert(Mutex::new(TerminalBufferState::default()));
         runtime.services_mut().insert(FormatterRegistry::default());
         runtime.services_mut().insert(Mutex::new(JobManager::new()));
-        runtime
-            .services_mut()
-            .insert(DbService::new().map_err(ShellError::Runtime)?);
-        acp::init_acp_manager(&mut runtime)?;
-        runtime
-            .services_mut()
-            .insert(AutocompleteRegistry::from_user_config(&*user_library));
-        runtime
-            .services_mut()
-            .insert(HoverRegistry::from_user_config(&*user_library));
-        let mut lsp_registry = LanguageServerRegistry::new();
-        lsp_registry
-            .register_all(user_library.language_servers())
-            .map_err(|error| ShellError::Runtime(error.to_string()))?;
-        runtime
-            .services_mut()
-            .insert(Arc::new(LspClientManager::new(lsp_registry)));
-        let mut syntax_registry = SyntaxRegistry::new();
-        syntax_registry
-            .register_all(user_library.syntax_languages())
-            .map_err(|error| ShellError::Runtime(error.to_string()))?;
-        runtime.services_mut().insert(syntax_registry);
-        configure_syntax_refresh_worker(&mut runtime).map_err(ShellError::Runtime)?;
         let mut theme_registry = ThemeRegistry::new();
         theme_registry
             .register_all(user_library.themes())
@@ -8886,11 +9063,14 @@ impl ShellState {
         load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
-        register_lsp_status_hooks(&mut runtime).map_err(ShellError::Runtime)?;
+        if !defer_optional_services {
+            install_optional_runtime_services(&mut runtime, &*user_library)?;
+        }
 
         Ok(Self {
             runtime,
             user_library,
+            deferred_startup_pending: defer_optional_services,
             typing_profiler: profile_input_latency
                 .then(|| TypingProfiler::new(default_typing_profile_log_path())),
             last_text_input_profile: None,
@@ -8899,6 +9079,19 @@ impl ShellState {
             mouse_drag: None,
             browser_host: BrowserHostService::new(),
         })
+    }
+
+    fn deferred_startup_pending(&self) -> bool {
+        self.deferred_startup_pending
+    }
+
+    fn finish_deferred_startup(&mut self) -> Result<(), ShellError> {
+        if !self.deferred_startup_pending {
+            return Ok(());
+        }
+        install_optional_runtime_services(&mut self.runtime, &*self.user_library)?;
+        self.deferred_startup_pending = false;
+        Ok(())
     }
 
     fn record_error(&mut self, source: &str, message: impl Into<String>) {
@@ -9373,6 +9566,12 @@ impl ShellState {
                 }
 
                 if keymod.intersects(ctrl_mod()) && keycode == Keycode::Q {
+                    if picker_visible {
+                        quickfix_open_current_list(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?;
+                        self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+                        return Ok(false);
+                    }
                     return Ok(true);
                 }
 
@@ -9393,6 +9592,16 @@ impl ShellState {
                         picker.backspace_query();
                         self.schedule_picker_search_refresh()?;
                     }
+                    return Ok(false);
+                }
+
+                if matches!(
+                    keycode,
+                    Keycode::Return | Keycode::KpEnter | Keycode::Return2
+                ) && quickfix_open_selected_entry(&mut self.runtime)
+                    .map_err(ShellError::Runtime)?
+                {
+                    self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                     return Ok(false);
                 }
 
@@ -11013,14 +11222,14 @@ impl ShellState {
     }
 
     fn schedule_autocomplete_refresh_if_active(&mut self) -> Result<(), ShellError> {
-        let registry = self
+        let Some(registry) = self
             .runtime
             .services()
             .get::<AutocompleteRegistry>()
             .cloned()
-            .ok_or_else(|| {
-                ShellError::Runtime("autocomplete registry service missing".to_owned())
-            })?;
+        else {
+            return Ok(());
+        };
         let lsp_client = self
             .runtime
             .services()
@@ -12389,7 +12598,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .user_library
         .clone()
         .unwrap_or_else(|| Arc::new(NullUserLibrary));
-    let mut state = ShellState::new_with_user_library(
+    let mut state = ShellState::new_with_user_library_fast_start(
         log_file_path,
         config.profile_input_latency,
         Arc::clone(&user_library),
@@ -12579,6 +12788,13 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     if let Some(frame) = typing_frame.as_mut() {
                         frame.layout_sync += layout_sync_started.elapsed();
                     }
+                }
+                if frames_rendered > 0
+                    && !had_events
+                    && state.deferred_startup_pending()
+                    && let Err(error) = state.finish_deferred_startup()
+                {
+                    state.record_shell_error("shell.startup-bootstrap", error);
                 }
 
                 let refresh_now = Instant::now();
@@ -13654,6 +13870,28 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         "Executes the selected picker action.",
     )?;
     register_hook(runtime, HOOK_PICKER_CANCEL, "Closes the active picker.")?;
+    register_hook(
+        runtime,
+        HOOK_QUICKFIX_OPEN,
+        "Opens current quickfix popup buffer.",
+    )?;
+    register_hook(runtime, HOOK_QUICKFIX_NEXT, "Opens next quickfix entry.")?;
+    register_hook(
+        runtime,
+        HOOK_QUICKFIX_PREVIOUS,
+        "Opens previous quickfix entry.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_QUICKFIX_TOGGLE_MARK,
+        "Toggles mark on current quickfix row.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_QUICKFIX_CLEAR_MARKS,
+        "Clears all quickfix marks.",
+    )?;
+    register_hook(runtime, HOOK_QUICKFIX_MARK_ALL, "Marks all quickfix rows.")?;
     register_hook(
         runtime,
         HOOK_AUTOCOMPLETE_TRIGGER,
@@ -15803,6 +16041,58 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             Ok(())
         })
         .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_QUICKFIX_OPEN, "shell.quickfix-open", |_, runtime| {
+            quickfix_open_current_list(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_QUICKFIX_NEXT, "shell.quickfix-next", |_, runtime| {
+            quickfix_select_next(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_QUICKFIX_PREVIOUS,
+            "shell.quickfix-previous",
+            |_, runtime| {
+                quickfix_select_previous(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_QUICKFIX_TOGGLE_MARK,
+            "shell.quickfix-toggle-mark",
+            |_, runtime| {
+                quickfix_toggle_mark(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_QUICKFIX_CLEAR_MARKS,
+            "shell.quickfix-clear-marks",
+            |_, runtime| {
+                quickfix_clear_marks(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_QUICKFIX_MARK_ALL,
+            "shell.quickfix-mark-all",
+            |_, runtime| {
+                quickfix_mark_all(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -16492,6 +16782,214 @@ fn open_lsp_location(runtime: &mut EditorRuntime, location: &LspLocation) -> Res
     ))
 }
 
+fn quickfix_state(runtime: &EditorRuntime) -> Result<&QuickfixState, String> {
+    runtime
+        .services()
+        .get::<QuickfixState>()
+        .ok_or_else(|| "quickfix state service missing".to_owned())
+}
+
+fn quickfix_state_mut(runtime: &mut EditorRuntime) -> Result<&mut QuickfixState, String> {
+    runtime
+        .services_mut()
+        .get_mut::<QuickfixState>()
+        .ok_or_else(|| "quickfix state service missing".to_owned())
+}
+
+fn quickfix_buffer_exists(
+    runtime: &EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+) -> bool {
+    runtime
+        .model()
+        .workspace(workspace_id)
+        .ok()
+        .and_then(|workspace| workspace.buffer(buffer_id))
+        .is_some()
+}
+
+fn sync_quickfix_popup_buffer(
+    runtime: &mut EditorRuntime,
+    focus_popup: bool,
+) -> Result<Option<BufferId>, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let (entries, selected_index, existing_buffer_id) = {
+        let state = quickfix_state(runtime)?;
+        if state.is_empty() {
+            return Ok(None);
+        }
+        (
+            state.render_lines(),
+            state.selected_index(),
+            state.buffer_id(),
+        )
+    };
+    let buffer_id = if let Some(existing) = existing_buffer_id {
+        if quickfix_buffer_exists(runtime, workspace_id, existing) {
+            existing
+        } else {
+            let created = runtime
+                .model_mut()
+                .create_popup_buffer(
+                    workspace_id,
+                    QUICKFIX_BUFFER_NAME,
+                    BufferKind::Quickfix,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+            quickfix_state_mut(runtime)?.set_buffer_id(created);
+            created
+        }
+    } else {
+        let created = runtime
+            .model_mut()
+            .create_popup_buffer(
+                workspace_id,
+                QUICKFIX_BUFFER_NAME,
+                BufferKind::Quickfix,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        quickfix_state_mut(runtime)?.set_buffer_id(created);
+        created
+    };
+    runtime
+        .model_mut()
+        .open_popup_buffer(workspace_id, QUICKFIX_POPUP_TITLE, buffer_id)
+        .map_err(|error| error.to_string())?;
+    {
+        let user_library = shell_user_library(runtime);
+        let ui = shell_ui_mut(runtime)?;
+        let buffer = ui.ensure_popup_buffer(
+            buffer_id,
+            QUICKFIX_BUFFER_NAME,
+            BufferKind::Quickfix,
+            &*user_library,
+        );
+        buffer.replace_with_lines_preserve_view(entries);
+        let _ = buffer.goto_line(selected_index);
+    }
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_buffer(buffer_id);
+        ui.set_popup_focus(focus_popup);
+    }
+    Ok(Some(buffer_id))
+}
+
+fn quickfix_open_picker_matches(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let entries = {
+        let ui = shell_ui(runtime)?;
+        let Some(picker) = ui.picker() else {
+            return Ok(false);
+        };
+        picker.exportable_quickfix_entries()
+    };
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.close_picker();
+    }
+    quickfix_state_mut(runtime)?.set_entries(entries);
+    sync_quickfix_popup_buffer(runtime, true)?;
+    Ok(true)
+}
+
+fn quickfix_entry_for_cursor(runtime: &mut EditorRuntime) -> Result<Option<QuickfixEntry>, String> {
+    let row = {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !buffer_is_quickfix(&buffer.kind) {
+            return Ok(None);
+        }
+        buffer.cursor_row()
+    };
+    let state = quickfix_state_mut(runtime)?;
+    state.set_selected_index(row);
+    Ok(state.selected_entry())
+}
+
+fn quickfix_open_entry(
+    runtime: &mut EditorRuntime,
+    entry: &QuickfixEntry,
+    focus_popup: bool,
+) -> Result<(), String> {
+    open_workspace_file_at(runtime, entry.path(), entry.target())?;
+    if !focus_popup {
+        shell_ui_mut(runtime)?.set_popup_focus(false);
+    }
+    sync_active_buffer(runtime)?;
+    Ok(())
+}
+
+fn quickfix_open_selected_entry(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let Some(entry) = quickfix_entry_for_cursor(runtime)? else {
+        return Ok(false);
+    };
+    quickfix_open_entry(runtime, &entry, false)?;
+    Ok(true)
+}
+
+fn quickfix_open_current_list(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if quickfix_open_picker_matches(runtime)? {
+        return Ok(());
+    }
+    let _ = sync_quickfix_popup_buffer(runtime, true)?;
+    Ok(())
+}
+
+fn quickfix_select_next(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(entry) = quickfix_state_mut(runtime)?.select_next() else {
+        return Ok(());
+    };
+    let _ = sync_quickfix_popup_buffer(runtime, false)?;
+    quickfix_open_entry(runtime, &entry, false)
+}
+
+fn quickfix_select_previous(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(entry) = quickfix_state_mut(runtime)?.select_previous() else {
+        return Ok(());
+    };
+    let _ = sync_quickfix_popup_buffer(runtime, false)?;
+    quickfix_open_entry(runtime, &entry, false)
+}
+
+fn quickfix_toggle_mark(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let row = {
+        let Some(entry) = quickfix_entry_for_cursor(runtime)? else {
+            return Ok(());
+        };
+        let state = quickfix_state(runtime)?;
+        state
+            .entries()
+            .iter()
+            .position(|candidate| candidate.id() == entry.id())
+            .unwrap_or(0)
+    };
+    if quickfix_state_mut(runtime)?.toggle_mark_at(row) {
+        let _ = sync_quickfix_popup_buffer(runtime, true)?;
+    }
+    Ok(())
+}
+
+fn quickfix_clear_marks(runtime: &mut EditorRuntime) -> Result<(), String> {
+    quickfix_state_mut(runtime)?.clear_marks();
+    let _ = sync_quickfix_popup_buffer(runtime, true)?;
+    Ok(())
+}
+
+fn quickfix_mark_all(runtime: &mut EditorRuntime) -> Result<(), String> {
+    quickfix_state_mut(runtime)?.mark_all();
+    let _ = sync_quickfix_popup_buffer(runtime, true)?;
+    Ok(())
+}
+
 fn ensure_lsp_log_buffer(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -17098,6 +17596,10 @@ fn buffer_is_db_browser(kind: &BufferKind) -> bool {
 
 fn buffer_is_compilation(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Compilation)
+}
+
+fn buffer_is_quickfix(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Quickfix)
 }
 
 /// Returns `true` when the user library has an evaluator for the given buffer
@@ -19853,6 +20355,7 @@ fn vim_search_entries(
                     direction,
                     target: matched.point,
                 },
+                quickfix: None,
             }
         })
         .collect();
@@ -25945,6 +26448,9 @@ fn handle_directory_chord(runtime: &mut EditorRuntime, chord: &str) -> Result<bo
 
 fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshStats, String> {
     let mut stats = SyntaxRefreshStats::default();
+    if runtime.services().get::<SyntaxRegistry>().is_none() {
+        return Ok(stats);
+    }
     if let Some(buffer_id) = shell_ui(runtime)?.active_buffer_id()
         && let Some(buffer) = shell_ui_mut(runtime)?.buffer_mut(buffer_id)
     {
@@ -27133,6 +27639,9 @@ fn active_runtime_buffer(
 }
 
 fn refresh_workspace_syntax(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if runtime.services().get::<SyntaxRegistry>().is_none() {
+        return Ok(());
+    }
     let buffer_ids = shell_ui(runtime)?
         .active_workspace_buffer_ids()
         .map(|buffer_ids| buffer_ids.to_vec())
@@ -27159,7 +27668,41 @@ fn queue_buffer_syntax_refresh(
         };
         buffer.force_syntax_refresh();
     }
+    if runtime.services().get::<SyntaxRegistry>().is_none() {
+        return Ok(());
+    }
     refresh_pending_syntax(runtime).map(|_| ())
+}
+
+fn install_optional_runtime_services(
+    runtime: &mut EditorRuntime,
+    user_library: &dyn UserLibrary,
+) -> Result<(), ShellError> {
+    runtime
+        .services_mut()
+        .insert(DbService::new().map_err(ShellError::Runtime)?);
+    acp::init_acp_manager(runtime)?;
+    runtime
+        .services_mut()
+        .insert(AutocompleteRegistry::from_user_config(user_library));
+    runtime
+        .services_mut()
+        .insert(HoverRegistry::from_user_config(user_library));
+    let mut lsp_registry = LanguageServerRegistry::new();
+    lsp_registry
+        .register_all(user_library.language_servers())
+        .map_err(|error| ShellError::Runtime(error.to_string()))?;
+    runtime
+        .services_mut()
+        .insert(Arc::new(LspClientManager::new(lsp_registry)));
+    let mut syntax_registry = SyntaxRegistry::new();
+    syntax_registry
+        .register_all(user_library.syntax_languages())
+        .map_err(|error| ShellError::Runtime(error.to_string()))?;
+    runtime.services_mut().insert(syntax_registry);
+    configure_syntax_refresh_worker(runtime).map_err(ShellError::Runtime)?;
+    register_lsp_status_hooks(runtime).map_err(ShellError::Runtime)?;
+    Ok(())
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
@@ -28400,6 +28943,7 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),
         BufferKind::Terminal => (true, None),
         BufferKind::Directory => (false, None),
+        BufferKind::Quickfix => (true, None),
         BufferKind::Compilation => {
             let mut input = InputField::new("$ ");
             input.set_placeholder(Some(
@@ -28461,6 +29005,10 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             BufferKind::Diagnostics => vec![
                 format!("{name} is a diagnostics-oriented buffer."),
                 "LSP and DAP packages can surface structured status here.".to_owned(),
+            ],
+            BufferKind::Quickfix => vec![
+                format!("{name} is a quickfix result list."),
+                "Press Enter to open target and return focus to workspace.".to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => vec![
                 format!("{name} is an interactive read-only buffer."),
@@ -28526,6 +29074,7 @@ fn buffer_kind_label(kind: &BufferKind) -> String {
         BufferKind::Directory => "directory".to_owned(),
         BufferKind::Compilation => "compilation".to_owned(),
         BufferKind::Diagnostics => "diagnostics".to_owned(),
+        BufferKind::Quickfix => "quickfix".to_owned(),
         BufferKind::Plugin(plugin_kind) => plugin_kind.clone(),
     }
 }

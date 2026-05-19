@@ -794,11 +794,9 @@ pub(super) fn init_acp_manager(runtime: &mut EditorRuntime) -> Result<(), ShellE
 }
 
 pub(super) fn refresh_pending_acp(runtime: &mut EditorRuntime) -> Result<bool, String> {
-    let manager = runtime
-        .services()
-        .get::<Arc<Mutex<AcpManager>>>()
-        .ok_or_else(|| "acp manager service missing".to_owned())?
-        .clone();
+    let Some(manager) = runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() else {
+        return Ok(false);
+    };
     let (events_changed, actions) = {
         let mut manager = manager
             .lock()
@@ -1443,6 +1441,7 @@ pub(super) fn acp_pick_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
                     buffer_id,
                     mode_id: mode.id.to_string(),
                 },
+                quickfix: None,
             }
         })
         .collect();
@@ -1497,6 +1496,7 @@ pub(super) fn acp_pick_model(runtime: &mut EditorRuntime) -> Result<(), String> 
                     buffer_id,
                     model_id: model.model_id.to_string(),
                 },
+                quickfix: None,
             }
         })
         .collect();
@@ -1783,6 +1783,7 @@ fn open_permission_picker(
                 request_id: request.request_id,
                 option_id: option.option_id.to_string(),
             },
+            quickfix: None,
         })
         .collect::<Vec<_>>();
     let picker =
@@ -1929,6 +1930,7 @@ fn open_slash_command_picker(
                     buffer_id,
                     command: command.name,
                 },
+                quickfix: None,
             }
         })
         .collect();
@@ -2755,6 +2757,7 @@ impl AcpManager {
                                 buffer_id,
                                 session_id: session.session_id.to_string(),
                             },
+                            quickfix: None,
                         }
                     })
                     .collect();

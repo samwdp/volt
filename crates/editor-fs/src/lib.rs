@@ -426,6 +426,10 @@ fn parse_relative_git_path(base: &Path, contents: &str) -> Option<PathBuf> {
 }
 
 fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(path) = windows_git_absolute_path(reference) {
+        return normalize_path(&path);
+    }
     let reference = Path::new(reference);
     if reference.is_absolute() {
         normalize_path(reference)
@@ -481,6 +485,23 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(windows)]
+fn windows_git_absolute_path(reference: &str) -> Option<PathBuf> {
+    let mut chars = reference.chars();
+    let slash = chars.next()?;
+    let drive = chars.next()?;
+    let separator = chars.next()?;
+    if slash != '/' || separator != '/' || !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    let suffix = chars.as_str();
+    Some(PathBuf::from(format!(
+        "{}:/{}",
+        drive.to_ascii_uppercase(),
+        suffix
+    )))
 }
 
 #[cfg(test)]
@@ -586,5 +607,60 @@ mod tests {
 
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discover_projects_resolves_git_for_windows_worktree_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir("discover-git-for-windows-worktree-repo");
+        let repo = root.join("repo-store");
+        let gitdir = repo.join(".git").join("worktrees").join("feature");
+        let worktree = root.join("project").join("feature");
+        fs::create_dir_all(&gitdir)?;
+        fs::create_dir_all(&worktree)?;
+        let gitdir_reference = git_for_windows_path(&gitdir)?;
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {gitdir_reference}\n"),
+        )?;
+        fs::write(gitdir.join("commondir"), "../../\n")?;
+
+        let projects = discover_projects(&[ProjectSearchRoot::new(&root, 3)])?;
+        let worktree_project = projects
+            .iter()
+            .find(|project| project.root() == worktree)
+            .expect("worktree should be discovered");
+        assert_eq!(worktree_project.repository_name(), "repo-store");
+        assert_eq!(worktree_project.repository_root(), repo);
+        assert_eq!(
+            worktree_project.worktree_parent_name().as_deref(),
+            Some("project")
+        );
+        assert_eq!(worktree_project.display_name(), "project [feature]");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn git_for_windows_path(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+        let path = path.canonicalize()?;
+        let rendered = path
+            .display()
+            .to_string()
+            .replace('\\', "/")
+            .trim_start_matches("//?/")
+            .to_owned();
+        let mut chars = rendered.chars();
+        let drive = chars.next().ok_or("missing drive letter")?;
+        if !drive.is_ascii_alphabetic() || chars.next() != Some(':') || chars.next() != Some('/') {
+            return Err(format!("unexpected Windows path format: {rendered}").into());
+        }
+        Ok(format!(
+            "/{}/{}",
+            drive.to_ascii_lowercase(),
+            chars.as_str()
+        ))
     }
 }

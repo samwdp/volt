@@ -2001,6 +2001,7 @@ pub(super) fn open_git_remote_picker(runtime: &mut EditorRuntime) -> Result<(), 
             PickerEntry {
                 item: PickerItem::new(item_id, remote.clone(), "remote", None::<String>),
                 action,
+                quickfix: None,
             }
         })
         .collect();
@@ -2023,6 +2024,7 @@ pub(super) fn open_git_fetch_remote_picker(runtime: &mut EditorRuntime) -> Resul
             PickerEntry {
                 item: PickerItem::new(item_id, remote.clone(), "remote", None::<String>),
                 action,
+                quickfix: None,
             }
         })
         .collect();
@@ -2376,6 +2378,7 @@ pub(super) fn open_git_commit_picker_with_action(
             PickerEntry {
                 item: PickerItem::new(item_id, label, "commit", None::<String>),
                 action,
+                quickfix: None,
             }
         })
         .collect();
@@ -2405,6 +2408,7 @@ pub(super) fn open_git_branch_picker_with_action(
             PickerEntry {
                 item: PickerItem::new(item_id, branch.clone(), "branch", None::<String>),
                 action,
+                quickfix: None,
             }
         })
         .collect();
@@ -2435,6 +2439,7 @@ pub(super) fn open_git_worktree_branch_picker(runtime: &mut EditorRuntime) -> Re
                     None::<String>,
                 ),
                 action,
+                quickfix: None,
             }
         })
         .collect::<Vec<_>>();
@@ -2521,6 +2526,7 @@ pub(super) fn git_worktree_dashboard_picker_overlay(
                     Some(entry.path.display().to_string()),
                 ),
                 action,
+                quickfix: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -2535,6 +2541,7 @@ pub(super) fn git_worktree_dashboard_picker_overlay(
                 Some("Open oil at the bare repo and choose a branch.".to_owned()),
             ),
             action: PickerAction::GitWorktreeDashboardCreate { base_dir },
+            quickfix: None,
         },
     );
 
@@ -2672,6 +2679,7 @@ pub(super) fn begin_oil_worktree_request(
                     None::<String>,
                 ),
                 action,
+                quickfix: None,
             }
         })
         .collect::<Vec<_>>();
@@ -4060,9 +4068,16 @@ pub(super) fn build_git_fringe_snapshot(
         }
         return snapshot;
     };
+    let normalized_head_text = normalize_git_fringe_text(&head_text);
+    let normalized_buffer_text = normalize_git_fringe_text(buffer_text);
+    if normalized_head_text == normalized_buffer_text {
+        return GitFringeSnapshot::default();
+    }
     let head_path = git_fringe_temp_path("head");
     let buffer_path = git_fringe_temp_path("buffer");
-    if fs::write(&head_path, head_text).is_err() || fs::write(&buffer_path, buffer_text).is_err() {
+    if fs::write(&head_path, normalized_head_text).is_err()
+        || fs::write(&buffer_path, normalized_buffer_text).is_err()
+    {
         let _ = fs::remove_file(&head_path);
         let _ = fs::remove_file(&buffer_path);
         return GitFringeSnapshot::default();
@@ -4085,6 +4100,22 @@ pub(super) fn build_git_fringe_snapshot(
     let _ = fs::remove_file(&head_path);
     let _ = fs::remove_file(&buffer_path);
     parse_git_fringe_diff(&diff_output, line_count)
+}
+
+fn normalize_git_fringe_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
 }
 
 pub(super) fn parse_git_fringe_diff(diff_output: &str, line_count: usize) -> GitFringeSnapshot {
@@ -4578,6 +4609,67 @@ mod tests {
             git_push_remote_name(&root, &snapshot),
             Some("origin".to_owned())
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_is_empty_when_buffer_matches_head() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+        git_read_command_output(
+            &root,
+            "config user email",
+            &["config", "user.email", "volt@example.com"],
+        )
+        .expect("user email");
+        git_read_command_output(
+            &root,
+            "config user name",
+            &["config", "user.name", "Volt Tests"],
+        )
+        .expect("user name");
+        let path = root.join("main.rs");
+        fs::write(&path, "fn main() {}").expect("write file");
+        git_read_command_output(&root, "add", &["add", "main.rs"]).expect("git add");
+        git_read_command_output(&root, "commit", &["commit", "-qm", "init"]).expect("git commit");
+
+        let snapshot = build_git_fringe_snapshot(&root, Path::new("main.rs"), "fn main() {}", 1);
+        assert!(snapshot.lines.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_ignores_crlf_only_difference() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+        git_read_command_output(
+            &root,
+            "config user email",
+            &["config", "user.email", "volt@example.com"],
+        )
+        .expect("user email");
+        git_read_command_output(
+            &root,
+            "config user name",
+            &["config", "user.name", "Volt Tests"],
+        )
+        .expect("user name");
+        let path = root.join("main.rs");
+        fs::write(&path, "fn main() {\r\n    println!(\"hi\");\r\n}\r\n").expect("write file");
+        git_read_command_output(&root, "add", &["add", "main.rs"]).expect("git add");
+        git_read_command_output(&root, "commit", &["commit", "-qm", "init"]).expect("git commit");
+
+        let snapshot = build_git_fringe_snapshot(
+            &root,
+            Path::new("main.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+            3,
+        );
+        assert!(snapshot.lines.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

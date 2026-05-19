@@ -65,6 +65,42 @@ pub fn package() -> PluginPackage {
             None,
         ),
         hook_command(
+            "quickfix.open",
+            "Opens current quickfix popup buffer.",
+            "ui.quickfix.open",
+            None,
+        ),
+        hook_command(
+            "quickfix.next",
+            "Opens next quickfix entry.",
+            "ui.quickfix.next",
+            None,
+        ),
+        hook_command(
+            "quickfix.previous",
+            "Opens previous quickfix entry.",
+            "ui.quickfix.previous",
+            None,
+        ),
+        hook_command(
+            "quickfix.toggle-mark",
+            "Toggles mark on current quickfix row.",
+            "ui.quickfix.toggle-mark",
+            None,
+        ),
+        hook_command(
+            "quickfix.clear-marks",
+            "Clears quickfix marks.",
+            "ui.quickfix.clear-marks",
+            None,
+        ),
+        hook_command(
+            "quickfix.mark-all",
+            "Marks all quickfix rows.",
+            "ui.quickfix.mark-all",
+            None,
+        ),
+        hook_command(
             "picker.toggle-popup-window",
             "Shows or closes the docked popup window.",
             "ui.popup.toggle",
@@ -94,6 +130,7 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+n", "picker.select-next", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Ctrl+p", "picker.select-previous", PluginKeymapScope::Popup),
+        PluginKeyBinding::new("Ctrl+q", "quickfix.open", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Enter", "picker.submit", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Escape", "picker.cancel", PluginKeymapScope::Popup),
     ])
@@ -110,4 +147,20 @@ fn hook_command(
         description,
         vec![PluginAction::emit_hook(hook_name, detail)],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_binds_ctrl_q_to_quickfix_open_in_popups() {
+        let package = package();
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+q"
+                && binding.command_name() == "quickfix.open"
+                && binding.scope() == PluginKeymapScope::Popup
+                && binding.vim_mode() == PluginVimMode::Any
+        }));
+    }
 }

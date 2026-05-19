@@ -2221,6 +2221,7 @@ fn picker_open_file_save_clears_dirty_state_and_closes_cleanly() -> Result<(), S
                 Some(path.display().to_string()),
             ),
             action: PickerAction::OpenFile(path.clone()),
+            quickfix: None,
         }],
     ));
 
@@ -2282,6 +2283,7 @@ fn picker_open_file_location_save_clears_dirty_state_and_closes_cleanly() -> Res
                 path: path.clone(),
                 target: TextPoint::new(0, 0),
             },
+            quickfix: None,
         }],
     ));
 
@@ -7191,6 +7193,7 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
                 Some("C:\\Users\\sam\\.config".to_owned()),
             ),
             action: PickerAction::NoOp,
+            quickfix: None,
         }],
     );
     let mut scene = Vec::new();
@@ -7464,10 +7467,12 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
             PickerEntry {
                 item: PickerItem::new("alpha", "alpha", "one", None::<String>),
                 action: PickerAction::NoOp,
+                quickfix: None,
             },
             PickerEntry {
                 item: PickerItem::new("beta", "beta", "two", None::<String>),
                 action: PickerAction::NoOp,
+                quickfix: None,
             },
         ],
     );
@@ -14096,4 +14101,195 @@ fn browser_devtools_shortcut_requested_rejects_other_modifiers() {
         Keycode::F11,
         Mod::NOMOD
     ));
+}
+
+fn prepare_quickfix_workspace_search_picker(
+    test_name: &str,
+) -> Result<(ShellState, PathBuf, PathBuf, PathBuf), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir(test_name);
+    let first = root.join("src").join("main.rs");
+    let second = root.join("src").join("lib.rs");
+    std::fs::create_dir_all(first.parent().ok_or_else(|| "missing src dir".to_owned())?)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(&first, "fn alpha() {}\n").map_err(|error| error.to_string())?;
+    std::fs::write(&second, "fn beta() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, test_name, &root)?;
+
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Workspace Search",
+        vec![
+            workspace_search::workspace_search_match_entry(
+                &root,
+                "src/main.rs",
+                1,
+                4,
+                "fn alpha() {}",
+            ),
+            workspace_search::workspace_search_match_entry(
+                &root,
+                "src/lib.rs",
+                1,
+                4,
+                "fn beta() {}",
+            ),
+        ],
+    ));
+
+    Ok((state, root, first, second))
+}
+
+#[test]
+fn ctrl_q_with_workspace_search_picker_exports_quickfix_instead_of_quitting() -> Result<(), String>
+{
+    let (mut state, _root, _first, _second) =
+        prepare_quickfix_workspace_search_picker("quickfix-ctrl-q-export")?;
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Q),
+                scancode: None,
+                keymod: ctrl_mod(),
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "Ctrl+Q did not open quickfix popup".to_owned())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.popup_buffer_id,
+        Some(popup.active_buffer)
+    );
+    assert!(shell_ui(&state.runtime)?.popup_focus);
+    let buffer = shell_buffer(&state.runtime, popup.active_buffer)?;
+    assert!(buffer_is_quickfix(&buffer.kind));
+    let first_line = buffer
+        .text
+        .line(0)
+        .ok_or_else(|| "quickfix first line missing".to_owned())?;
+    assert!(first_line.contains("main.rs:1:4 | fn alpha() {}"));
+    assert!(first_line.contains("[ ] "));
+    let second_line = buffer
+        .text
+        .line(1)
+        .ok_or_else(|| "quickfix second line missing".to_owned())?;
+    assert!(second_line.contains("lib.rs:1:4 | fn beta() {}"));
+    assert!(second_line.contains("[ ] "));
+    Ok(())
+}
+
+#[test]
+fn ctrl_q_with_non_quickfix_picker_does_not_quit() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let original_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Buffers",
+        vec![PickerEntry {
+            item: PickerItem::new("buffer:alpha", "alpha", "scratch", None::<&str>),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    ));
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Q),
+                scancode: None,
+                keymod: ctrl_mod(),
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    assert!(shell_ui(&state.runtime)?.picker().is_some());
+    assert_eq!(active_shell_buffer_id(&state.runtime)?, original_buffer_id);
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    Ok(())
+}
+
+#[test]
+#[ignore = "enable once quickfix picker export command lands"]
+fn quickfix_picker_export_opens_popup_and_renders_workspace_search_results() -> Result<(), String> {
+    let (state, root, first, second) =
+        prepare_quickfix_workspace_search_picker("quickfix-export-popup")?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "picker missing before quickfix export".to_owned())?;
+    assert_eq!(picker.session().matches().len(), 2);
+    let _ = (first, second);
+    let _ = active_runtime_popup(&state.runtime)?;
+    let _ = shell_ui(&state.runtime)?.popup_buffer_id;
+    let _ = shell_ui(&state.runtime)?.popup_focus;
+    let _ = root;
+    unimplemented!("invoke quickfix export and assert popup buffer renders exported rows");
+}
+
+#[test]
+#[ignore = "enable once quickfix enter handler lands"]
+fn quickfix_enter_opens_target_and_moves_focus_back_to_workspace() -> Result<(), String> {
+    let (state, root, first, _) = prepare_quickfix_workspace_search_picker("quickfix-enter-focus")?;
+
+    let original_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let _ = (root, first);
+    let _ = shell_ui(&state.runtime)?.popup_focus;
+    let _ = original_buffer_id;
+    unimplemented!(
+        "export picker to quickfix, press Enter on quickfix row, assert workspace focus"
+    );
+}
+
+#[test]
+#[ignore = "enable once quickfix next and previous commands land"]
+fn quickfix_next_previous_wraparound_tracks_current_list() -> Result<(), String> {
+    let (state, root, first, second) =
+        prepare_quickfix_workspace_search_picker("quickfix-wraparound")?;
+
+    let _ = active_shell_buffer_id(&state.runtime)?;
+    let _ = shell_ui(&state.runtime)?.popup_focus;
+    let _ = (root, first, second);
+    unimplemented!("export picker, drive quickfix.next/previous, assert wraparound navigation");
+}
+
+#[test]
+#[ignore = "enable once quickfix export command lands"]
+fn quickfix_export_from_unsupported_picker_is_noop() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let original_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Buffers",
+        vec![PickerEntry {
+            item: PickerItem::new("buffer:alpha", "alpha", "scratch", None::<&str>),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    ));
+
+    let _ = original_buffer_id;
+    let _ = active_runtime_popup(&state.runtime)?;
+    unimplemented!("invoke quickfix export and assert picker closes or no-ops without popup");
 }
