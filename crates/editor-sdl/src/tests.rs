@@ -1466,7 +1466,8 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     assert_eq!(picker.session().title(), "Workspace Files");
     let main_path = root.join("src").join("main.rs");
     assert!(picker.session().matches().iter().any(|matched| {
-        matched.item().label().contains("main.rs")
+        matched.item().label() == "main.rs"
+            && matched.item().detail() == "src"
             && matched.item().fringe() == Some(editor_icons::seti_file_icon(&main_path))
     }));
     assert!(
@@ -1484,6 +1485,46 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     assert_eq!(active.kind, BufferKind::File);
     assert!(active.display_name().contains("main.rs"));
     assert_eq!(active.text.line(0).as_deref(), Some("fn main() {"));
+
+    drop(state);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_file_picker_searches_full_path_but_shows_file_name_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !git_available() {
+        return Ok(());
+    }
+
+    let mut state = user_shell_state()?;
+    let root = temp_workspace_root("files-columns");
+    let nested_dir = root.join("src").join("deep").join("nested");
+    fs::create_dir_all(&nested_dir)?;
+    fs::write(nested_dir.join("really-long-name.rs"), "// test\n")?;
+
+    run_git(&root, &["init", "-q"])?;
+    run_git(&root, &["add", "."])?;
+    open_workspace_from_project(&mut state.runtime, "files-columns", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.list-files")
+        .map_err(|error| error.to_string())?;
+    state.handle_text_input("deep nested")?;
+
+    let picker = state
+        .ui()?
+        .picker()
+        .ok_or("missing workspace file picker")?;
+    let item = picker
+        .session()
+        .selected()
+        .map(|matched| matched.item())
+        .ok_or("missing selected workspace file")?;
+    assert_eq!(item.label(), "really-long-name.rs");
+    assert_eq!(item.detail(), "src/deep/nested");
 
     drop(state);
     fs::remove_dir_all(root)?;

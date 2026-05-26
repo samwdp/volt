@@ -20,15 +20,18 @@ pub use editor_syntax::{
 pub use editor_theme::{Color, Theme, ThemeOption};
 
 pub use abi::{
-    AbiAcpClient, AbiAutocompleteProvider, AbiCaptureThemeMapping, AbiColor, AbiDebugAdapterSpec,
+    AbiAcpClient, AbiAutocompleteProvider, AbiBrowserFeatureSpec, AbiCaptureThemeMapping, AbiColor,
+    AbiContextHelpEntry, AbiContextHelpSpec, AbiDbFeatureSpec, AbiDebugAdapterSpec,
     AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGhostTextContext, AbiGhostTextLine,
-    AbiGitLogEntry, AbiGitStashEntry, AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider,
-    AbiIconFontCategory, AbiIconFontSymbol, AbiLanguageConfiguration,
-    AbiLanguageServerRootStrategy, AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo,
-    AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPdfOpenMode, AbiSection,
-    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
-    AbiStringPair, AbiTerminalConfig, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
-    AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiGitCommandBinding, AbiGitFeatureSpec, AbiGitLogEntry, AbiGitPrefixBinding, AbiGitStashEntry,
+    AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory,
+    AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
+    AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults,
+    AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPdfOpenMode,
+    AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
+    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
+    AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule,
+    UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -83,6 +86,7 @@ pub mod oil_hooks {
     pub const OPEN: &str = "ui.oil.open";
     pub const OPEN_PARENT: &str = "ui.oil.open-parent";
     pub const ACTION: &str = "ui.oil.action";
+    pub const GIT_WORKTREE: &str = "ui.oil.git-worktree";
 }
 
 /// Hook name constants for the browser buffer.
@@ -90,6 +94,29 @@ pub mod browser_hooks {
     pub const OPEN: &str = "ui.browser.open";
     pub const OPEN_POPUP: &str = "ui.browser.open-popup";
     pub const URL: &str = "ui.browser.url";
+    pub const FOCUS_INPUT: &str = "ui.browser.focus-input";
+    pub const SUBMIT: &str = "ui.browser.submit";
+}
+
+/// Hook name constants for generic input surfaces.
+pub mod input_hooks {
+    pub const SUBMIT: &str = "ui.input.submit";
+    pub const CLEAR: &str = "ui.input.clear";
+}
+
+/// Hook name constants for database explorer buffers.
+pub mod db_hooks {
+    pub const CONNECT: &str = "db.connect";
+    pub const DISCONNECT: &str = "db.disconnect";
+    pub const SHOW_TABLES: &str = "db.show-tables";
+    pub const NEW_QUERY_BUFFER: &str = "db.new-query-buffer";
+    pub const EXECUTE_SQL: &str = "db.execute-sql";
+    pub const SHOW_CONNECTIONS: &str = "db.show-connections";
+    pub const SHOW_HISTORY: &str = "db.show-history";
+    pub const SHOW_SNIPPETS: &str = "db.show-snippets";
+    pub const SAVE_SNIPPET: &str = "db.save-snippet";
+    pub const REFRESH_SCHEMA: &str = "db.refresh-schema";
+    pub const ACTIVATE_LINE: &str = "db.activate-line";
 }
 
 /// Hook name constants for terminal buffers.
@@ -125,6 +152,13 @@ pub mod buffer_kinds {
     pub const ACP: &str = "acp";
     pub const BROWSER: &str = "browser";
     pub const CALCULATOR: &str = "calculator";
+    pub const DB_CONNECT: &str = "db-connect";
+    pub const DB_QUERY: &str = "db-query";
+    pub const DB_CONNECTIONS: &str = "db-connections";
+    pub const DB_SCHEMA: &str = "db-schema";
+    pub const DB_HISTORY: &str = "db-history";
+    pub const DB_SNIPPETS: &str = "db-snippets";
+    pub const DB_RESULTS: &str = "db-results";
     pub const PDF: &str = "pdf";
 }
 
@@ -304,70 +338,216 @@ pub struct GhostTextLine {
 
 /// Stable contract implemented by the compiled user extension library.
 pub trait UserLibrary: Send + Sync {
-    fn packages(&self) -> Vec<PluginPackage>;
-    fn themes(&self) -> Vec<Theme>;
-    fn syntax_languages(&self) -> Vec<LanguageConfiguration>;
-    fn language_servers(&self) -> Vec<LanguageServerSpec>;
-    fn debug_adapters(&self) -> Vec<DebugAdapterSpec>;
-    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider>;
-    fn autocomplete_result_limit(&self) -> usize;
-    fn autocomplete_token_icon(&self) -> &'static str;
-    fn hover_providers(&self) -> Vec<HoverProvider>;
-    fn hover_line_limit(&self) -> usize;
-    fn hover_token_icon(&self) -> &'static str;
-    fn hover_signature_icon(&self) -> &'static str;
-    fn acp_clients(&self) -> Vec<AcpClient>;
-    fn acp_client_by_id(&self, id: &str) -> Option<AcpClient>;
-    fn workspace_roots(&self) -> Vec<WorkspaceRoot>;
-    fn terminal_config(&self) -> TerminalConfig;
-    fn commandline_enabled(&self) -> bool;
-    fn pane_config(&self) -> PaneConfig;
-    fn ligature_config(&self) -> LigatureConfig;
-    fn oil_defaults(&self) -> OilDefaults;
-    fn oil_keybindings(&self) -> OilKeybindings;
-    fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction>;
-    fn oil_chord_action(&self, had_prefix: bool, chord: &str) -> Option<OilKeyAction>;
-    fn oil_help_lines(&self) -> Vec<String>;
+    fn packages(&self) -> Vec<PluginPackage> {
+        Vec::new()
+    }
+    fn themes(&self) -> Vec<Theme> {
+        Vec::new()
+    }
+    fn syntax_languages(&self) -> Vec<LanguageConfiguration> {
+        Vec::new()
+    }
+    fn language_servers(&self) -> Vec<LanguageServerSpec> {
+        Vec::new()
+    }
+    fn debug_adapters(&self) -> Vec<DebugAdapterSpec> {
+        Vec::new()
+    }
+    fn autocomplete_providers(&self) -> Vec<AutocompleteProvider> {
+        Vec::new()
+    }
+    fn autocomplete_result_limit(&self) -> usize {
+        8
+    }
+    fn autocomplete_token_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_FORM_TEXTBOX
+    }
+    fn hover_providers(&self) -> Vec<HoverProvider> {
+        Vec::new()
+    }
+    fn hover_line_limit(&self) -> usize {
+        10
+    }
+    fn hover_token_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE
+    }
+    fn hover_signature_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_SIGNATURE
+    }
+    fn acp_clients(&self) -> Vec<AcpClient> {
+        Vec::new()
+    }
+    fn acp_client_by_id(&self, _id: &str) -> Option<AcpClient> {
+        None
+    }
+    fn workspace_roots(&self) -> Vec<WorkspaceRoot> {
+        Vec::new()
+    }
+    fn terminal_config(&self) -> TerminalConfig {
+        #[cfg(target_os = "windows")]
+        return TerminalConfig {
+            program: "powershell.exe".to_owned(),
+            args: vec!["-NoLogo".to_owned()],
+        };
+        #[cfg(not(target_os = "windows"))]
+        return TerminalConfig {
+            program: "bash".to_owned(),
+            args: Vec::new(),
+        };
+    }
+    fn commandline_enabled(&self) -> bool {
+        true
+    }
+    fn pane_config(&self) -> PaneConfig {
+        PaneConfig {
+            golden_ratio: false,
+        }
+    }
+    fn ligature_config(&self) -> LigatureConfig {
+        LigatureConfig { enabled: false }
+    }
+    fn oil_defaults(&self) -> OilDefaults {
+        OilDefaults::default()
+    }
+    fn oil_keybindings(&self) -> OilKeybindings {
+        OilKeybindings::default()
+    }
+    fn oil_keydown_action(&self, _chord: &str) -> Option<OilKeyAction> {
+        None
+    }
+    fn oil_chord_action(&self, _had_prefix: bool, _chord: &str) -> Option<OilKeyAction> {
+        None
+    }
+    fn oil_help_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn oil_directory_sections(
         &self,
-        root: &std::path::Path,
-        entries: &[DirectoryEntry],
-        show_hidden: bool,
-        sort_mode: OilSortMode,
-        trash_enabled: bool,
-    ) -> SectionTree;
-    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str;
-    fn git_status_sections(&self, snapshot: &GitStatusSnapshot) -> SectionTree;
-    fn git_commit_template(&self) -> Vec<String>;
-    fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix>;
+        _root: &std::path::Path,
+        _entries: &[DirectoryEntry],
+        _show_hidden: bool,
+        _sort_mode: OilSortMode,
+        _trash_enabled: bool,
+    ) -> SectionTree {
+        SectionTree::default()
+    }
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
+        label
+    }
+    fn git_status_sections(&self, _snapshot: &GitStatusSnapshot) -> SectionTree {
+        SectionTree::default()
+    }
+    fn git_commit_template(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn git_prefix_for_chord(&self, _chord: &str) -> Option<GitStatusPrefix> {
+        None
+    }
     fn git_command_for_chord(
         &self,
-        prefix: Option<GitStatusPrefix>,
-        chord: &str,
-    ) -> Option<&'static str>;
-    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String>;
-    fn browser_input_hint(&self, url: Option<&str>) -> String;
-    fn browser_url_prompt(&self) -> String;
-    fn browser_url_placeholder(&self) -> String;
-    fn pdf_open_mode(&self) -> PdfOpenMode;
+        _prefix: Option<GitStatusPrefix>,
+        _chord: &str,
+    ) -> Option<&'static str> {
+        None
+    }
+    fn browser_buffer_lines(&self, _url: Option<&str>) -> Vec<String> {
+        Vec::new()
+    }
+    fn browser_input_hint(&self, _url: Option<&str>) -> String {
+        String::new()
+    }
+    fn browser_url_prompt(&self) -> String {
+        String::new()
+    }
+    fn browser_url_placeholder(&self) -> String {
+        String::new()
+    }
+    fn git_feature_spec(&self) -> GitFeatureSpec {
+        GitFeatureSpec::default()
+    }
+    fn oil_feature_spec(&self) -> OilFeatureSpec {
+        OilFeatureSpec::default()
+    }
+    fn browser_feature_spec(&self) -> BrowserFeatureSpec {
+        BrowserFeatureSpec::default()
+    }
+    fn db_feature_spec(&self) -> DbFeatureSpec {
+        DbFeatureSpec::default()
+    }
+    fn terminal_feature_spec(&self) -> TerminalFeatureSpec {
+        TerminalFeatureSpec::default()
+    }
+    fn context_help_specs(&self) -> Vec<ContextHelpSpec> {
+        let mut specs = Vec::new();
+        specs.extend(self.git_feature_spec().context_help_specs());
+
+        let oil = self.oil_feature_spec();
+        if !oil.help.entries.is_empty() {
+            specs.push(oil.help);
+        }
+
+        let browser = self.browser_feature_spec();
+        if !browser.help.entries.is_empty() {
+            specs.push(browser.help);
+        }
+
+        specs.extend(self.db_feature_spec().context_help_specs());
+
+        let terminal = self.terminal_feature_spec();
+        if !terminal.help.entries.is_empty() {
+            specs.push(terminal.help);
+        }
+
+        specs
+    }
+    fn pdf_open_mode(&self) -> PdfOpenMode {
+        PdfOpenMode::Rendered
+    }
     fn headerline_lines(&self, _context: &GhostTextContext<'_>) -> Vec<String> {
         Vec::new()
     }
     fn ghost_text_lines(&self, _context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
         Vec::new()
     }
-    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String;
-    fn statusline_lsp_connected_icon(&self) -> &'static str;
-    fn statusline_lsp_error_icon(&self) -> &'static str;
-    fn statusline_lsp_warning_icon(&self) -> &'static str;
-    fn lsp_diagnostic_icon(&self) -> &'static str;
-    fn lsp_diagnostic_line_limit(&self) -> usize;
-    fn lsp_show_buffer_diagnostics(&self) -> bool;
-    fn gitfringe_token_added(&self) -> &'static str;
-    fn gitfringe_token_modified(&self) -> &'static str;
-    fn gitfringe_token_removed(&self) -> &'static str;
-    fn gitfringe_symbol(&self) -> &'static str;
-    fn icon_symbols(&self) -> &'static [IconFontSymbol];
+    fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
+        format!(
+            " {} | {}:{} ",
+            context.buffer_name, context.line, context.column
+        )
+    }
+    fn statusline_lsp_connected_icon(&self) -> &'static str {
+        editor_icons::symbols::md::MD_LAN_CONNECT
+    }
+    fn statusline_lsp_error_icon(&self) -> &'static str {
+        editor_icons::symbols::cod::COD_ERROR
+    }
+    fn statusline_lsp_warning_icon(&self) -> &'static str {
+        editor_icons::symbols::cod::COD_WARNING
+    }
+    fn lsp_diagnostic_icon(&self) -> &'static str {
+        "●"
+    }
+    fn lsp_diagnostic_line_limit(&self) -> usize {
+        8
+    }
+    fn lsp_show_buffer_diagnostics(&self) -> bool {
+        true
+    }
+    fn gitfringe_token_added(&self) -> &'static str {
+        "git.fringe.added"
+    }
+    fn gitfringe_token_modified(&self) -> &'static str {
+        "git.fringe.modified"
+    }
+    fn gitfringe_token_removed(&self) -> &'static str {
+        "git.fringe.removed"
+    }
+    fn gitfringe_symbol(&self) -> &'static str {
+        "⏽"
+    }
+    fn icon_symbols(&self) -> &'static [IconFontSymbol] {
+        editor_icons::all_symbols()
+    }
     fn supports_plugin_evaluate(&self, kind: &str) -> bool {
         self.plugin_buffer(kind)
             .and_then(|buffer| buffer.evaluate_handler().map(str::to_owned))
@@ -414,13 +594,17 @@ pub trait UserLibrary: Send + Sync {
             .map(|buffer| buffer.key_bindings().to_vec())
             .unwrap_or_default()
     }
-    fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String>;
+    fn run_plugin_buffer_evaluator(&self, _handler: &str, _input: &str) -> Vec<String> {
+        Vec::new()
+    }
     fn plugin_buffer(&self, kind: &str) -> Option<PluginBuffer> {
         self.packages()
             .into_iter()
             .find_map(|package| package.buffer(kind).cloned())
     }
-    fn default_build_command(&self, language: &str) -> Option<String>;
+    fn default_build_command(&self, _language: &str) -> Option<String> {
+        None
+    }
 }
 
 impl PluginBuffer {
@@ -576,6 +760,52 @@ pub mod oil_protocol {
 
 // ─── Shared configuration types ──────────────────────────────────────────────
 
+/// One contextual help row surfaced by a feature.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextHelpEntry {
+    pub chord: String,
+    pub action: String,
+    pub description: String,
+}
+
+impl ContextHelpEntry {
+    /// Creates one contextual help row.
+    pub fn new(
+        chord: impl Into<String>,
+        action: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            chord: chord.into(),
+            action: action.into(),
+            description: description.into(),
+        }
+    }
+}
+
+/// Contextual help exported for a specific feature scope.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextHelpSpec {
+    pub scope: String,
+    pub title: String,
+    pub entries: Vec<ContextHelpEntry>,
+}
+
+impl ContextHelpSpec {
+    /// Creates one contextual help group.
+    pub fn new(
+        scope: impl Into<String>,
+        title: impl Into<String>,
+        entries: Vec<ContextHelpEntry>,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            title: title.into(),
+            entries,
+        }
+    }
+}
+
 /// User-configurable sort mode for oil directory buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OilSortMode {
@@ -632,6 +862,16 @@ pub struct OilDefaults {
     pub trash_enabled: bool,
 }
 
+impl Default for OilDefaults {
+    fn default() -> Self {
+        Self {
+            show_hidden: false,
+            sort_mode: OilSortMode::TypeThenName,
+            trash_enabled: false,
+        }
+    }
+}
+
 /// User-configurable keybindings for the oil directory browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OilKeybindings {
@@ -655,6 +895,31 @@ pub struct OilKeybindings {
     pub create_git_worktree: &'static str,
 }
 
+impl Default for OilKeybindings {
+    fn default() -> Self {
+        Self {
+            open_entry: "Enter",
+            open_vertical_split: "Ctrl+\\",
+            open_horizontal_split: "Ctrl+|",
+            open_new_pane: "Ctrl+t",
+            preview_entry: "Ctrl+p",
+            refresh: "Ctrl+l",
+            close: "Ctrl+c",
+            prefix: "g",
+            open_parent: "-",
+            open_workspace_root: "_",
+            set_root: "`",
+            show_help: "?",
+            cycle_sort: "s",
+            toggle_hidden: ".",
+            toggle_trash: "\\",
+            open_external: "x",
+            set_tab_local_root: "~",
+            create_git_worktree: "wn",
+        }
+    }
+}
+
 /// Git key-chord action prefix kind used for file-scoped git commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatusPrefix {
@@ -671,6 +936,148 @@ pub enum GitStatusPrefix {
     CherryPick,
     Revert,
     Reset,
+}
+
+/// One prefix starter exported by git status feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPrefixBinding {
+    pub chord: String,
+    pub prefix: GitStatusPrefix,
+    pub action: String,
+    pub description: String,
+}
+
+impl GitPrefixBinding {
+    /// Creates one prefix starter binding.
+    pub fn new(
+        chord: impl Into<String>,
+        prefix: GitStatusPrefix,
+        action: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            chord: chord.into(),
+            prefix,
+            action: action.into(),
+            description: description.into(),
+        }
+    }
+}
+
+/// One git command binding resolved from optional prefix + chord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommandBinding {
+    pub prefix: Option<GitStatusPrefix>,
+    pub chord: String,
+    pub command_name: String,
+    pub action: String,
+    pub description: String,
+}
+
+impl GitCommandBinding {
+    /// Creates one git command binding.
+    pub fn new(
+        prefix: Option<GitStatusPrefix>,
+        chord: impl Into<String>,
+        command_name: impl Into<String>,
+        action: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            prefix,
+            chord: chord.into(),
+            command_name: command_name.into(),
+            action: action.into(),
+            description: description.into(),
+        }
+    }
+}
+
+/// Public contract for first-party git workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GitFeatureSpec {
+    pub status_buffer_name: String,
+    pub commit_buffer_name: String,
+    pub branch_popup_title: String,
+    pub prefix_bindings: Vec<GitPrefixBinding>,
+    pub command_bindings: Vec<GitCommandBinding>,
+    pub status_help: ContextHelpSpec,
+    pub view_help: ContextHelpSpec,
+}
+
+impl GitFeatureSpec {
+    /// Resolves status-prefix starter chord.
+    pub fn prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix> {
+        self.prefix_bindings
+            .iter()
+            .find(|binding| binding.chord == chord)
+            .map(|binding| binding.prefix)
+    }
+
+    /// Resolves git command name from optional prefix + chord.
+    pub fn command_for_chord(&self, prefix: Option<GitStatusPrefix>, chord: &str) -> Option<&str> {
+        self.command_bindings
+            .iter()
+            .find(|binding| binding.prefix == prefix && binding.chord == chord)
+            .map(|binding| binding.command_name.as_str())
+    }
+
+    /// Returns contextual help groups contributed by git feature.
+    pub fn context_help_specs(&self) -> Vec<ContextHelpSpec> {
+        vec![self.status_help.clone(), self.view_help.clone()]
+    }
+}
+
+/// Public contract for oil directory workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OilFeatureSpec {
+    pub defaults: OilDefaults,
+    pub keybindings: OilKeybindings,
+    pub help: ContextHelpSpec,
+}
+
+/// Public contract for browser workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrowserFeatureSpec {
+    pub buffer_name: String,
+    pub url_prompt: String,
+    pub url_placeholder: String,
+    pub input_hint: String,
+    pub help: ContextHelpSpec,
+}
+
+/// Public contract for database workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DbFeatureSpec {
+    pub connect_buffer_name: String,
+    pub connections_buffer_name: String,
+    pub schema_buffer_name: String,
+    pub history_buffer_name: String,
+    pub snippets_buffer_name: String,
+    pub results_buffer_name: String,
+    pub execute_chord: String,
+    pub connect_help: ContextHelpSpec,
+    pub query_help: ContextHelpSpec,
+    pub browser_help: ContextHelpSpec,
+}
+
+impl DbFeatureSpec {
+    /// Returns contextual help groups contributed by database feature.
+    pub fn context_help_specs(&self) -> Vec<ContextHelpSpec> {
+        vec![
+            self.connect_help.clone(),
+            self.query_help.clone(),
+            self.browser_help.clone(),
+        ]
+    }
+}
+
+/// Public contract for terminal workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TerminalFeatureSpec {
+    pub buffer_name: String,
+    pub popup_buffer_name: String,
+    pub help: ContextHelpSpec,
 }
 
 /// Autocomplete provider configuration exported by the user library.

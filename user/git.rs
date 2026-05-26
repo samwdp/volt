@@ -1,150 +1,889 @@
 use editor_core::{Section, SectionAction, SectionItem, SectionTree};
 use editor_git::{GitStatusSnapshot, StatusEntry};
-use editor_plugin_api::{PluginAction, PluginCommand, PluginPackage};
+use editor_plugin_api::{
+    ContextHelpEntry, ContextHelpSpec, GitCommandBinding, GitFeatureSpec, GitPrefixBinding,
+    GitStatusPrefix, PluginAction, PluginCommand, PluginPackage, buffer_kinds, git_actions,
+    git_hooks, git_sections,
+};
 
-pub const GIT_STATUS_KIND: &str = "git-status";
-pub const GIT_COMMIT_KIND: &str = "git-commit";
-pub const GIT_DIFF_KIND: &str = "git-diff";
-pub const GIT_LOG_KIND: &str = "git-log";
-pub const GIT_STASH_KIND: &str = "git-stash";
-pub const HOOK_GIT_STATUS_OPEN_POPUP: &str = "ui.git.status-open-popup";
-pub const HOOK_GIT_DIFF_OPEN: &str = "ui.git.diff-open";
-pub const HOOK_GIT_LOG_OPEN: &str = "ui.git.log-open";
-pub const HOOK_GIT_STASH_LIST_OPEN: &str = "ui.git.stash-list-open";
-pub const ACTION_STAGE_FILE: &str = "git.stage-file";
-pub const ACTION_STAGE_ALL: &str = "git.stage-all";
-pub const ACTION_UNSTAGE_FILE: &str = "git.unstage-file";
-pub const ACTION_COMMIT_OPEN: &str = "git.commit-open";
-pub const ACTION_PUSH: &str = "git.push";
-pub const ACTION_SHOW_COMMIT: &str = "git.show-commit";
-pub const ACTION_SHOW_STASH: &str = "git.show-stash";
-pub const SECTION_HEADERS: &str = "git.status.headers";
-pub const SECTION_IN_PROGRESS: &str = "git.status.in-progress";
-pub const SECTION_STAGED: &str = "git.status.staged";
-pub const SECTION_UNSTAGED: &str = "git.status.unstaged";
-pub const SECTION_UNTRACKED: &str = "git.status.untracked";
-pub const SECTION_STASHES: &str = "git.status.stashes";
-pub const SECTION_UNPULLED: &str = "git.status.unpulled";
-pub const SECTION_UNPUSHED: &str = "git.status.unpushed";
-pub const SECTION_REMOTE: &str = "git.status.remote";
+pub const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
+pub const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
+pub const GIT_DIFF_KIND: &str = buffer_kinds::GIT_DIFF;
+pub const GIT_LOG_KIND: &str = buffer_kinds::GIT_LOG;
+pub const GIT_STASH_KIND: &str = buffer_kinds::GIT_STASH;
+pub const SECTION_HEADERS: &str = git_sections::HEADERS;
+pub const SECTION_IN_PROGRESS: &str = git_sections::IN_PROGRESS;
+pub const SECTION_STAGED: &str = git_sections::STAGED;
+pub const SECTION_UNSTAGED: &str = git_sections::UNSTAGED;
+pub const SECTION_UNTRACKED: &str = git_sections::UNTRACKED;
+pub const SECTION_STASHES: &str = git_sections::STASHES;
+pub const SECTION_UNPULLED: &str = git_sections::UNPULLED;
+pub const SECTION_UNPUSHED: &str = git_sections::UNPUSHED;
+pub const SECTION_REMOTE: &str = git_sections::REMOTE;
 pub const SECTION_RECENT: &str = "git.status.recent";
-pub const SECTION_COMMIT: &str = "git.status.commit";
+pub const SECTION_COMMIT: &str = git_sections::COMMIT;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitStatusPrefix {
-    Commit,
-    Push,
-    Fetch,
-    Pull,
-    Branch,
-    Diff,
-    Log,
-    Stash,
-    Merge,
-    Rebase,
-    CherryPick,
-    Revert,
-    Reset,
+fn help_entry(chord: &str, action: &str, description: &str) -> ContextHelpEntry {
+    ContextHelpEntry::new(chord, action, description)
+}
+
+/// Public git feature contract used by first-party and third-party code.
+pub fn feature_spec() -> GitFeatureSpec {
+    GitFeatureSpec {
+        status_buffer_name: "*git-status*".to_owned(),
+        commit_buffer_name: "*git-commit*".to_owned(),
+        branch_popup_title: "Git Branches".to_owned(),
+        prefix_bindings: vec![
+            GitPrefixBinding::new(
+                "c",
+                GitStatusPrefix::Commit,
+                "commit prefix",
+                "Starts the commit prefix (press c again to open commit).",
+            ),
+            GitPrefixBinding::new(
+                "P",
+                GitStatusPrefix::Push,
+                "push prefix",
+                "Starts the push prefix (p pushremote, u upstream).",
+            ),
+            GitPrefixBinding::new(
+                "f",
+                GitStatusPrefix::Fetch,
+                "fetch prefix",
+                "Starts the fetch prefix (p pushremote, u upstream, a all).",
+            ),
+            GitPrefixBinding::new(
+                "F",
+                GitStatusPrefix::Pull,
+                "pull prefix",
+                "Starts the pull prefix (u upstream).",
+            ),
+            GitPrefixBinding::new(
+                "b",
+                GitStatusPrefix::Branch,
+                "branch prefix",
+                "Starts the branch prefix (press b again for branches).",
+            ),
+            GitPrefixBinding::new(
+                "d",
+                GitStatusPrefix::Diff,
+                "diff prefix",
+                "Starts the diff prefix.",
+            ),
+            GitPrefixBinding::new(
+                "l",
+                GitStatusPrefix::Log,
+                "log prefix",
+                "Starts the log prefix.",
+            ),
+            GitPrefixBinding::new(
+                "z",
+                GitStatusPrefix::Stash,
+                "stash prefix",
+                "Starts the stash prefix.",
+            ),
+            GitPrefixBinding::new(
+                "m",
+                GitStatusPrefix::Merge,
+                "merge prefix",
+                "Starts the merge prefix.",
+            ),
+            GitPrefixBinding::new(
+                "r",
+                GitStatusPrefix::Rebase,
+                "rebase prefix",
+                "Starts the rebase prefix.",
+            ),
+            GitPrefixBinding::new(
+                "A",
+                GitStatusPrefix::CherryPick,
+                "cherry-pick prefix",
+                "Starts the cherry-pick prefix.",
+            ),
+            GitPrefixBinding::new(
+                "V",
+                GitStatusPrefix::Revert,
+                "revert prefix",
+                "Starts the revert prefix (V/v/s/a).",
+            ),
+            GitPrefixBinding::new(
+                "X",
+                GitStatusPrefix::Reset,
+                "reset prefix",
+                "Starts the reset prefix (m/s/h/k).",
+            ),
+        ],
+        command_bindings: vec![
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Commit),
+                "c",
+                "git.status.commit",
+                "open commit buffer",
+                "Opens the git commit buffer.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Push),
+                "p",
+                "git.status.push-pushremote",
+                "push to pushremote",
+                "Pushes to the push remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Push),
+                "u",
+                "git.status.push-upstream",
+                "push to upstream",
+                "Pushes to the upstream remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Fetch),
+                "p",
+                "git.status.fetch-pushremote",
+                "fetch pushremote",
+                "Fetches from the push remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Fetch),
+                "u",
+                "git.status.fetch-upstream",
+                "fetch upstream",
+                "Fetches from the upstream remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Fetch),
+                "a",
+                "git.status.fetch-all",
+                "fetch all",
+                "Fetches from all remotes.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Pull),
+                "u",
+                "git.status.pull-upstream",
+                "pull upstream",
+                "Pulls from the upstream remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Branch),
+                "b",
+                "git.status.branches",
+                "open branch picker",
+                "Opens the git branch picker.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Branch),
+                "w",
+                "git.worktree.create",
+                "create worktree",
+                "Creates a git worktree.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "m",
+                "git.status.merge",
+                "merge",
+                "Merges the selected branch.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "e",
+                "git.status.merge-edit",
+                "merge edit",
+                "Merges and edits the commit message.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "n",
+                "git.status.merge-no-commit",
+                "merge no-commit",
+                "Merges without committing.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "s",
+                "git.status.merge-squash",
+                "merge squash",
+                "Squash merges the selected branch.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "p",
+                "git.status.merge-preview",
+                "merge preview",
+                "Previews merge result.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Merge),
+                "a",
+                "git.status.merge-abort",
+                "merge abort",
+                "Aborts merge in progress.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "p",
+                "git.status.rebase-pushremote",
+                "rebase pushremote",
+                "Rebases onto push remote.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "u",
+                "git.status.rebase-upstream",
+                "rebase upstream",
+                "Rebases onto upstream.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "e",
+                "git.status.rebase-onto",
+                "rebase onto",
+                "Rebases onto selected commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "i",
+                "git.status.rebase-interactive",
+                "rebase interactive",
+                "Starts interactive rebase.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "r",
+                "git.status.rebase-continue",
+                "rebase continue",
+                "Continues current rebase.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "s",
+                "git.status.rebase-skip",
+                "rebase skip",
+                "Skips current rebase commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "a",
+                "git.status.rebase-abort",
+                "rebase abort",
+                "Aborts current rebase.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "f",
+                "git.status.rebase-autosquash",
+                "rebase autosquash",
+                "Runs autosquash rebase.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "m",
+                "git.status.rebase-edit-commit",
+                "rebase edit commit",
+                "Edits selected commit during rebase.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "w",
+                "git.status.rebase-reword",
+                "rebase reword",
+                "Rewords selected commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Rebase),
+                "k",
+                "git.status.rebase-remove-commit",
+                "rebase drop commit",
+                "Removes selected commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "d",
+                "git.status.diff-dwim",
+                "diff dwim",
+                "Shows the most relevant diff for point.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "s",
+                "git.status.diff-staged",
+                "diff staged",
+                "Shows staged diff.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "u",
+                "git.status.diff-unstaged",
+                "diff unstaged",
+                "Shows unstaged diff.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "w",
+                "git.diff",
+                "open diff buffer",
+                "Opens the git diff buffer.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "c",
+                "git.status.diff-commit",
+                "diff commit",
+                "Diffs selected commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "t",
+                "git.status.diff-stash",
+                "diff stash",
+                "Diffs selected stash.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "r",
+                "git.status.diff-range",
+                "diff range",
+                "Diffs selected range.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Diff),
+                "p",
+                "git.status.diff-paths",
+                "diff paths",
+                "Diffs selected paths.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "l",
+                "git.log",
+                "open log buffer",
+                "Opens the git log buffer.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "h",
+                "git.status.log-head",
+                "log head",
+                "Shows head history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "u",
+                "git.status.log-related",
+                "log related",
+                "Shows related history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "o",
+                "git.status.log-other",
+                "log other",
+                "Shows other-side history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "L",
+                "git.status.log-branches",
+                "log branches",
+                "Shows branch comparison history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "b",
+                "git.status.log-all-branches",
+                "log all branches",
+                "Shows all branches history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Log),
+                "a",
+                "git.status.log-all",
+                "log all",
+                "Shows complete history.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "z",
+                "git.status.stash-both",
+                "stash both",
+                "Stashes index and worktree.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "i",
+                "git.status.stash-index",
+                "stash index",
+                "Stashes index only.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "w",
+                "git.status.stash-worktree",
+                "stash worktree",
+                "Stashes worktree only.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "x",
+                "git.status.stash-keep-index",
+                "stash keep index",
+                "Stashes while keeping index.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "a",
+                "git.status.stash-apply",
+                "stash apply",
+                "Applies selected stash.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "p",
+                "git.status.stash-pop",
+                "stash pop",
+                "Pops selected stash.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "k",
+                "git.status.stash-drop",
+                "stash drop",
+                "Drops selected stash.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "v",
+                "git.status.stash-show",
+                "stash show",
+                "Shows selected stash.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Stash),
+                "l",
+                "git.stash-list",
+                "open stash list",
+                "Opens the git stash list buffer.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::CherryPick),
+                "A",
+                "git.status.cherry-pick",
+                "cherry-pick",
+                "Cherry-picks selected commit.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::CherryPick),
+                "a",
+                "git.status.cherry-pick-apply",
+                "apply commit at point",
+                "Applies the commit under the cursor.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::CherryPick),
+                "s",
+                "git.status.cherry-pick-skip",
+                "cherry-pick skip",
+                "Skips current cherry-pick.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Revert),
+                "V",
+                "git.status.revert",
+                "revert / continue",
+                "Reverts the selected commit or continues.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Revert),
+                "v",
+                "git.status.revert-no-commit",
+                "revert no-commit / abort",
+                "Reverts without commit or aborts in progress.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Revert),
+                "s",
+                "git.status.revert-skip",
+                "revert skip",
+                "Skips the current revert/cherry-pick.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Revert),
+                "a",
+                "git.status.revert-abort",
+                "revert abort",
+                "Aborts the current revert/cherry-pick.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "m",
+                "git.status.reset-mixed",
+                "reset mixed",
+                "Resets to the selected commit (mixed).",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "s",
+                "git.status.reset-soft",
+                "reset soft",
+                "Resets to the selected commit (soft).",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "h",
+                "git.status.reset-hard",
+                "reset hard",
+                "Resets to the selected commit (hard).",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "k",
+                "git.status.reset-keep",
+                "reset keep",
+                "Resets to the selected commit (keep).",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "i",
+                "git.status.reset-index",
+                "reset index",
+                "Resets index only.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "w",
+                "git.status.reset-worktree",
+                "reset worktree",
+                "Resets worktree only.",
+            ),
+            GitCommandBinding::new(
+                Some(GitStatusPrefix::Reset),
+                "f",
+                "git.status.checkout-file",
+                "checkout file",
+                "Restores file at point.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "g",
+                "git.status.refresh",
+                "refresh status",
+                "Refreshes the git status buffer.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "n",
+                "git.status.next-section",
+                "next section",
+                "Moves to the next git status section.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "p",
+                "git.status.previous-section",
+                "previous section",
+                "Moves to the previous git status section.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "S",
+                "git.status.stage-all",
+                "stage all",
+                "Stages all unstaged changes.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "s",
+                "git.status.stage",
+                "stage file / stage all",
+                "Stages the file under the cursor, or all if none is selected.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "u",
+                "git.status.unstage",
+                "unstage file",
+                "Unstages the file under the cursor.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "U",
+                "git.status.unstage-all",
+                "unstage all",
+                "Unstages all staged changes.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "Y",
+                "git.status.cherry-open",
+                "cherry-pick prefix",
+                "Opens cherry-pick targets.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "a",
+                "git.status.apply-commit",
+                "cherry-pick apply at point",
+                "Applies the commit under the cursor.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "x",
+                "git.status.discard-or-reset",
+                "delete file(s)",
+                "Deletes the file under the cursor or the visual selection.",
+            ),
+            GitCommandBinding::new(
+                None,
+                "q",
+                "buffer.close",
+                "close",
+                "Closes the active git buffer.",
+            ),
+        ],
+        status_help: ContextHelpSpec::new(
+            "GitStatus",
+            "Git Status",
+            vec![
+                help_entry("g", "refresh status", "Refreshes the git status buffer."),
+                help_entry("n", "next section", "Moves to the next git status section."),
+                help_entry(
+                    "p",
+                    "previous section",
+                    "Moves to the previous git status section.",
+                ),
+                help_entry(
+                    "s",
+                    "stage file / stage all",
+                    "Stages the file under the cursor, or all if none is selected.",
+                ),
+                help_entry("S", "stage all", "Stages all unstaged changes."),
+                help_entry("u", "unstage file", "Unstages the file under the cursor."),
+                help_entry("U", "unstage all", "Unstages all staged changes."),
+                help_entry(
+                    "c",
+                    "commit prefix",
+                    "Starts the commit prefix (press c again to open commit).",
+                ),
+                help_entry("c c", "open commit buffer", "Opens the git commit buffer."),
+                help_entry(
+                    "P",
+                    "push prefix",
+                    "Starts the push prefix (p pushremote, u upstream).",
+                ),
+                help_entry("P p", "push to pushremote", "Pushes to the push remote."),
+                help_entry("P u", "push to upstream", "Pushes to the upstream remote."),
+                help_entry(
+                    "f",
+                    "fetch prefix",
+                    "Starts the fetch prefix (p pushremote, u upstream, a all).",
+                ),
+                help_entry("f p", "fetch pushremote", "Fetches from the push remote."),
+                help_entry("f u", "fetch upstream", "Fetches from the upstream remote."),
+                help_entry("f a", "fetch all", "Fetches from all remotes."),
+                help_entry("F", "pull prefix", "Starts the pull prefix (u upstream)."),
+                help_entry("F u", "pull upstream", "Pulls from the upstream remote."),
+                help_entry(
+                    "b",
+                    "branch prefix",
+                    "Starts the branch prefix (press b again for branches).",
+                ),
+                help_entry("b b", "open branch picker", "Opens the git branch picker."),
+                help_entry("b w", "create worktree", "Creates a git worktree."),
+                help_entry("d", "diff prefix", "Starts the diff prefix."),
+                help_entry(
+                    "d d",
+                    "diff dwim",
+                    "Shows the most relevant diff for point.",
+                ),
+                help_entry("d s", "diff staged", "Shows staged diff."),
+                help_entry("d u", "diff unstaged", "Shows unstaged diff."),
+                help_entry("d w", "open diff buffer", "Opens the git diff buffer."),
+                help_entry("d c", "diff commit", "Diffs selected commit."),
+                help_entry("d t", "diff stash", "Diffs selected stash."),
+                help_entry("d r", "diff range", "Diffs selected range."),
+                help_entry("d p", "diff paths", "Diffs selected paths."),
+                help_entry("l", "log prefix", "Starts the log prefix."),
+                help_entry("l l", "open log buffer", "Opens the git log buffer."),
+                help_entry("l h", "log head", "Shows head history."),
+                help_entry("l u", "log related", "Shows related history."),
+                help_entry("l o", "log other", "Shows other-side history."),
+                help_entry("l L", "log branches", "Shows branch comparison history."),
+                help_entry("l b", "log all branches", "Shows all branches history."),
+                help_entry("l a", "log all", "Shows complete history."),
+                help_entry("z", "stash prefix", "Starts the stash prefix."),
+                help_entry("z z", "stash both", "Stashes index and worktree."),
+                help_entry("z i", "stash index", "Stashes index only."),
+                help_entry("z w", "stash worktree", "Stashes worktree only."),
+                help_entry("z x", "stash keep index", "Stashes while keeping index."),
+                help_entry("z a", "stash apply", "Applies selected stash."),
+                help_entry("z p", "stash pop", "Pops selected stash."),
+                help_entry("z k", "stash drop", "Drops selected stash."),
+                help_entry("z v", "stash show", "Shows selected stash."),
+                help_entry("z l", "open stash list", "Opens the git stash list buffer."),
+                help_entry("m", "merge prefix", "Starts the merge prefix."),
+                help_entry("m m", "merge", "Merges the selected branch."),
+                help_entry("m e", "merge edit", "Merges and edits the commit message."),
+                help_entry("m n", "merge no-commit", "Merges without committing."),
+                help_entry("m s", "merge squash", "Squash merges the selected branch."),
+                help_entry("m p", "merge preview", "Previews merge result."),
+                help_entry("m a", "merge abort", "Aborts merge in progress."),
+                help_entry("r", "rebase prefix", "Starts the rebase prefix."),
+                help_entry("r p", "rebase pushremote", "Rebases onto push remote."),
+                help_entry("r u", "rebase upstream", "Rebases onto upstream."),
+                help_entry("r e", "rebase onto", "Rebases onto selected commit."),
+                help_entry("r i", "rebase interactive", "Starts interactive rebase."),
+                help_entry("r r", "rebase continue", "Continues current rebase."),
+                help_entry("r s", "rebase skip", "Skips current rebase commit."),
+                help_entry("r a", "rebase abort", "Aborts current rebase."),
+                help_entry("r f", "rebase autosquash", "Runs autosquash rebase."),
+                help_entry(
+                    "r m",
+                    "rebase edit commit",
+                    "Edits selected commit during rebase.",
+                ),
+                help_entry("r w", "rebase reword", "Rewords selected commit."),
+                help_entry("r k", "rebase drop commit", "Removes selected commit."),
+                help_entry("A", "cherry-pick prefix", "Starts the cherry-pick prefix."),
+                help_entry("A A", "cherry-pick", "Cherry-picks selected commit."),
+                help_entry(
+                    "A a",
+                    "apply commit at point",
+                    "Applies the commit under the cursor.",
+                ),
+                help_entry("A s", "cherry-pick skip", "Skips current cherry-pick."),
+                help_entry("V", "revert prefix", "Starts the revert prefix (V/v/s/a)."),
+                help_entry(
+                    "V V",
+                    "revert / continue",
+                    "Reverts the selected commit or continues.",
+                ),
+                help_entry(
+                    "V v",
+                    "revert no-commit / abort",
+                    "Reverts without commit or aborts in progress.",
+                ),
+                help_entry(
+                    "V s",
+                    "revert skip",
+                    "Skips the current revert/cherry-pick.",
+                ),
+                help_entry(
+                    "V a",
+                    "revert abort",
+                    "Aborts the current revert/cherry-pick.",
+                ),
+                help_entry("X", "reset prefix", "Starts the reset prefix (m/s/h/k)."),
+                help_entry(
+                    "X m",
+                    "reset mixed",
+                    "Resets to the selected commit (mixed).",
+                ),
+                help_entry("X s", "reset soft", "Resets to the selected commit (soft)."),
+                help_entry("X h", "reset hard", "Resets to the selected commit (hard)."),
+                help_entry("X k", "reset keep", "Resets to the selected commit (keep)."),
+                help_entry("X i", "reset index", "Resets index only."),
+                help_entry("X w", "reset worktree", "Resets worktree only."),
+                help_entry("X f", "checkout file", "Restores file at point."),
+                help_entry("q", "close", "Closes the active git buffer."),
+            ],
+        ),
+        view_help: ContextHelpSpec::new(
+            "GitView",
+            "Git View",
+            vec![help_entry(
+                "g",
+                "refresh view",
+                "Refreshes git diff/log/stash buffers.",
+            )],
+        ),
+    }
 }
 
 /// Returns the git status prefix started by a chord, if any.
 pub fn status_prefix_for_chord(chord: &str) -> Option<GitStatusPrefix> {
-    match chord {
-        "c" => Some(GitStatusPrefix::Commit),
-        "P" => Some(GitStatusPrefix::Push),
-        "f" => Some(GitStatusPrefix::Fetch),
-        "F" => Some(GitStatusPrefix::Pull),
-        "b" => Some(GitStatusPrefix::Branch),
-        "d" => Some(GitStatusPrefix::Diff),
-        "l" => Some(GitStatusPrefix::Log),
-        "z" => Some(GitStatusPrefix::Stash),
-        "m" => Some(GitStatusPrefix::Merge),
-        "r" => Some(GitStatusPrefix::Rebase),
-        "A" => Some(GitStatusPrefix::CherryPick),
-        "V" => Some(GitStatusPrefix::Revert),
-        "X" => Some(GitStatusPrefix::Reset),
-        _ => None,
-    }
+    feature_spec().prefix_for_chord(chord)
 }
 
 /// Resolves a git status prefix + chord pair to the command it should execute.
 pub fn status_command_name(prefix: Option<GitStatusPrefix>, chord: &str) -> Option<&'static str> {
-    match (prefix, chord) {
-        (Some(GitStatusPrefix::Commit), "c") => Some("git.status.commit"),
-        (Some(GitStatusPrefix::Push), "p") => Some("git.status.push-pushremote"),
-        (Some(GitStatusPrefix::Push), "u") => Some("git.status.push-upstream"),
-        (Some(GitStatusPrefix::Fetch), "p") => Some("git.status.fetch-pushremote"),
-        (Some(GitStatusPrefix::Fetch), "u") => Some("git.status.fetch-upstream"),
-        (Some(GitStatusPrefix::Fetch), "a") => Some("git.status.fetch-all"),
-        (Some(GitStatusPrefix::Pull), "u") => Some("git.status.pull-upstream"),
-        (Some(GitStatusPrefix::Branch), "b") => Some("git.status.branches"),
-        (Some(GitStatusPrefix::Branch), "w") => Some("git.worktree.create"),
-        (Some(GitStatusPrefix::Merge), "m") => Some("git.status.merge"),
-        (Some(GitStatusPrefix::Merge), "e") => Some("git.status.merge-edit"),
-        (Some(GitStatusPrefix::Merge), "n") => Some("git.status.merge-no-commit"),
-        (Some(GitStatusPrefix::Merge), "s") => Some("git.status.merge-squash"),
-        (Some(GitStatusPrefix::Merge), "p") => Some("git.status.merge-preview"),
-        (Some(GitStatusPrefix::Merge), "a") => Some("git.status.merge-abort"),
-        (Some(GitStatusPrefix::Rebase), "p") => Some("git.status.rebase-pushremote"),
-        (Some(GitStatusPrefix::Rebase), "u") => Some("git.status.rebase-upstream"),
-        (Some(GitStatusPrefix::Rebase), "e") => Some("git.status.rebase-onto"),
-        (Some(GitStatusPrefix::Rebase), "i") => Some("git.status.rebase-interactive"),
-        (Some(GitStatusPrefix::Rebase), "r") => Some("git.status.rebase-continue"),
-        (Some(GitStatusPrefix::Rebase), "s") => Some("git.status.rebase-skip"),
-        (Some(GitStatusPrefix::Rebase), "a") => Some("git.status.rebase-abort"),
-        (Some(GitStatusPrefix::Rebase), "f") => Some("git.status.rebase-autosquash"),
-        (Some(GitStatusPrefix::Rebase), "m") => Some("git.status.rebase-edit-commit"),
-        (Some(GitStatusPrefix::Rebase), "w") => Some("git.status.rebase-reword"),
-        (Some(GitStatusPrefix::Rebase), "k") => Some("git.status.rebase-remove-commit"),
-        (Some(GitStatusPrefix::Diff), "d") => Some("git.status.diff-dwim"),
-        (Some(GitStatusPrefix::Diff), "s") => Some("git.status.diff-staged"),
-        (Some(GitStatusPrefix::Diff), "u") => Some("git.status.diff-unstaged"),
-        (Some(GitStatusPrefix::Diff), "w") => Some("git.diff"),
-        (Some(GitStatusPrefix::Diff), "c") => Some("git.status.diff-commit"),
-        (Some(GitStatusPrefix::Diff), "t") => Some("git.status.diff-stash"),
-        (Some(GitStatusPrefix::Diff), "r") => Some("git.status.diff-range"),
-        (Some(GitStatusPrefix::Diff), "p") => Some("git.status.diff-paths"),
-        (Some(GitStatusPrefix::Log), "l") => Some("git.log"),
-        (Some(GitStatusPrefix::Log), "h") => Some("git.status.log-head"),
-        (Some(GitStatusPrefix::Log), "u") => Some("git.status.log-related"),
-        (Some(GitStatusPrefix::Log), "o") => Some("git.status.log-other"),
-        (Some(GitStatusPrefix::Log), "L") => Some("git.status.log-branches"),
-        (Some(GitStatusPrefix::Log), "b") => Some("git.status.log-all-branches"),
-        (Some(GitStatusPrefix::Log), "a") => Some("git.status.log-all"),
-        (Some(GitStatusPrefix::Stash), "z") => Some("git.status.stash-both"),
-        (Some(GitStatusPrefix::Stash), "i") => Some("git.status.stash-index"),
-        (Some(GitStatusPrefix::Stash), "w") => Some("git.status.stash-worktree"),
-        (Some(GitStatusPrefix::Stash), "x") => Some("git.status.stash-keep-index"),
-        (Some(GitStatusPrefix::Stash), "a") => Some("git.status.stash-apply"),
-        (Some(GitStatusPrefix::Stash), "p") => Some("git.status.stash-pop"),
-        (Some(GitStatusPrefix::Stash), "k") => Some("git.status.stash-drop"),
-        (Some(GitStatusPrefix::Stash), "v") => Some("git.status.stash-show"),
-        (Some(GitStatusPrefix::Stash), "l") => Some("git.stash-list"),
-        (Some(GitStatusPrefix::CherryPick), "A") => Some("git.status.cherry-pick"),
-        (Some(GitStatusPrefix::CherryPick), "a") => Some("git.status.cherry-pick-apply"),
-        (Some(GitStatusPrefix::CherryPick), "s") => Some("git.status.cherry-pick-skip"),
-        (Some(GitStatusPrefix::Revert), "V") => Some("git.status.revert"),
-        (Some(GitStatusPrefix::Revert), "v") => Some("git.status.revert-no-commit"),
-        (Some(GitStatusPrefix::Revert), "s") => Some("git.status.revert-skip"),
-        (Some(GitStatusPrefix::Revert), "a") => Some("git.status.revert-abort"),
-        (Some(GitStatusPrefix::Reset), "m") => Some("git.status.reset-mixed"),
-        (Some(GitStatusPrefix::Reset), "s") => Some("git.status.reset-soft"),
-        (Some(GitStatusPrefix::Reset), "h") => Some("git.status.reset-hard"),
-        (Some(GitStatusPrefix::Reset), "k") => Some("git.status.reset-keep"),
-        (Some(GitStatusPrefix::Reset), "i") => Some("git.status.reset-index"),
-        (Some(GitStatusPrefix::Reset), "w") => Some("git.status.reset-worktree"),
-        (Some(GitStatusPrefix::Reset), "f") => Some("git.status.checkout-file"),
-        (None, "g") => Some("git.status.refresh"),
-        (None, "n") => Some("git.status.next-section"),
-        (None, "p") => Some("git.status.previous-section"),
-        (None, "S") => Some("git.status.stage-all"),
-        (None, "s") => Some("git.status.stage"),
-        (None, "u") => Some("git.status.unstage"),
-        (None, "U") => Some("git.status.unstage-all"),
-        (None, "Y") => Some("git.status.cherry-open"),
-        (None, "a") => Some("git.status.apply-commit"),
-        (None, "x") => Some("git.status.discard-or-reset"),
-        (None, "q") => Some("buffer.close"),
+    let spec = feature_spec();
+    let command = spec.command_for_chord(prefix, chord)?;
+    match command {
+        "git.status.commit" => Some("git.status.commit"),
+        "git.status.push-pushremote" => Some("git.status.push-pushremote"),
+        "git.status.push-upstream" => Some("git.status.push-upstream"),
+        "git.status.fetch-pushremote" => Some("git.status.fetch-pushremote"),
+        "git.status.fetch-upstream" => Some("git.status.fetch-upstream"),
+        "git.status.fetch-all" => Some("git.status.fetch-all"),
+        "git.status.pull-upstream" => Some("git.status.pull-upstream"),
+        "git.status.branches" => Some("git.status.branches"),
+        "git.worktree.create" => Some("git.worktree.create"),
+        "git.status.merge" => Some("git.status.merge"),
+        "git.status.merge-edit" => Some("git.status.merge-edit"),
+        "git.status.merge-no-commit" => Some("git.status.merge-no-commit"),
+        "git.status.merge-squash" => Some("git.status.merge-squash"),
+        "git.status.merge-preview" => Some("git.status.merge-preview"),
+        "git.status.merge-abort" => Some("git.status.merge-abort"),
+        "git.status.rebase-pushremote" => Some("git.status.rebase-pushremote"),
+        "git.status.rebase-upstream" => Some("git.status.rebase-upstream"),
+        "git.status.rebase-onto" => Some("git.status.rebase-onto"),
+        "git.status.rebase-interactive" => Some("git.status.rebase-interactive"),
+        "git.status.rebase-continue" => Some("git.status.rebase-continue"),
+        "git.status.rebase-skip" => Some("git.status.rebase-skip"),
+        "git.status.rebase-abort" => Some("git.status.rebase-abort"),
+        "git.status.rebase-autosquash" => Some("git.status.rebase-autosquash"),
+        "git.status.rebase-edit-commit" => Some("git.status.rebase-edit-commit"),
+        "git.status.rebase-reword" => Some("git.status.rebase-reword"),
+        "git.status.rebase-remove-commit" => Some("git.status.rebase-remove-commit"),
+        "git.status.diff-dwim" => Some("git.status.diff-dwim"),
+        "git.status.diff-staged" => Some("git.status.diff-staged"),
+        "git.status.diff-unstaged" => Some("git.status.diff-unstaged"),
+        "git.diff" => Some("git.diff"),
+        "git.status.diff-commit" => Some("git.status.diff-commit"),
+        "git.status.diff-stash" => Some("git.status.diff-stash"),
+        "git.status.diff-range" => Some("git.status.diff-range"),
+        "git.status.diff-paths" => Some("git.status.diff-paths"),
+        "git.log" => Some("git.log"),
+        "git.status.log-head" => Some("git.status.log-head"),
+        "git.status.log-related" => Some("git.status.log-related"),
+        "git.status.log-other" => Some("git.status.log-other"),
+        "git.status.log-branches" => Some("git.status.log-branches"),
+        "git.status.log-all-branches" => Some("git.status.log-all-branches"),
+        "git.status.log-all" => Some("git.status.log-all"),
+        "git.status.stash-both" => Some("git.status.stash-both"),
+        "git.status.stash-index" => Some("git.status.stash-index"),
+        "git.status.stash-worktree" => Some("git.status.stash-worktree"),
+        "git.status.stash-keep-index" => Some("git.status.stash-keep-index"),
+        "git.status.stash-apply" => Some("git.status.stash-apply"),
+        "git.status.stash-pop" => Some("git.status.stash-pop"),
+        "git.status.stash-drop" => Some("git.status.stash-drop"),
+        "git.status.stash-show" => Some("git.status.stash-show"),
+        "git.stash-list" => Some("git.stash-list"),
+        "git.status.cherry-pick" => Some("git.status.cherry-pick"),
+        "git.status.cherry-pick-apply" => Some("git.status.cherry-pick-apply"),
+        "git.status.cherry-pick-skip" => Some("git.status.cherry-pick-skip"),
+        "git.status.revert" => Some("git.status.revert"),
+        "git.status.revert-no-commit" => Some("git.status.revert-no-commit"),
+        "git.status.revert-skip" => Some("git.status.revert-skip"),
+        "git.status.revert-abort" => Some("git.status.revert-abort"),
+        "git.status.reset-mixed" => Some("git.status.reset-mixed"),
+        "git.status.reset-soft" => Some("git.status.reset-soft"),
+        "git.status.reset-hard" => Some("git.status.reset-hard"),
+        "git.status.reset-keep" => Some("git.status.reset-keep"),
+        "git.status.reset-index" => Some("git.status.reset-index"),
+        "git.status.reset-worktree" => Some("git.status.reset-worktree"),
+        "git.status.checkout-file" => Some("git.status.checkout-file"),
+        "git.status.refresh" => Some("git.status.refresh"),
+        "git.status.next-section" => Some("git.status.next-section"),
+        "git.status.previous-section" => Some("git.status.previous-section"),
+        "git.status.stage-all" => Some("git.status.stage-all"),
+        "git.status.stage" => Some("git.status.stage"),
+        "git.status.unstage" => Some("git.status.unstage"),
+        "git.status.unstage-all" => Some("git.status.unstage-all"),
+        "git.status.cherry-open" => Some("git.status.cherry-open"),
+        "git.status.apply-commit" => Some("git.status.apply-commit"),
+        "git.status.discard-or-reset" => Some("git.status.discard-or-reset"),
+        "buffer.close" => Some("buffer.close"),
         _ => None,
     }
 }
@@ -179,7 +918,7 @@ pub fn package() -> PluginPackage {
             "git.status-open-popup",
             "Opens the git status buffer in the popup window.",
             vec![PluginAction::emit_hook(
-                HOOK_GIT_STATUS_OPEN_POPUP,
+                git_hooks::STATUS_OPEN_POPUP,
                 None::<&str>,
             )],
         ),
@@ -195,18 +934,18 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "git.diff",
             "Opens the git diff buffer.",
-            vec![PluginAction::emit_hook(HOOK_GIT_DIFF_OPEN, None::<&str>)],
+            vec![PluginAction::emit_hook(git_hooks::DIFF_OPEN, None::<&str>)],
         ),
         PluginCommand::new(
             "git.log",
             "Opens the git log buffer.",
-            vec![PluginAction::emit_hook(HOOK_GIT_LOG_OPEN, None::<&str>)],
+            vec![PluginAction::emit_hook(git_hooks::LOG_OPEN, None::<&str>)],
         ),
         PluginCommand::new(
             "git.stash-list",
             "Opens the git stash list buffer.",
             vec![PluginAction::emit_hook(
-                HOOK_GIT_STASH_LIST_OPEN,
+                git_hooks::STASH_LIST_OPEN,
                 None::<&str>,
             )],
         ),
@@ -324,7 +1063,7 @@ fn staged_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .staged()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_UNSTAGE_FILE).with_detail(entry.path());
+            let action = SectionAction::new(git_actions::UNSTAGE_FILE).with_detail(entry.path());
             SectionItem::new(status_entry_label(entry, true)).with_action(action)
         })
         .collect::<Vec<_>>();
@@ -343,7 +1082,7 @@ fn unstaged_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .unstaged()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_STAGE_FILE).with_detail(entry.path());
+            let action = SectionAction::new(git_actions::STAGE_FILE).with_detail(entry.path());
             SectionItem::new(status_entry_label(entry, false)).with_action(action)
         })
         .collect::<Vec<_>>();
@@ -362,7 +1101,7 @@ fn untracked_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .untracked()
         .iter()
         .map(|path| {
-            let action = SectionAction::new(ACTION_STAGE_FILE).with_detail(path);
+            let action = SectionAction::new(git_actions::STAGE_FILE).with_detail(path);
             SectionItem::new(format!(
                 "{} {path}",
                 crate::icon_font::symbols::cod::COD_SYMBOL_FILE
@@ -385,7 +1124,7 @@ fn stashes_section(snapshot: &GitStatusSnapshot) -> Section {
         .stashes()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_SHOW_STASH).with_detail(entry.name());
+            let action = SectionAction::new(git_actions::SHOW_STASH).with_detail(entry.name());
             let name = stash_display_name(entry.name());
             SectionItem::new(format!(
                 "{} {} {}",
@@ -412,7 +1151,7 @@ fn unpulled_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .unpulled()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            let action = SectionAction::new(git_actions::SHOW_COMMIT).with_detail(entry.hash());
             SectionItem::new(format!(
                 "{} {} {}",
                 crate::icon_font::symbols::cod::COD_ARROW_DOWN,
@@ -438,7 +1177,7 @@ fn unpushed_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .unpushed()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            let action = SectionAction::new(git_actions::SHOW_COMMIT).with_detail(entry.hash());
             SectionItem::new(format!(
                 "{} {} {}",
                 crate::icon_font::symbols::cod::COD_ARROW_UP,
@@ -471,7 +1210,7 @@ fn recent_section(snapshot: &GitStatusSnapshot) -> Option<Section> {
         .recent()
         .iter()
         .map(|entry| {
-            let action = SectionAction::new(ACTION_SHOW_COMMIT).with_detail(entry.hash());
+            let action = SectionAction::new(git_actions::SHOW_COMMIT).with_detail(entry.hash());
             SectionItem::new(format!(
                 "{} {} {}",
                 crate::icon_font::symbols::cod::COD_HISTORY,
@@ -502,7 +1241,7 @@ fn commit_section(snapshot: &GitStatusSnapshot) -> Section {
             "{} Press c to commit staged changes.",
             crate::icon_font::symbols::cod::COD_GIT_COMMIT
         ))
-        .with_action(SectionAction::new(ACTION_COMMIT_OPEN))
+        .with_action(SectionAction::new(git_actions::COMMIT_OPEN))
     };
     Section::new(SECTION_COMMIT, git_section_title(SECTION_COMMIT, "Commit")).with_items(vec![item])
 }

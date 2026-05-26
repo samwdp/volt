@@ -21,6 +21,7 @@ pub const COPILOT_ENABLED_DEFAULT: bool = false;
 pub const SERVER_RUST_ANALYZER: &str = "rust-analyzer";
 pub const SERVER_MARKSMAN: &str = "marksman";
 pub const SERVER_CSHARP_LS: &str = "csharp-ls";
+pub const SERVER_ROSLYN_LANGUAGE_SERVER: &str = "roslyn-language-server";
 pub const SERVER_TYPESCRIPT_LANGUAGE_SERVER: &str = "typescript-language-server";
 pub const SERVER_TAILWINDCSS_LANGUAGE_SERVER: &str = "tailwindcss-language-server";
 pub const SERVER_VSCODE_JSON_LANGUAGE_SERVER: &str = "vscode-json-language-server";
@@ -162,6 +163,12 @@ pub fn package() -> PluginPackage {
             "Starts csharp-ls for the active C# or Razor file.",
             HOOK_LSP_START,
             Some(SERVER_CSHARP_LS),
+        ),
+        hook_command(
+            "lsp.start-roslyn-language-server",
+            "Starts roslyn-language-server for the active C#, Razor, or CSHTML file.",
+            HOOK_LSP_START,
+            Some(SERVER_ROSLYN_LANGUAGE_SERVER),
         ),
         hook_command(
             "lsp.start-typescript-language-server",
@@ -1137,6 +1144,17 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             ]),
         ),
         LanguageServerSpec::new(
+            SERVER_ROSLYN_LANGUAGE_SERVER,
+            "csharp",
+            ["cs", "razor", "cshtml"],
+            SERVER_ROSLYN_LANGUAGE_SERVER,
+            ["--stdio", "--autoLoadProjects"],
+        )
+        .with_document_language_ids([("razor", "razor"), ("cshtml", "razor")])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["*.sln", "*.slnx", "*.csproj"])
+        .with_enabled_by_default(false),
+        LanguageServerSpec::new(
             SERVER_TYPESCRIPT_LANGUAGE_SERVER,
             "typescript",
             ["ts", "tsx", "js", "jsx"],
@@ -1714,6 +1732,34 @@ mod tests {
         {
             assert!(settings.as_object().is_some());
         }
+    }
+
+    #[test]
+    fn roslyn_language_server_is_manual_alternative_for_csharp_and_razor() {
+        let server = language_servers()
+            .into_iter()
+            .find(|server| server.id() == SERVER_ROSLYN_LANGUAGE_SERVER)
+            .expect("roslyn-language-server should be registered");
+
+        assert_eq!(server.program(), SERVER_ROSLYN_LANGUAGE_SERVER);
+        assert_eq!(server.args(), ["--stdio", "--autoLoadProjects"]);
+        assert_eq!(server.language_id(), "csharp");
+        assert_eq!(server.document_language_id_for_extension("cs"), "csharp");
+        assert_eq!(server.document_language_id_for_extension("razor"), "razor");
+        assert_eq!(server.document_language_id_for_extension("cshtml"), "razor");
+        assert_eq!(
+            server.root_strategy(),
+            LanguageServerRootStrategy::MarkersOrWorkspace
+        );
+        assert!(
+            server
+                .root_markers()
+                .iter()
+                .any(|marker| marker == "*.slnx"),
+            "roslyn-language-server should recognize solution filters"
+        );
+        assert!(!server.enabled_by_default());
+        assert!(has_command(&package(), "lsp.start-roslyn-language-server"));
     }
 
     #[test]

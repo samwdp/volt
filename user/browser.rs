@@ -1,16 +1,46 @@
 use crate::icon_font::symbols::{cod, md};
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    PluginVimMode, browser_hooks,
+    BrowserFeatureSpec, ContextHelpEntry, ContextHelpSpec, PluginAction, PluginBuffer,
+    PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    browser_hooks, buffer_kinds,
 };
 
-pub const BROWSER_KIND: &str = "browser";
+pub const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 pub const BUFFER_NAME: &str = "*browser*";
-pub const HOOK_BROWSER_URL: &str = "ui.browser.url";
-pub const HOOK_BROWSER_SUBMIT: &str = "ui.browser.submit";
 pub const URL_PROMPT: &str = "URL > ";
 pub const URL_PLACEHOLDER: &str = "https://example.com";
 pub const INPUT_HINT: &str = "Enter/Ctrl+Enter navigate · F12 devtools · click page to browse";
+
+/// Public browser feature contract used by first-party and third-party code.
+pub fn feature_spec() -> BrowserFeatureSpec {
+    BrowserFeatureSpec {
+        buffer_name: BUFFER_NAME.to_owned(),
+        url_prompt: URL_PROMPT.to_owned(),
+        url_placeholder: URL_PLACEHOLDER.to_owned(),
+        input_hint: INPUT_HINT.to_owned(),
+        help: ContextHelpSpec::new(
+            "Browser",
+            "Browser",
+            vec![
+                ContextHelpEntry::new(
+                    "I",
+                    "focus input",
+                    "Focuses browser URL prompt and enters insert mode.",
+                ),
+                ContextHelpEntry::new(
+                    "Enter",
+                    "navigate",
+                    "Navigates using current browser URL prompt text.",
+                ),
+                ContextHelpEntry::new(
+                    "Ctrl+Enter",
+                    "navigate",
+                    "Navigates using current browser URL prompt text.",
+                ),
+            ],
+        ),
+    }
+}
 
 /// Returns the metadata for the browser buffer package.
 pub fn package() -> PluginPackage {
@@ -36,20 +66,20 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "browser.url",
             "Detects a URL in the current buffer and opens it in a split browser buffer.",
-            vec![PluginAction::emit_hook(HOOK_BROWSER_URL, None::<&str>)],
+            vec![PluginAction::emit_hook(browser_hooks::URL, None::<&str>)],
         ),
         PluginCommand::new(
             "browser.focus-input",
             "Focuses the browser input section and enters insert mode.",
             vec![PluginAction::emit_hook(
-                "ui.browser.focus-input",
+                browser_hooks::FOCUS_INPUT,
                 None::<&str>,
             )],
         ),
         PluginCommand::new(
             "browser.navigate",
             "Navigates the browser using the current URL prompt text.",
-            vec![PluginAction::emit_hook(HOOK_BROWSER_SUBMIT, None::<&str>)],
+            vec![PluginAction::emit_hook(browser_hooks::SUBMIT, None::<&str>)],
         ),
     ])
     .with_buffers(vec![

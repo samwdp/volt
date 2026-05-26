@@ -1128,6 +1128,7 @@ const BUFFER_INPUT_HINT_GAP: i32 = 4;
 const BUFFER_INPUT_FOOTER_GAP: i32 = 10;
 const BUFFER_OVERLAY_BOTTOM_GAP: i32 = 8;
 const INPUT_PANEL_VERTICAL_PADDING: i32 = 10;
+const MAX_VISIBLE_INPUT_TEXT_ROWS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct BufferFooterLayout {
@@ -1187,15 +1188,30 @@ pub(super) fn buffer_footer_layout_with_command_line(
             (line_count, input.hint().is_some())
         })
         .unwrap_or((0, false));
-    let input_box_height = if input_text_lines > 0 {
-        (line_height * input_text_lines as i32 + BUFFER_INPUT_BOX_EXTRA_HEIGHT).max(line_height)
+    let input_hint_gap = if has_hint { BUFFER_INPUT_HINT_GAP } else { 0 };
+    let input_footer_gap = if has_hint { BUFFER_INPUT_FOOTER_GAP } else { 0 };
+    let fixed_input_reserved = if input_text_lines > 0 {
+        input_hint_gap + i32::from(has_hint) * line_height + input_footer_gap
     } else {
         0
     };
-    let input_hint_gap = if has_hint { BUFFER_INPUT_HINT_GAP } else { 0 };
-    let input_footer_gap = if has_hint { BUFFER_INPUT_FOOTER_GAP } else { 0 };
+    let min_input_y = body_y + BUFFER_BODY_BOTTOM_PADDING + line_height;
+    let max_input_reserved = statusline_y.saturating_sub(min_input_y).max(0);
+    let capped_input_text_lines = input_text_lines.min(MAX_VISIBLE_INPUT_TEXT_ROWS);
+    let desired_input_box_height = if capped_input_text_lines > 0 {
+        (line_height * capped_input_text_lines as i32 + BUFFER_INPUT_BOX_EXTRA_HEIGHT)
+            .max(line_height)
+    } else {
+        0
+    };
+    let max_input_box_height = max_input_reserved.saturating_sub(fixed_input_reserved);
+    let input_box_height = if input_text_lines > 0 && max_input_box_height > 0 {
+        desired_input_box_height.clamp(line_height.min(max_input_box_height), max_input_box_height)
+    } else {
+        0
+    };
     let input_reserved = if input_text_lines > 0 {
-        input_box_height + input_hint_gap + i32::from(has_hint) * line_height + input_footer_gap
+        input_box_height + fixed_input_reserved
     } else {
         0
     };
@@ -1212,6 +1228,17 @@ pub(super) fn buffer_footer_layout_with_command_line(
         visible_rows,
         pane_bottom: input_y - BUFFER_OVERLAY_BOTTOM_GAP,
     }
+}
+
+fn visible_input_text_rows(input_box_height: i32, line_height: i32) -> usize {
+    if input_box_height <= 0 {
+        return 0;
+    }
+    let rows = input_box_height
+        .saturating_sub(BUFFER_INPUT_BOX_EXTRA_HEIGHT)
+        .max(line_height)
+        .saturating_div(line_height.max(1)) as usize;
+    rows.min(MAX_VISIBLE_INPUT_TEXT_ROWS)
 }
 
 pub(super) fn buffer_visible_rows_for_height(
@@ -2528,6 +2555,9 @@ fn render_buffer_with_view_state(
                 )?;
             }
         }
+        let max_visible_rows = visible_input_text_rows(layout.input_box_height, line_height);
+        let (visible_rows, first_visible_row) =
+            input.visible_wrapped_visual_rows(available_input_cols, max_visible_rows);
         if input.text().is_empty() {
             if let Some(placeholder) = input.placeholder() {
                 let line = format!("{prompt}{placeholder}");
@@ -2536,11 +2566,7 @@ fn render_buffer_with_view_state(
                 draw_text(target, input_x, layout.input_y, prompt, input_foreground)?;
             }
         } else {
-            for (index, line) in input
-                .wrapped_visual_rows(available_input_cols)
-                .into_iter()
-                .enumerate()
-            {
+            for (index, line) in visible_rows.into_iter().enumerate() {
                 let prefix = if index == 0 { prompt } else { &prompt_padding };
                 let rendered = format!("{prefix}{line}");
                 draw_text(
@@ -2576,6 +2602,7 @@ fn render_buffer_with_view_state(
             && matches!(input_mode, InputMode::Insert | InputMode::Replace)
         {
             let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
+            let input_row = input_row.saturating_sub(first_visible_row);
             let input_col = prompt_len + col_in_visual_row;
             let cursor_width = (cell_width / 4).max(2) as u32;
             fill_rounded_rect(
@@ -2602,6 +2629,7 @@ fn render_buffer_with_view_state(
                 cursor_input.clear_selection();
                 let (input_row, col_in_visual_row) =
                     cursor_input.cursor_visual_row_col(available_input_cols);
+                let input_row = input_row.saturating_sub(first_visible_row);
                 fill_rect(
                     target,
                     PixelRectToRect::rect(
@@ -3323,6 +3351,9 @@ pub(super) fn render_input_panel(
             )?;
         }
     }
+    let max_visible_rows = visible_input_text_rows(pane_layout.rect.height() as i32, line_height);
+    let (visible_rows, first_visible_row) =
+        input.visible_wrapped_visual_rows(available_input_cols, max_visible_rows);
     if input.text().is_empty() {
         if let Some(placeholder) = input.placeholder() {
             let line = format!("{prompt}{placeholder}");
@@ -3331,11 +3362,7 @@ pub(super) fn render_input_panel(
             draw_text(target, input_x, input_y, prompt, foreground)?;
         }
     } else {
-        for (index, line) in input
-            .wrapped_visual_rows(available_input_cols)
-            .into_iter()
-            .enumerate()
-        {
+        for (index, line) in visible_rows.into_iter().enumerate() {
             let prefix = if index == 0 { prompt } else { &prompt_padding };
             let rendered = format!("{prefix}{line}");
             draw_text(
@@ -3349,6 +3376,7 @@ pub(super) fn render_input_panel(
     }
     if pane_active && matches!(input_mode, InputMode::Insert | InputMode::Replace) {
         let (input_row, col_in_visual_row) = input.cursor_visual_row_col(available_input_cols);
+        let input_row = input_row.saturating_sub(first_visible_row);
         let input_col = prompt_len + col_in_visual_row;
         let cursor_width = (cell_width / 4).max(2) as u32;
         fill_rounded_rect(
@@ -3369,6 +3397,7 @@ pub(super) fn render_input_panel(
             let cursor_index = cursor_char.min(char_count.saturating_sub(1));
             let (input_row, col_in_visual_row) =
                 input.visual_row_col_for_cursor(cursor_index, available_input_cols);
+            let input_row = input_row.saturating_sub(first_visible_row);
             fill_rounded_rect(
                 target,
                 PixelRectToRect::rect(
@@ -3414,7 +3443,10 @@ pub(super) fn acp_buffer_layout(
     let gap = 8i32;
     let body_width = panel_width.saturating_sub(20);
     let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
-    let input_rows = state.input.visual_line_count(wrap_cols).max(1);
+    let desired_input_rows = state
+        .input
+        .visual_line_count(wrap_cols)
+        .clamp(1, MAX_VISIBLE_INPUT_TEXT_ROWS);
     let footer_line_count = state.footer_pane.line_count().max(1);
     let footer_rows = state
         .footer_pane
@@ -3428,6 +3460,20 @@ pub(super) fn acp_buffer_layout(
     let total_height = layout.pane_bottom.saturating_sub(layout.body_y).max(
         plan_chrome + output_chrome + input_chrome + footer_chrome + gap * 3 + line_height * 4,
     );
+    let min_top_rows = 2i32;
+    let max_input_rows = total_height
+        .saturating_sub(
+            plan_chrome
+                + output_chrome
+                + footer_chrome
+                + footer_rows as i32 * line_height
+                + input_chrome
+                + gap * 3
+                + min_top_rows * line_height,
+        )
+        .saturating_div(line_height.max(1))
+        .max(1) as usize;
+    let input_rows = desired_input_rows.min(max_input_rows);
     let bottom_reserved = input_chrome
         + input_rows as i32 * line_height
         + footer_chrome

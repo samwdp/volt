@@ -1,28 +1,17 @@
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    PluginVimMode,
+    ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, PluginAction, PluginBuffer, PluginCommand,
+    PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, buffer_kinds, db_hooks,
+    input_hooks,
 };
 
 pub const PACKAGE_NAME: &str = "db";
-pub const CONNECT_KIND: &str = "db-connect";
-pub const QUERY_KIND: &str = "db-query";
-pub const CONNECTIONS_KIND: &str = "db-connections";
-pub const SCHEMA_KIND: &str = "db-schema";
-pub const HISTORY_KIND: &str = "db-history";
-pub const SNIPPETS_KIND: &str = "db-snippets";
-pub const RESULTS_KIND: &str = "db-results";
-
-pub const HOOK_CONNECT: &str = "db.connect";
-pub const HOOK_DISCONNECT: &str = "db.disconnect";
-pub const HOOK_SHOW_TABLES: &str = "db.show-tables";
-pub const HOOK_NEW_QUERY_BUFFER: &str = "db.new-query-buffer";
-pub const HOOK_EXECUTE_SQL: &str = "db.execute-sql";
-pub const HOOK_SHOW_CONNECTIONS: &str = "db.show-connections";
-pub const HOOK_SHOW_HISTORY: &str = "db.show-history";
-pub const HOOK_SHOW_SNIPPETS: &str = "db.show-snippets";
-pub const HOOK_SAVE_SNIPPET: &str = "db.save-snippet";
-pub const HOOK_REFRESH_SCHEMA: &str = "db.refresh-schema";
-pub const HOOK_ACTIVATE_LINE: &str = "db.activate-line";
+pub const CONNECT_KIND: &str = buffer_kinds::DB_CONNECT;
+pub const QUERY_KIND: &str = buffer_kinds::DB_QUERY;
+pub const CONNECTIONS_KIND: &str = buffer_kinds::DB_CONNECTIONS;
+pub const SCHEMA_KIND: &str = buffer_kinds::DB_SCHEMA;
+pub const HISTORY_KIND: &str = buffer_kinds::DB_HISTORY;
+pub const SNIPPETS_KIND: &str = buffer_kinds::DB_SNIPPETS;
+pub const RESULTS_KIND: &str = buffer_kinds::DB_RESULTS;
 
 pub const CONNECT_BUFFER_NAME: &str = "*db-connect*";
 pub const CONNECTIONS_BUFFER_NAME: &str = "*db-connections*";
@@ -32,6 +21,59 @@ pub const SNIPPETS_BUFFER_NAME: &str = "*db-snippets*";
 pub const RESULTS_BUFFER_NAME: &str = "*db-results*";
 
 pub const EXECUTE_CHORD: &str = "Ctrl+c Ctrl+c";
+
+/// Public database feature contract used by first-party and third-party code.
+pub fn feature_spec() -> DbFeatureSpec {
+    DbFeatureSpec {
+        connect_buffer_name: CONNECT_BUFFER_NAME.to_owned(),
+        connections_buffer_name: CONNECTIONS_BUFFER_NAME.to_owned(),
+        schema_buffer_name: SCHEMA_BUFFER_NAME.to_owned(),
+        history_buffer_name: HISTORY_BUFFER_NAME.to_owned(),
+        snippets_buffer_name: SNIPPETS_BUFFER_NAME.to_owned(),
+        results_buffer_name: RESULTS_BUFFER_NAME.to_owned(),
+        execute_chord: EXECUTE_CHORD.to_owned(),
+        connect_help: ContextHelpSpec::new(
+            "DbConnect",
+            "DB Connect",
+            vec![
+                ContextHelpEntry::new("Enter", "submit", "Submits database connection prompt."),
+                ContextHelpEntry::new(
+                    "Ctrl+Enter",
+                    "submit",
+                    "Submits database connection prompt.",
+                ),
+            ],
+        ),
+        query_help: ContextHelpSpec::new(
+            "DbQuery",
+            "DB Query",
+            vec![
+                ContextHelpEntry::new(
+                    EXECUTE_CHORD,
+                    "execute sql",
+                    "Executes the current statement or selection.",
+                ),
+                ContextHelpEntry::new(
+                    "Ctrl+s",
+                    "save snippet",
+                    "Saves the current statement or selection as snippet.",
+                ),
+            ],
+        ),
+        browser_help: ContextHelpSpec::new(
+            "DbBrowser",
+            "DB Browser",
+            vec![
+                ContextHelpEntry::new(
+                    "Enter",
+                    "activate line",
+                    "Runs action attached to current database browser line.",
+                ),
+                ContextHelpEntry::new("r", "refresh schema", "Refreshes active schema browser."),
+            ],
+        ),
+    }
+}
 
 /// Returns the database explorer package metadata.
 pub fn package() -> PluginPackage {
@@ -44,75 +86,75 @@ pub fn package() -> PluginPackage {
         hook_command(
             "db.connect",
             "Prompts for a raw database connection string.",
-            HOOK_CONNECT,
+            db_hooks::CONNECT,
             None,
         ),
         hook_command(
             "db.disconnect",
             "Disconnects the active database session.",
-            HOOK_DISCONNECT,
+            db_hooks::DISCONNECT,
             None,
         ),
         hook_command(
             "db.show-tables",
             "Opens the schema explorer for the active database session.",
-            HOOK_SHOW_TABLES,
+            db_hooks::SHOW_TABLES,
             None,
         ),
         hook_command(
             "db.new-query-buffer",
             "Creates a SQL query buffer bound to the active database session.",
-            HOOK_NEW_QUERY_BUFFER,
+            db_hooks::NEW_QUERY_BUFFER,
             None,
         ),
         hook_command(
             "db.execute-sql",
             "Executes the selected SQL or current statement in the active DB query buffer.",
-            HOOK_EXECUTE_SQL,
+            db_hooks::EXECUTE_SQL,
             None,
         ),
         hook_command(
             "db.show-connections",
             "Shows active and remembered database connections.",
-            HOOK_SHOW_CONNECTIONS,
+            db_hooks::SHOW_CONNECTIONS,
             None,
         ),
         hook_command(
             "db.show-history",
             "Shows recent executed SQL for active database sessions.",
-            HOOK_SHOW_HISTORY,
+            db_hooks::SHOW_HISTORY,
             None,
         ),
         hook_command(
             "db.show-snippets",
             "Shows saved SQL snippets.",
-            HOOK_SHOW_SNIPPETS,
+            db_hooks::SHOW_SNIPPETS,
             None,
         ),
         hook_command(
             "db.save-snippet",
             "Saves the selected SQL or current statement as a snippet.",
-            HOOK_SAVE_SNIPPET,
+            db_hooks::SAVE_SNIPPET,
             None,
         ),
         hook_command(
             "db.refresh-schema",
             "Refreshes schema cache for the active database session.",
-            HOOK_REFRESH_SCHEMA,
+            db_hooks::REFRESH_SCHEMA,
             None,
         ),
         hook_command(
             "db.activate-line",
             "Runs the action attached to the current database browser line.",
-            HOOK_ACTIVATE_LINE,
+            db_hooks::ACTIVATE_LINE,
             None,
         ),
     ])
     .with_buffers(vec![
         PluginBuffer::new(CONNECT_KIND, connect_buffer_lines()).with_key_bindings(vec![
-            PluginKeyBinding::new("Enter", "ui.input.submit", PluginKeymapScope::Popup)
+            PluginKeyBinding::new("Enter", input_hooks::SUBMIT, PluginKeymapScope::Popup)
                 .with_vim_mode(PluginVimMode::Insert),
-            PluginKeyBinding::new("Ctrl+Enter", "ui.input.submit", PluginKeymapScope::Popup)
+            PluginKeyBinding::new("Ctrl+Enter", input_hooks::SUBMIT, PluginKeymapScope::Popup)
                 .with_vim_mode(PluginVimMode::Insert),
         ]),
         PluginBuffer::new(QUERY_KIND, query_buffer_lines()).with_key_bindings(vec![

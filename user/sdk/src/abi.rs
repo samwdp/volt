@@ -18,10 +18,12 @@ use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 use serde_json::Number;
 
 use crate::{
-    AcpClient, AutocompleteProvider, AutocompleteProviderItem, GhostTextContext, GhostTextLine,
-    GitStatusPrefix, HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode,
-    StatuslineContext, TerminalConfig, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, AutocompleteProviderItem, BrowserFeatureSpec,
+    ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, GhostTextContext, GhostTextLine,
+    GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix, HoverProvider,
+    HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults, OilFeatureSpec,
+    OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, StatuslineContext,
+    TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -905,6 +907,321 @@ impl From<AbiGitStatusPrefix> for GitStatusPrefix {
             AbiGitStatusPrefix::CherryPick => Self::CherryPick,
             AbiGitStatusPrefix::Revert => Self::Revert,
             AbiGitStatusPrefix::Reset => Self::Reset,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiContextHelpEntry {
+    pub chord: RString,
+    pub action: RString,
+    pub description: RString,
+}
+
+impl From<ContextHelpEntry> for AbiContextHelpEntry {
+    fn from(value: ContextHelpEntry) -> Self {
+        Self {
+            chord: value.chord.into(),
+            action: value.action.into(),
+            description: value.description.into(),
+        }
+    }
+}
+
+impl From<AbiContextHelpEntry> for ContextHelpEntry {
+    fn from(value: AbiContextHelpEntry) -> Self {
+        Self {
+            chord: value.chord.into_string(),
+            action: value.action.into_string(),
+            description: value.description.into_string(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiContextHelpSpec {
+    pub scope: RString,
+    pub title: RString,
+    pub entries: RVec<AbiContextHelpEntry>,
+}
+
+impl From<ContextHelpSpec> for AbiContextHelpSpec {
+    fn from(value: ContextHelpSpec) -> Self {
+        Self {
+            scope: value.scope.into(),
+            title: value.title.into(),
+            entries: value
+                .entries
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+}
+
+impl From<AbiContextHelpSpec> for ContextHelpSpec {
+    fn from(value: AbiContextHelpSpec) -> Self {
+        Self {
+            scope: value.scope.into_string(),
+            title: value.title.into_string(),
+            entries: value.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiGitPrefixBinding {
+    pub chord: RString,
+    pub prefix: AbiGitStatusPrefix,
+    pub action: RString,
+    pub description: RString,
+}
+
+impl From<GitPrefixBinding> for AbiGitPrefixBinding {
+    fn from(value: GitPrefixBinding) -> Self {
+        Self {
+            chord: value.chord.into(),
+            prefix: value.prefix.into(),
+            action: value.action.into(),
+            description: value.description.into(),
+        }
+    }
+}
+
+impl From<AbiGitPrefixBinding> for GitPrefixBinding {
+    fn from(value: AbiGitPrefixBinding) -> Self {
+        Self {
+            chord: value.chord.into_string(),
+            prefix: value.prefix.into(),
+            action: value.action.into_string(),
+            description: value.description.into_string(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiGitCommandBinding {
+    pub prefix: ROption<AbiGitStatusPrefix>,
+    pub chord: RString,
+    pub command_name: RString,
+    pub action: RString,
+    pub description: RString,
+}
+
+impl From<GitCommandBinding> for AbiGitCommandBinding {
+    fn from(value: GitCommandBinding) -> Self {
+        Self {
+            prefix: value.prefix.map(Into::into).into(),
+            chord: value.chord.into(),
+            command_name: value.command_name.into(),
+            action: value.action.into(),
+            description: value.description.into(),
+        }
+    }
+}
+
+impl From<AbiGitCommandBinding> for GitCommandBinding {
+    fn from(value: AbiGitCommandBinding) -> Self {
+        Self {
+            prefix: value.prefix.into_option().map(Into::into),
+            chord: value.chord.into_string(),
+            command_name: value.command_name.into_string(),
+            action: value.action.into_string(),
+            description: value.description.into_string(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiGitFeatureSpec {
+    pub status_buffer_name: RString,
+    pub commit_buffer_name: RString,
+    pub branch_popup_title: RString,
+    pub prefix_bindings: RVec<AbiGitPrefixBinding>,
+    pub command_bindings: RVec<AbiGitCommandBinding>,
+    pub status_help: AbiContextHelpSpec,
+    pub view_help: AbiContextHelpSpec,
+}
+
+impl From<GitFeatureSpec> for AbiGitFeatureSpec {
+    fn from(value: GitFeatureSpec) -> Self {
+        Self {
+            status_buffer_name: value.status_buffer_name.into(),
+            commit_buffer_name: value.commit_buffer_name.into(),
+            branch_popup_title: value.branch_popup_title.into(),
+            prefix_bindings: value
+                .prefix_bindings
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+            command_bindings: value
+                .command_bindings
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+            status_help: value.status_help.into(),
+            view_help: value.view_help.into(),
+        }
+    }
+}
+
+impl From<AbiGitFeatureSpec> for GitFeatureSpec {
+    fn from(value: AbiGitFeatureSpec) -> Self {
+        Self {
+            status_buffer_name: value.status_buffer_name.into_string(),
+            commit_buffer_name: value.commit_buffer_name.into_string(),
+            branch_popup_title: value.branch_popup_title.into_string(),
+            prefix_bindings: value.prefix_bindings.into_iter().map(Into::into).collect(),
+            command_bindings: value.command_bindings.into_iter().map(Into::into).collect(),
+            status_help: value.status_help.into(),
+            view_help: value.view_help.into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiOilFeatureSpec {
+    pub defaults: AbiOilDefaults,
+    pub keybindings: AbiOilKeybindings,
+    pub help: AbiContextHelpSpec,
+}
+
+impl From<OilFeatureSpec> for AbiOilFeatureSpec {
+    fn from(value: OilFeatureSpec) -> Self {
+        Self {
+            defaults: value.defaults.into(),
+            keybindings: value.keybindings.into(),
+            help: value.help.into(),
+        }
+    }
+}
+
+impl From<AbiOilFeatureSpec> for OilFeatureSpec {
+    fn from(value: AbiOilFeatureSpec) -> Self {
+        Self {
+            defaults: value.defaults.into(),
+            keybindings: value.keybindings.into(),
+            help: value.help.into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiBrowserFeatureSpec {
+    pub buffer_name: RString,
+    pub url_prompt: RString,
+    pub url_placeholder: RString,
+    pub input_hint: RString,
+    pub help: AbiContextHelpSpec,
+}
+
+impl From<BrowserFeatureSpec> for AbiBrowserFeatureSpec {
+    fn from(value: BrowserFeatureSpec) -> Self {
+        Self {
+            buffer_name: value.buffer_name.into(),
+            url_prompt: value.url_prompt.into(),
+            url_placeholder: value.url_placeholder.into(),
+            input_hint: value.input_hint.into(),
+            help: value.help.into(),
+        }
+    }
+}
+
+impl From<AbiBrowserFeatureSpec> for BrowserFeatureSpec {
+    fn from(value: AbiBrowserFeatureSpec) -> Self {
+        Self {
+            buffer_name: value.buffer_name.into_string(),
+            url_prompt: value.url_prompt.into_string(),
+            url_placeholder: value.url_placeholder.into_string(),
+            input_hint: value.input_hint.into_string(),
+            help: value.help.into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiDbFeatureSpec {
+    pub connect_buffer_name: RString,
+    pub connections_buffer_name: RString,
+    pub schema_buffer_name: RString,
+    pub history_buffer_name: RString,
+    pub snippets_buffer_name: RString,
+    pub results_buffer_name: RString,
+    pub execute_chord: RString,
+    pub connect_help: AbiContextHelpSpec,
+    pub query_help: AbiContextHelpSpec,
+    pub browser_help: AbiContextHelpSpec,
+}
+
+impl From<DbFeatureSpec> for AbiDbFeatureSpec {
+    fn from(value: DbFeatureSpec) -> Self {
+        Self {
+            connect_buffer_name: value.connect_buffer_name.into(),
+            connections_buffer_name: value.connections_buffer_name.into(),
+            schema_buffer_name: value.schema_buffer_name.into(),
+            history_buffer_name: value.history_buffer_name.into(),
+            snippets_buffer_name: value.snippets_buffer_name.into(),
+            results_buffer_name: value.results_buffer_name.into(),
+            execute_chord: value.execute_chord.into(),
+            connect_help: value.connect_help.into(),
+            query_help: value.query_help.into(),
+            browser_help: value.browser_help.into(),
+        }
+    }
+}
+
+impl From<AbiDbFeatureSpec> for DbFeatureSpec {
+    fn from(value: AbiDbFeatureSpec) -> Self {
+        Self {
+            connect_buffer_name: value.connect_buffer_name.into_string(),
+            connections_buffer_name: value.connections_buffer_name.into_string(),
+            schema_buffer_name: value.schema_buffer_name.into_string(),
+            history_buffer_name: value.history_buffer_name.into_string(),
+            snippets_buffer_name: value.snippets_buffer_name.into_string(),
+            results_buffer_name: value.results_buffer_name.into_string(),
+            execute_chord: value.execute_chord.into_string(),
+            connect_help: value.connect_help.into(),
+            query_help: value.query_help.into(),
+            browser_help: value.browser_help.into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiTerminalFeatureSpec {
+    pub buffer_name: RString,
+    pub popup_buffer_name: RString,
+    pub help: AbiContextHelpSpec,
+}
+
+impl From<TerminalFeatureSpec> for AbiTerminalFeatureSpec {
+    fn from(value: TerminalFeatureSpec) -> Self {
+        Self {
+            buffer_name: value.buffer_name.into(),
+            popup_buffer_name: value.popup_buffer_name.into(),
+            help: value.help.into(),
+        }
+    }
+}
+
+impl From<AbiTerminalFeatureSpec> for TerminalFeatureSpec {
+    fn from(value: AbiTerminalFeatureSpec) -> Self {
+        Self {
+            buffer_name: value.buffer_name.into_string(),
+            popup_buffer_name: value.popup_buffer_name.into_string(),
+            help: value.help.into(),
         }
     }
 }
@@ -1944,6 +2261,12 @@ pub struct UserLibraryModule {
     pub browser_input_hint: extern "C" fn(ROption<RString>) -> RString,
     pub browser_url_prompt: extern "C" fn() -> RString,
     pub browser_url_placeholder: extern "C" fn() -> RString,
+    pub git_feature_spec: extern "C" fn() -> AbiGitFeatureSpec,
+    pub oil_feature_spec: extern "C" fn() -> AbiOilFeatureSpec,
+    pub browser_feature_spec: extern "C" fn() -> AbiBrowserFeatureSpec,
+    pub db_feature_spec: extern "C" fn() -> AbiDbFeatureSpec,
+    pub terminal_feature_spec: extern "C" fn() -> AbiTerminalFeatureSpec,
+    pub context_help_specs: extern "C" fn() -> RVec<AbiContextHelpSpec>,
     pub statusline_render: extern "C" fn(AbiStatuslineContext) -> RString,
     pub statusline_lsp_connected_icon: extern "C" fn() -> RStr<'static>,
     pub statusline_lsp_error_icon: extern "C" fn() -> RStr<'static>,
@@ -1962,8 +2285,9 @@ pub struct UserLibraryModule {
     pub ghost_text_lines: extern "C" fn(AbiGhostTextContext) -> RVec<AbiGhostTextLine>,
     pub headerline_lines: extern "C" fn(AbiGhostTextContext) -> RVec<RString>,
     pub pdf_open_mode: extern "C" fn() -> AbiPdfOpenMode,
-    #[sabi(last_prefix_field)]
     pub pane_config_v1: extern "C" fn() -> AbiPaneConfig,
+    #[sabi(last_prefix_field)]
+    pub reserved_feature_contracts_v2: extern "C" fn() -> bool,
 }
 
 impl RootModule for UserLibraryModuleRef {

@@ -16,6 +16,7 @@ pub struct PickerItem {
     id: String,
     label: String,
     detail: String,
+    search_text: String,
     preview: Option<String>,
     fringe: Option<String>,
 }
@@ -28,9 +29,11 @@ impl PickerItem {
         detail: impl Into<String>,
         preview: Option<impl Into<String>>,
     ) -> Self {
+        let label = label.into();
         Self {
             id: id.into(),
-            label: label.into(),
+            search_text: label.clone(),
+            label,
             detail: detail.into(),
             preview: preview.map(Into::into),
             fringe: None,
@@ -52,6 +55,12 @@ impl PickerItem {
         &self.detail
     }
 
+    /// Overrides the text used for fuzzy matching without changing the visible label.
+    pub fn with_search_text(mut self, search_text: impl Into<String>) -> Self {
+        self.search_text = search_text.into();
+        self
+    }
+
     /// Returns the preview content, when available.
     pub fn preview(&self) -> Option<&str> {
         self.preview.as_deref()
@@ -66,6 +75,10 @@ impl PickerItem {
     /// Returns the left-fringe content, when available.
     pub fn fringe(&self) -> Option<&str> {
         self.fringe.as_deref()
+    }
+
+    fn search_text(&self) -> &str {
+        &self.search_text
     }
 }
 
@@ -270,16 +283,16 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
         });
     }
 
-    let label_chars: Vec<char> = item.label().chars().collect();
-    let label_lower = item.label().to_ascii_lowercase();
+    let search_chars: Vec<char> = item.search_text().chars().collect();
+    let search_lower = item.search_text().to_ascii_lowercase();
     let mut score = 0i64;
     let mut matched_positions = Vec::new();
 
     for (term_index, term) in query_terms.iter().enumerate() {
-        let matched = match_term(term, &label_chars, &label_lower)?;
+        let matched = match_term(term, &search_chars, &search_lower)?;
         score += matched.score;
-        score += best_contiguous_substring_bonus(term, &label_chars, &label_lower);
-        if term_index == 0 && label_lower.starts_with(term) {
+        score += best_contiguous_substring_bonus(term, &search_chars, &search_lower);
+        if term_index == 0 && search_lower.starts_with(term) {
             score += 24;
         }
         matched_positions.extend(matched.matched_positions);
@@ -287,7 +300,7 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
 
     matched_positions.sort_unstable();
     matched_positions.dedup();
-    score -= label_chars.len() as i64;
+    score -= search_chars.len() as i64;
 
     Some(PickerMatch {
         item: item.clone(),
@@ -590,6 +603,22 @@ mod tests {
                 .selected()
                 .and_then(|selected| selected.item().fringe()),
             Some("icon")
+        );
+    }
+
+    #[test]
+    fn custom_search_text_matches_hidden_path_segments() {
+        let mut session = PickerSession::new(
+            "Files",
+            vec![item("main", "main.rs").with_search_text("src/deep/nested/main.rs")],
+        );
+
+        session.set_query("deep nested");
+
+        assert_eq!(session.match_count(), 1);
+        assert_eq!(
+            session.selected().map(|matched| matched.item().label()),
+            Some("main.rs")
         );
     }
 }

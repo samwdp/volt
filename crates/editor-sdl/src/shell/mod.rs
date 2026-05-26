@@ -99,9 +99,9 @@ use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
     OilDefaults, OilKeyAction, PdfOpenMode, PluginBufferSectionUpdate, PluginBufferSections,
-    autocomplete_hooks, browser_hooks, buffer_kinds, git_actions, git_hooks, git_sections,
-    hover_hooks, image_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
-    terminal_hooks,
+    autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks,
+    git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
+    pdf_hooks, plugin_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -137,6 +137,34 @@ use sdl3::{
     video::{Window, WindowContext},
 };
 use sdl3_ttf_sys as _;
+
+#[derive(Debug, Clone)]
+struct StartupTrace {
+    origin: Instant,
+    last: Instant,
+}
+
+impl StartupTrace {
+    fn enabled() -> bool {
+        std::env::var_os("VOLT_STARTUP_TRACE").is_some()
+    }
+
+    fn new() -> Option<Self> {
+        let now = Instant::now();
+        Self::enabled().then_some(Self {
+            origin: now,
+            last: now,
+        })
+    }
+
+    fn mark(&mut self, stage: &str) {
+        let now = Instant::now();
+        let delta_ms = now.duration_since(self.last).as_secs_f64() * 1000.0;
+        let total_ms = now.duration_since(self.origin).as_secs_f64() * 1000.0;
+        eprintln!("[startup] {stage}: +{delta_ms:.1}ms total={total_ms:.1}ms");
+        self.last = now;
+    }
+}
 
 fn runtime_pane_rects(
     user_library: &dyn UserLibrary,
@@ -254,13 +282,13 @@ const ACP_BUFFER_KIND: &str = buffer_kinds::ACP;
 const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 const PDF_BUFFER_KIND: &str = buffer_kinds::PDF;
 const SQLS_SERVER_ID: &str = "sqls";
-const DB_CONNECT_KIND: &str = "db-connect";
-const DB_QUERY_KIND: &str = "db-query";
-const DB_CONNECTIONS_KIND: &str = "db-connections";
-const DB_SCHEMA_KIND: &str = "db-schema";
-const DB_HISTORY_KIND: &str = "db-history";
-const DB_SNIPPETS_KIND: &str = "db-snippets";
-const DB_RESULTS_KIND: &str = "db-results";
+const DB_CONNECT_KIND: &str = buffer_kinds::DB_CONNECT;
+const DB_QUERY_KIND: &str = buffer_kinds::DB_QUERY;
+const DB_CONNECTIONS_KIND: &str = buffer_kinds::DB_CONNECTIONS;
+const DB_SCHEMA_KIND: &str = buffer_kinds::DB_SCHEMA;
+const DB_HISTORY_KIND: &str = buffer_kinds::DB_HISTORY;
+const DB_SNIPPETS_KIND: &str = buffer_kinds::DB_SNIPPETS;
+const DB_RESULTS_KIND: &str = buffer_kinds::DB_RESULTS;
 const DB_CONNECT_BUFFER_NAME: &str = "*db-connect*";
 const DB_CONNECTIONS_BUFFER_NAME: &str = "*db-connections*";
 const DB_SCHEMA_BUFFER_NAME: &str = "*db-schema*";
@@ -270,8 +298,8 @@ const DB_RESULTS_BUFFER_NAME: &str = "*db-results*";
 const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
-const HOOK_BROWSER_FOCUS_INPUT: &str = "ui.browser.focus-input";
-const HOOK_BROWSER_SUBMIT: &str = "ui.browser.submit";
+const HOOK_BROWSER_FOCUS_INPUT: &str = browser_hooks::FOCUS_INPUT;
+const HOOK_BROWSER_SUBMIT: &str = browser_hooks::SUBMIT;
 const HOOK_TERMINAL_OPEN_POPUP: &str = terminal_hooks::OPEN_POPUP;
 const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
@@ -320,18 +348,18 @@ const HOOK_GIT_STASH_LIST_OPEN: &str = git_hooks::STASH_LIST_OPEN;
 const HOOK_OIL_OPEN: &str = oil_hooks::OPEN;
 const HOOK_OIL_OPEN_PARENT: &str = oil_hooks::OPEN_PARENT;
 const HOOK_OIL_ACTION: &str = oil_hooks::ACTION;
-const HOOK_OIL_GIT_WORKTREE: &str = "ui.oil.git-worktree";
-const HOOK_DB_CONNECT: &str = "db.connect";
-const HOOK_DB_DISCONNECT: &str = "db.disconnect";
-const HOOK_DB_SHOW_TABLES: &str = "db.show-tables";
-const HOOK_DB_NEW_QUERY_BUFFER: &str = "db.new-query-buffer";
-const HOOK_DB_EXECUTE_SQL: &str = "db.execute-sql";
-const HOOK_DB_SHOW_CONNECTIONS: &str = "db.show-connections";
-const HOOK_DB_SHOW_HISTORY: &str = "db.show-history";
-const HOOK_DB_SHOW_SNIPPETS: &str = "db.show-snippets";
-const HOOK_DB_SAVE_SNIPPET: &str = "db.save-snippet";
-const HOOK_DB_REFRESH_SCHEMA: &str = "db.refresh-schema";
-const HOOK_DB_ACTIVATE_LINE: &str = "db.activate-line";
+const HOOK_OIL_GIT_WORKTREE: &str = oil_hooks::GIT_WORKTREE;
+const HOOK_DB_CONNECT: &str = db_hooks::CONNECT;
+const HOOK_DB_DISCONNECT: &str = db_hooks::DISCONNECT;
+const HOOK_DB_SHOW_TABLES: &str = db_hooks::SHOW_TABLES;
+const HOOK_DB_NEW_QUERY_BUFFER: &str = db_hooks::NEW_QUERY_BUFFER;
+const HOOK_DB_EXECUTE_SQL: &str = db_hooks::EXECUTE_SQL;
+const HOOK_DB_SHOW_CONNECTIONS: &str = db_hooks::SHOW_CONNECTIONS;
+const HOOK_DB_SHOW_HISTORY: &str = db_hooks::SHOW_HISTORY;
+const HOOK_DB_SHOW_SNIPPETS: &str = db_hooks::SHOW_SNIPPETS;
+const HOOK_DB_SAVE_SNIPPET: &str = db_hooks::SAVE_SNIPPET;
+const HOOK_DB_REFRESH_SCHEMA: &str = db_hooks::REFRESH_SCHEMA;
+const HOOK_DB_ACTIVATE_LINE: &str = db_hooks::ACTIVATE_LINE;
 const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
@@ -384,8 +412,8 @@ const LSP_LOG_BUFFER_PREFIX: &str = "*lsp-log ";
 const LSP_METADATA_BUFFER_KIND: &str = "lsp-metadata";
 const OIL_PREVIEW_KIND: &str = "oil-preview";
 const OIL_HELP_KIND: &str = "oil-help";
-const HOOK_INPUT_SUBMIT: &str = "ui.input.submit";
-const HOOK_INPUT_CLEAR: &str = "ui.input.clear";
+const HOOK_INPUT_SUBMIT: &str = input_hooks::SUBMIT;
+const HOOK_INPUT_CLEAR: &str = input_hooks::CLEAR;
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
@@ -399,6 +427,8 @@ const GIT_LOG_LIMIT: usize = 10;
 const GIT_LOG_VIEW_LIMIT: usize = 200;
 const DEFAULT_WORKSPACE_ROOT_SEARCH_DEPTH: usize = 6;
 const BUNDLED_ICON_FONT_SEARCH_DEPTH: usize = 6;
+const DEFERRED_ICON_FONT_IDLE_DELAY: Duration = Duration::from_millis(1500);
+const DEFERRED_EMOJI_FONT_IDLE_DELAY: Duration = Duration::from_secs(5);
 const BUNDLED_ICON_FONT_DIR_CANDIDATES: &[&[&str]] =
     &[&["crates", "volt", "assets", "font"], &["assets", "font"]];
 const BUNDLED_ICON_FONT_FILES: &[&str] = &[
@@ -655,6 +685,12 @@ struct FontSet<'ttf> {
     cell_width: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionalFontLoadMode {
+    StartupPrimaryOnly,
+    Eager,
+}
+
 impl<'ttf> FontSet<'ttf> {
     fn new(init: FontSetInit<'ttf>) -> Self {
         let icon_fonts = init
@@ -744,6 +780,21 @@ impl<'ttf> FontSet<'ttf> {
         &self.icon_fonts
     }
 
+    fn push_icon_font(
+        &mut self,
+        name: String,
+        font: Font<'ttf>,
+        raster_font: RasterFont,
+        pixel_size: f32,
+    ) {
+        self.icon_fonts.push(IconFont {
+            name,
+            font,
+            raster_font,
+            pixel_size,
+        });
+    }
+
     fn cell_width(&self) -> i32 {
         self.cell_width
     }
@@ -783,6 +834,21 @@ impl<'ttf> FontSet<'ttf> {
         } else {
             false
         }
+    }
+
+    fn set_emoji_font(
+        &mut self,
+        font: Font<'ttf>,
+        raster_font: RasterFont,
+        pixel_size: f32,
+        shape_face: ShapeFace<'static>,
+    ) {
+        self.emoji_font = Some(EmojiFont {
+            font,
+            raster_font,
+            pixel_size,
+            shape_face,
+        });
     }
 }
 
@@ -2293,6 +2359,25 @@ impl InputField {
         rows
     }
 
+    fn visible_wrapped_visual_rows(
+        &self,
+        available_cols: usize,
+        max_rows: usize,
+    ) -> (Vec<String>, usize) {
+        let rows = self.wrapped_visual_rows(available_cols);
+        if max_rows == 0 || rows.len() <= max_rows {
+            return (rows, 0);
+        }
+        let (cursor_row, _) = self.cursor_visual_row_col(available_cols);
+        let max_start = rows.len().saturating_sub(max_rows);
+        let start_row = cursor_row
+            .saturating_add(1)
+            .saturating_sub(max_rows)
+            .min(max_start);
+        let visible_rows = rows.into_iter().skip(start_row).take(max_rows).collect();
+        (visible_rows, start_row)
+    }
+
     fn visual_line_count(&self, available_cols: usize) -> usize {
         self.wrapped_visual_rows(available_cols).len().max(1)
     }
@@ -2536,13 +2621,168 @@ impl InputField {
     }
 
     fn delete_selection(&mut self) -> bool {
-        let Some((start, end)) = self.selected_char_range(VisualSelectionKind::Character) else {
+        self.delete_selection_kind(VisualSelectionKind::Character)
+    }
+
+    fn delete_selection_kind(&mut self, kind: VisualSelectionKind) -> bool {
+        let Some((start, end)) = self.selected_char_range(kind) else {
             return false;
         };
+        self.delete_char_range(start, end)
+    }
+
+    fn set_cursor_char(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.char_count());
+        self.selection_anchor = None;
+    }
+
+    fn slice_char_range(&self, start: usize, end: usize) -> String {
+        let start = start.min(self.char_count());
+        let end = end.min(self.char_count());
+        let start_byte = self.byte_index_for_char(start);
+        let end_byte = self.byte_index_for_char(end);
+        if start_byte >= end_byte {
+            return String::new();
+        }
+        self.text[start_byte..end_byte].to_owned()
+    }
+
+    fn delete_char_range(&mut self, start: usize, end: usize) -> bool {
+        let start = start.min(self.char_count());
+        let end = end.min(self.char_count());
+        if start >= end {
+            return false;
+        }
         self.delete_range(start, end);
-        self.cursor = start;
+        self.cursor = start.min(self.char_count());
         self.selection_anchor = None;
         true
+    }
+
+    fn replace_char_range(&mut self, start: usize, end: usize, text: &str) -> bool {
+        let filtered: String = text
+            .chars()
+            .filter(|character| *character != '\r')
+            .collect();
+        let start = start.min(self.char_count());
+        let end = end.min(self.char_count());
+        if start > end {
+            return false;
+        }
+        self.delete_range(start, end);
+        let insert_at = self.byte_index_for_char(start);
+        self.text.insert_str(insert_at, &filtered);
+        self.cursor = start.saturating_add(filtered.chars().count());
+        self.selection_anchor = None;
+        true
+    }
+
+    fn text_buffer(&self) -> TextBuffer {
+        let mut buffer = TextBuffer::from_text(&self.text);
+        buffer.set_cursor(self.cursor_point());
+        buffer
+    }
+
+    fn line_range_chars(&self, line_index: usize) -> Option<(usize, usize)> {
+        let buffer = self.text_buffer();
+        let range = buffer.line_range(line_index)?;
+        Some((
+            buffer.point_to_char_index(range.start()),
+            buffer.point_to_char_index(range.end()),
+        ))
+    }
+
+    fn line_span_range_chars(
+        &self,
+        start_line: usize,
+        line_count: usize,
+    ) -> Option<(usize, usize)> {
+        let buffer = self.text_buffer();
+        if buffer.line_count() == 0 {
+            return None;
+        }
+        let end_line = start_line
+            .saturating_add(line_count.max(1).saturating_sub(1))
+            .min(buffer.line_count().saturating_sub(1));
+        let start = buffer.line_range(start_line)?.start();
+        let end = buffer.line_range(end_line)?.end();
+        Some((
+            buffer.point_to_char_index(start),
+            buffer.point_to_char_index(end),
+        ))
+    }
+
+    fn text_object_range_chars(
+        &self,
+        kind: VimTextObjectKind,
+        around: bool,
+        count: usize,
+    ) -> Option<(usize, usize)> {
+        let buffer = self.text_buffer();
+        let range = match kind {
+            VimTextObjectKind::Word => buffer.word_range_at(buffer.cursor(), around, count),
+            VimTextObjectKind::BigWord => {
+                buffer.word_range_at_kind(buffer.cursor(), WordKind::BigWord, around, count)
+            }
+            VimTextObjectKind::Sentence => buffer.sentence_range_at(buffer.cursor(), around, count),
+            VimTextObjectKind::Paragraph => {
+                buffer.paragraph_range_at(buffer.cursor(), around, count)
+            }
+            VimTextObjectKind::Delimited { open, close } => {
+                buffer.delimited_range_at(buffer.cursor(), open, close, around)
+            }
+            VimTextObjectKind::Tag => buffer.tag_range_at(buffer.cursor(), around),
+        }?;
+        Some((
+            buffer.point_to_char_index(range.start()),
+            buffer.point_to_char_index(range.end()),
+        ))
+    }
+
+    fn open_line_below(&mut self) -> bool {
+        let buffer = self.text_buffer();
+        let line = buffer.cursor().line;
+        let insertion = buffer
+            .line_range(line)
+            .map(|range| buffer.point_to_char_index(range.end()))
+            .unwrap_or_else(|| self.char_count());
+        self.replace_char_range(insertion, insertion, "\n");
+        self.cursor = insertion.saturating_add(1).min(self.char_count());
+        self.selection_anchor = None;
+        true
+    }
+
+    fn open_line_above(&mut self) -> bool {
+        let buffer = self.text_buffer();
+        let line = buffer.cursor().line;
+        let insertion = buffer
+            .line_range(line)
+            .map(|range| buffer.point_to_char_index(range.start()))
+            .unwrap_or(0);
+        self.replace_char_range(insertion, insertion, "\n");
+        self.cursor = insertion.min(self.char_count());
+        self.selection_anchor = None;
+        true
+    }
+
+    fn replace_chars_at_cursor(&mut self, character: char, count: usize) -> bool {
+        let start = self.cursor_char();
+        let mut end = start;
+        for _ in 0..count.max(1) {
+            let Some(current) = self.text.chars().nth(end) else {
+                break;
+            };
+            if current == '\n' {
+                break;
+            }
+            end = end.saturating_add(1);
+        }
+        if start == end {
+            return false;
+        }
+        let replaced = self.replace_char_range(start, end, &character.to_string());
+        self.cursor = start.min(self.char_count());
+        replaced
     }
 
     fn selection_visual_ranges(
@@ -6919,6 +7159,7 @@ enum PickerAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
     Generic,
+    AcpSlash { buffer_id: BufferId },
     AcpPermission { request_id: u64 },
 }
 
@@ -8976,15 +9217,22 @@ impl ShellState {
         user_library: Arc<dyn UserLibrary>,
         defer_optional_services: bool,
     ) -> Result<Self, ShellError> {
+        let mut startup_trace = StartupTrace::new();
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("volt");
         let workspace_id = runtime
             .model_mut()
             .open_workspace(window_id, "default", default_workspace_root())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        if let Some(trace) = startup_trace.as_mut() {
+            trace.mark("shell.runtime-foundation");
+        }
 
         register_shell_hooks(&mut runtime).map_err(ShellError::Runtime)?;
         register_git_status_commands(&mut runtime).map_err(ShellError::Runtime)?;
+        if let Some(trace) = startup_trace.as_mut() {
+            trace.mark("shell.register-hooks");
+        }
 
         let notes_id = runtime
             .model_mut()
@@ -9030,6 +9278,9 @@ impl ShellState {
             )
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
+        if let Some(trace) = startup_trace.as_mut() {
+            trace.mark("shell.bootstrap-buffers");
+        }
 
         let log_dir_error = ensure_log_directory(&log_file_path).err();
         runtime.services_mut().insert(ErrorLog::new(
@@ -9057,14 +9308,23 @@ impl ShellState {
             record_runtime_error(&mut runtime, "theme.restore", error);
         }
         runtime.services_mut().insert(theme_registry);
+        if let Some(trace) = startup_trace.as_mut() {
+            trace.mark("shell.theme-registry");
+        }
         runtime
             .services_mut()
             .insert(UserLibraryService(Arc::clone(&user_library)));
         load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
+        if let Some(trace) = startup_trace.as_mut() {
+            trace.mark("shell.user-packages");
+        }
         if !defer_optional_services {
             install_optional_runtime_services(&mut runtime, &*user_library)?;
+            if let Some(trace) = startup_trace.as_mut() {
+                trace.mark("shell.optional-services");
+            }
         }
 
         Ok(Self {
@@ -9575,7 +9835,25 @@ impl ShellState {
                     return Ok(true);
                 }
 
-                if picker_visible {
+                let acp_slash_picker_active = matches!(
+                    self.ui()?.picker_kind(),
+                    Some(PickerKind::AcpSlash { buffer_id })
+                        if buffer_id == active_buffer.buffer_id
+                );
+                if picker_visible
+                    && acp_slash_picker_active
+                    && matches!(
+                        keycode,
+                        Keycode::Return | Keycode::KpEnter | Keycode::Return2
+                    )
+                {
+                    self.runtime
+                        .execute_command("picker.submit")
+                        .map_err(|error| ShellError::Runtime(error.to_string()))?;
+                    self.sync_active_buffer().map_err(ShellError::Runtime)?;
+                    return Ok(false);
+                }
+                if picker_visible && !acp_slash_picker_active {
                     if matches!(
                         keycode,
                         Keycode::Return | Keycode::KpEnter | Keycode::Return2
@@ -9592,6 +9870,14 @@ impl ShellState {
                         picker.backspace_query();
                         self.schedule_picker_search_refresh()?;
                     }
+                    return Ok(false);
+                }
+                if picker_visible
+                    && acp_slash_picker_active
+                    && matches!(keycode, Keycode::Backspace | Keycode::Delete)
+                {
+                    self.ui_mut()?.close_picker();
+                } else if picker_visible && acp_slash_picker_active {
                     return Ok(false);
                 }
 
@@ -10419,11 +10705,22 @@ impl ShellState {
                     return Ok(true);
                 };
                 if character != '\n' {
-                    let replaced = self
-                        .active_buffer_mut()?
-                        .replace_chars_at_cursor(character, count);
-                    if replaced {
-                        self.mark_active_buffer_syntax_dirty()?;
+                    if active_shell_buffer_vim_targets_input(&self.runtime)
+                        .map_err(ShellError::Runtime)?
+                    {
+                        if let Some(input) = active_shell_buffer_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .input_field_mut()
+                        {
+                            let _ = input.replace_chars_at_cursor(character, count);
+                        }
+                    } else {
+                        let replaced = self
+                            .active_buffer_mut()?
+                            .replace_chars_at_cursor(character, count);
+                        if replaced {
+                            self.mark_active_buffer_syntax_dirty()?;
+                        }
                     }
                 }
                 self.ui_mut()?.enter_normal_mode();
@@ -10801,13 +11098,18 @@ impl ShellState {
             }
             return Ok(());
         }
-        if self.picker_visible()? {
+        let acp_slash_picker_active =
+            matches!(self.ui()?.picker_kind(), Some(PickerKind::AcpSlash { .. }));
+        if self.picker_visible()? && !acp_slash_picker_active {
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(picker) = self.ui_mut()?.picker_mut() {
                 picker.append_query(text);
             }
             self.schedule_picker_search_refresh()?;
             return Ok(());
+        }
+        if acp_slash_picker_active {
+            self.ui_mut()?.close_picker();
         }
         let active_buffer =
             active_buffer_event_context(&self.runtime).map_err(ShellError::Runtime)?;
@@ -12583,6 +12885,7 @@ fn should_yield_after_typing_batch(
 
 /// Runs the SDL3 + SDL_ttf demo shell.
 pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
+    let mut startup_trace = StartupTrace::new();
     let log_file_path = default_error_log_path();
     install_panic_hook(log_file_path.clone());
 
@@ -12593,6 +12896,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     configure_window_opacity_driver(Some(video.current_video_driver()));
     register_clipboard_context(video.clone());
     let ttf = sdl3::ttf::init().map_err(|error| ShellError::Sdl(error.to_string()))?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.sdl-init");
+    }
 
     let user_library: Arc<dyn UserLibrary> = config
         .user_library
@@ -12603,6 +12909,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         config.profile_input_latency,
         Arc::clone(&user_library),
     )?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.state-fast-start");
+    }
     let theme_registry = state.runtime.services().get::<ThemeRegistry>();
     let window_effect_settings = current_window_effect_settings(theme_registry);
     let mut theme_reload_state = ThemeReloadState::new();
@@ -12620,12 +12929,26 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         .build()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
     apply_window_effects(&mut window, window_effect_settings)?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.window-create");
+    }
     let mut theme_settings =
         theme_runtime_settings(theme_registry, &config, window.display_scale());
-    let (mut fonts, mut font_path) = load_font_set(&ttf, &theme_settings, &*user_library)?;
+    let (mut fonts, mut font_path) = load_font_set_with_mode(
+        &ttf,
+        &theme_settings,
+        &*user_library,
+        OptionalFontLoadMode::StartupPrimaryOnly,
+    )?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.load-fonts");
+    }
     let icon = load_window_icon()?;
     if !window.set_icon(icon) {
         return Err(ShellError::Sdl(sdl3::get_error().to_string()));
+    }
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.window-icon");
     }
     video.text_input().start(&window);
     let mut line_height = fonts.primary().height().max(1) as usize;
@@ -12639,6 +12962,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.renderer-ready");
+    }
     let mut frames_rendered = 0;
     let mut last_scene: Option<Vec<DrawCommand>> = None;
     let mut last_visual_key: Option<ShellVisualRefreshKey> = None;
@@ -12650,6 +12976,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     }
 
     let mut frame_pacing_sleep = Duration::from_secs(0);
+    let mut deferred_icon_font_paths: Option<VecDeque<PathBuf>> = None;
+    let mut deferred_icon_fonts_complete = true;
+    let mut deferred_emoji_font_loaded = false;
+    let mut last_user_activity = Instant::now();
     loop {
         let frame_started = Instant::now();
         let frame_result =
@@ -12687,6 +13017,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                if fonts_changed {
+                    deferred_icon_font_paths = None;
+                    deferred_icon_fonts_complete = true;
+                    deferred_emoji_font_loaded = true;
+                }
                 if theme_settings.window_effects != previous_window_effects
                     && let Err(error) = update_window_effects(
                         canvas.window_mut(),
@@ -12776,6 +13111,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     }
                 }
                 if had_events {
+                    last_user_activity = Instant::now();
                     let layout_sync_started = Instant::now();
                     if let Err(error) = state.sync_visible_buffer_layouts(
                         render_width,
@@ -12788,6 +13124,41 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     if let Some(frame) = typing_frame.as_mut() {
                         frame.layout_sync += layout_sync_started.elapsed();
                     }
+                }
+                if frames_rendered > 0
+                    && !had_events
+                    && frame_started.duration_since(last_user_activity)
+                        >= DEFERRED_ICON_FONT_IDLE_DELAY
+                {
+                    match load_next_deferred_icon_font(
+                        &ttf,
+                        &theme_settings,
+                        &*user_library,
+                        &mut fonts,
+                        &mut deferred_icon_font_paths,
+                        &mut deferred_icon_fonts_complete,
+                    ) {
+                        Ok(true) => text_texture_cache.clear(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            deferred_icon_fonts_complete = true;
+                            state.record_shell_error("shell.deferred-icon-fonts", error);
+                        }
+                    }
+                }
+                if frames_rendered > 0
+                    && !had_events
+                    && deferred_icon_fonts_complete
+                    && frame_started.duration_since(last_user_activity)
+                        >= DEFERRED_EMOJI_FONT_IDLE_DELAY
+                    && load_deferred_emoji_font(
+                        &ttf,
+                        &theme_settings,
+                        &mut fonts,
+                        &mut deferred_emoji_font_loaded,
+                    )
+                {
+                    text_texture_cache.clear();
                 }
                 if frames_rendered > 0
                     && !had_events
@@ -13048,6 +13419,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             }
             Ok(FrameOutcome::Continue) => {
                 frames_rendered += 1;
+                if frames_rendered == 1
+                    && let Some(trace) = startup_trace.as_mut()
+                {
+                    trace.mark("shell.first-frame");
+                }
                 if let Some(frame_limit) = config.frame_limit
                     && frames_rendered >= frame_limit
                 {
@@ -13072,6 +13448,61 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         renderer_name,
         &font_path,
     ))
+}
+
+fn load_next_deferred_icon_font<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    settings: &ThemeRuntimeSettings,
+    user_library: &dyn UserLibrary,
+    fonts: &mut FontSet<'ttf>,
+    deferred_icon_font_paths: &mut Option<VecDeque<PathBuf>>,
+    deferred_icon_fonts_complete: &mut bool,
+) -> Result<bool, ShellError> {
+    if *deferred_icon_fonts_complete {
+        return Ok(false);
+    }
+
+    if deferred_icon_font_paths.is_none() {
+        *deferred_icon_font_paths = Some(resolve_icon_font_paths()?.into());
+    }
+    let Some(paths) = deferred_icon_font_paths.as_mut() else {
+        return Ok(false);
+    };
+    let Some(path) = paths.pop_front() else {
+        validate_bundled_icon_fonts(fonts, user_library)?;
+        *deferred_icon_fonts_complete = true;
+        return Ok(false);
+    };
+
+    let effective_font_size = scaled_font_size(settings.font_size, settings.display_scale);
+    let primary_line_height = fonts.primary().height().max(1);
+    let (name, font, raster_font, pixel_size) =
+        load_icon_font(ttf, &path, effective_font_size, primary_line_height)?;
+    fonts.push_icon_font(name, font, raster_font, pixel_size);
+
+    if paths.is_empty() {
+        validate_bundled_icon_fonts(fonts, user_library)?;
+        *deferred_icon_fonts_complete = true;
+    }
+
+    Ok(true)
+}
+
+fn load_deferred_emoji_font<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    settings: &ThemeRuntimeSettings,
+    fonts: &mut FontSet<'ttf>,
+    deferred_emoji_font_loaded: &mut bool,
+) -> bool {
+    if *deferred_emoji_font_loaded {
+        return false;
+    }
+    *deferred_emoji_font_loaded = true;
+    let Some((font, raster_font, pixel_size, shape_face)) = load_emoji_font(ttf, settings) else {
+        return false;
+    };
+    fonts.set_emoji_font(font, raster_font, pixel_size, shape_face);
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13104,7 +13535,12 @@ fn update_theme_runtime<'ttf>(
         || updated.emoji_font_size != theme_settings.emoji_font_size
         || updated.display_scale != theme_settings.display_scale
     {
-        let (next_fonts, next_font_path) = load_font_set(ttf, &updated, &*state.user_library)?;
+        let (next_fonts, next_font_path) = load_font_set_with_mode(
+            ttf,
+            &updated,
+            &*state.user_library,
+            OptionalFontLoadMode::Eager,
+        )?;
         *font_path = next_font_path;
         *fonts = next_fonts;
         text_texture_cache.clear();
@@ -13411,6 +13847,23 @@ fn resolve_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
     Ok(paths)
 }
 
+fn resolve_startup_icon_font_paths() -> Result<Vec<PathBuf>, ShellError> {
+    let bundled_dir = resolve_bundled_icon_font_dir()?;
+    let nfm_path = bundled_dir.join("NFM.ttf");
+    if !nfm_path.is_file() {
+        return resolve_icon_font_paths();
+    }
+
+    let mut paths = vec![nfm_path];
+    let mut seen = paths.iter().cloned().collect::<BTreeSet<_>>();
+    for path in resolve_system_icon_font_paths() {
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
 fn validate_bundled_icon_fonts(
     fonts: &FontSet<'_>,
     user_library: &dyn UserLibrary,
@@ -13443,6 +13896,83 @@ fn validate_bundled_icon_fonts(
         "bundled icon font validation failed: {missing_count} exported icons are missing from the startup icon-font stack ({loaded_fonts}). examples: {}",
         examples.join(", ")
     )))
+}
+
+fn load_emoji_font<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    settings: &ThemeRuntimeSettings,
+) -> Option<(Font<'ttf>, RasterFont, f32, ShapeFace<'static>)> {
+    let emoji_effective_font_size =
+        scaled_font_size(settings.emoji_font_size, settings.display_scale);
+    let emoji_path = resolve_emoji_font_path(settings.emoji_font_request.as_deref())?;
+    let emoji_font_data = fs::read(&emoji_path).ok()?;
+    let emoji_font_data: &'static [u8] = Box::leak(emoji_font_data.into_boxed_slice());
+    if emoji_font_data.is_empty() {
+        return None;
+    }
+    let emoji_raster_font = RasterFont::from_bytes(
+        emoji_font_data,
+        fontdue::FontSettings {
+            scale: emoji_effective_font_size,
+            ..fontdue::FontSettings::default()
+        },
+    )
+    .ok()?;
+    let emoji_shape_face = ShapeFace::from_slice(emoji_font_data, 0)?;
+    let font = ttf.load_font(&emoji_path, emoji_effective_font_size).ok()?;
+    let pixel_size = normalized_raster_pixel_size(
+        emoji_effective_font_size,
+        font.height().max(1),
+        emoji_raster_font.horizontal_line_metrics(emoji_effective_font_size),
+    );
+    Some((font, emoji_raster_font, pixel_size, emoji_shape_face))
+}
+
+fn load_icon_font<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    path: &Path,
+    effective_font_size: f32,
+    primary_line_height: i32,
+) -> Result<(String, Font<'ttf>, RasterFont, f32), ShellError> {
+    let name = path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("icon-font")
+        .to_owned();
+    let bytes = fs::read(path).map_err(|error| {
+        ShellError::Runtime(format!(
+            "failed to read bundled icon font `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let raster_font =
+        RasterFont::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|error| {
+            ShellError::Runtime(format!(
+                "failed to parse bundled icon font `{}`: {error}",
+                path.display()
+            ))
+        })?;
+    let font = ttf
+        .load_font(path, effective_font_size)
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let pixel_size = normalized_raster_pixel_size(
+        effective_font_size,
+        primary_line_height,
+        raster_font.horizontal_line_metrics(effective_font_size),
+    );
+    Ok((name, font, raster_font, pixel_size))
+}
+
+fn load_icon_fonts_for_paths<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    paths: Vec<PathBuf>,
+    effective_font_size: f32,
+    primary_line_height: i32,
+) -> Result<Vec<(String, Font<'ttf>, RasterFont, f32)>, ShellError> {
+    paths
+        .into_iter()
+        .map(|path| load_icon_font(ttf, &path, effective_font_size, primary_line_height))
+        .collect()
 }
 
 struct LoadedPrimaryFont<'ttf> {
@@ -13529,15 +14059,27 @@ fn styled_font_candidates(path: &Path, style: TextStyle) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn load_font_set<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     settings: &ThemeRuntimeSettings,
     user_library: &dyn UserLibrary,
 ) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
+    load_font_set_with_mode(ttf, settings, user_library, OptionalFontLoadMode::Eager)
+}
+
+fn load_font_set_with_mode<'ttf>(
+    ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
+    settings: &ThemeRuntimeSettings,
+    user_library: &dyn UserLibrary,
+    optional_font_load_mode: OptionalFontLoadMode,
+) -> Result<(FontSet<'ttf>, PathBuf), ShellError> {
+    let mut startup_trace = StartupTrace::new();
     let effective_font_size = scaled_font_size(settings.font_size, settings.display_scale);
-    let emoji_effective_font_size =
-        scaled_font_size(settings.emoji_font_size, settings.display_scale);
     let primary_path = resolve_font_path(settings.font_request.as_deref())?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.resolve-primary");
+    }
     let primary_font_data: &'static [u8] = Box::leak(
         fs::read(&primary_path)
             .map_err(|error| {
@@ -13548,6 +14090,9 @@ fn load_font_set<'ttf>(
             })?
             .into_boxed_slice(),
     );
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.read-primary");
+    }
     let primary_raster_font = RasterFont::from_bytes(
         primary_font_data,
         fontdue::FontSettings {
@@ -13561,31 +14106,49 @@ fn load_font_set<'ttf>(
             primary_path.display()
         ))
     })?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.raster-primary");
+    }
     let primary_shape_face = ShapeFace::from_slice(primary_font_data, 0).ok_or_else(|| {
         ShellError::Runtime(format!(
             "failed to parse shaping data for primary font `{}`",
             primary_path.display()
         ))
     })?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.shape-primary");
+    }
     let primary = load_primary_font(ttf, &primary_path, effective_font_size, TextStyle::plain())?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-primary");
+    }
     let primary_bold = load_primary_font(
         ttf,
         &primary_path,
         effective_font_size,
         TextStyle::new(true, false),
     )?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-primary-bold");
+    }
     let primary_italic = load_primary_font(
         ttf,
         &primary_path,
         effective_font_size,
         TextStyle::new(false, true),
     )?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-primary-italic");
+    }
     let primary_bold_italic = load_primary_font(
         ttf,
         &primary_path,
         effective_font_size,
         TextStyle::new(true, true),
     )?;
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-primary-bold-italic");
+    }
     let primary_line_height = primary.font.height().max(1);
     let primary_pixel_size = normalized_raster_pixel_size(
         effective_font_size,
@@ -13599,89 +14162,37 @@ fn load_font_set<'ttf>(
         .0
         .max(1) as i32;
 
-    // Load emoji font (best-effort, silently fails if not available)
-    let emoji_font: Option<(Font<'ttf>, RasterFont, f32, ShapeFace<'static>)> =
-        match resolve_emoji_font_path(settings.emoji_font_request.as_deref()) {
-            Some(emoji_path) => {
-                let emoji_font_data = fs::read(&emoji_path)
-                    .map_err(|error| {
-                        ShellError::Runtime(format!(
-                            "failed to read emoji font `{}`: {error}",
-                            emoji_path.display()
-                        ))
-                    })
-                    .ok()
-                    .unwrap_or_default();
-                let emoji_font_data: &'static [u8] = Box::leak(emoji_font_data.into_boxed_slice());
-                if emoji_font_data.is_empty() {
-                    None
-                } else {
-                    let emoji_raster_font = RasterFont::from_bytes(
-                        emoji_font_data,
-                        fontdue::FontSettings {
-                            scale: emoji_effective_font_size,
-                            ..fontdue::FontSettings::default()
-                        },
-                    )
-                    .ok();
-                    let emoji_shape_face = ShapeFace::from_slice(emoji_font_data, 0);
-                    if let (Some(font), Some(raster_font), Some(shape_face)) = (
-                        ttf.load_font(&emoji_path, emoji_effective_font_size).ok(),
-                        emoji_raster_font,
-                        emoji_shape_face,
-                    ) {
-                        let pixel_size = normalized_raster_pixel_size(
-                            emoji_effective_font_size,
-                            font.height().max(1),
-                            raster_font.horizontal_line_metrics(emoji_effective_font_size),
-                        );
-                        Some((font, raster_font, pixel_size, shape_face))
-                    } else {
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
+    let emoji_font = match optional_font_load_mode {
+        OptionalFontLoadMode::StartupPrimaryOnly => None,
+        OptionalFontLoadMode::Eager => load_emoji_font(ttf, settings),
+    };
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-emoji");
+    }
 
-    let icon_fonts = resolve_icon_font_paths()?
-        .into_iter()
-        .map(|path| {
-            let name = path
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .unwrap_or("icon-font")
-                .to_owned();
-            let bytes = fs::read(&path).map_err(|error| {
-                ShellError::Runtime(format!(
-                    "failed to read bundled icon font `{}`: {error}",
-                    path.display()
-                ))
-            })?;
-            let raster_font = RasterFont::from_bytes(bytes, fontdue::FontSettings::default())
-                .map_err(|error| {
-                    ShellError::Runtime(format!(
-                        "failed to parse bundled icon font `{}`: {error}",
-                        path.display()
-                    ))
-                })?;
-            let font = ttf
-                .load_font(&path, effective_font_size)
-                .map_err(|error| ShellError::Sdl(error.to_string()))?;
-            let pixel_size = normalized_raster_pixel_size(
-                effective_font_size,
-                primary_line_height,
-                raster_font.horizontal_line_metrics(effective_font_size),
-            );
-            Ok((name, font, raster_font, pixel_size))
-        })
-        .collect::<Result<Vec<_>, ShellError>>()?;
     let icon_chars = user_library
         .icon_symbols()
         .iter()
         .flat_map(|symbol| symbol.glyph.chars())
         .collect();
-    let fonts = FontSet::new(FontSetInit {
+    let icon_fonts = match optional_font_load_mode {
+        OptionalFontLoadMode::StartupPrimaryOnly => load_icon_fonts_for_paths(
+            ttf,
+            resolve_startup_icon_font_paths()?,
+            effective_font_size,
+            primary_line_height,
+        )?,
+        OptionalFontLoadMode::Eager => load_icon_fonts_for_paths(
+            ttf,
+            resolve_icon_font_paths()?,
+            effective_font_size,
+            primary_line_height,
+        )?,
+    };
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.load-icons");
+    }
+    let mut fonts = FontSet::new(FontSetInit {
         primary: primary.font,
         primary_bold: primary_bold.font,
         primary_italic: primary_italic.font,
@@ -13697,7 +14208,46 @@ fn load_font_set<'ttf>(
         icon_chars,
         cell_width,
     });
-    validate_bundled_icon_fonts(&fonts, user_library)?;
+    if optional_font_load_mode == OptionalFontLoadMode::StartupPrimaryOnly
+        && validate_bundled_icon_fonts(&fonts, user_library).is_err()
+    {
+        fonts = FontSet::new(FontSetInit {
+            primary: fonts.primary,
+            primary_bold: fonts.primary_bold,
+            primary_italic: fonts.primary_italic,
+            primary_bold_italic: fonts.primary_bold_italic,
+            primary_bold_is_synthetic: fonts.primary_bold_is_synthetic,
+            primary_bold_italic_is_synthetic: fonts.primary_bold_italic_is_synthetic,
+            primary_raster_font: fonts.primary_raster_font,
+            primary_shape_face: fonts.primary_shape_face,
+            primary_pixel_size: fonts.primary_pixel_size,
+            emoji_font: fonts.emoji_font.map(|emoji| {
+                (
+                    emoji.font,
+                    emoji.raster_font,
+                    emoji.pixel_size,
+                    emoji.shape_face,
+                )
+            }),
+            ligatures_enabled: fonts.ligatures_enabled,
+            icon_fonts: load_icon_fonts_for_paths(
+                ttf,
+                resolve_icon_font_paths()?,
+                effective_font_size,
+                primary_line_height,
+            )?,
+            icon_chars: fonts.icon_chars,
+            cell_width: fonts.cell_width,
+        });
+    }
+    if optional_font_load_mode == OptionalFontLoadMode::Eager
+        || optional_font_load_mode == OptionalFontLoadMode::StartupPrimaryOnly
+    {
+        validate_bundled_icon_fonts(&fonts, user_library)?;
+    }
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("shell.fonts.validate-icons");
+    }
     Ok((fonts, primary_path))
 }
 
@@ -14817,6 +15367,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "open-line-below" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
+                    if active_shell_buffer_vim_targets_input(runtime)? {
+                        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                            input.open_line_below();
+                        }
+                        shell_ui_mut(runtime)?.enter_insert_mode();
+                        return Ok(());
+                    }
                     let (buffer_id, indent_size, use_tabs) = {
                         let ui = shell_ui(runtime)?;
                         let buffer_id = active_shell_buffer_id(runtime)?;
@@ -14837,6 +15394,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 "open-line-above" => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
+                    if active_shell_buffer_vim_targets_input(runtime)? {
+                        if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                            input.open_line_above();
+                        }
+                        shell_ui_mut(runtime)?.enter_insert_mode();
+                        return Ok(());
+                    }
                     let (buffer_id, indent_size, use_tabs, reference_indent) = {
                         let ui = shell_ui(runtime)?;
                         let buffer_id = active_shell_buffer_id(runtime)?;
@@ -17397,9 +17961,26 @@ fn vim_edit_targets_input(runtime: &EditorRuntime, detail: &str) -> Result<bool,
         return Ok(false);
     }
     Ok(match detail {
-        "enter-replace-mode" | "append" | "append-line-end" | "insert-line-start" => {
-            active_shell_buffer_vim_targets_input(runtime)?
-        }
+        "delete-char"
+        | "delete-char-before"
+        | "delete-line-end"
+        | "change-line-end"
+        | "substitute-char"
+        | "substitute-line"
+        | "replace-char"
+        | "enter-replace-mode"
+        | "append"
+        | "append-line-end"
+        | "insert-line-start"
+        | "open-line-below"
+        | "open-line-above"
+        | "start-delete-operator"
+        | "start-change-operator"
+        | "put-after"
+        | "put-before"
+        | "visual-delete"
+        | "visual-change"
+        | "visual-replace-char" => active_shell_buffer_vim_targets_input(runtime)?,
         _ => false,
     })
 }
@@ -21122,6 +21703,16 @@ fn paste_text_into_active_input_buffer(
         let buffer = shell_buffer(runtime, buffer_id)?;
         buffer_is_acp(&buffer.kind)
     };
+    let close_acp_slash_picker_first = is_acp
+        && matches!(
+            shell_ui(runtime)?.picker_kind(),
+            Some(PickerKind::AcpSlash {
+                buffer_id: picker_buffer_id,
+            }) if picker_buffer_id == buffer_id
+        );
+    if close_acp_slash_picker_first {
+        shell_ui_mut(runtime)?.close_picker();
+    }
     let handled = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         if let Some(input) = buffer.input_field_mut() {
@@ -21132,6 +21723,7 @@ fn paste_text_into_active_input_buffer(
         }
     };
     if handled && is_acp {
+        shell_ui_mut(runtime)?.close_picker();
         acp::maybe_open_slash_completion(runtime, buffer_id)?;
         acp::refresh_acp_input_hint(runtime, buffer_id)?;
     }
@@ -21179,6 +21771,35 @@ fn trim_word_forward_operator_range(
     TextRange::new(original_cursor, line_end)
 }
 
+fn trim_word_forward_input_operator_range(
+    input: &InputField,
+    motion: ShellMotion,
+    original_cursor: TextPoint,
+    target: TextPoint,
+    range: (usize, usize),
+    repeat: usize,
+) -> (usize, usize) {
+    if repeat != 1
+        || !matches!(
+            motion,
+            ShellMotion::WordForward | ShellMotion::BigWordForward
+        )
+        || target.line == original_cursor.line
+    {
+        return range;
+    }
+
+    let (_, line_end) = match input.line_range_chars(original_cursor.line) {
+        Some(range) => range,
+        None => return range,
+    };
+    let start = input.text_buffer().point_to_char_index(original_cursor);
+    if line_end <= start {
+        return range;
+    }
+    (start, line_end)
+}
+
 fn charwise_motion_range(
     buffer: &ShellBuffer,
     start: TextPoint,
@@ -21201,6 +21822,31 @@ fn charwise_motion_range(
         TextRange::new(target, end)
     };
     (range.start() != range.end()).then_some(range.normalized())
+}
+
+fn input_charwise_motion_range(
+    input: &InputField,
+    start: usize,
+    target: usize,
+    inclusive: bool,
+) -> Option<(usize, usize)> {
+    let total = input.char_count();
+    let range = if target >= start {
+        let end = if inclusive {
+            target.saturating_add(1).min(total)
+        } else {
+            target
+        };
+        (start, end)
+    } else {
+        let end = if inclusive {
+            start.saturating_add(1).min(total)
+        } else {
+            start
+        };
+        (target, end)
+    };
+    (range.0 < range.1).then_some(range)
 }
 
 fn visual_selection(
@@ -22531,7 +23177,7 @@ fn apply_visual_operator(runtime: &mut EditorRuntime, operator: VimOperator) -> 
             }
             VimOperator::Delete | VimOperator::Change => {
                 if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
-                    input.delete_selection();
+                    input.delete_selection_kind(kind);
                 }
                 if operator == VimOperator::Change {
                     shell_ui_mut(runtime)?.enter_insert_mode();
@@ -23852,6 +24498,9 @@ fn apply_linewise_operator(
     operator: VimOperator,
     line_count: usize,
 ) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        return apply_input_linewise_operator(runtime, operator, line_count);
+    }
     let (range, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
@@ -23877,6 +24526,9 @@ fn apply_text_object_operator(
     around: bool,
     count: usize,
 ) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        return apply_input_text_object_operator(runtime, operator, kind, around, count);
+    }
     if shell_ui(runtime)?.vim().multicursor.is_some()
         && apply_multicursor_text_object_operator(runtime, operator, kind)?
     {
@@ -24005,6 +24657,114 @@ fn range_for_char_count(buffer: &ShellBuffer, count: usize) -> Option<(TextRange
     (end != start).then_some((TextRange::new(start, end), end))
 }
 
+fn apply_input_operator_to_char_range(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    start: usize,
+    end: usize,
+    linewise: bool,
+) -> Result<(), String> {
+    let removed = {
+        let input = active_shell_buffer_mut(runtime)?
+            .input_field_mut()
+            .ok_or_else(|| "input field is missing".to_owned())?;
+        input.slice_char_range(start, end)
+    };
+    if removed.is_empty() {
+        shell_ui_mut(runtime)?.enter_normal_mode();
+        return Ok(());
+    }
+
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        let yank = if linewise {
+            YankRegister::Line(removed.clone())
+        } else {
+            YankRegister::Character(removed.clone())
+        };
+        store_yank_register(runtime, yank, true)?;
+    }
+
+    match operator {
+        VimOperator::Delete => {
+            active_shell_buffer_mut(runtime)?
+                .input_field_mut()
+                .ok_or_else(|| "input field is missing".to_owned())?
+                .delete_char_range(start, end);
+            shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
+        }
+        VimOperator::Change => {
+            let input = active_shell_buffer_mut(runtime)?
+                .input_field_mut()
+                .ok_or_else(|| "input field is missing".to_owned())?;
+            if linewise && removed.ends_with('\n') {
+                input.replace_char_range(start, end, "\n");
+                input.set_cursor_char(start);
+            } else {
+                input.delete_char_range(start, end);
+            }
+            shell_ui_mut(runtime)?.enter_insert_mode();
+            mark_change_finish_on_normal(runtime)?;
+        }
+        VimOperator::Yank => {
+            if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
+                input.set_cursor_char(start);
+            }
+            shell_ui_mut(runtime)?.enter_normal_mode();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+            let replaced = transform_case_text(&removed, operator);
+            let input = active_shell_buffer_mut(runtime)?
+                .input_field_mut()
+                .ok_or_else(|| "input field is missing".to_owned())?;
+            input.replace_char_range(start, end, &replaced);
+            input.set_cursor_char(start);
+            shell_ui_mut(runtime)?.enter_normal_mode();
+            schedule_finish_change(runtime)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_input_linewise_operator(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    line_count: usize,
+) -> Result<(), String> {
+    let (start, end) = {
+        let input = active_shell_buffer_mut(runtime)?
+            .input_field_mut()
+            .ok_or_else(|| "input field is missing".to_owned())?;
+        let line = input.cursor_point().line;
+        input
+            .line_span_range_chars(line, line_count.max(1))
+            .ok_or_else(|| "linewise input Vim range could not be resolved".to_owned())?
+    };
+    apply_input_operator_to_char_range(runtime, operator, start, end, true)
+}
+
+fn apply_input_text_object_operator(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    kind: VimTextObjectKind,
+    around: bool,
+    count: usize,
+) -> Result<(), String> {
+    let (start, end) = {
+        let input = active_shell_buffer_mut(runtime)?
+            .input_field_mut()
+            .ok_or_else(|| "input field is missing".to_owned())?;
+        input
+            .text_object_range_chars(kind, around, count.max(1))
+            .ok_or_else(|| "text object is unavailable at current input cursor".to_owned())?
+    };
+    apply_input_operator_to_char_range(runtime, operator, start, end, false)
+}
+
 fn apply_operator_motion(
     runtime: &mut EditorRuntime,
     operator: VimOperator,
@@ -24012,6 +24772,15 @@ fn apply_operator_motion(
     motion: ShellMotion,
     motion_count: Option<usize>,
 ) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        return apply_input_operator_motion(
+            runtime,
+            operator,
+            operator_count,
+            motion,
+            motion_count,
+        );
+    }
     let (range, linewise, original_cursor, flash_selection) = {
         let buffer = active_shell_buffer_mut(runtime)?;
         let original_cursor = buffer.cursor_point();
@@ -24125,6 +24894,127 @@ fn apply_operator_motion(
         original_cursor,
         flash_selection,
     )
+}
+
+fn apply_input_operator_motion(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    operator_count: usize,
+    motion: ShellMotion,
+    motion_count: Option<usize>,
+) -> Result<(), String> {
+    let (range, linewise) = {
+        let input = active_shell_buffer_mut(runtime)?
+            .input_field_mut()
+            .ok_or_else(|| "input field is missing".to_owned())?;
+        let original_cursor = input.cursor_char();
+        let original_point = input.cursor_point();
+        let range = match motion {
+            ShellMotion::Down => {
+                let line_count = operator_count
+                    .saturating_mul(motion_count.unwrap_or(1))
+                    .saturating_add(1);
+                input.line_span_range_chars(original_point.line, line_count)
+            }
+            ShellMotion::Up => {
+                let line_count = operator_count
+                    .saturating_mul(motion_count.unwrap_or(1))
+                    .saturating_add(1);
+                let start_line = original_point
+                    .line
+                    .saturating_sub(line_count.saturating_sub(1));
+                let end_line = original_point.line;
+                let (start, _) = input
+                    .line_range_chars(start_line)
+                    .ok_or_else(|| "up input motion start line unavailable".to_owned())?;
+                let (_, end) = input
+                    .line_range_chars(end_line)
+                    .ok_or_else(|| "up input motion end line unavailable".to_owned())?;
+                Some((start, end))
+            }
+            ShellMotion::FirstLine => {
+                let buffer = input.text_buffer();
+                let target_line = motion_count.unwrap_or(1).saturating_sub(1);
+                let start_line = target_line.min(original_point.line);
+                let end_line = target_line.max(original_point.line);
+                let start = buffer.point_to_char_index(
+                    buffer
+                        .line_range(start_line)
+                        .ok_or_else(|| "first-line input range start unavailable".to_owned())?
+                        .start(),
+                );
+                let end = buffer.point_to_char_index(
+                    buffer
+                        .line_range(end_line)
+                        .ok_or_else(|| "first-line input range end unavailable".to_owned())?
+                        .end(),
+                );
+                Some((start, end))
+            }
+            ShellMotion::LastLine => {
+                let buffer = input.text_buffer();
+                let target_line = motion_count
+                    .map(|line| line.saturating_sub(1))
+                    .unwrap_or(buffer.line_count().saturating_sub(1));
+                let start_line = target_line.min(original_point.line);
+                let end_line = target_line.max(original_point.line);
+                let start = buffer.point_to_char_index(
+                    buffer
+                        .line_range(start_line)
+                        .ok_or_else(|| "last-line input range start unavailable".to_owned())?
+                        .start(),
+                );
+                let end = buffer.point_to_char_index(
+                    buffer
+                        .line_range(end_line)
+                        .ok_or_else(|| "last-line input range end unavailable".to_owned())?
+                        .end(),
+                );
+                Some((start, end))
+            }
+            _ => {
+                let repeat = operator_count
+                    .saturating_mul(motion_count.unwrap_or(1))
+                    .max(1);
+                if !move_input_with_motion(input, motion, Some(repeat)) {
+                    None
+                } else {
+                    let target = input.cursor_char();
+                    let target_point = input.cursor_point();
+                    let range = input_charwise_motion_range(
+                        input,
+                        original_cursor,
+                        target,
+                        motion_is_inclusive(motion),
+                    )
+                    .map(|range| {
+                        trim_word_forward_input_operator_range(
+                            input,
+                            motion,
+                            original_point,
+                            target_point,
+                            range,
+                            repeat,
+                        )
+                    });
+                    input.set_cursor_char(original_cursor);
+                    range
+                }
+            }
+        };
+        (
+            range.ok_or_else(|| "input Vim operator motion did not resolve a range".to_owned())?,
+            matches!(
+                motion,
+                ShellMotion::Down
+                    | ShellMotion::Up
+                    | ShellMotion::FirstLine
+                    | ShellMotion::LastLine
+            ),
+        )
+    };
+
+    apply_input_operator_to_char_range(runtime, operator, range.0, range.1, linewise)
 }
 
 fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Result<(), String> {
@@ -25042,6 +25932,82 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
             return Ok(());
         }
     }
+    if active_shell_buffer_vim_targets_input(runtime)? {
+        start_change_recording(runtime)?;
+        {
+            let input = active_shell_buffer_mut(runtime)?
+                .input_field_mut()
+                .ok_or_else(|| "input field is missing".to_owned())?;
+            match &yank {
+                YankRegister::Character(text) => {
+                    let insertion = if after {
+                        input
+                            .cursor_char()
+                            .saturating_add(1)
+                            .min(input.char_count())
+                    } else {
+                        input.cursor_char()
+                    };
+                    input.set_cursor_char(insertion);
+                    input.insert_text(text);
+                }
+                YankRegister::Line(text) => {
+                    let buffer = input.text_buffer();
+                    let line = buffer.cursor().line;
+                    let current = input
+                        .line_range_chars(line)
+                        .ok_or_else(|| "current input line is unavailable".to_owned())?;
+                    let insertion = if after { current.1 } else { current.0 };
+                    let line_count = buffer.line_count();
+                    let mut inserted = text.clone();
+                    if !inserted.ends_with('\n') {
+                        inserted.push('\n');
+                    }
+                    let cursor = if after && line + 1 >= line_count && input.char_count() > 0 {
+                        inserted.insert(0, '\n');
+                        insertion.saturating_add(1)
+                    } else {
+                        insertion
+                    };
+                    input.replace_char_range(insertion, insertion, &inserted);
+                    input.set_cursor_char(cursor);
+                }
+                YankRegister::Block(lines) => {
+                    let insertion = if after {
+                        input
+                            .cursor_char()
+                            .saturating_add(1)
+                            .min(input.char_count())
+                    } else {
+                        input.cursor_char()
+                    };
+                    input.set_cursor_char(insertion);
+                    input.insert_text(&lines.join("\n"));
+                }
+                YankRegister::Directory(entries) => {
+                    let insertion = if after {
+                        input
+                            .cursor_char()
+                            .saturating_add(1)
+                            .min(input.char_count())
+                    } else {
+                        input.cursor_char()
+                    };
+                    input.set_cursor_char(insertion);
+                    input.insert_text(
+                        &entries
+                            .iter()
+                            .map(|entry| entry.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
+        }
+        shell_ui_mut(runtime)?.vim_mut().clear_transient();
+        schedule_finish_change(runtime)?;
+        return Ok(());
+    }
 
     start_change_recording(runtime)?;
     let buffer_id = active_shell_buffer_id(runtime)?;
@@ -25188,7 +26154,7 @@ fn put_yank_over_visual_selection(runtime: &mut EditorRuntime, after: bool) -> R
         };
         let inserted = yank_to_clipboard_text(&yank).into_owned();
         if let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut() {
-            input.delete_selection();
+            input.delete_selection_kind(kind);
             input.insert_text(&inserted);
         }
         let replaced_yank = match kind {

@@ -94,12 +94,14 @@ use editor_plugin_api::PluginPackage;
 use editor_plugin_api::{
     DebugAdapterSpec, LanguageConfiguration, LanguageServerSpec, PdfOpenMode, Theme,
     abi::{
-        AbiAcpClient, AbiAutocompleteProvider, AbiDebugAdapterSpec, AbiDirectoryEntry,
-        AbiGhostTextContext, AbiGhostTextLine, AbiGitStatusPrefix, AbiGitStatusSnapshot,
+        AbiAcpClient, AbiAutocompleteProvider, AbiBrowserFeatureSpec, AbiContextHelpSpec,
+        AbiDbFeatureSpec, AbiDebugAdapterSpec, AbiDirectoryEntry, AbiGhostTextContext,
+        AbiGhostTextLine, AbiGitFeatureSpec, AbiGitStatusPrefix, AbiGitStatusSnapshot,
         AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
-        AbiLigatureConfig, AbiOilDefaults, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
-        AbiPaneConfig, AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig,
-        AbiTheme, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiLigatureConfig, AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings,
+        AbiOilSortMode, AbiPaneConfig, AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext,
+        AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiWorkspaceRoot, UserLibraryModule,
+        UserLibraryModuleRef,
     },
 };
 
@@ -173,9 +175,10 @@ pub fn themes() -> Vec<Theme> {
 pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, GhostTextContext, GhostTextLine, GitStatusPrefix,
-    HoverProvider, LigatureConfig, OilDefaults, OilKeyAction, OilKeybindings, PaneConfig,
-    StatuslineContext, TerminalConfig, UserLibrary, WorkspaceRoot,
+    AcpClient, AutocompleteProvider, BrowserFeatureSpec, ContextHelpSpec, DbFeatureSpec,
+    GhostTextContext, GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider,
+    LigatureConfig, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig,
+    StatuslineContext, TerminalConfig, TerminalFeatureSpec, UserLibrary, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -303,49 +306,19 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn oil_defaults(&self) -> OilDefaults {
-        let d = oil::defaults();
-        OilDefaults {
-            show_hidden: d.show_hidden,
-            sort_mode: match d.sort_mode {
-                oil::OilSortMode::TypeThenName => editor_plugin_api::OilSortMode::TypeThenName,
-                oil::OilSortMode::TypeThenNameDesc => {
-                    editor_plugin_api::OilSortMode::TypeThenNameDesc
-                }
-            },
-            trash_enabled: d.trash_enabled,
-        }
+        oil::feature_spec().defaults
     }
 
     fn oil_keybindings(&self) -> OilKeybindings {
-        let k = oil::keybindings();
-        OilKeybindings {
-            open_entry: k.open_entry,
-            open_vertical_split: k.open_vertical_split,
-            open_horizontal_split: k.open_horizontal_split,
-            open_new_pane: k.open_new_pane,
-            preview_entry: k.preview_entry,
-            refresh: k.refresh,
-            close: k.close,
-            prefix: k.prefix,
-            open_parent: k.open_parent,
-            open_workspace_root: k.open_workspace_root,
-            set_root: k.set_root,
-            show_help: k.show_help,
-            cycle_sort: k.cycle_sort,
-            toggle_hidden: k.toggle_hidden,
-            toggle_trash: k.toggle_trash,
-            open_external: k.open_external,
-            set_tab_local_root: k.set_tab_local_root,
-            create_git_worktree: k.create_git_worktree,
-        }
+        oil::feature_spec().keybindings
     }
 
     fn oil_keydown_action(&self, chord: &str) -> Option<OilKeyAction> {
-        oil::keydown_action(chord).map(map_oil_key_action)
+        oil::keydown_action(chord)
     }
 
     fn oil_chord_action(&self, had_prefix: bool, chord: &str) -> Option<OilKeyAction> {
-        oil::chord_action(had_prefix, chord).map(map_oil_key_action)
+        oil::chord_action(had_prefix, chord)
     }
 
     fn oil_help_lines(&self) -> Vec<String> {
@@ -360,11 +333,7 @@ impl UserLibrary for UserLibraryImpl {
         sort_mode: editor_plugin_api::OilSortMode,
         trash_enabled: bool,
     ) -> editor_core::SectionTree {
-        let user_sort = match sort_mode {
-            editor_plugin_api::OilSortMode::TypeThenName => oil::OilSortMode::TypeThenName,
-            editor_plugin_api::OilSortMode::TypeThenNameDesc => oil::OilSortMode::TypeThenNameDesc,
-        };
-        oil::directory_sections(root, entries, show_hidden, user_sort, trash_enabled)
+        oil::directory_sections(root, entries, show_hidden, sort_mode, trash_enabled)
     }
 
     fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
@@ -383,21 +352,7 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix> {
-        git::status_prefix_for_chord(chord).map(|p| match p {
-            git::GitStatusPrefix::Commit => GitStatusPrefix::Commit,
-            git::GitStatusPrefix::Push => GitStatusPrefix::Push,
-            git::GitStatusPrefix::Fetch => GitStatusPrefix::Fetch,
-            git::GitStatusPrefix::Pull => GitStatusPrefix::Pull,
-            git::GitStatusPrefix::Branch => GitStatusPrefix::Branch,
-            git::GitStatusPrefix::Diff => GitStatusPrefix::Diff,
-            git::GitStatusPrefix::Log => GitStatusPrefix::Log,
-            git::GitStatusPrefix::Stash => GitStatusPrefix::Stash,
-            git::GitStatusPrefix::Merge => GitStatusPrefix::Merge,
-            git::GitStatusPrefix::Rebase => GitStatusPrefix::Rebase,
-            git::GitStatusPrefix::CherryPick => GitStatusPrefix::CherryPick,
-            git::GitStatusPrefix::Revert => GitStatusPrefix::Revert,
-            git::GitStatusPrefix::Reset => GitStatusPrefix::Reset,
-        })
+        git::feature_spec().prefix_for_chord(chord)
     }
 
     fn git_command_for_chord(
@@ -405,22 +360,7 @@ impl UserLibrary for UserLibraryImpl {
         prefix: Option<GitStatusPrefix>,
         chord: &str,
     ) -> Option<&'static str> {
-        let user_prefix = prefix.map(|p| match p {
-            GitStatusPrefix::Commit => git::GitStatusPrefix::Commit,
-            GitStatusPrefix::Push => git::GitStatusPrefix::Push,
-            GitStatusPrefix::Fetch => git::GitStatusPrefix::Fetch,
-            GitStatusPrefix::Pull => git::GitStatusPrefix::Pull,
-            GitStatusPrefix::Branch => git::GitStatusPrefix::Branch,
-            GitStatusPrefix::Diff => git::GitStatusPrefix::Diff,
-            GitStatusPrefix::Log => git::GitStatusPrefix::Log,
-            GitStatusPrefix::Stash => git::GitStatusPrefix::Stash,
-            GitStatusPrefix::Merge => git::GitStatusPrefix::Merge,
-            GitStatusPrefix::Rebase => git::GitStatusPrefix::Rebase,
-            GitStatusPrefix::CherryPick => git::GitStatusPrefix::CherryPick,
-            GitStatusPrefix::Revert => git::GitStatusPrefix::Revert,
-            GitStatusPrefix::Reset => git::GitStatusPrefix::Reset,
-        });
-        git::status_command_name(user_prefix, chord)
+        git::status_command_name(prefix, chord)
     }
 
     fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String> {
@@ -432,11 +372,41 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn browser_url_prompt(&self) -> String {
-        browser::URL_PROMPT.to_owned()
+        browser::feature_spec().url_prompt
     }
 
     fn browser_url_placeholder(&self) -> String {
-        browser::URL_PLACEHOLDER.to_owned()
+        browser::feature_spec().url_placeholder
+    }
+
+    fn git_feature_spec(&self) -> GitFeatureSpec {
+        git::feature_spec()
+    }
+
+    fn oil_feature_spec(&self) -> OilFeatureSpec {
+        oil::feature_spec()
+    }
+
+    fn browser_feature_spec(&self) -> BrowserFeatureSpec {
+        browser::feature_spec()
+    }
+
+    fn db_feature_spec(&self) -> DbFeatureSpec {
+        db::feature_spec()
+    }
+
+    fn terminal_feature_spec(&self) -> TerminalFeatureSpec {
+        terminal::feature_spec()
+    }
+
+    fn context_help_specs(&self) -> Vec<ContextHelpSpec> {
+        let mut specs = Vec::new();
+        specs.extend(self.git_feature_spec().context_help_specs());
+        specs.push(self.oil_feature_spec().help);
+        specs.push(self.browser_feature_spec().help);
+        specs.extend(self.db_feature_spec().context_help_specs());
+        specs.push(self.terminal_feature_spec().help);
+        specs
     }
 
     fn pdf_open_mode(&self) -> PdfOpenMode {
@@ -534,29 +504,6 @@ impl UserLibrary for UserLibraryImpl {
 
     fn default_build_command(&self, language: &str) -> Option<String> {
         compile::default_build_command(language).map(str::to_owned)
-    }
-}
-
-fn map_oil_key_action(action: oil::OilKeyAction) -> OilKeyAction {
-    match action {
-        oil::OilKeyAction::OpenEntry => OilKeyAction::OpenEntry,
-        oil::OilKeyAction::OpenVerticalSplit => OilKeyAction::OpenVerticalSplit,
-        oil::OilKeyAction::OpenHorizontalSplit => OilKeyAction::OpenHorizontalSplit,
-        oil::OilKeyAction::OpenNewPane => OilKeyAction::OpenNewPane,
-        oil::OilKeyAction::PreviewEntry => OilKeyAction::PreviewEntry,
-        oil::OilKeyAction::Refresh => OilKeyAction::Refresh,
-        oil::OilKeyAction::Close => OilKeyAction::Close,
-        oil::OilKeyAction::StartPrefix => OilKeyAction::StartPrefix,
-        oil::OilKeyAction::OpenParent => OilKeyAction::OpenParent,
-        oil::OilKeyAction::OpenWorkspaceRoot => OilKeyAction::OpenWorkspaceRoot,
-        oil::OilKeyAction::SetRoot => OilKeyAction::SetRoot,
-        oil::OilKeyAction::ShowHelp => OilKeyAction::ShowHelp,
-        oil::OilKeyAction::CycleSort => OilKeyAction::CycleSort,
-        oil::OilKeyAction::ToggleHidden => OilKeyAction::ToggleHidden,
-        oil::OilKeyAction::ToggleTrash => OilKeyAction::ToggleTrash,
-        oil::OilKeyAction::OpenExternal => OilKeyAction::OpenExternal,
-        oil::OilKeyAction::SetTabLocalRoot => OilKeyAction::SetTabLocalRoot,
-        oil::OilKeyAction::CreateGitWorktree => OilKeyAction::CreateGitWorktree,
     }
 }
 
@@ -788,6 +735,35 @@ extern "C" fn exported_browser_url_placeholder() -> RString {
     UserLibraryImpl.browser_url_placeholder().into()
 }
 
+extern "C" fn exported_git_feature_spec() -> AbiGitFeatureSpec {
+    UserLibraryImpl.git_feature_spec().into()
+}
+
+extern "C" fn exported_oil_feature_spec() -> AbiOilFeatureSpec {
+    UserLibraryImpl.oil_feature_spec().into()
+}
+
+extern "C" fn exported_browser_feature_spec() -> AbiBrowserFeatureSpec {
+    UserLibraryImpl.browser_feature_spec().into()
+}
+
+extern "C" fn exported_db_feature_spec() -> AbiDbFeatureSpec {
+    UserLibraryImpl.db_feature_spec().into()
+}
+
+extern "C" fn exported_terminal_feature_spec() -> AbiTerminalFeatureSpec {
+    UserLibraryImpl.terminal_feature_spec().into()
+}
+
+extern "C" fn exported_context_help_specs() -> RVec<AbiContextHelpSpec> {
+    UserLibraryImpl
+        .context_help_specs()
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>()
+        .into()
+}
+
 extern "C" fn exported_pdf_open_mode() -> AbiPdfOpenMode {
     UserLibraryImpl.pdf_open_mode().into()
 }
@@ -942,6 +918,10 @@ extern "C" fn exported_default_build_command(language: RString) -> ROption<RStri
         .into()
 }
 
+extern "C" fn exported_reserved_feature_contracts_v2() -> bool {
+    true
+}
+
 pub fn user_library_module() -> UserLibraryModuleRef {
     UserLibraryModule {
         packages: exported_packages,
@@ -977,6 +957,12 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         browser_input_hint: exported_browser_input_hint,
         browser_url_prompt: exported_browser_url_prompt,
         browser_url_placeholder: exported_browser_url_placeholder,
+        git_feature_spec: exported_git_feature_spec,
+        oil_feature_spec: exported_oil_feature_spec,
+        browser_feature_spec: exported_browser_feature_spec,
+        db_feature_spec: exported_db_feature_spec,
+        terminal_feature_spec: exported_terminal_feature_spec,
+        context_help_specs: exported_context_help_specs,
         statusline_render: exported_statusline_render,
         statusline_lsp_connected_icon: exported_statusline_lsp_connected_icon,
         statusline_lsp_error_icon: exported_statusline_lsp_error_icon,
@@ -996,6 +982,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         headerline_lines: exported_headerline_lines,
         pdf_open_mode: exported_pdf_open_mode,
         pane_config_v1: exported_pane_config,
+        reserved_feature_contracts_v2: exported_reserved_feature_contracts_v2,
     }
     .leak_into_prefix()
 }

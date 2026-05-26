@@ -1516,7 +1516,7 @@ fn terminal_buffers_are_read_only_without_prompt_input() {
 
 #[test]
 fn directory_view_state_uses_user_oil_defaults() {
-    let defaults = editor_plugin_host::NullUserLibrary.oil_defaults();
+    let defaults = user::UserLibraryImpl.oil_defaults();
     let state = DirectoryViewState::new(std::path::PathBuf::from("."), Vec::new(), defaults);
 
     assert_eq!(state.show_hidden, defaults.show_hidden);
@@ -4142,6 +4142,23 @@ fn state_with_user_library() -> Result<ShellState, String> {
         .map_err(|error| error.to_string())
 }
 
+fn focus_input_normal_mode(state: &mut ShellState, buffer_id: BufferId) -> Result<(), String> {
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+    state
+        .runtime
+        .emit_hook(HOOK_MODE_NORMAL, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn install_user_plugin_buffer(
     state: &mut ShellState,
     name: &str,
@@ -4241,6 +4258,23 @@ fn install_plugin_sections_test_buffer_with_update(
     );
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+    Ok(buffer_id)
+}
+
+fn install_user_acp_test_buffer(
+    state: &mut ShellState,
+    input_text: &str,
+) -> Result<BufferId, String> {
+    let buffer_id = install_user_plugin_buffer(state, "*acp*", user::acp::ACP_BUFFER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.init_acp_view("Test ACP");
+        let _ = buffer.focus_acp_input();
+        buffer
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .set_text(input_text);
+    }
     Ok(buffer_id)
 }
 
@@ -5203,36 +5237,37 @@ fn git_status_sequence_commands_are_registered() -> Result<(), String> {
 
 #[test]
 fn git_status_command_name_maps_sequences_to_picker_commands() {
+    let user_library = user::UserLibraryImpl;
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, None, "S"),
+        git_status_command_name(&user_library, None, "S"),
         Some("git.status.stage-all")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Pull), "u"),
+        git_status_command_name(&user_library, Some(GitPrefix::Pull), "u"),
         Some("git.status.pull-upstream")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Branch), "b"),
+        git_status_command_name(&user_library, Some(GitPrefix::Branch), "b"),
         Some("git.status.branches")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Diff), "w"),
+        git_status_command_name(&user_library, Some(GitPrefix::Diff), "w"),
         Some("git.diff")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Log), "l"),
+        git_status_command_name(&user_library, Some(GitPrefix::Log), "l"),
         Some("git.log")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Stash), "l"),
+        git_status_command_name(&user_library, Some(GitPrefix::Stash), "l"),
         Some("git.stash-list")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Rebase), "f"),
+        git_status_command_name(&user_library, Some(GitPrefix::Rebase), "f"),
         Some("git.status.rebase-autosquash")
     );
     assert_eq!(
-        git_status_command_name(&NullUserLibrary, Some(GitPrefix::Reset), "f"),
+        git_status_command_name(&user_library, Some(GitPrefix::Reset), "f"),
         Some("git.status.checkout-file")
     );
 }
@@ -5542,7 +5577,7 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
         buffer
             .section_line_meta(line_index)
             .and_then(|meta| meta.action.as_ref())
-            .is_some_and(|action| action.id() == user::git::ACTION_COMMIT_OPEN)
+            .is_some_and(|action| action.id() == editor_plugin_api::git_actions::COMMIT_OPEN)
     });
 
     assert_eq!(snapshot.branch(), Some(branch.as_str()));
@@ -5871,7 +5906,7 @@ fn hover_registry_includes_signature_help_provider() {
 
 #[test]
 fn statusline_icon_segments_split_acp_and_lsp_icons() {
-    let user_library = editor_plugin_host::NullUserLibrary;
+    let user_library = user::UserLibraryImpl;
     let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
     let lsp_icon = user_library.statusline_lsp_connected_icon();
     let statusline = format!("NORMAL | {acp_icon} | Ln 3, Col 9 | {lsp_icon} rust-analyzer");
@@ -5889,7 +5924,7 @@ fn statusline_icon_segments_split_acp_and_lsp_icons() {
 
 #[test]
 fn statusline_icon_segments_split_diagnostic_icons() {
-    let user_library = editor_plugin_host::NullUserLibrary;
+    let user_library = user::UserLibraryImpl;
     let lsp_icon = user_library.statusline_lsp_connected_icon();
     let error_icon = user_library.statusline_lsp_error_icon();
     let warning_icon = user_library.statusline_lsp_warning_icon();
@@ -8686,6 +8721,82 @@ fn render_acp_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), Stri
 }
 
 #[test]
+fn render_acp_buffer_with_tall_multiline_input_keeps_footer_on_screen() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let pasted = "        AircraftEngineeringServicingEquipment, // ASE\n\
+        AircraftTowBar, // ACTB\n\
+        AircraftTug, // TUGS - 30\n\
+        BaggageDollie, // BAGD\n\
+        BaggagePOD, // POD\n\
+        BaggageTug, // EBT\n\
+        BeltLoader, // BELT\n\
+        Van, // CAR\n\
+        CateringVehicle, // CATV\n\
+        Coach, // COAC\n\
+        DeIcingVehicle, // DEIC\n\
+        GroundPowerUnit, // GPU\n\
+        HighLoader, // HILO - 40\n\
+        LowLoader, // LOLO\n\
+        Minibus, // MBUS\n\
+        MotorisedStep, // MSTP\n\
+        NonMotorisedStep, // STPN\n\
+        PassengerBoardingRamp, // PBR\n\
+        PassengerMobility, // LIFT - Ambulift\n"
+        .repeat(6);
+    let buffer_id = install_acp_test_buffer(&mut state, 0, &format!("/{pasted}"), None)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        let _ = buffer.focus_acp_input();
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    assert!(layout.input_y >= layout.body_y);
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "missing ACP layout".to_owned())?;
+    let footer_bottom =
+        acp_layout.footer.rect.y() + i32::try_from(acp_layout.footer.rect.height()).unwrap_or(0);
+    assert!(footer_bottom <= layout.pane_bottom);
+    assert_eq!(
+        acp_layout.input.rect.height() as i32,
+        input_panel_chrome_height() + 16 * 10
+    );
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Insert,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(acp_layout.input.rect.height() > 0);
+    assert!(!scene.is_empty());
+    Ok(())
+}
+
+#[test]
 fn sync_active_viewport_uses_active_pane_height_for_horizontal_splits() -> Result<(), String> {
     let render_width = 640;
     let render_height = 320;
@@ -9705,7 +9816,7 @@ fn acp_input_field_visual_yank_copies_selected_text() -> Result<(), String> {
         input.cursor = 0;
     }
 
-    shell_ui_mut(&mut state.runtime)?.enter_normal_mode();
+    focus_input_normal_mode(&mut state, buffer_id)?;
     start_visual_mode_with_kind(&mut state.runtime, VisualSelectionKind::Character)?;
     apply_motion_command(&mut state.runtime, ShellMotion::Right)?;
     apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
@@ -9726,6 +9837,201 @@ fn acp_input_field_visual_yank_copies_selected_text() -> Result<(), String> {
             .selection_anchor,
         None
     );
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_dd_deletes_current_line() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha\nbeta\ngamma")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char("alpha\n".chars().count());
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(input.text(), "alpha\ngamma");
+    assert_eq!(ui.vim().yank, Some(YankRegister::Line("beta\n".to_owned())));
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_dw_deletes_motion_range() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha beta")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char(0);
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("w")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(input.text(), "beta");
+    assert_eq!(
+        ui.vim().yank,
+        Some(YankRegister::Character("alpha ".to_owned()))
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_cw_enters_insert_mode() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha beta")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char(0);
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("w")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(ui.input_mode(), InputMode::Insert);
+    assert_eq!(input.text(), "beta");
+
+    state
+        .handle_text_input("zeta ")
+        .map_err(|error| error.to_string())?;
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(input.text(), "zeta beta");
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_visual_line_delete_removes_selected_lines() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha\nbeta\ngamma")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char(0);
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("V")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("d")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(ui.input_mode(), InputMode::Normal);
+    assert_eq!(input.text(), "gamma");
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_o_and_o_open_new_lines() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha\nbeta")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char("alpha\n".chars().count());
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("o")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    state
+        .handle_text_input("middle")
+        .map_err(|error| error.to_string())?;
+    state
+        .try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+
+    state
+        .handle_text_input("O")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    state
+        .handle_text_input("above")
+        .map_err(|error| error.to_string())?;
+
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(input.text(), "alpha\nbeta\nabove\nmiddle");
+    Ok(())
+}
+
+#[test]
+fn acp_input_field_yy_and_p_work_linewise() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_acp_test_buffer(&mut state, "alpha\nbeta")?;
+    {
+        let input = shell_buffer_mut(&mut state.runtime, buffer_id)?
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.set_cursor_char(0);
+    }
+    focus_input_normal_mode(&mut state, buffer_id)?;
+
+    state
+        .handle_text_input("y")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("y")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("p")
+        .map_err(|error| error.to_string())?;
+
+    let input = shell_buffer(&state.runtime, buffer_id)?
+        .input_field()
+        .ok_or_else(|| "ACP input field missing".to_owned())?;
+    assert_eq!(input.text(), "alpha\nalpha\nbeta");
     Ok(())
 }
 
@@ -9867,6 +10173,199 @@ fn paste_text_into_active_input_buffer_updates_acp_input() -> Result<(), String>
             .ok_or_else(|| "ACP input field missing".to_owned())?
             .text(),
         "alpha beta"
+    );
+    Ok(())
+}
+
+#[test]
+fn paste_text_into_active_input_buffer_closes_acp_picker_for_multiline_text() -> Result<(), String>
+{
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "/fix", None)?;
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "ACP Slash Commands",
+        Vec::new(),
+    ));
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        "\nmore context"
+    )?);
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "/fix\nmore context"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_nonleading_double_slash_does_not_open_slash_picker() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "i have this code ", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    state
+        .handle_text_input("//")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "i have this code //"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_slash_picker_text_input_updates_acp_input() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "/", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+    shell_ui_mut(&mut state.runtime)?.set_picker(
+        PickerOverlay::from_entries("ACP Slash Commands", Vec::new())
+            .with_kind(PickerKind::AcpSlash { buffer_id }),
+    );
+
+    state
+        .handle_text_input("fix")
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "/fix"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_slash_picker_backspace_can_delete_leading_slash() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "/", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+    shell_ui_mut(&mut state.runtime)?.set_picker(
+        PickerOverlay::from_entries("ACP Slash Commands", Vec::new())
+            .with_kind(PickerKind::AcpSlash { buffer_id }),
+    );
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Backspace),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        ""
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_paste_code_with_inline_double_slash_comments_closes_slash_picker() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "/", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+        ui.set_picker(
+            PickerOverlay::from_entries("ACP Slash Commands", Vec::new())
+                .with_kind(PickerKind::AcpSlash { buffer_id }),
+        );
+    }
+
+    let pasted = "        Unknown = 0,\n        Vehicle=1,\n        Other,\n        SmartPhone,\n        Person,\n        Trailer,\n        Train,\n        Aircraft,\n        Luggage,\n        Skip,\n        IoTDevice=10,\n        Building,\n        Robot,\n        Parcel,\n        Animal,\n        CommercialWasteBin,\n        Keg,\n        Crane,\n        Generator,\n        RetailCage,\n        GolfBuggy=20,\n        RoadSweeper,\n        BarCodeScanner,\n        Printer,\n        Computer,\n        Gritter,\n        AirStarterUnit,\n        AircraftEngineeringServicingEquipment, // ASE\n        AircraftTowBar, // ACTB\n        AircraftTug, // TUGS - 30\n        BaggageDollie, // BAGD\n        BaggagePOD, // POD\n        BaggageTug, // EBT\n        BeltLoader, // BELT\n        Car,\n        Van, // CAR\n        CateringVehicle, // CATV\n        Coach, // COAC\n        DeIcingVehicle, // DEIC\n        GroundPowerUnit, // GPU\n        HighLoader, // HILO - 40\n        Lorry,\n        LowLoader, // LOLO\n        Minibus, // MBUS\n        MotorisedStep, // MSTP\n        NonMotorisedStep, // STPN\n        PassengerBoardingRamp, // PBR\n        PassengerMobility, // LIFT - Ambulift\n        FuelBowser,\n        WaterBowser,\n";
+
+    assert!(paste_text_into_active_input_buffer(
+        &mut state.runtime,
+        pasted
+    )?);
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        format!("/{pasted}")
     );
     Ok(())
 }

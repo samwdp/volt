@@ -1566,15 +1566,8 @@ name = "editor-plugin-host"
 version = "0.1.0"
 dependencies = [
  "editor-core",
- "editor-dap",
- "editor-fs",
- "editor-git",
- "editor-icons",
- "editor-lsp",
  "editor-path",
  "editor-plugin-api",
- "editor-syntax",
- "editor-theme",
 ]
 
 [[package]]

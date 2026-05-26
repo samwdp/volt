@@ -225,6 +225,12 @@ fn preferred_font_search_roots() -> Vec<PathBuf> {
 }
 
 fn preferred_berkeley_mono_font() -> Option<PathBuf> {
+    for candidate in preferred_berkeley_mono_font_candidates() {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     let normalized = normalize_font_name("Berkeley Mono");
     let mut stack = preferred_font_search_roots();
     let mut matches = Vec::new();
@@ -267,6 +273,21 @@ fn preferred_berkeley_mono_font() -> Option<PathBuf> {
     pick_best_matching_font_path(matches, &normalized)
 }
 
+fn preferred_berkeley_mono_font_candidates() -> Vec<PathBuf> {
+    const FILE_NAMES: &[&str] = &[
+        "LigaBerkeleyMono-Regular.ttf",
+        "LigaBerkeleyMono-Regular.otf",
+        "BerkeleyMono-Regular.ttf",
+        "Berkeley Mono Regular.ttf",
+        "Berkeley Mono Variable.ttf",
+    ];
+
+    preferred_font_search_roots()
+        .into_iter()
+        .flat_map(|root| FILE_NAMES.iter().map(move |name| root.join(name)))
+        .collect()
+}
+
 /// Finds the first available system monospace font from the known candidates.
 pub fn find_system_monospace_font() -> Result<PathBuf, RenderError> {
     if let Some(font_path) = preferred_berkeley_mono_font() {
@@ -286,6 +307,11 @@ pub fn find_font_by_name(name: &str) -> Option<PathBuf> {
     let normalized = normalize_font_name(name);
     if normalized.is_empty() {
         return None;
+    }
+    if normalized.contains("berkeleymono")
+        && let Some(path) = preferred_berkeley_mono_font()
+    {
+        return Some(path);
     }
 
     const MAX_FONT_SEARCH_DEPTH: usize = 6;

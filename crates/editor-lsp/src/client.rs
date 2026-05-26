@@ -51,6 +51,7 @@ const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
 const COPILOT_SERVER_ID: &str = "copilot-language-server";
 const CSHARP_SERVER_ID: &str = "csharp-ls";
+const ROSLYN_LANGUAGE_SERVER_ID: &str = "roslyn-language-server";
 const CSHARP_WORKSPACE_SECTION: &str = "csharp";
 const CSHARP_METADATA_REQUEST_METHOD: &str = "csharp/metadata";
 const INLINE_COMPLETION_METHOD: &str = "textDocument/inlineCompletion";
@@ -3613,7 +3614,7 @@ fn is_copilot_server(server_id: &str) -> bool {
 }
 
 fn is_csharp_server(server_id: &str) -> bool {
-    server_id == CSHARP_SERVER_ID
+    matches!(server_id, CSHARP_SERVER_ID | ROSLYN_LANGUAGE_SERVER_ID)
 }
 
 fn is_csharp_metadata_uri(uri: &str) -> bool {
@@ -5288,6 +5289,16 @@ mod tests {
     fn csharp_and_copilot_servers_receive_initialization_options() {
         assert_eq!(
             initialization_options_for_server(CSHARP_SERVER_ID, None),
+            Some(json!({
+                "experimental": {
+                    "csharp": {
+                        "metadataUris": true,
+                    }
+                }
+            }))
+        );
+        assert_eq!(
+            initialization_options_for_server(ROSLYN_LANGUAGE_SERVER_ID, None),
             Some(json!({
                 "experimental": {
                     "csharp": {

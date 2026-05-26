@@ -1,5 +1,6 @@
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, terminal_hooks,
+    ContextHelpEntry, ContextHelpSpec, PluginAction, PluginCommand, PluginKeyBinding,
+    PluginKeymapScope, PluginPackage, TerminalFeatureSpec, terminal_hooks,
 };
 use std::env;
 
@@ -68,6 +69,26 @@ pub fn package() -> PluginPackage {
         "terminal.open",
         PluginKeymapScope::Global,
     )])
+}
+
+/// Public terminal feature contract used by first-party and third-party code.
+pub fn feature_spec() -> TerminalFeatureSpec {
+    TerminalFeatureSpec {
+        buffer_name: "*terminal*".to_owned(),
+        popup_buffer_name: "*terminal-popup*".to_owned(),
+        help: ContextHelpSpec::new(
+            "Terminal",
+            "Terminal",
+            vec![
+                ContextHelpEntry::new("Ctrl+`", "open terminal", "Opens builtin terminal buffer."),
+                ContextHelpEntry::new(
+                    "terminal.popup",
+                    "open popup terminal",
+                    "Opens popup-hosted terminal buffer.",
+                ),
+            ],
+        ),
+    }
 }
 
 #[cfg(test)]

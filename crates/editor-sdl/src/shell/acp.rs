@@ -1082,26 +1082,37 @@ pub(super) fn maybe_open_slash_completion(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let buffer = shell_buffer(runtime, buffer_id)?;
-    if !matches!(
-        &buffer.kind,
-        BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
-    ) {
-        return Ok(());
-    }
-    if shell_ui(runtime)?.picker_visible() {
-        return Ok(());
-    }
-    let Some(input) = buffer.input_field() else {
+    let Some(text) = ({
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
+        ) {
+            return Ok(());
+        }
+        buffer.input_field().map(|input| input.text().to_owned())
+    }) else {
         return Ok(());
     };
-    let text = input.text();
-    if !text.starts_with('/') {
+    let picker_kind = shell_ui(runtime)?.picker_kind();
+    let slash_picker_active = matches!(
+        picker_kind,
+        Some(PickerKind::AcpSlash {
+            buffer_id: picker_buffer_id,
+        }) if picker_buffer_id == buffer_id
+    );
+    let Some(trimmed) = acp_slash_completion_query(&text) else {
+        if slash_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        }
         return Ok(());
-    }
-    let trimmed = text.trim_start_matches('/');
-    if trimmed.chars().any(|character| character.is_whitespace()) {
-        return Ok(());
+    };
+    if shell_ui(runtime)?.picker_visible() {
+        if slash_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        } else {
+            return Ok(());
+        }
     }
     open_slash_command_picker(
         runtime,
@@ -1844,6 +1855,11 @@ fn pending_slash_trigger(trigger: &CompletionTrigger) -> PendingSlashTrigger {
     }
 }
 
+fn acp_slash_completion_query(text: &str) -> Option<&str> {
+    let trimmed = text.strip_prefix('/')?;
+    (!trimmed.chars().any(|character| character.is_whitespace())).then_some(trimmed)
+}
+
 fn pending_slash_completion_trigger(
     buffer: &ShellBuffer,
     pending: PendingSlashTrigger,
@@ -1851,18 +1867,11 @@ fn pending_slash_completion_trigger(
     let input = buffer.input_field()?;
     let text = input.text();
     match pending {
-        PendingSlashTrigger::Auto => {
-            if !text.starts_with('/') {
-                return None;
-            }
-            let trimmed = text.trim_start_matches('/');
-            if trimmed.contains(' ') {
-                return None;
-            }
-            Some(CompletionTrigger::Auto(trimmed.to_owned()))
-        }
+        PendingSlashTrigger::Auto => Some(CompletionTrigger::Auto(
+            acp_slash_completion_query(text)?.to_owned(),
+        )),
         PendingSlashTrigger::Manual => {
-            if text.is_empty() || text.starts_with('/') {
+            if text.is_empty() || acp_slash_completion_query(text).is_some() {
                 Some(CompletionTrigger::Manual)
             } else {
                 None
@@ -1943,7 +1952,7 @@ fn open_slash_command_picker(
         }
         CompletionTrigger::Manual => {}
     }
-    shell_ui_mut(runtime)?.set_picker(picker);
+    shell_ui_mut(runtime)?.set_picker(picker.with_kind(PickerKind::AcpSlash { buffer_id }));
     Ok(())
 }
 
@@ -5140,5 +5149,37 @@ mod tests {
             vec!["Zulu", "Alpha"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn pending_slash_completion_trigger_rejects_multiline_input() -> Result<(), String> {
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let (_workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+        {
+            let buffer = shell_ui_mut(&mut state.runtime)?
+                .buffer_mut(buffer_id)
+                .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+            let input = buffer
+                .input_field_mut()
+                .ok_or_else(|| "ACP input field missing".to_owned())?;
+            input.set_text("/fix\nmore context");
+        }
+
+        let buffer = shell_ui(&state.runtime)?
+            .buffer(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        assert!(pending_slash_completion_trigger(buffer, PendingSlashTrigger::Auto).is_none());
+        assert!(pending_slash_completion_trigger(buffer, PendingSlashTrigger::Manual).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn acp_slash_completion_query_requires_leading_single_token_command() {
+        assert_eq!(acp_slash_completion_query("/"), Some(""));
+        assert_eq!(acp_slash_completion_query("/fix"), Some("fix"));
+        assert!(acp_slash_completion_query("/fix more").is_none());
+        assert!(acp_slash_completion_query("/fix\nmore").is_none());
+        assert!(acp_slash_completion_query("i have this code //").is_none());
+        assert!(acp_slash_completion_query(" //").is_none());
     }
 }

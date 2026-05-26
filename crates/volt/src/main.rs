@@ -9,6 +9,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use abi_stable::library::RootModule;
@@ -24,7 +25,10 @@ use editor_plugin_api::abi::{
     AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
     UserLibraryModuleRef,
 };
-use editor_plugin_api::{PaneConfig, PdfOpenMode};
+use editor_plugin_api::{
+    BrowserFeatureSpec, ContextHelpSpec, DbFeatureSpec, GitFeatureSpec, OilFeatureSpec, PaneConfig,
+    PdfOpenMode, TerminalFeatureSpec,
+};
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
 use editor_syntax::SyntaxRegistry;
@@ -92,6 +96,34 @@ struct LaunchOptions {
 struct DynamicUserLibrary {
     module: UserLibraryModuleRef,
     icon_symbols: &'static [editor_icons::IconFontSymbol],
+}
+
+#[derive(Debug, Clone)]
+struct StartupTrace {
+    origin: Instant,
+    last: Instant,
+}
+
+impl StartupTrace {
+    fn enabled() -> bool {
+        std::env::var_os("VOLT_STARTUP_TRACE").is_some()
+    }
+
+    fn new() -> Option<Self> {
+        let now = Instant::now();
+        Self::enabled().then_some(Self {
+            origin: now,
+            last: now,
+        })
+    }
+
+    fn mark(&mut self, stage: &str) {
+        let now = Instant::now();
+        let delta_ms = now.duration_since(self.last).as_secs_f64() * 1000.0;
+        let total_ms = now.duration_since(self.origin).as_secs_f64() * 1000.0;
+        eprintln!("[startup] {stage}: +{delta_ms:.1}ms total={total_ms:.1}ms");
+        self.last = now;
+    }
 }
 
 impl DynamicUserLibrary {
@@ -328,6 +360,33 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.browser_url_placeholder()().into()
     }
 
+    fn git_feature_spec(&self) -> GitFeatureSpec {
+        self.module.git_feature_spec()().into()
+    }
+
+    fn oil_feature_spec(&self) -> OilFeatureSpec {
+        self.module.oil_feature_spec()().into()
+    }
+
+    fn browser_feature_spec(&self) -> BrowserFeatureSpec {
+        self.module.browser_feature_spec()().into()
+    }
+
+    fn db_feature_spec(&self) -> DbFeatureSpec {
+        self.module.db_feature_spec()().into()
+    }
+
+    fn terminal_feature_spec(&self) -> TerminalFeatureSpec {
+        self.module.terminal_feature_spec()().into()
+    }
+
+    fn context_help_specs(&self) -> Vec<ContextHelpSpec> {
+        self.module.context_help_specs()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
     fn pdf_open_mode(&self) -> PdfOpenMode {
         self.module.pdf_open_mode()().into()
     }
@@ -463,7 +522,7 @@ fn validate_runtime_user_library(library: &dyn UserLibrary) -> Result<(), String
     .map_err(|message| format!("syntax language export panicked: {message}"))
 }
 
-fn load_user_library() -> Arc<dyn UserLibrary> {
+fn load_user_library(trace: &mut Option<StartupTrace>) -> Arc<dyn UserLibrary> {
     let current_exe = std::env::current_exe().ok();
     for path in user_library_candidates(
         current_exe.as_deref(),
@@ -474,10 +533,19 @@ fn load_user_library() -> Arc<dyn UserLibrary> {
         }
         match UserLibraryModuleRef::load_from_file(&path) {
             Ok(module) => {
+                if let Some(trace) = trace.as_mut() {
+                    trace.mark("user-library.load-dylib");
+                }
                 let library = Arc::new(DynamicUserLibrary::new(module));
+                if let Some(trace) = trace.as_mut() {
+                    trace.mark("user-library.wrap-dylib");
+                }
                 match validate_runtime_user_library(library.as_ref()) {
                     Ok(()) => {
                         eprintln!("loaded user library from `{}`", path.display());
+                        if let Some(trace) = trace.as_mut() {
+                            trace.mark("user-library.validate-dylib");
+                        }
                         return library;
                     }
                     Err(error) => {
@@ -485,6 +553,9 @@ fn load_user_library() -> Arc<dyn UserLibrary> {
                             "runtime user library `{}` is incompatible with this build: {error}",
                             path.display()
                         );
+                        if let Some(trace) = trace.as_mut() {
+                            trace.mark("user-library.reject-dylib");
+                        }
                     }
                 }
             }
@@ -493,20 +564,36 @@ fn load_user_library() -> Arc<dyn UserLibrary> {
                     "failed to load runtime user library `{}`: {error}",
                     path.display()
                 );
+                if let Some(trace) = trace.as_mut() {
+                    trace.mark("user-library.load-dylib-error");
+                }
             }
         }
+    }
+    if let Some(trace) = trace.as_mut() {
+        trace.mark("user-library.use-static");
     }
     Arc::new(user::UserLibraryImpl)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut startup_trace = StartupTrace::new();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if process_supervisor::maybe_run(&args)? {
         return Ok(());
     }
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("process-supervisor");
+    }
 
     let options = parse_launch_options(args)?;
-    let user_library = load_user_library();
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("parse-launch-options");
+    }
+    let user_library = load_user_library(&mut startup_trace);
+    if let Some(trace) = startup_trace.as_mut() {
+        trace.mark("user-library.ready");
+    }
     match options.mode {
         LaunchMode::ShellDemo => {
             let summary = run_demo_shell(ShellConfig {
@@ -515,6 +602,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
             })?;
+            if let Some(trace) = startup_trace.as_mut() {
+                trace.mark("run-demo-shell");
+            }
             print_shell_summary("Volt", &summary);
             return Ok(());
         }
@@ -527,6 +617,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 user_library: Some(Arc::clone(&user_library)),
                 ..ShellConfig::default()
             })?;
+            if let Some(trace) = startup_trace.as_mut() {
+                trace.mark("run-demo-shell-hidden");
+            }
             print_shell_summary("volt hidden shell smoke test", &summary);
             return Ok(());
         }

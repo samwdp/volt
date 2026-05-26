@@ -1,127 +1,135 @@
 use editor_core::{Section, SectionAction, SectionItem, SectionTree};
 use editor_fs::{DirectoryEntry, DirectoryEntryKind};
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    ContextHelpEntry, ContextHelpSpec, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings,
+    OilSortMode, PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginVimMode, oil_hooks, oil_protocol,
 };
 use std::path::Path;
 
-pub const HOOK_OIL_OPEN: &str = "ui.oil.open";
-pub const HOOK_OIL_OPEN_PARENT: &str = "ui.oil.open-parent";
-pub const HOOK_OIL_ACTION: &str = "ui.oil.action";
-pub const HOOK_OIL_GIT_WORKTREE: &str = "ui.oil.git-worktree";
-pub const ACTION_OIL_ENTRY: &str = "oil.entry";
-pub const SECTION_OIL_DIRECTORY: &str = "oil.directory";
+pub const ACTION_OIL_ENTRY: &str = oil_protocol::ACTION_OIL_ENTRY;
+pub const SECTION_OIL_DIRECTORY: &str = oil_protocol::SECTION_OIL_DIRECTORY;
 
-/// User-configurable default options for new oil buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OilDefaults {
-    pub show_hidden: bool,
-    pub sort_mode: OilSortMode,
-    pub trash_enabled: bool,
+fn help_entry(chord: impl Into<String>, action: &str, description: &str) -> ContextHelpEntry {
+    ContextHelpEntry::new(chord, action, description)
 }
 
-/// User-configurable sort modes for oil directory buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OilSortMode {
-    TypeThenName,
-    TypeThenNameDesc,
-}
-
-impl OilSortMode {
-    /// Returns the human-readable label shown in the oil header.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::TypeThenName => "type+name",
-            Self::TypeThenNameDesc => "type+name desc",
-        }
+/// Public oil feature contract used by first-party and third-party code.
+pub fn feature_spec() -> OilFeatureSpec {
+    let keybindings = OilKeybindings::default();
+    let prefixed = |suffix: &str| format!("{}{}", keybindings.prefix, suffix);
+    OilFeatureSpec {
+        defaults: OilDefaults::default(),
+        keybindings,
+        help: ContextHelpSpec::new(
+            "Oil",
+            "Oil",
+            vec![
+                help_entry(
+                    keybindings.open_entry,
+                    "open",
+                    "Opens the file or enters the selected directory.",
+                ),
+                help_entry(
+                    keybindings.open_vertical_split,
+                    "open vertical split",
+                    "Opens the selection in a vertical split.",
+                ),
+                help_entry(
+                    keybindings.open_horizontal_split,
+                    "open horizontal split",
+                    "Opens the selection in a horizontal split.",
+                ),
+                help_entry("yy", "copy entry", "Copies the selected file or directory."),
+                help_entry(
+                    "Visual y",
+                    "copy entries",
+                    "Copies the selected files and directories.",
+                ),
+                help_entry(
+                    "p",
+                    "paste copies",
+                    "Copies the yanked files and directories into the current oil root.",
+                ),
+                help_entry(
+                    keybindings.open_new_pane,
+                    "open new pane",
+                    "Opens the selection in a new pane.",
+                ),
+                help_entry(
+                    keybindings.preview_entry,
+                    "preview",
+                    "Previews the selected file.",
+                ),
+                help_entry(
+                    keybindings.refresh,
+                    "refresh",
+                    "Refreshes the directory listing.",
+                ),
+                help_entry(keybindings.close, "close", "Closes the directory buffer."),
+                help_entry(
+                    keybindings.open_parent,
+                    "parent directory",
+                    "Navigates to the parent directory.",
+                ),
+                help_entry(
+                    keybindings.open_workspace_root,
+                    "workspace root",
+                    "Navigates to the workspace root.",
+                ),
+                help_entry(
+                    keybindings.set_root,
+                    "set root",
+                    "Sets the directory root to the selection.",
+                ),
+                help_entry(
+                    prefixed(keybindings.set_tab_local_root),
+                    "set root (tab)",
+                    "Sets the directory root to the selection (tab-local).",
+                ),
+                help_entry(
+                    prefixed(keybindings.cycle_sort),
+                    "change sort",
+                    "Cycles the directory sort order.",
+                ),
+                help_entry(
+                    prefixed(keybindings.toggle_hidden),
+                    "toggle hidden",
+                    "Toggles hidden file visibility.",
+                ),
+                help_entry(
+                    prefixed(keybindings.toggle_trash),
+                    "toggle trash",
+                    "Toggles trash usage for deletions.",
+                ),
+                help_entry(
+                    prefixed(keybindings.open_external),
+                    "open external",
+                    "Opens the selection externally.",
+                ),
+                help_entry(
+                    prefixed(keybindings.show_help),
+                    "help",
+                    "Shows the oil help popup.",
+                ),
+                help_entry(
+                    prefixed(keybindings.create_git_worktree),
+                    "create git worktree",
+                    "Creates a git worktree from the current oil buffer.",
+                ),
+            ],
+        ),
     }
-
-    /// Returns the next sort mode in the cycle used by the oil UI.
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::TypeThenName => Self::TypeThenNameDesc,
-            Self::TypeThenNameDesc => Self::TypeThenName,
-        }
-    }
-}
-
-/// User-configurable oil keybindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OilKeybindings {
-    pub open_entry: &'static str,
-    pub open_vertical_split: &'static str,
-    pub open_horizontal_split: &'static str,
-    pub open_new_pane: &'static str,
-    pub preview_entry: &'static str,
-    pub refresh: &'static str,
-    pub close: &'static str,
-    pub prefix: &'static str,
-    pub open_parent: &'static str,
-    pub open_workspace_root: &'static str,
-    pub set_root: &'static str,
-    pub show_help: &'static str,
-    pub cycle_sort: &'static str,
-    pub toggle_hidden: &'static str,
-    pub toggle_trash: &'static str,
-    pub open_external: &'static str,
-    pub set_tab_local_root: &'static str,
-    pub create_git_worktree: &'static str,
-}
-
-/// Oil actions resolved from user-configured keybindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OilKeyAction {
-    OpenEntry,
-    OpenVerticalSplit,
-    OpenHorizontalSplit,
-    OpenNewPane,
-    PreviewEntry,
-    Refresh,
-    Close,
-    StartPrefix,
-    OpenParent,
-    OpenWorkspaceRoot,
-    SetRoot,
-    ShowHelp,
-    CycleSort,
-    ToggleHidden,
-    ToggleTrash,
-    OpenExternal,
-    SetTabLocalRoot,
-    CreateGitWorktree,
 }
 
 /// Returns the default options applied to newly created oil buffers.
 pub fn defaults() -> OilDefaults {
-    OilDefaults {
-        show_hidden: false,
-        sort_mode: OilSortMode::TypeThenName,
-        trash_enabled: false,
-    }
+    feature_spec().defaults
 }
 
 /// Returns the user-configurable oil keybindings.
 pub fn keybindings() -> OilKeybindings {
-    OilKeybindings {
-        open_entry: "Enter",
-        open_vertical_split: "Ctrl+\\",
-        open_horizontal_split: "Ctrl+|",
-        open_new_pane: "Ctrl+t",
-        preview_entry: "Ctrl+p",
-        refresh: "Ctrl+l",
-        close: "Ctrl+c",
-        prefix: "g",
-        open_parent: "-",
-        open_workspace_root: "_",
-        set_root: "`",
-        show_help: "?",
-        cycle_sort: "s",
-        toggle_hidden: ".",
-        toggle_trash: "\\",
-        open_external: "x",
-        set_tab_local_root: "~",
-        create_git_worktree: "wn",
-    }
+    feature_spec().keybindings
 }
 
 /// Resolves a keydown chord to an oil action, if any.
@@ -188,7 +196,7 @@ fn oil_action_command(
     PluginCommand::new(
         name,
         description,
-        vec![PluginAction::emit_hook(HOOK_OIL_ACTION, Some(action))],
+        vec![PluginAction::emit_hook(oil_hooks::ACTION, Some(action))],
     )
 }
 
@@ -203,12 +211,15 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "oil.open-directory",
             "Opens an editable directory buffer.",
-            vec![PluginAction::emit_hook(HOOK_OIL_OPEN, None::<&str>)],
+            vec![PluginAction::emit_hook(oil_hooks::OPEN, None::<&str>)],
         ),
         PluginCommand::new(
             "oil.open-parent",
             "Opens a parent-directory view.",
-            vec![PluginAction::emit_hook(HOOK_OIL_OPEN_PARENT, None::<&str>)],
+            vec![PluginAction::emit_hook(
+                oil_hooks::OPEN_PARENT,
+                None::<&str>,
+            )],
         ),
         oil_action_command(
             "oil.open-entry",
@@ -276,7 +287,10 @@ pub fn package() -> PluginPackage {
         PluginCommand::new(
             "oil.git-worktree",
             "Creates a git worktree from an oil directory buffer.",
-            vec![PluginAction::emit_hook(HOOK_OIL_GIT_WORKTREE, None::<&str>)],
+            vec![PluginAction::emit_hook(
+                oil_hooks::GIT_WORKTREE,
+                None::<&str>,
+            )],
         ),
     ])
     .with_key_bindings(vec![
@@ -548,7 +562,7 @@ mod tests {
             .expect("oil.git-worktree command");
         assert_eq!(
             command.actions()[0].hook().map(|hook| hook.hook_name()),
-            Some(HOOK_OIL_GIT_WORKTREE)
+            Some(oil_hooks::GIT_WORKTREE)
         );
 
         let binding = package

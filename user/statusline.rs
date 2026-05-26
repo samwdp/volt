@@ -146,12 +146,8 @@ fn position_segment(context: &StatuslineContext<'_>) -> Option<String> {
 }
 
 fn lsp_segment(context: &StatuslineContext<'_>) -> Option<String> {
-    let server = context.lsp_server?;
     let mut segment = String::new();
     segment.push(' ');
-    segment.push_str(LSP_CONNECTED_ICON);
-    segment.push(' ');
-    segment.push_str(server);
     if let Some(diagnostics) = context.lsp_diagnostics {
         if diagnostics.errors > 0 {
             segment.push(' ');
