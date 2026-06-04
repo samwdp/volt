@@ -1,5 +1,6 @@
 use editor_plugin_api::{
-    ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, PluginAction, PluginBuffer, PluginCommand,
+    ContextHelpEntry, ContextHelpSpec, DbActionSpec, DbBrowserContext, DbBrowserItemContext,
+    DbBrowserItemKind, DbBrowserItemSpec, DbFeatureSpec, PluginAction, PluginBuffer, PluginCommand,
     PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, buffer_kinds, db_hooks,
     input_hooks,
 };
@@ -73,6 +74,36 @@ pub fn feature_spec() -> DbFeatureSpec {
             ],
         ),
     }
+}
+
+pub fn browser_items(context: &DbBrowserContext) -> Vec<DbBrowserItemSpec> {
+    context.items.iter().map(browser_item).collect()
+}
+
+fn browser_item(item: &DbBrowserItemContext) -> DbBrowserItemSpec {
+    let line = match item.kind {
+        DbBrowserItemKind::Header => item.label.to_string(),
+        DbBrowserItemKind::Empty => item.label.to_string(),
+        DbBrowserItemKind::ActiveConnection | DbBrowserItemKind::RememberedConnection => {
+            format!(
+                "{} {}{}",
+                item.engine,
+                item.label,
+                if item.active { " [active]" } else { "" }
+            )
+        }
+        DbBrowserItemKind::Table => format!("▦ {}", item.label),
+        DbBrowserItemKind::View => format!("◫ {}", item.label),
+        DbBrowserItemKind::Index => format!("◎ {}", item.label),
+        DbBrowserItemKind::HistoryEntry | DbBrowserItemKind::Snippet => {
+            format!("{} {} :: {}", item.engine, item.label, item.detail)
+        }
+    };
+    DbBrowserItemSpec::new(line, default_action(item))
+}
+
+fn default_action(item: &DbBrowserItemContext) -> Option<DbActionSpec> {
+    item.default_action.clone().into()
 }
 
 /// Returns the database explorer package metadata.
@@ -169,7 +200,8 @@ pub fn package() -> PluginPackage {
         readonly_browser_buffer(SCHEMA_KIND, true),
         readonly_browser_buffer(HISTORY_KIND, false),
         readonly_browser_buffer(SNIPPETS_KIND, false),
-        PluginBuffer::new(RESULTS_KIND, vec!["Query results appear here.".to_owned()]),
+        PluginBuffer::new(RESULTS_KIND, vec!["Query results appear here.".to_owned()])
+            .with_line_wrap(false),
     ])
 }
 
@@ -260,5 +292,35 @@ mod tests {
                 .iter()
                 .any(|binding| binding.chord() == EXECUTE_CHORD),
         );
+    }
+
+    #[test]
+    fn results_buffer_disables_line_wrap_by_default() {
+        let package = package();
+        let results_buffer = package
+            .buffers()
+            .iter()
+            .find(|buffer| buffer.kind() == RESULTS_KIND)
+            .expect("results buffer should be exported");
+
+        assert!(!results_buffer.line_wrap());
+    }
+
+    #[test]
+    fn browser_items_shape_table_rows_from_user_config() {
+        let context = DbBrowserContext::new(
+            editor_plugin_api::DbBrowserKind::Schema,
+            "*db-schema local*",
+        )
+        .with_items(vec![
+            DbBrowserItemContext::new(DbBrowserItemKind::Table, "users")
+                .with_default_action(DbActionSpec::open_table_preview(7, None::<String>, "users")),
+        ]);
+        let items = browser_items(&context);
+        assert_eq!(items[0].line(), "▦ users");
+        assert!(matches!(
+            items[0].action(),
+            Some(DbActionSpec::OpenTablePreview { session_id: 7, .. })
+        ));
     }
 }

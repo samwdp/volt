@@ -1,5 +1,4 @@
 use super::*;
-use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
 
 pub(super) fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(), String> {
     let bindings = [
@@ -33,327 +32,388 @@ pub(super) fn picker_overlay(
     runtime: &EditorRuntime,
     provider: &str,
 ) -> Result<PickerOverlay, String> {
-    match provider {
-        "commands" => Ok(command_picker_overlay(runtime)),
-        "buffers" => buffer_picker_overlay(runtime),
-        "buffers.close" => buffer_close_picker_overlay(runtime),
-        "keybindings" => Ok(keybinding_picker_overlay(runtime)),
-        "treesitter.languages" => treesitter_install_picker_overlay(runtime),
-        "workspace.projects" => workspace_project_picker_overlay(runtime),
-        "workspace.dashboard" => git_worktree_dashboard_picker_overlay(runtime),
-        "workspace.switch" => workspace_switch_picker_overlay(runtime),
-        "workspace.delete" => workspace_delete_picker_overlay(runtime),
-        "workspace.files" => workspace_file_picker_overlay(runtime),
-        "workspace.search" => workspace_search_picker_overlay(runtime),
-        "undo-tree" => undo_tree_picker_overlay(runtime),
-        "themes" => theme_picker_overlay(runtime),
-        "icon-fonts" => Ok(icon_font_picker_overlay(runtime)),
-        "acp-clients" => Ok(acp_clients_picker_overlay(runtime)),
-        other => Err(format!("unknown picker provider `{other}`")),
+    let spec = shell_user_library(runtime)
+        .picker_providers()
+        .into_iter()
+        .find(|spec| spec.id() == provider)
+        .ok_or_else(|| format!("unknown picker provider `{provider}`"))?;
+    picker_overlay_from_spec(runtime, &spec)
+}
+
+fn picker_overlay_from_spec(
+    runtime: &EditorRuntime,
+    spec: &PickerProviderSpec,
+) -> Result<PickerOverlay, String> {
+    if spec.source() == PickerSource::WorkspaceSearch {
+        return workspace_search_picker_overlay(runtime)
+            .map(|overlay| overlay.with_title(spec.title()));
     }
+    if spec.source() == PickerSource::WorkspaceDashboard {
+        return Ok(git_worktree_dashboard_picker_overlay(runtime)
+            .unwrap_or_else(workspace_dashboard_unavailable_overlay)
+            .with_title(spec.title()));
+    }
+
+    let context = picker_provider_context(runtime, spec)?;
+    user_picker_overlay(runtime, spec, context)
 }
 
-fn command_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
-    let entries = runtime
-        .commands()
-        .definitions()
-        .into_iter()
-        .map(|definition| PickerEntry {
-            item: PickerItem::new(
-                definition.name(),
-                definition.name(),
-                definition.description(),
-                Some(definition.description()),
-            ),
-            action: PickerAction::ExecuteCommand(definition.name().to_owned()),
-            quickfix: None,
-        })
-        .collect();
-
-    PickerOverlay::from_entries("Command Palette", entries)
-}
-
-fn buffer_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let ui = shell_ui(runtime)?;
-    let entries = ui
-        .active_workspace_buffer_ids()
-        .into_iter()
-        .flatten()
-        .filter_map(|buffer_id| ui.buffer(*buffer_id))
-        .map(|buffer| PickerEntry {
-            item: PickerItem::new(
-                buffer.id().to_string(),
-                buffer.display_name(),
-                buffer.kind_label(),
-                Some(format!(
-                    "{} | row {}, col {}",
-                    buffer.kind_label(),
-                    buffer.cursor_row() + 1,
-                    buffer.cursor_col() + 1,
-                )),
-            ),
-            action: PickerAction::FocusBuffer(buffer.id()),
-            quickfix: None,
-        })
-        .collect();
-
-    Ok(PickerOverlay::from_entries("Buffers", entries))
-}
-
-fn buffer_close_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let ui = shell_ui(runtime)?;
-    let entries = ui
-        .active_workspace_buffer_ids()
-        .into_iter()
-        .flatten()
-        .filter_map(|buffer_id| ui.buffer(*buffer_id))
-        .map(|buffer| {
-            let dirty = if buffer.is_dirty() {
-                "modified"
-            } else {
-                "clean"
-            };
-            PickerEntry {
-                item: PickerItem::new(
-                    buffer.id().to_string(),
-                    buffer.display_name(),
-                    format!("{} | {dirty}", buffer.kind_label()),
-                    Some(format!(
-                        "{} | row {}, col {}",
-                        buffer.kind_label(),
-                        buffer.cursor_row() + 1,
-                        buffer.cursor_col() + 1,
-                    )),
-                ),
-                action: PickerAction::CloseBuffer(buffer.id()),
-                quickfix: None,
-            }
-        })
-        .collect();
-
-    Ok(PickerOverlay::from_entries("Close Buffers", entries))
-}
-
-fn treesitter_install_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let registry = runtime
-        .services()
-        .get::<SyntaxRegistry>()
-        .ok_or_else(|| "syntax registry service missing".to_owned())?;
-    let entries = registry
-        .languages()
-        .map(|language| {
-            let detail = match language.grammar() {
-                Some(grammar) => {
-                    let installed = registry.is_installed(language.id()).unwrap_or(false);
-                    let status = if installed { "installed" } else { "missing" };
-                    format!("{status} | {}", grammar.repository_url())
-                }
-                None => "built-in grammar".to_owned(),
-            };
-            let preview = language.grammar().map(|grammar| {
-                grammar
-                    .install_directory(registry.install_root())
-                    .display()
-                    .to_string()
-            });
-            PickerEntry {
-                item: PickerItem::new(language.id(), language.id(), detail, preview),
-                action: PickerAction::InstallTreeSitterLanguage(language.id().to_owned()),
-                quickfix: None,
-            }
-        })
-        .collect();
-
-    Ok(PickerOverlay::from_entries("Tree-sitter Install", entries))
-}
-
-fn workspace_project_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let roots = shell_user_library(runtime)
-        .workspace_roots()
-        .into_iter()
-        .map(|root| ProjectSearchRoot::new(root.path, root.max_depth))
-        .collect::<Vec<_>>();
-    let entries = discover_projects(&roots)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|project| {
-            let existing_workspace = find_workspace_by_root(runtime, project.root())?;
-            let workspace_name = project.display_name();
-            let detail = workspace_project_picker_detail(&project, existing_workspace.is_some());
-            let action = existing_workspace.map_or(
-                PickerAction::CreateWorkspace {
-                    name: workspace_name.clone(),
-                    root: project.root().to_path_buf(),
-                },
-                PickerAction::SwitchWorkspace,
-            );
-            Ok(PickerEntry {
-                item: PickerItem::new(
-                    project.root().display().to_string(),
-                    workspace_name,
-                    detail,
-                    Some(workspace_project_picker_preview(&project)),
-                ),
-                action,
-                quickfix: None,
-            })
-        })
+fn user_picker_overlay(
+    runtime: &EditorRuntime,
+    spec: &PickerProviderSpec,
+    context: PickerProviderContext,
+) -> Result<PickerOverlay, String> {
+    let items = shell_user_library(runtime)
+        .picker_provider_items(&context)
+        .unwrap_or_else(|| spec.items().to_vec());
+    let entries = items
+        .iter()
+        .map(|item| static_picker_entry(runtime, item))
         .collect::<Result<Vec<_>, String>>()?;
-
-    Ok(PickerOverlay::from_entries("Projects", entries))
-}
-
-fn workspace_project_picker_detail(project: &ProjectCandidate, is_open: bool) -> String {
-    let mut parts = vec![project.kind().label().to_owned()];
-    if project.kind() == ProjectKind::GitWorktree && project.repository_root() != project.root() {
-        let context = project
-            .worktree_parent_name()
-            .unwrap_or_else(|| project.repository_display_name());
-        parts.push(format!("project {context}"));
+    let mut overlay = PickerOverlay::from_entries(spec.title(), entries).with_title(spec.title());
+    if spec.source() == PickerSource::WorkspaceFiles
+        && let Some(root) = context.workspace_root.as_ref().into_option()
+    {
+        overlay.submit_action = Some(PickerAction::CreateWorkspaceFile {
+            root: PathBuf::from(root.as_str()),
+        });
     }
-    if is_open {
-        parts.push("open workspace".to_owned());
-    }
-    parts.join(" | ")
-}
-
-fn workspace_project_picker_preview(project: &ProjectCandidate) -> String {
-    if project.kind() == ProjectKind::GitWorktree && project.repository_root() != project.root() {
-        return format!(
-            "worktree {} | repo {}",
-            project.root().display(),
-            project.repository_root().display(),
-        );
-    }
-    project.root().display().to_string()
-}
-
-pub(crate) fn workspace_switch_picker_overlay(
-    runtime: &EditorRuntime,
-) -> Result<PickerOverlay, String> {
-    let entries = runtime
-        .model()
-        .active_window()
-        .map_err(|error| error.to_string())?
-        .workspaces()
-        .map(|workspace| PickerEntry {
-            item: PickerItem::new(
-                workspace.id().to_string(),
-                workspace.name(),
-                workspace
-                    .root()
-                    .map(|root| root.display().to_string())
-                    .unwrap_or_else(|| "default workspace".to_owned()),
-                workspace.root().map(|root| root.display().to_string()),
-            ),
-            action: PickerAction::SwitchWorkspace(workspace.id()),
-            quickfix: None,
-        })
-        .collect();
-
-    Ok(PickerOverlay::from_entries("Workspaces", entries))
-}
-
-pub(crate) fn workspace_delete_picker_overlay(
-    runtime: &EditorRuntime,
-) -> Result<PickerOverlay, String> {
-    let default_workspace = shell_ui(runtime)?.default_workspace();
-    let entries = runtime
-        .model()
-        .active_window()
-        .map_err(|error| error.to_string())?
-        .workspaces()
-        .filter(|workspace| workspace.id() != default_workspace)
-        .map(|workspace| PickerEntry {
-            item: PickerItem::new(
-                workspace.id().to_string(),
-                workspace.name(),
-                workspace
-                    .root()
-                    .map(|root| root.display().to_string())
-                    .unwrap_or_else(|| "workspace".to_owned()),
-                Some("Deletes the selected workspace.".to_owned()),
-            ),
-            action: PickerAction::DeleteWorkspace(workspace.id()),
-            quickfix: None,
-        })
-        .collect();
-
-    Ok(PickerOverlay::from_entries("Delete Workspace", entries))
-}
-
-fn workspace_file_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let workspace = runtime
-        .model()
-        .active_workspace()
-        .map_err(|error| error.to_string())?;
-    let Some(root) = workspace.root() else {
-        return Ok(message_picker_overlay(
-            "Workspace Files",
-            "Workspace has no project root",
-            "Open a project-backed workspace before listing files.",
-            Some(
-                "workspace.list-files works from a project workspace created by workspace.new."
-                    .to_owned(),
-            ),
-        ));
-    };
-
-    let files = match list_repository_files(root) {
-        Ok(files) => files,
-        Err(error) => {
-            return Ok(message_picker_overlay(
-                "Workspace Files",
-                "Unable to read workspace files",
-                &error.to_string(),
-                Some(root.display().to_string()),
-            ));
+    if spec.source() == PickerSource::UndoTree {
+        overlay = overlay.with_result_order(PickerResultOrder::Source);
+        if let Some(selected_index) = context.undo_tree.iter().position(|entry| entry.selected) {
+            overlay.session.set_selected_index(selected_index);
         }
-    };
+    }
+    Ok(overlay)
+}
 
-    if files.is_empty() {
-        return Ok(message_picker_overlay(
-            "Workspace Files",
-            "No visible files found",
-            "Git did not report any tracked or unignored files for this workspace.",
-            Some(root.display().to_string()),
-        ));
+fn workspace_dashboard_unavailable_overlay(error: String) -> PickerOverlay {
+    PickerOverlay::from_entries(
+        "Workspace Dashboard",
+        vec![PickerEntry {
+            item: PickerItem::new(
+                "workspace-dashboard-unavailable",
+                "Workspace dashboard unavailable",
+                error.clone(),
+                Some(error),
+            ),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    )
+}
+
+fn picker_provider_context(
+    runtime: &EditorRuntime,
+    spec: &PickerProviderSpec,
+) -> Result<PickerProviderContext, String> {
+    let mut context = PickerProviderContext::new(spec.id(), spec.title(), spec.source());
+    match spec.source() {
+        PickerSource::User
+        | PickerSource::Static
+        | PickerSource::WorkspaceDashboard
+        | PickerSource::WorkspaceSearch => {}
+        PickerSource::Commands => {
+            context.commands = runtime
+                .commands()
+                .definitions()
+                .into_iter()
+                .map(|definition| PickerCommandContext {
+                    name: definition.name().into(),
+                    description: definition.description().into(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::Buffers | PickerSource::BufferClose => {
+            let ui = shell_ui(runtime)?;
+            context.buffers = ui
+                .active_workspace_buffer_ids()
+                .into_iter()
+                .flatten()
+                .filter_map(|buffer_id| ui.buffer(*buffer_id))
+                .map(|buffer| PickerBufferContext {
+                    id: buffer.id().get(),
+                    display_name: buffer.display_name().into(),
+                    kind_label: buffer.kind_label().into(),
+                    cursor_row: buffer.cursor_row(),
+                    cursor_col: buffer.cursor_col(),
+                    dirty: buffer.is_dirty(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::Keybindings => {
+            context.keybindings = runtime
+                .keymaps()
+                .bindings()
+                .into_iter()
+                .map(|binding| {
+                    let command_names = binding.command_names();
+                    let description = command_names
+                        .iter()
+                        .map(|command_name| {
+                            runtime
+                                .commands()
+                                .get(command_name)
+                                .map(|definition| definition.description().to_owned())
+                                .unwrap_or_else(|| {
+                                    format!("{command_name}: command description unavailable.")
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    let scope = binding.scope().to_string();
+                    let mode = binding.vim_mode().to_string();
+                    PickerKeybindingContext {
+                        id: format!("{scope}:{mode}:{}", binding.chord()).into(),
+                        chord: binding.chord().into(),
+                        scope: scope.into(),
+                        vim_mode: mode.into(),
+                        command_names: command_names
+                            .iter()
+                            .map(|command_name| command_name.as_str().into())
+                            .collect::<Vec<_>>()
+                            .into(),
+                        description: description.into(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::TreesitterLanguages => {
+            let registry = runtime
+                .services()
+                .get::<SyntaxRegistry>()
+                .ok_or_else(|| "syntax registry service missing".to_owned())?;
+            context.syntax_languages = registry
+                .languages()
+                .map(|language| {
+                    let detail = match language.grammar() {
+                        Some(grammar) => {
+                            let installed = registry.is_installed(language.id()).unwrap_or(false);
+                            let status = if installed { "installed" } else { "missing" };
+                            format!("{status} | {}", grammar.repository_url())
+                        }
+                        None => "built-in grammar".to_owned(),
+                    };
+                    let preview = language.grammar().map(|grammar| {
+                        grammar
+                            .install_directory(registry.install_root())
+                            .display()
+                            .to_string()
+                    });
+                    PickerSyntaxLanguageContext {
+                        id: language.id().into(),
+                        detail: detail.into(),
+                        preview: preview.map(Into::into).into(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::WorkspaceProjects => {
+            context.workspaces = workspace_contexts(runtime, None)?.into();
+        }
+        PickerSource::WorkspaceSwitch => {
+            context.workspaces = workspace_contexts(runtime, None)?.into();
+        }
+        PickerSource::WorkspaceDelete => {
+            context.workspaces =
+                workspace_contexts(runtime, Some(shell_ui(runtime)?.default_workspace()))?.into();
+        }
+        PickerSource::WorkspaceFiles => {
+            context.workspace_root = active_workspace_root(runtime)?
+                .map(|root| root.display().to_string().into())
+                .into();
+        }
+        PickerSource::Themes => {
+            let registry = runtime
+                .services()
+                .get::<ThemeRegistry>()
+                .ok_or_else(|| "theme registry service missing".to_owned())?;
+            context.themes = registry
+                .themes()
+                .map(|theme| PickerThemeContext {
+                    id: theme.id().into(),
+                    name: theme.name().into(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::IconFonts => {
+            context.icons = shell_user_library(runtime)
+                .icon_symbols()
+                .iter()
+                .map(|symbol| PickerIconContext {
+                    id: symbol.id().into(),
+                    label: format!("{} {}", symbol.glyph, symbol.name).into(),
+                    detail: format!("{} | {}", symbol.category.label(), symbol.codepoint_label())
+                        .into(),
+                    glyph: symbol.glyph.into(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::AcpClients => {
+            context.acp_clients = shell_user_library(runtime)
+                .acp_clients()
+                .into_iter()
+                .map(|client| PickerAcpClientContext {
+                    id: client.id.into(),
+                    label: client.label.into(),
+                    detail: format!("{} {}", client.command, client.args.join(" ")).into(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+        PickerSource::UndoTree => {
+            let buffer_id = active_shell_buffer_id(runtime)?;
+            let buffer = shell_ui(runtime)?
+                .buffer(buffer_id)
+                .ok_or_else(|| "active buffer is missing".to_owned())?;
+            let (entries, selected_index) = buffer.undo_tree_entries();
+            context.undo_tree = entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| PickerUndoTreeContext {
+                    buffer_id: buffer_id.get(),
+                    node_id: entry.node_id,
+                    label: entry.label.into(),
+                    detail: entry.detail.into(),
+                    preview: entry.preview.map(Into::into).into(),
+                    selected: index == selected_index,
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
+    }
+    Ok(context)
+}
+
+fn workspace_contexts(
+    runtime: &EditorRuntime,
+    hidden_workspace: Option<WorkspaceId>,
+) -> Result<Vec<PickerWorkspaceContext>, String> {
+    let default_workspace = shell_ui(runtime).ok().map(|ui| ui.default_workspace());
+    Ok(runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?
+        .workspaces()
+        .filter(|workspace| Some(workspace.id()) != hidden_workspace)
+        .map(|workspace| PickerWorkspaceContext {
+            id: workspace.id().get(),
+            name: workspace.name().into(),
+            root: workspace
+                .root()
+                .map(|root| root.display().to_string().into())
+                .into(),
+            is_default: Some(workspace.id()) == default_workspace,
+        })
+        .collect())
+}
+
+fn static_picker_entry(
+    runtime: &EditorRuntime,
+    item: &editor_plugin_api::PickerItemSpec,
+) -> Result<PickerEntry, String> {
+    let mut picker_item = PickerItem::new(
+        item.id(),
+        item.label(),
+        item.detail(),
+        item.preview().map(str::to_owned),
+    );
+    if let Some(search_text) = item.search_text() {
+        picker_item = picker_item.with_search_text(search_text);
+    }
+    if let Some(fringe) = item.fringe() {
+        picker_item = picker_item.with_fringe(fringe);
     }
 
-    let entries = files
-        .into_iter()
-        .map(|relative_path| {
-            let path = root.join(&relative_path);
-            let search_text = workspace_relative_path(Some(root), &path);
-            let label = relative_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| search_text.clone());
-            let detail = relative_path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map(|parent| parent.display().to_string())
-                .unwrap_or_else(|| "workspace root".to_owned());
-            PickerEntry {
-                item: PickerItem::new(
-                    path.display().to_string(),
-                    label,
-                    detail,
-                    Some(path.display().to_string()),
-                )
-                .with_search_text(search_text)
-                .with_fringe(editor_icons::seti_file_icon(&path)),
-                action: PickerAction::OpenFile(path),
-                quickfix: None,
-            }
-        })
-        .collect();
+    Ok(PickerEntry {
+        item: picker_item,
+        action: picker_action_from_spec(runtime, item.action())?,
+        quickfix: None,
+    })
+}
 
-    let mut overlay = PickerOverlay::from_entries("Workspace Files", entries);
-    overlay.submit_action = Some(PickerAction::CreateWorkspaceFile {
-        root: root.to_path_buf(),
-    });
-    Ok(overlay)
+fn picker_action_from_spec(
+    runtime: &EditorRuntime,
+    action: &PickerActionSpec,
+) -> Result<PickerAction, String> {
+    match action {
+        PickerActionSpec::NoOp => Ok(PickerAction::NoOp),
+        PickerActionSpec::ExecuteCommand { command } => {
+            Ok(PickerAction::ExecuteCommand(command.to_string()))
+        }
+        PickerActionSpec::ExecuteCommands { commands } => Ok(PickerAction::ExecuteCommands(
+            commands.iter().map(ToString::to_string).collect(),
+        )),
+        PickerActionSpec::EmitHook { hook, detail } => Ok(PickerAction::EmitHook {
+            hook: hook.to_string(),
+            detail: detail.as_ref().map(ToString::to_string).into(),
+        }),
+        PickerActionSpec::FocusBuffer { buffer_id } => Ok(PickerAction::FocusBuffer(
+            resolve_buffer_id(runtime, *buffer_id)?,
+        )),
+        PickerActionSpec::CloseBuffer { buffer_id } => Ok(PickerAction::CloseBuffer(
+            resolve_buffer_id(runtime, *buffer_id)?,
+        )),
+        PickerActionSpec::OpenAcpClient { client_id } => {
+            Ok(PickerAction::OpenAcpClient(client_id.to_string()))
+        }
+        PickerActionSpec::OpenFile { path } => {
+            Ok(PickerAction::OpenFile(PathBuf::from(path.as_str())))
+        }
+        PickerActionSpec::CreateWorkspaceFile { root } => Ok(PickerAction::CreateWorkspaceFile {
+            root: PathBuf::from(root.as_str()),
+        }),
+        PickerActionSpec::InstallTreeSitterLanguage { language_id } => Ok(
+            PickerAction::InstallTreeSitterLanguage(language_id.to_string()),
+        ),
+        PickerActionSpec::CreateWorkspace { name, root } => Ok(PickerAction::CreateWorkspace {
+            name: name.to_string(),
+            root: PathBuf::from(root.as_str()),
+        }),
+        PickerActionSpec::SwitchWorkspace { workspace_id } => Ok(PickerAction::SwitchWorkspace(
+            resolve_workspace_id(runtime, *workspace_id)?,
+        )),
+        PickerActionSpec::DeleteWorkspace { workspace_id } => Ok(PickerAction::DeleteWorkspace(
+            resolve_workspace_id(runtime, *workspace_id)?,
+        )),
+        PickerActionSpec::UndoTreeNode { buffer_id, node_id } => Ok(PickerAction::UndoTreeNode {
+            buffer_id: resolve_buffer_id(runtime, *buffer_id)?,
+            node_id: *node_id,
+        }),
+        PickerActionSpec::CopyToClipboard { text } => {
+            Ok(PickerAction::CopyToClipboard(text.to_string()))
+        }
+        PickerActionSpec::ActivateTheme { theme_id } => {
+            Ok(PickerAction::ActivateTheme(theme_id.to_string()))
+        }
+    }
+}
+
+fn resolve_buffer_id(runtime: &EditorRuntime, id: u64) -> Result<BufferId, String> {
+    let ui = shell_ui(runtime)?;
+    ui.active_workspace_buffer_ids()
+        .into_iter()
+        .flatten()
+        .copied()
+        .find(|buffer_id| buffer_id.get() == id)
+        .ok_or_else(|| format!("unknown picker buffer id `{id}`"))
+}
+
+fn resolve_workspace_id(runtime: &EditorRuntime, id: u64) -> Result<WorkspaceId, String> {
+    runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?
+        .workspaces()
+        .map(|workspace| workspace.id())
+        .find(|workspace_id| workspace_id.get() == id)
+        .ok_or_else(|| format!("unknown picker workspace id `{id}`"))
 }
 
 fn workspace_search_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
@@ -370,167 +430,6 @@ fn workspace_search_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOver
     };
 
     Ok(PickerOverlay::workspace_search("Workspace Search", root))
-}
-
-fn keybinding_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
-    let mut entries: Vec<PickerEntry> = runtime
-        .keymaps()
-        .bindings()
-        .into_iter()
-        .map(|binding| {
-            let command_names = binding.command_names();
-            let description = command_names
-                .iter()
-                .map(|command_name| {
-                    runtime
-                        .commands()
-                        .get(command_name)
-                        .map(|definition| definition.description().to_owned())
-                        .unwrap_or_else(|| {
-                            format!("{command_name}: command description unavailable.")
-                        })
-                })
-                .collect::<Vec<_>>()
-                .join(" -> ");
-            let command_label = command_names.join(" -> ");
-            let scope = binding.scope().to_string();
-            let mode = binding.vim_mode().to_string();
-            PickerEntry {
-                item: PickerItem::new(
-                    format!("{scope}:{mode}:{}", binding.chord()),
-                    format!("{} {}", binding.chord(), command_label),
-                    format!("{} [{}] -> {}", binding.scope(), mode, command_label),
-                    Some(description),
-                ),
-                action: if command_names.len() == 1 {
-                    PickerAction::ExecuteCommand(binding.command_name().to_owned())
-                } else {
-                    PickerAction::ExecuteCommands(command_names.to_vec())
-                },
-                quickfix: None,
-            }
-        })
-        .collect();
-
-    let contextual = shell_user_library(runtime)
-        .context_help_specs()
-        .into_iter()
-        .flat_map(|spec| contextual_keybinding_entries(&spec))
-        .collect::<Vec<_>>();
-    entries.extend(contextual);
-
-    PickerOverlay::from_entries("Keybindings", entries)
-}
-
-fn icon_font_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
-    let entries = shell_user_library(runtime)
-        .icon_symbols()
-        .iter()
-        .map(|symbol| {
-            let label = format!("{} {}", symbol.glyph, symbol.name);
-            let detail = format!("{} | {}", symbol.category.label(), symbol.codepoint_label());
-            PickerEntry {
-                item: PickerItem::new(symbol.id(), label, detail, Some(symbol.glyph.to_owned())),
-                action: PickerAction::CopyToClipboard(symbol.glyph.to_owned()),
-                quickfix: None,
-            }
-        })
-        .collect();
-    PickerOverlay::from_entries("Bundled Icon Fonts", entries)
-}
-
-fn acp_clients_picker_overlay(runtime: &EditorRuntime) -> PickerOverlay {
-    let entries = shell_user_library(runtime)
-        .acp_clients()
-        .into_iter()
-        .map(|client| {
-            let detail = format!("{} {}", client.command, client.args.join(" "));
-            PickerEntry {
-                item: PickerItem::new(client.id.as_str(), client.label, detail, None::<String>),
-                action: PickerAction::OpenAcpClient(client.id),
-                quickfix: None,
-            }
-        })
-        .collect();
-    PickerOverlay::from_entries("ACP Clients", entries)
-}
-
-fn contextual_keybinding_entries(spec: &editor_plugin_api::ContextHelpSpec) -> Vec<PickerEntry> {
-    spec.entries
-        .iter()
-        .map(|binding| PickerEntry {
-            item: PickerItem::new(
-                format!("{}:Normal:{}", spec.scope, binding.chord),
-                format!("{} {} {}", binding.chord, spec.scope, binding.action),
-                format!("{} [Normal] -> {}", spec.scope, binding.action),
-                Some(binding.description.clone()),
-            ),
-            action: PickerAction::NoOp,
-            quickfix: None,
-        })
-        .collect()
-}
-
-fn theme_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let registry = runtime
-        .services()
-        .get::<ThemeRegistry>()
-        .ok_or_else(|| "theme registry service missing".to_owned())?;
-    let entries = registry
-        .themes()
-        .map(|theme| {
-            let theme_id = theme.id().to_owned();
-            PickerEntry {
-                item: PickerItem::new(&theme_id, theme.name(), "Theme", Some(theme_id.clone())),
-                action: PickerAction::ActivateTheme(theme_id),
-                quickfix: None,
-            }
-        })
-        .collect();
-    Ok(PickerOverlay::from_entries("Themes", entries))
-}
-
-fn undo_tree_picker_overlay(runtime: &EditorRuntime) -> Result<PickerOverlay, String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    let buffer = shell_ui(runtime)?
-        .buffer(buffer_id)
-        .ok_or_else(|| "active buffer is missing".to_owned())?;
-    let (entries, selected_index) = buffer.undo_tree_entries();
-    if entries.is_empty() {
-        return Ok(message_picker_overlay(
-            "Undo Tree",
-            "No undo history",
-            "Make an edit to populate the undo tree.",
-            None::<String>,
-        ));
-    }
-    let mut actions = BTreeMap::new();
-    let items = entries
-        .into_iter()
-        .map(|entry| {
-            let item_id = format!("undo:{}", entry.node_id);
-            actions.insert(
-                item_id.clone(),
-                PickerAction::UndoTreeNode {
-                    buffer_id,
-                    node_id: entry.node_id,
-                },
-            );
-            PickerItem::new(item_id, entry.label, entry.detail, entry.preview)
-        })
-        .collect();
-    let mut session = PickerSession::new("Undo Tree", items)
-        .with_preserve_order()
-        .with_result_limit(256);
-    session.set_selected_index(selected_index);
-    Ok(PickerOverlay {
-        session,
-        actions,
-        quickfix_entries: BTreeMap::new(),
-        submit_action: None,
-        mode: PickerMode::Static,
-        kind: PickerKind::Generic,
-    })
 }
 
 fn message_picker_overlay(
@@ -827,53 +726,43 @@ fn picker_fringe_width_chars(matches: &[editor_picker::PickerMatch]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
     use super::*;
-
-    fn temp_dir(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        env::temp_dir().join(format!("volt-picker-{label}-{unique}"))
-    }
+    use editor_plugin_api::{PickerActionSpec, PickerItemSpec, PickerProviderSpec};
 
     #[test]
-    fn workspace_project_picker_shows_repo_context_for_worktrees()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_dir("worktree-context");
-        let repo = root.join("repo-store");
-        let gitdir = repo.join(".git").join("worktrees").join("feature");
-        let worktree = root.join("project").join("feature");
-        fs::create_dir_all(&gitdir)?;
-        fs::create_dir_all(&worktree)?;
-        fs::write(
-            worktree.join(".git"),
-            "gitdir: ../../repo-store/.git/worktrees/feature\n",
-        )?;
-        fs::write(gitdir.join("commondir"), "../../\n")?;
-
-        let projects = discover_projects(&[ProjectSearchRoot::new(&root, 3)])?;
-        let worktree_project = projects
-            .iter()
-            .find(|project| project.root() == worktree)
-            .expect("worktree should be discovered");
-        assert_eq!(worktree_project.display_name(), "project [feature]");
-        assert_eq!(
-            workspace_project_picker_detail(worktree_project, false),
-            "git worktree | project project",
-        );
-        assert_eq!(
-            workspace_project_picker_preview(worktree_project),
-            format!("worktree {} | repo {}", worktree.display(), repo.display()),
+    fn static_user_picker_provider_builds_executable_entries() -> Result<(), String> {
+        let provider = PickerProviderSpec::static_items(
+            "tools",
+            "Tools",
+            vec![
+                PickerItemSpec::new(
+                    "open-commands",
+                    "Command palette",
+                    "Open command picker",
+                    PickerActionSpec::execute_command("picker.open-commands"),
+                )
+                .with_search_text("commands palette")
+                .with_preview("Runs picker.open-commands"),
+            ],
         );
 
-        fs::remove_dir_all(root)?;
+        let mut runtime = EditorRuntime::new();
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::new(NullUserLibrary)));
+        let context = picker_provider_context(&runtime, &provider)?;
+        let picker = user_picker_overlay(&runtime, &provider, context)?;
+        let selected = picker
+            .session()
+            .selected()
+            .ok_or_else(|| "static picker has no selected item".to_owned())?;
+        assert_eq!(picker.session().title(), "Tools");
+        assert_eq!(selected.item().label(), "Command palette");
+        assert_eq!(selected.item().preview(), Some("Runs picker.open-commands"));
+        assert!(matches!(
+            picker.selected_action(),
+            Some(PickerAction::ExecuteCommand(command)) if command == "picker.open-commands"
+        ));
         Ok(())
     }
 }

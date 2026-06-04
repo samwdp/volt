@@ -1,5 +1,6 @@
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    VimActionSpec,
 };
 
 /// Returns the metadata for the multiple cursor package.
@@ -15,7 +16,7 @@ pub fn package() -> PluginPackage {
             "Adds a new cursor at the next match.",
             vec![PluginAction::emit_hook(
                 "editor.vim.edit",
-                Some("multicursor-add-next-match"),
+                Some(VimActionSpec::MulticursorAddNextMatch.hook_detail()),
             )],
         ),
         PluginCommand::new(
@@ -23,7 +24,7 @@ pub fn package() -> PluginPackage {
             "Adds cursors at every remaining match in the buffer.",
             vec![PluginAction::emit_hook(
                 "editor.vim.edit",
-                Some("multicursor-select-all-matches"),
+                Some(VimActionSpec::MulticursorSelectAllMatches.hook_detail()),
             )],
         ),
     ])

@@ -175,10 +175,12 @@ pub fn themes() -> Vec<Theme> {
 pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
-    AcpClient, AutocompleteProvider, BrowserFeatureSpec, ContextHelpSpec, DbFeatureSpec,
-    GhostTextContext, GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider,
-    LigatureConfig, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig,
-    StatuslineContext, TerminalConfig, TerminalFeatureSpec, UserLibrary, WorkspaceRoot,
+    AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, BrowserFeatureSpec,
+    ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec, GhostTextContext,
+    GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, LigatureConfig, OilDefaults,
+    OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig, PickerItemSpec,
+    PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
+    TerminalFeatureSpec, UserLibrary, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -251,6 +253,17 @@ impl UserLibrary for UserLibraryImpl {
         hover::SIGNATURE_ICON
     }
 
+    fn picker_providers(&self) -> Vec<PickerProviderSpec> {
+        picker::providers()
+    }
+
+    fn picker_provider_items(
+        &self,
+        context: &PickerProviderContext,
+    ) -> Option<Vec<PickerItemSpec>> {
+        picker::provider_items(context)
+    }
+
     fn acp_clients(&self) -> Vec<AcpClient> {
         acp::clients()
             .into_iter()
@@ -274,6 +287,14 @@ impl UserLibrary for UserLibraryImpl {
             env: c.env,
             cwd: c.cwd,
         })
+    }
+
+    fn acp_picker_items(&self, context: &AcpPickerContext) -> Vec<AcpPickerItemSpec> {
+        acp::picker_items(context)
+    }
+
+    fn db_browser_items(&self, context: &DbBrowserContext) -> Vec<DbBrowserItemSpec> {
+        db::browser_items(context)
     }
 
     fn workspace_roots(&self) -> Vec<WorkspaceRoot> {
@@ -581,6 +602,19 @@ extern "C" fn exported_hover_signature_icon() -> RStr<'static> {
     RStr::from_str(UserLibraryImpl.hover_signature_icon())
 }
 
+extern "C" fn exported_picker_providers() -> RVec<PickerProviderSpec> {
+    UserLibraryImpl.picker_providers().into()
+}
+
+extern "C" fn exported_picker_provider_items(
+    context: PickerProviderContext,
+) -> ROption<RVec<PickerItemSpec>> {
+    UserLibraryImpl
+        .picker_provider_items(&context)
+        .map(Into::into)
+        .into()
+}
+
 extern "C" fn exported_acp_clients() -> RVec<AbiAcpClient> {
     UserLibraryImpl
         .acp_clients()
@@ -595,6 +629,14 @@ extern "C" fn exported_acp_client_by_id(id: RString) -> ROption<AbiAcpClient> {
         .acp_client_by_id(id.as_str())
         .map(Into::into)
         .into()
+}
+
+extern "C" fn exported_acp_picker_items(context: AcpPickerContext) -> RVec<AcpPickerItemSpec> {
+    UserLibraryImpl.acp_picker_items(&context).into()
+}
+
+extern "C" fn exported_db_browser_items(context: DbBrowserContext) -> RVec<DbBrowserItemSpec> {
+    UserLibraryImpl.db_browser_items(&context).into()
 }
 
 extern "C" fn exported_workspace_roots() -> RVec<AbiWorkspaceRoot> {
@@ -936,8 +978,12 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         hover_line_limit: exported_hover_line_limit,
         hover_token_icon: exported_hover_token_icon,
         hover_signature_icon: exported_hover_signature_icon,
+        picker_providers: exported_picker_providers,
+        picker_provider_items: exported_picker_provider_items,
         acp_clients: exported_acp_clients,
         acp_client_by_id: exported_acp_client_by_id,
+        acp_picker_items: exported_acp_picker_items,
+        db_browser_items: exported_db_browser_items,
         workspace_roots: exported_workspace_roots,
         terminal_config: exported_terminal_config,
         commandline_enabled: exported_commandline_enabled,
@@ -1173,6 +1219,19 @@ mod tests {
         }
 
         assert!(library.acp_client_by_id("__missing__").is_none());
+    }
+
+    #[test]
+    fn user_library_exports_picker_providers() {
+        let library = UserLibraryImpl;
+        let providers = library.picker_providers();
+        let ids = providers
+            .iter()
+            .map(|provider| provider.id())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("commands"));
+        assert!(ids.contains("workspace.files"));
+        assert!(ids.contains("themes"));
     }
 
     #[test]

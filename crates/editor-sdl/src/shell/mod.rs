@@ -85,8 +85,8 @@ use editor_db::{
 };
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
-    GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
-    parse_stash_list, parse_status,
+    GitLogEntry, GitStatusSnapshot, detect_in_progress, parse_log_oneline, parse_stash_list,
+    parse_status,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
@@ -97,11 +97,15 @@ use editor_lsp::{
 };
 use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
 use editor_plugin_api::{
+    AcpActionSpec, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption,
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, PdfOpenMode, PluginBufferSectionUpdate, PluginBufferSections,
-    autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks,
-    git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
-    pdf_hooks, plugin_hooks, terminal_hooks,
+    OilDefaults, OilKeyAction, PdfOpenMode, PickerAcpClientContext, PickerActionSpec,
+    PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
+    PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
+    PickerThemeContext, PickerUndoTreeContext, PickerWorkspaceContext, PluginBufferSectionUpdate,
+    PluginBufferSections, VimEditAction, autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks,
+    git_actions, git_hooks, git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks,
+    oil_hooks, oil_protocol, pdf_hooks, plugin_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -231,6 +235,7 @@ const HOOK_VIM_EDIT: &str = "editor.vim.edit";
 const HOOK_VIM_COMMAND_LINE: &str = "editor.vim.command-line";
 const HOOK_BUFFER_SAVE: &str = "buffer.save";
 const HOOK_BUFFER_CLOSE: &str = "buffer.close";
+const HOOK_BUFFER_TOGGLE_LINE_WRAP: &str = "buffer.toggle_line_wrap";
 const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
@@ -2957,6 +2962,8 @@ pub(crate) struct ShellBuffer {
     undo_tree: UndoTree,
     language_id: Option<String>,
     pub(crate) scroll_row: usize,
+    scroll_col: usize,
+    line_wrap: bool,
     viewport_lines: usize,
     wrap_cache: Option<WrapRowCache>,
     context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
@@ -3803,6 +3810,8 @@ impl ShellBuffer {
             undo_tree,
             language_id: None,
             scroll_row: 0,
+            scroll_col: 0,
+            line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
             viewport_lines: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
@@ -3870,6 +3879,8 @@ impl ShellBuffer {
             undo_tree,
             language_id: None,
             scroll_row: 0,
+            scroll_col: 0,
+            line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
             viewport_lines: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
@@ -3908,6 +3919,7 @@ impl ShellBuffer {
         let (read_only, input) = buffer_interaction(&kind, user_library);
         let browser_state = browser_state_for_kind(&kind, user_library);
         let plugin_section_state = plugin_section_state_for_kind(&kind, user_library);
+        let line_wrap = plugin_buffer_line_wrap(&kind, user_library);
         let vim_target = default_vim_target(input.is_some() || browser_state.is_some());
 
         Self {
@@ -3939,6 +3951,8 @@ impl ShellBuffer {
             undo_tree,
             language_id: None,
             scroll_row: 0,
+            scroll_col: 0,
+            line_wrap,
             viewport_lines: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
@@ -4106,6 +4120,19 @@ impl ShellBuffer {
 
     fn has_plugin_sections(&self) -> bool {
         self.plugin_section_state.is_some()
+    }
+
+    fn line_wrap(&self) -> bool {
+        self.line_wrap
+    }
+
+    fn toggle_line_wrap(&mut self) -> bool {
+        self.line_wrap = !self.line_wrap;
+        if self.line_wrap {
+            self.scroll_col = 0;
+        }
+        self.wrap_cache = None;
+        self.line_wrap
     }
 
     #[cfg(test)]
@@ -5024,6 +5051,7 @@ impl ShellBuffer {
         BufferViewState {
             cursor: self.cursor_point(),
             scroll_row: self.scroll_row,
+            scroll_col: self.scroll_col,
         }
     }
 
@@ -5032,6 +5060,7 @@ impl ShellBuffer {
         self.scroll_row = view_state
             .scroll_row
             .min(self.line_count().saturating_sub(1));
+        self.scroll_col = view_state.scroll_col;
     }
 
     fn line_count(&self) -> usize {
@@ -6212,7 +6241,11 @@ impl ShellBuffer {
             pane.scroll_row = next as usize;
             return;
         }
-        let max_scroll = self.line_count().saturating_sub(1) as i32;
+        let max_scroll = if self.line_wrap {
+            self.line_count().saturating_sub(1)
+        } else {
+            self.line_count().saturating_sub(self.viewport_lines())
+        } as i32;
         let next = (self.scroll_row as i32 + delta).clamp(0, max_scroll);
         self.scroll_row = next as usize;
     }
@@ -6429,6 +6462,37 @@ impl ShellBuffer {
         let cursor_row = self.cursor_row();
         if self.line_count() == 0 {
             self.scroll_row = 0;
+            self.scroll_col = 0;
+            return;
+        }
+        if !self.line_wrap {
+            let max_scroll_row = self.line_count().saturating_sub(content_rows);
+            self.scroll_row = self.scroll_row.min(max_scroll_row);
+            if cursor_row < self.scroll_row {
+                self.scroll_row = cursor_row;
+            } else if cursor_row >= self.scroll_row.saturating_add(content_rows) {
+                self.scroll_row = cursor_row
+                    .saturating_sub(content_rows.saturating_sub(1))
+                    .min(max_scroll_row);
+            }
+            let visible_cols = wrap_cols.max(1);
+            let min_cursor_col = scrolloff.min(visible_cols.saturating_sub(1) / 2);
+            let max_cursor_col = visible_cols
+                .saturating_sub(1)
+                .saturating_sub(min_cursor_col);
+            let cursor_display_col = LineCharMap::with_tab_width(
+                &self.text.line(cursor_row).unwrap_or_default(),
+                indent_size,
+            )
+            .display_col_at(self.cursor_col());
+            if cursor_display_col < self.scroll_col.saturating_add(min_cursor_col) {
+                self.scroll_col = cursor_display_col.saturating_sub(min_cursor_col);
+            } else {
+                let current_offset = cursor_display_col.saturating_sub(self.scroll_col);
+                if current_offset > max_cursor_col {
+                    self.scroll_col = cursor_display_col.saturating_sub(max_cursor_col);
+                }
+            }
             return;
         }
         let cursor_col = self.cursor_col();
@@ -7023,6 +7087,7 @@ enum GitResetMode {
 struct BufferViewState {
     cursor: TextPoint,
     scroll_row: usize,
+    scroll_col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -7090,6 +7155,10 @@ enum PickerAction {
         root: PathBuf,
     },
     ActivateTheme(String),
+    EmitHook {
+        hook: String,
+        detail: Option<String>,
+    },
     UndoTreeNode {
         buffer_id: BufferId,
         node_id: usize,
@@ -7365,6 +7434,11 @@ impl PickerOverlay {
         self
     }
 
+    fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.session.set_title(title);
+        self
+    }
+
     fn search(
         title: impl Into<String>,
         direction: VimSearchDirection,
@@ -7493,6 +7567,13 @@ struct RuntimePopupSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct DismissedPopupState {
+    title: String,
+    buffers: Vec<BufferId>,
+    active_buffer: BufferId,
+}
+
+#[derive(Debug, Clone)]
 struct ShellWorkspaceView {
     buffer_ids: Vec<BufferId>,
     panes: Vec<ShellPane>,
@@ -7557,6 +7638,7 @@ pub(crate) struct ShellUiState {
     last_lsp_notification_revision: u64,
     popup_focus: bool,
     popup_buffer_id: Option<BufferId>,
+    dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
     autocomplete_worker: AutocompleteWorkerState,
@@ -7616,6 +7698,7 @@ impl ShellUiState {
             last_lsp_notification_revision: 0,
             popup_focus: false,
             popup_buffer_id: None,
+            dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
@@ -7670,6 +7753,31 @@ impl ShellUiState {
 
     fn clear_popup_buffer(&mut self) {
         self.popup_buffer_id = None;
+    }
+
+    fn stash_dismissed_popup(
+        &mut self,
+        workspace_id: WorkspaceId,
+        title: String,
+        buffers: Vec<BufferId>,
+        active_buffer: BufferId,
+    ) {
+        self.dismissed_popups.insert(
+            workspace_id,
+            DismissedPopupState {
+                title,
+                buffers,
+                active_buffer,
+            },
+        );
+    }
+
+    fn dismissed_popup(&self, workspace_id: WorkspaceId) -> Option<&DismissedPopupState> {
+        self.dismissed_popups.get(&workspace_id)
+    }
+
+    fn clear_dismissed_popup(&mut self, workspace_id: WorkspaceId) {
+        self.dismissed_popups.remove(&workspace_id);
     }
 
     fn set_popup_focus(&mut self, focus: bool) {
@@ -7941,6 +8049,7 @@ impl ShellUiState {
         }
         let removed = self.workspace_views.remove(&workspace_id);
         self.attached_lsp_servers.remove(&workspace_id);
+        self.dismissed_popups.remove(&workspace_id);
         if let Some(removed) = removed {
             self.buffers
                 .retain(|buffer| !removed.buffer_ids.contains(&buffer.id()));
@@ -8111,6 +8220,16 @@ impl ShellUiState {
             self.persist_active_buffer_vim_state();
         }
         self.buffers.retain(|buffer| buffer.id() != buffer_id);
+        for dismissed in self.dismissed_popups.values_mut() {
+            dismissed.buffers.retain(|id| *id != buffer_id);
+            if dismissed.active_buffer == buffer_id
+                && let Some(active_buffer) = dismissed.buffers.first().copied()
+            {
+                dismissed.active_buffer = active_buffer;
+            }
+        }
+        self.dismissed_popups
+            .retain(|_, dismissed| !dismissed.buffers.is_empty());
         if let Some(path) = removed_watch_path.as_deref() {
             self.file_reload_worker.unwatch_path(path);
             self.lsp_sync_worker.cancel_path(path);
@@ -8406,6 +8525,7 @@ impl ShellUiState {
             .unwrap_or(BufferViewState {
                 cursor: TextPoint::default(),
                 scroll_row: 0,
+                scroll_col: 0,
             });
         if let Some(view) = self.workspace_view_mut()
             && view.panes.len() == 1
@@ -9187,10 +9307,72 @@ struct MouseDragState {
     kind: VisualSelectionKind,
 }
 
+#[cfg(test)]
+struct ShellTestUserLibrary;
+
+#[cfg(test)]
+impl UserLibrary for ShellTestUserLibrary {
+    fn picker_providers(&self) -> Vec<PickerProviderSpec> {
+        vec![
+            PickerProviderSpec::new(
+                "workspace.switch",
+                "Switch Workspace",
+                PickerSource::WorkspaceSwitch,
+            ),
+            PickerProviderSpec::new(
+                "workspace.delete",
+                "Delete Workspace",
+                PickerSource::WorkspaceDelete,
+            ),
+        ]
+    }
+
+    fn picker_provider_items(
+        &self,
+        context: &PickerProviderContext,
+    ) -> Option<Vec<editor_plugin_api::PickerItemSpec>> {
+        match context.source {
+            PickerSource::WorkspaceSwitch => Some(
+                context
+                    .workspaces
+                    .iter()
+                    .map(workspace_picker_item)
+                    .collect(),
+            ),
+            PickerSource::WorkspaceDelete => Some(
+                context
+                    .workspaces
+                    .iter()
+                    .filter(|workspace| !workspace.is_default)
+                    .map(workspace_picker_item)
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+fn workspace_picker_item(workspace: &PickerWorkspaceContext) -> editor_plugin_api::PickerItemSpec {
+    let detail = workspace
+        .root
+        .as_ref()
+        .into_option()
+        .map(|root| root.to_string())
+        .unwrap_or_else(|| "default workspace".to_owned());
+    editor_plugin_api::PickerItemSpec::new(
+        workspace.id.to_string(),
+        workspace.name.clone(),
+        detail.clone(),
+        PickerActionSpec::switch_workspace(workspace.id),
+    )
+    .with_preview(detail)
+}
+
 impl ShellState {
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, ShellError> {
-        let user_library: Arc<dyn UserLibrary> = Arc::new(NullUserLibrary);
+        let user_library: Arc<dyn UserLibrary> = Arc::new(ShellTestUserLibrary);
         Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
@@ -14390,6 +14572,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     register_hook(runtime, HOOK_BUFFER_CLOSE, "Closes the active buffer.")?;
     register_hook(
         runtime,
+        HOOK_BUFFER_TOGGLE_LINE_WRAP,
+        "Toggles automatic line wrapping for the active buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_SAVE,
         "Saves all modified file buffers in the active workspace.",
     )?;
@@ -15220,47 +15407,49 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_VIM_EDIT, "shell.vim-edit", |event, runtime| {
             let detail = event.detail.as_deref().unwrap_or_default();
-            if handle_terminal_vim_edit(runtime, detail)? {
+            let action = VimEditAction::from_hook_detail(detail)
+                .ok_or_else(|| format!("unknown Vim edit action `{detail}`"))?;
+            if handle_terminal_vim_edit(runtime, action)? {
                 return Ok(());
             }
-            if vim_edit_requires_write(detail)
+            if vim_edit_requires_write(action)
                 && active_shell_buffer_read_only(runtime)?
-                && !vim_edit_targets_input(runtime, detail)?
+                && !vim_edit_targets_input(runtime, action)?
             {
                 let action = format!("{detail} blocked");
                 report_read_only(runtime, &action);
                 return Ok(());
             }
-            match detail {
-                "delete-char" => {
+            match action {
+                VimEditAction::DeleteChar => {
                     delete_chars(runtime, false)?;
                 }
-                "delete-char-before" => {
+                VimEditAction::DeleteCharBefore => {
                     delete_chars(runtime, true)?;
                 }
-                "delete-line-end" => {
+                VimEditAction::DeleteLineEnd => {
                     start_change_recording(runtime)?;
                     apply_motion_alias(runtime, VimOperator::Delete, ShellMotion::LineEnd)?;
                 }
-                "change-line-end" => {
+                VimEditAction::ChangeLineEnd => {
                     start_change_recording(runtime)?;
                     apply_motion_alias(runtime, VimOperator::Change, ShellMotion::LineEnd)?;
                 }
-                "yank-line" => {
+                VimEditAction::YankLine => {
                     let lines = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
                     apply_linewise_operator(runtime, VimOperator::Yank, lines)?;
                 }
-                "substitute-char" => {
+                VimEditAction::SubstituteChar => {
                     substitute_chars(runtime)?;
                 }
-                "substitute-line" => {
+                VimEditAction::SubstituteLine => {
                     let lines = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
                     apply_linewise_operator(runtime, VimOperator::Change, lines)?;
                 }
-                "replace-char" => {
+                VimEditAction::ReplaceChar => {
                     start_replace_char(runtime)?;
                 }
-                "enter-replace-mode" => {
+                VimEditAction::EnterReplaceMode => {
                     if shell_ui(runtime)?.vim().multicursor.is_some() {
                         let ui = shell_ui_mut(runtime)?;
                         ui.input_mode = InputMode::Replace;
@@ -15275,15 +15464,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     mark_change_finish_on_normal(runtime)?;
                     shell_ui_mut(runtime)?.enter_replace_mode();
                 }
-                "toggle-case" => {
+                VimEditAction::ToggleCase => {
                     toggle_case_chars(runtime)?;
                 }
-                "toggle-line-comment" => {
+                VimEditAction::ToggleLineComment => {
                     start_change_recording(runtime)?;
                     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
                     toggle_current_line_comment(runtime, count)?;
                 }
-                "append" => {
+                VimEditAction::Append => {
                     if shell_ui(runtime)?.vim().multicursor.is_some() {
                         let offset = {
                             let state = shell_ui(runtime)?
@@ -15318,7 +15507,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     active_shell_buffer_mut(runtime)?.append_after_cursor();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
-                "append-line-end" => {
+                VimEditAction::AppendLineEnd => {
                     if shell_ui(runtime)?.vim().multicursor.is_some() {
                         let offset = shell_ui(runtime)?
                             .vim()
@@ -15344,7 +15533,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     active_shell_buffer_mut(runtime)?.append_line_end();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
-                "insert-line-start" => {
+                VimEditAction::InsertLineStart => {
                     if shell_ui(runtime)?.vim().multicursor.is_some() {
                         set_multicursor_cursor_offset(runtime, 0)?;
                         let ui = shell_ui_mut(runtime)?;
@@ -15364,7 +15553,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     active_shell_buffer_mut(runtime)?.insert_line_start();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
-                "open-line-below" => {
+                VimEditAction::OpenLineBelow => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     if active_shell_buffer_vim_targets_input(runtime)? {
@@ -15391,7 +15580,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     shell_buffer_mut(runtime, buffer_id)?.mark_syntax_dirty();
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
-                "open-line-above" => {
+                VimEditAction::OpenLineAbove => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     if active_shell_buffer_vim_targets_input(runtime)? {
@@ -15436,20 +15625,20 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     }
                     shell_ui_mut(runtime)?.enter_insert_mode();
                 }
-                "undo" => {
+                VimEditAction::Undo => {
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.undo();
                     buffer.mark_syntax_dirty();
                 }
-                "redo" => {
+                VimEditAction::Redo => {
                     let buffer = active_shell_buffer_mut(runtime)?;
                     buffer.redo();
                     buffer.mark_syntax_dirty();
                 }
-                "multicursor-add-next-match" => {
+                VimEditAction::MulticursorAddNextMatch => {
                     add_next_multicursor_match(runtime)?;
                 }
-                "multicursor-select-all-matches" => {
+                VimEditAction::MulticursorSelectAllMatches => {
                     add_next_multicursor_match(runtime)?;
                     while shell_ui(runtime)?.vim().multicursor.is_some() {
                         let before = shell_ui(runtime)?
@@ -15470,178 +15659,177 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         }
                     }
                 }
-                "enter-visual" => {
+                VimEditAction::EnterVisual => {
                     toggle_visual_mode(runtime)?;
                 }
-                "enter-visual-line" => {
+                VimEditAction::EnterVisualLine => {
                     toggle_visual_line_mode(runtime)?;
                 }
-                "enter-visual-block" => {
+                VimEditAction::EnterVisualBlock => {
                     toggle_visual_block_mode(runtime)?;
                 }
-                "start-delete-operator" => {
+                VimEditAction::StartDeleteOperator => {
                     start_vim_operator(runtime, VimOperator::Delete)?;
                 }
-                "start-change-operator" => {
+                VimEditAction::StartChangeOperator => {
                     start_vim_operator(runtime, VimOperator::Change)?;
                 }
-                "start-yank-operator" => {
+                VimEditAction::StartYankOperator => {
                     start_vim_operator(runtime, VimOperator::Yank)?;
                 }
-                "start-format-operator" => {
+                VimEditAction::StartFormatOperator => {
                     start_vim_format(runtime)?;
                 }
-                "start-g-prefix" => {
+                VimEditAction::StartGPrefix => {
                     start_vim_g_prefix(runtime)?;
                 }
-                "start-find-forward" => {
+                VimEditAction::StartFindForward => {
                     start_vim_find(runtime, VimFindKind::ForwardTo)?;
                 }
-                "start-find-backward" => {
+                VimEditAction::StartFindBackward => {
                     start_vim_find(runtime, VimFindKind::BackwardTo)?;
                 }
-                "start-till-forward" => {
+                VimEditAction::StartTillForward => {
                     start_vim_find(runtime, VimFindKind::ForwardBefore)?;
                 }
-                "start-till-backward" => {
+                VimEditAction::StartTillBackward => {
                     start_vim_find(runtime, VimFindKind::BackwardAfter)?;
                 }
-                "repeat-find-next" => {
+                VimEditAction::RepeatFindNext => {
                     repeat_last_find(runtime, false)?;
                 }
-                "repeat-find-previous" => {
+                VimEditAction::RepeatFindPrevious => {
                     repeat_last_find(runtime, true)?;
                 }
-                "start-search-forward" => {
+                VimEditAction::StartSearchForward => {
                     open_vim_search_prompt(runtime, VimSearchDirection::Forward)?;
                 }
-                "start-search-backward" => {
+                VimEditAction::StartSearchBackward => {
                     open_vim_search_prompt(runtime, VimSearchDirection::Backward)?;
                 }
-                "search-word-forward" => {
+                VimEditAction::SearchWordForward => {
                     search_word_under_cursor(runtime, VimSearchDirection::Forward)?;
                 }
-                "search-word-backward" => {
+                VimEditAction::SearchWordBackward => {
                     search_word_under_cursor(runtime, VimSearchDirection::Backward)?;
                 }
-                "repeat-search-next" => {
+                VimEditAction::RepeatSearchNext => {
                     repeat_vim_search(runtime, false)?;
                 }
-                "repeat-search-previous" => {
+                VimEditAction::RepeatSearchPrevious => {
                     repeat_vim_search(runtime, true)?;
                 }
-                "select-register" => {
+                VimEditAction::SelectRegister => {
                     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::Register);
                 }
-                "set-mark" => {
+                VimEditAction::SetMark => {
                     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MarkSet);
                 }
-                "goto-mark-line" => {
+                VimEditAction::GotoMarkLine => {
                     shell_ui_mut(runtime)?.vim_mut().pending =
                         Some(VimPending::MarkJump { linewise: true });
                 }
-                "goto-mark" => {
+                VimEditAction::GotoMark => {
                     shell_ui_mut(runtime)?.vim_mut().pending =
                         Some(VimPending::MarkJump { linewise: false });
                 }
-                "toggle-macro-record" => {
+                VimEditAction::ToggleMacroRecord => {
                     if shell_ui(runtime)?.vim().recording_macro.is_some() {
                         stop_macro_record(runtime)?;
                     } else {
                         shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MacroRecord);
                     }
                 }
-                "start-macro-playback" => {
+                VimEditAction::StartMacroPlayback => {
                     shell_ui_mut(runtime)?.vim_mut().pending = Some(VimPending::MacroPlayback);
                 }
-                "put-after" => {
+                VimEditAction::PutAfter => {
                     put_yank(runtime, true)?;
                 }
-                "put-before" => {
+                VimEditAction::PutBefore => {
                     put_yank(runtime, false)?;
                 }
-                "visual-put-after" => {
+                VimEditAction::VisualPutAfter => {
                     put_yank_over_visual_selection(runtime, true)?;
                 }
-                "visual-put-before" => {
+                VimEditAction::VisualPutBefore => {
                     put_yank_over_visual_selection(runtime, false)?;
                 }
-                "visual-swap-anchor" => {
+                VimEditAction::VisualSwapAnchor => {
                     swap_visual_anchor(runtime)?;
                 }
-                "start-visual-inner-text-object" => {
+                VimEditAction::StartVisualInnerTextObject => {
                     start_visual_text_object(runtime, false)?;
                 }
-                "start-visual-around-text-object" => {
+                VimEditAction::StartVisualAroundTextObject => {
                     start_visual_text_object(runtime, true)?;
                 }
-                "visual-delete" => {
+                VimEditAction::VisualDelete => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Delete)?;
                 }
-                "visual-change" => {
+                VimEditAction::VisualChange => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Change)?;
                 }
-                "visual-replace-char" => {
+                VimEditAction::VisualReplaceChar => {
                     start_change_recording(runtime)?;
                     shell_ui_mut(runtime)?.vim_mut().pending =
                         Some(VimPending::ReplaceVisualSelection);
                 }
-                "visual-block-insert" => {
+                VimEditAction::VisualBlockInsert => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     start_visual_block_insert(runtime, false)?;
                 }
-                "visual-block-append" => {
+                VimEditAction::VisualBlockAppend => {
                     start_change_recording(runtime)?;
                     mark_change_finish_on_normal(runtime)?;
                     start_visual_block_insert(runtime, true)?;
                 }
-                "visual-format" => {
+                VimEditAction::VisualFormat => {
                     start_change_recording(runtime)?;
                     emit_workspace_format(runtime)?;
                 }
-                "visual-toggle-comment" => {
+                VimEditAction::VisualToggleComment => {
                     start_change_recording(runtime)?;
                     toggle_visual_selection_comments(runtime)?;
                 }
-                "visual-yank" => {
+                VimEditAction::VisualYank => {
                     apply_visual_operator(runtime, VimOperator::Yank)?;
                 }
-                "visual-toggle-case" => {
+                VimEditAction::VisualToggleCase => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::ToggleCase)?;
                 }
-                "visual-lowercase" => {
+                VimEditAction::VisualLowercase => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Lowercase)?;
                 }
-                "visual-uppercase" => {
+                VimEditAction::VisualUppercase => {
                     start_change_recording(runtime)?;
                     apply_visual_operator(runtime, VimOperator::Uppercase)?;
                 }
-                "visual-indent" => {
+                VimEditAction::VisualIndent => {
                     start_change_recording(runtime)?;
                     shift_visual_selection(runtime, true)?;
                 }
-                "visual-outdent" => {
+                VimEditAction::VisualOutdent => {
                     start_change_recording(runtime)?;
                     shift_visual_selection(runtime, false)?;
                 }
-                "visual-join" => {
+                VimEditAction::VisualJoin => {
                     start_change_recording(runtime)?;
                     join_visual_selection_lines(runtime)?;
                 }
-                "visual-move-down" => {
+                VimEditAction::VisualMoveDown => {
                     start_change_recording(runtime)?;
                     move_visual_selection_lines(runtime, true)?;
                 }
-                "visual-move-up" => {
+                VimEditAction::VisualMoveUp => {
                     start_change_recording(runtime)?;
                     move_visual_selection_lines(runtime, false)?;
                 }
-                _ => {}
             }
             Ok(())
         })
@@ -15693,6 +15881,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             close_buffer_with_prompt(runtime, buffer_id)?;
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BUFFER_TOGGLE_LINE_WRAP,
+            "shell.buffer-toggle-line-wrap",
+            |event, runtime| {
+                let buffer_id = event.buffer_id.unwrap_or(active_shell_buffer_id(runtime)?);
+                let buffer = shell_buffer_mut(runtime, buffer_id)?;
+                buffer.toggle_line_wrap();
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
@@ -16029,7 +16229,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .detail
                 .as_deref()
                 .ok_or_else(|| "oil action hook missing detail".to_owned())?;
-            let action = oil_action_from_detail(detail)
+            let action = OilKeyAction::from_hook_detail(detail)
                 .ok_or_else(|| format!("unknown oil action `{detail}`"))?;
             if !execute_oil_action(runtime, action)? {
                 return Err("oil action requires an active oil buffer".to_owned());
@@ -16444,6 +16644,34 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     {
                         record_runtime_error(runtime, "theme.save", error);
                     }
+                }
+                PickerAction::EmitHook { hook, detail } => {
+                    let workspace_id = runtime
+                        .model()
+                        .active_workspace_id()
+                        .map_err(|error| error.to_string())?;
+                    let mut event = HookEvent::new().with_workspace(workspace_id);
+                    if let Some(window_id) = runtime.model().active_window_id() {
+                        event = event.with_window(window_id);
+                    }
+                    if let Ok(workspace) = runtime.model().workspace(workspace_id)
+                        && let Some(pane_id) = workspace.active_pane_id()
+                    {
+                        event = event.with_pane(pane_id);
+                        if let Some(buffer_id) = workspace
+                            .pane(pane_id)
+                            .and_then(|pane| pane.active_buffer())
+                        {
+                            event = event.with_buffer(buffer_id);
+                        }
+                    }
+                    if let Some(detail) = detail {
+                        event = event.with_detail(detail);
+                    }
+                    runtime
+                        .emit_hook(&hook, event)
+                        .map_err(|error| error.to_string())?;
+                    sync_active_buffer(runtime)?;
                 }
                 PickerAction::UndoTreeNode { buffer_id, node_id } => {
                     apply_undo_tree_node(runtime, buffer_id, node_id)?;
@@ -17956,31 +18184,31 @@ fn active_shell_buffer_vim_targets_input(runtime: &EditorRuntime) -> Result<bool
     Ok(shell_ui(runtime)?.active_buffer_targets_input())
 }
 
-fn vim_edit_targets_input(runtime: &EditorRuntime, detail: &str) -> Result<bool, String> {
+fn vim_edit_targets_input(runtime: &EditorRuntime, action: VimEditAction) -> Result<bool, String> {
     if !active_shell_buffer_has_input(runtime)? {
         return Ok(false);
     }
-    Ok(match detail {
-        "delete-char"
-        | "delete-char-before"
-        | "delete-line-end"
-        | "change-line-end"
-        | "substitute-char"
-        | "substitute-line"
-        | "replace-char"
-        | "enter-replace-mode"
-        | "append"
-        | "append-line-end"
-        | "insert-line-start"
-        | "open-line-below"
-        | "open-line-above"
-        | "start-delete-operator"
-        | "start-change-operator"
-        | "put-after"
-        | "put-before"
-        | "visual-delete"
-        | "visual-change"
-        | "visual-replace-char" => active_shell_buffer_vim_targets_input(runtime)?,
+    Ok(match action {
+        VimEditAction::DeleteChar
+        | VimEditAction::DeleteCharBefore
+        | VimEditAction::DeleteLineEnd
+        | VimEditAction::ChangeLineEnd
+        | VimEditAction::SubstituteChar
+        | VimEditAction::SubstituteLine
+        | VimEditAction::ReplaceChar
+        | VimEditAction::EnterReplaceMode
+        | VimEditAction::Append
+        | VimEditAction::AppendLineEnd
+        | VimEditAction::InsertLineStart
+        | VimEditAction::OpenLineBelow
+        | VimEditAction::OpenLineAbove
+        | VimEditAction::StartDeleteOperator
+        | VimEditAction::StartChangeOperator
+        | VimEditAction::PutAfter
+        | VimEditAction::PutBefore
+        | VimEditAction::VisualDelete
+        | VimEditAction::VisualChange
+        | VimEditAction::VisualReplaceChar => active_shell_buffer_vim_targets_input(runtime)?,
         _ => false,
     })
 }
@@ -18217,68 +18445,76 @@ fn report_read_only(runtime: &mut EditorRuntime, action: &str) {
     record_runtime_error(runtime, "buffer.read-only", message);
 }
 
-fn vim_edit_requires_write(detail: &str) -> bool {
+fn vim_edit_requires_write(action: VimEditAction) -> bool {
     matches!(
-        detail,
-        "delete-char"
-            | "delete-char-before"
-            | "delete-line-end"
-            | "change-line-end"
-            | "substitute-char"
-            | "substitute-line"
-            | "replace-char"
-            | "enter-replace-mode"
-            | "toggle-case"
-            | "toggle-line-comment"
-            | "append"
-            | "append-line-end"
-            | "insert-line-start"
-            | "open-line-below"
-            | "open-line-above"
-            | "undo"
-            | "redo"
-            | "start-delete-operator"
-            | "start-change-operator"
-            | "start-format-operator"
-            | "put-after"
-            | "put-before"
-            | "visual-delete"
-            | "visual-change"
-            | "visual-replace-char"
-            | "visual-format"
-            | "visual-toggle-comment"
-            | "visual-toggle-case"
-            | "visual-lowercase"
-            | "visual-uppercase"
-            | "visual-indent"
-            | "visual-outdent"
-            | "visual-join"
-            | "visual-move-down"
-            | "visual-move-up"
-            | "visual-block-insert"
-            | "visual-block-append"
+        action,
+        VimEditAction::DeleteChar
+            | VimEditAction::DeleteCharBefore
+            | VimEditAction::DeleteLineEnd
+            | VimEditAction::ChangeLineEnd
+            | VimEditAction::SubstituteChar
+            | VimEditAction::SubstituteLine
+            | VimEditAction::ReplaceChar
+            | VimEditAction::EnterReplaceMode
+            | VimEditAction::ToggleCase
+            | VimEditAction::ToggleLineComment
+            | VimEditAction::Append
+            | VimEditAction::AppendLineEnd
+            | VimEditAction::InsertLineStart
+            | VimEditAction::OpenLineBelow
+            | VimEditAction::OpenLineAbove
+            | VimEditAction::Undo
+            | VimEditAction::Redo
+            | VimEditAction::StartDeleteOperator
+            | VimEditAction::StartChangeOperator
+            | VimEditAction::StartFormatOperator
+            | VimEditAction::PutAfter
+            | VimEditAction::PutBefore
+            | VimEditAction::VisualDelete
+            | VimEditAction::VisualChange
+            | VimEditAction::VisualReplaceChar
+            | VimEditAction::VisualFormat
+            | VimEditAction::VisualToggleComment
+            | VimEditAction::VisualToggleCase
+            | VimEditAction::VisualLowercase
+            | VimEditAction::VisualUppercase
+            | VimEditAction::VisualIndent
+            | VimEditAction::VisualOutdent
+            | VimEditAction::VisualJoin
+            | VimEditAction::VisualMoveDown
+            | VimEditAction::VisualMoveUp
+            | VimEditAction::VisualBlockInsert
+            | VimEditAction::VisualBlockAppend
     )
 }
 
-fn handle_terminal_vim_edit(runtime: &mut EditorRuntime, detail: &str) -> Result<bool, String> {
+fn handle_terminal_vim_edit(
+    runtime: &mut EditorRuntime,
+    action: VimEditAction,
+) -> Result<bool, String> {
     if !active_shell_buffer_is_terminal(runtime)? {
         return Ok(false);
     }
-    match detail {
-        "append" | "append-line-end" | "insert-line-start" | "open-line-below"
-        | "open-line-above" | "substitute-char" | "substitute-line" => {
+    match action {
+        VimEditAction::Append
+        | VimEditAction::AppendLineEnd
+        | VimEditAction::InsertLineStart
+        | VimEditAction::OpenLineBelow
+        | VimEditAction::OpenLineAbove
+        | VimEditAction::SubstituteChar
+        | VimEditAction::SubstituteLine => {
             shell_ui_mut(runtime)?.enter_insert_mode();
             Ok(true)
         }
-        "enter-replace-mode" | "replace-char" => {
+        VimEditAction::EnterReplaceMode | VimEditAction::ReplaceChar => {
             shell_ui_mut(runtime)?.enter_replace_mode();
             Ok(true)
         }
-        "put-after" => {
+        VimEditAction::PutAfter => {
             put_yank(runtime, true)?;
             Ok(true)
         }
-        "put-before" => {
+        VimEditAction::PutBefore => {
             put_yank(runtime, false)?;
             Ok(true)
         }
@@ -23373,7 +23609,11 @@ fn refresh_db_browser_buffer(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    let view = db_service_mut(runtime)?.rerender_browser_buffer(buffer_id.get())?;
+    let user_library = shell_user_library(runtime);
+    let view = db_service_mut(runtime)?
+        .rerender_browser_buffer_with(buffer_id.get(), &|context| {
+            user_library.db_browser_items(context)
+        })?;
     apply_db_browser_view(runtime, buffer_id, view)
 }
 
@@ -23442,7 +23682,11 @@ fn open_db_connections_buffer(runtime: &mut EditorRuntime) -> Result<(), String>
         DB_CONNECTIONS_BUFFER_NAME,
         DB_CONNECTIONS_KIND,
     )?;
-    let view = db_service_mut(runtime)?.render_connections_buffer(buffer_id.get())?;
+    let user_library = shell_user_library(runtime);
+    let view = db_service_mut(runtime)?
+        .render_connections_buffer_with(buffer_id.get(), &|context| {
+            user_library.db_browser_items(context)
+        })?;
     apply_db_browser_view(runtime, buffer_id, view)
 }
 
@@ -23452,21 +23696,34 @@ fn open_db_schema_buffer(
 ) -> Result<(), String> {
     let buffer_id =
         open_or_focus_workspace_plugin_buffer(runtime, DB_SCHEMA_BUFFER_NAME, DB_SCHEMA_KIND)?;
-    let view = db_service_mut(runtime)?.render_schema_buffer(buffer_id.get(), session_id)?;
+    let user_library = shell_user_library(runtime);
+    let view = db_service_mut(runtime)?.render_schema_buffer_with(
+        buffer_id.get(),
+        session_id,
+        &|context| user_library.db_browser_items(context),
+    )?;
     apply_db_browser_view(runtime, buffer_id, view)
 }
 
 fn open_db_history_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id =
         open_or_focus_workspace_plugin_buffer(runtime, DB_HISTORY_BUFFER_NAME, DB_HISTORY_KIND)?;
-    let view = db_service_mut(runtime)?.render_history_buffer(buffer_id.get())?;
+    let user_library = shell_user_library(runtime);
+    let view = db_service_mut(runtime)?
+        .render_history_buffer_with(buffer_id.get(), &|context| {
+            user_library.db_browser_items(context)
+        })?;
     apply_db_browser_view(runtime, buffer_id, view)
 }
 
 fn open_db_snippets_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id =
         open_or_focus_workspace_plugin_buffer(runtime, DB_SNIPPETS_BUFFER_NAME, DB_SNIPPETS_KIND)?;
-    let view = db_service_mut(runtime)?.render_snippets_buffer(buffer_id.get())?;
+    let user_library = shell_user_library(runtime);
+    let view = db_service_mut(runtime)?
+        .render_snippets_buffer_with(buffer_id.get(), &|context| {
+            user_library.db_browser_items(context)
+        })?;
     apply_db_browser_view(runtime, buffer_id, view)
 }
 
@@ -27233,29 +27490,6 @@ fn open_file_at_line(
     Ok(())
 }
 
-fn oil_action_from_detail(detail: &str) -> Option<OilKeyAction> {
-    match detail {
-        "open-entry" => Some(OilKeyAction::OpenEntry),
-        "open-vertical-split" => Some(OilKeyAction::OpenVerticalSplit),
-        "open-horizontal-split" => Some(OilKeyAction::OpenHorizontalSplit),
-        "open-new-pane" => Some(OilKeyAction::OpenNewPane),
-        "preview-entry" => Some(OilKeyAction::PreviewEntry),
-        "refresh" => Some(OilKeyAction::Refresh),
-        "close" => Some(OilKeyAction::Close),
-        "open-parent" => Some(OilKeyAction::OpenParent),
-        "open-workspace-root" => Some(OilKeyAction::OpenWorkspaceRoot),
-        "set-root" => Some(OilKeyAction::SetRoot),
-        "show-help" => Some(OilKeyAction::ShowHelp),
-        "cycle-sort" => Some(OilKeyAction::CycleSort),
-        "toggle-hidden" => Some(OilKeyAction::ToggleHidden),
-        "toggle-trash" => Some(OilKeyAction::ToggleTrash),
-        "open-external" => Some(OilKeyAction::OpenExternal),
-        "set-tab-local-root" => Some(OilKeyAction::SetTabLocalRoot),
-        "git-worktree" => Some(OilKeyAction::CreateGitWorktree),
-        _ => None,
-    }
-}
-
 fn execute_oil_action(runtime: &mut EditorRuntime, action: OilKeyAction) -> Result<bool, String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let buffer = shell_buffer(runtime, buffer_id)?;
@@ -28297,22 +28531,63 @@ fn toggle_runtime_popup(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let popup_id = runtime
+    let popup = runtime
         .model()
         .workspace(workspace_id)
         .map_err(|error| error.to_string())?
         .popups()
         .next()
-        .map(|popup| popup.id());
+        .map(|popup| {
+            (
+                popup.id(),
+                popup.title().to_owned(),
+                popup.buffer_ids().to_vec(),
+                popup.active_buffer(),
+            )
+        });
 
-    if let Some(popup_id) = popup_id {
+    if let Some((popup_id, title, buffers, active_buffer)) = popup {
         runtime
             .model_mut()
             .close_popup(workspace_id, popup_id)
             .map_err(|error| error.to_string())?;
         let ui = shell_ui_mut(runtime)?;
+        ui.stash_dismissed_popup(workspace_id, title, buffers, active_buffer);
         ui.set_popup_focus(false);
         ui.clear_popup_buffer();
+        return Ok(());
+    }
+
+    let dismissed_popup = shell_ui(runtime)?.dismissed_popup(workspace_id).cloned();
+    if let Some(dismissed_popup) = dismissed_popup {
+        let (buffers, active_buffer) = {
+            let workspace = runtime
+                .model()
+                .workspace(workspace_id)
+                .map_err(|error| error.to_string())?;
+            let buffers = dismissed_popup
+                .buffers
+                .into_iter()
+                .filter(|buffer_id| workspace.buffer(*buffer_id).is_some())
+                .collect::<Vec<_>>();
+            let active_buffer = if buffers.contains(&dismissed_popup.active_buffer) {
+                dismissed_popup.active_buffer
+            } else if let Some(active_buffer) = buffers.first().copied() {
+                active_buffer
+            } else {
+                shell_ui_mut(runtime)?.clear_dismissed_popup(workspace_id);
+                return Ok(());
+            };
+            (buffers, active_buffer)
+        };
+        runtime
+            .model_mut()
+            .open_popup(workspace_id, dismissed_popup.title, buffers, active_buffer)
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        ui.clear_dismissed_popup(workspace_id);
+        ui.set_popup_buffer(active_buffer);
+        ui.set_popup_focus(true);
         return Ok(());
     }
 
@@ -29036,14 +29311,14 @@ fn create_workspace_file_from_query(
 pub(crate) fn workspace_switch_picker_overlay(
     runtime: &EditorRuntime,
 ) -> Result<PickerOverlay, String> {
-    picker::workspace_switch_picker_overlay(runtime)
+    picker::picker_overlay(runtime, "workspace.switch")
 }
 
 #[cfg(test)]
 pub(crate) fn workspace_delete_picker_overlay(
     runtime: &EditorRuntime,
 ) -> Result<PickerOverlay, String> {
-    picker::workspace_delete_picker_overlay(runtime)
+    picker::picker_overlay(runtime, "workspace.delete")
 }
 
 fn apply_undo_tree_node(
@@ -29931,6 +30206,13 @@ fn plugin_section_state_for_kind(
     let buffer = user_library.plugin_buffer(plugin_kind)?;
     let sections = buffer.sections()?.clone();
     PluginSectionBufferState::new(sections, buffer.evaluate_target_section())
+}
+
+fn plugin_buffer_line_wrap(kind: &BufferKind, user_library: &dyn UserLibrary) -> bool {
+    match kind {
+        BufferKind::Plugin(plugin_kind) => user_library.plugin_buffer_line_wrap(plugin_kind),
+        _ => true,
+    }
 }
 
 fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibrary) -> Vec<String> {

@@ -149,6 +149,11 @@ impl PickerSession {
         &self.title
     }
 
+    /// Replaces the title shown by picker renderers.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = title.into();
+    }
+
     /// Returns the current fuzzy query.
     pub fn query(&self) -> &str {
         &self.query

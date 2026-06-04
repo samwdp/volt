@@ -184,6 +184,7 @@ pub struct GitStatusSnapshot {
     branch: Option<String>,
     upstream: Option<String>,
     push_remote: Option<String>,
+    tag: Option<String>,
     ahead: usize,
     behind: usize,
     head: Option<GitLogEntry>,
@@ -211,6 +212,11 @@ impl GitStatusSnapshot {
     /// Returns the push-remote ref name.
     pub fn push_remote(&self) -> Option<&str> {
         self.push_remote.as_deref()
+    }
+
+    /// Returns nearest reachable tag name for `HEAD`.
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     /// Returns ahead count relative to upstream.
@@ -297,6 +303,12 @@ impl GitStatusSnapshot {
     pub fn with_upstreams(mut self, upstream: Option<String>, push_remote: Option<String>) -> Self {
         self.upstream = upstream;
         self.push_remote = push_remote;
+        self
+    }
+
+    /// Adds nearest reachable tag for the current `HEAD`.
+    pub fn with_tag(mut self, tag: Option<String>) -> Self {
+        self.tag = tag;
         self
     }
 

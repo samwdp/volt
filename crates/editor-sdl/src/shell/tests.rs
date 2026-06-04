@@ -5142,6 +5142,42 @@ fn git_status_header_spans_skip_leading_icons() {
 }
 
 #[test]
+fn git_status_merge_header_spans_keep_tracking_counts() {
+    let line = SectionRenderLine {
+        text: format!(
+            "{} Merge: origin/main (ahead 2, behind 1)",
+            editor_icons::symbols::cod::COD_ARROW_DOWN
+        ),
+        depth: 1,
+        section_id: GIT_SECTION_HEADERS.to_owned(),
+        action: None,
+        kind: SectionRenderLineKind::Item,
+    };
+    let formatted = format_section_line(&line);
+    let spans = git_status_line_spans(&line, &formatted);
+
+    assert_eq!(
+        syntax_span_segments(&formatted, &spans),
+        vec![
+            (
+                TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
+                editor_icons::symbols::cod::COD_ARROW_DOWN.to_owned(),
+            ),
+            (
+                TOKEN_GIT_STATUS_HEADER_LABEL.to_owned(),
+                "Merge:".to_owned()
+            ),
+            (
+                TOKEN_GIT_STATUS_HEADER_VALUE.to_owned(),
+                "origin/main".to_owned(),
+            ),
+            (TOKEN_GIT_STATUS_SECTION_COUNT.to_owned(), "2".to_owned()),
+            (TOKEN_GIT_STATUS_SECTION_COUNT.to_owned(), "1".to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn git_status_entry_spans_skip_leading_icons() {
     let line = SectionRenderLine {
         text: format!(
@@ -13740,7 +13776,10 @@ fn terminal_put_shortcuts_paste_yanks_in_normal_mode() -> Result<(), String> {
         );
     }
 
-    assert!(handle_terminal_vim_edit(&mut state.runtime, "put-after")?);
+    assert!(handle_terminal_vim_edit(
+        &mut state.runtime,
+        VimEditAction::PutAfter
+    )?);
     assert!(terminal_buffer_state(&state.runtime)?.contains(buffer_id));
     assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
     assert_eq!(shell_ui(&state.runtime)?.vim().pending, None);
@@ -13786,6 +13825,45 @@ fn terminal_popup_command_focuses_the_popup_surface() -> Result<(), String> {
 }
 
 #[test]
+fn dismissed_popup_toggle_restores_terminal_buffer() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+
+    state
+        .runtime
+        .execute_command("terminal.popup")
+        .map_err(|error| error.to_string())?;
+
+    let first_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "terminal popup was not opened".to_owned())?;
+    let terminal_buffer = first_popup.active_buffer;
+    assert!(terminal_buffer_state(&state.runtime)?.contains(terminal_buffer));
+
+    state
+        .runtime
+        .execute_command("picker.toggle-popup-window")
+        .map_err(|error| error.to_string())?;
+
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    assert_eq!(shell_ui(&state.runtime)?.popup_buffer_id, None);
+    assert!(shell_buffer(&state.runtime, terminal_buffer).is_ok());
+    assert!(terminal_buffer_state(&state.runtime)?.contains(terminal_buffer));
+
+    state
+        .runtime
+        .execute_command("picker.toggle-popup-window")
+        .map_err(|error| error.to_string())?;
+
+    let restored_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "terminal popup was not restored".to_owned())?;
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(restored_popup.active_buffer, terminal_buffer);
+    assert_eq!(ui.popup_buffer_id, Some(terminal_buffer));
+    assert!(ui.popup_focus);
+    assert!(terminal_buffer_state(&state.runtime)?.contains(terminal_buffer));
+    Ok(())
+}
+
+#[test]
 fn browser_popup_command_focuses_the_popup_surface() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let pane_buffer = active_shell_buffer_id(&state.runtime)?;
@@ -13807,6 +13885,48 @@ fn browser_popup_command_focuses_the_popup_surface() -> Result<(), String> {
         shell_buffer(&state.runtime, popup.active_buffer)?.kind,
         BufferKind::Plugin(ref kind) if kind == user::browser::BROWSER_KIND
     ));
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_command_opens_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+
+    state
+        .runtime
+        .execute_command("workspace.dashboard")
+        .map_err(|error| error.to_string())?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "workspace dashboard picker did not open".to_owned())?;
+    assert_eq!(picker.session.title(), "Worktrees");
+    assert!(picker.session.item_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_command_opens_fallback_picker_outside_git() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-dashboard-non-git");
+    open_workspace_from_project(&mut state.runtime, "non-git", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.dashboard")
+        .map_err(|error| error.to_string())?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "workspace dashboard fallback picker did not open".to_owned())?;
+    assert_eq!(picker.session.title(), "Worktrees");
+    assert_eq!(picker.session.item_count(), 1);
+    assert!(
+        picker
+            .session
+            .selected()
+            .is_some_and(|selected| selected.item().label() == "Workspace dashboard unavailable")
+    );
     Ok(())
 }
 

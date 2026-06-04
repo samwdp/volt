@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+editor-plugin-api = { path = "../../user/sdk" }
 keyring = "4.0.1"
 keyring-core = "1.0.0"
 postgres = "0.19.13"

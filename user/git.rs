@@ -963,8 +963,7 @@ pub fn package() -> PluginPackage {
 
 /// Builds the git status section tree for rendering.
 pub fn status_sections(snapshot: &GitStatusSnapshot) -> SectionTree {
-    let mut sections = Vec::new();
-    sections.push(status_header_section(snapshot));
+    let mut sections = vec![status_header_section(snapshot)];
     if !snapshot.in_progress().is_empty() {
         sections.push(in_progress_section(snapshot));
     }
@@ -993,6 +992,7 @@ pub fn status_sections(snapshot: &GitStatusSnapshot) -> SectionTree {
         sections.push(section);
     }
     sections.push(commit_section(snapshot));
+
     SectionTree::new(sections)
 }
 
@@ -1009,6 +1009,7 @@ fn status_header_section(snapshot: &GitStatusSnapshot) -> Section {
     let branch_icon = crate::icon_font::symbols::dev::DEV_GIT_BRANCH;
     let incoming_icon = crate::icon_font::symbols::cod::COD_ARROW_DOWN;
     let outgoing_icon = crate::icon_font::symbols::cod::COD_ARROW_UP;
+    let tag_icon = crate::icon_font::symbols::cod::COD_TAG;
     let head_line = match (snapshot.branch(), snapshot.head()) {
         (Some(branch), Some(head)) => format!(
             "{branch_icon} Head: {branch} {} {}",
@@ -1022,7 +1023,7 @@ fn status_header_section(snapshot: &GitStatusSnapshot) -> Section {
     items.push(SectionItem::new(head_line));
     if let Some(upstream) = snapshot.upstream() {
         let line = format!(
-            "{incoming_icon} Upstream: {upstream} (ahead {}, behind {})",
+            "{incoming_icon} Merge: {upstream} (ahead {}, behind {})",
             snapshot.ahead(),
             snapshot.behind()
         );
@@ -1032,6 +1033,9 @@ fn status_header_section(snapshot: &GitStatusSnapshot) -> Section {
         items.push(SectionItem::new(format!(
             "{outgoing_icon} Push: {push_remote}"
         )));
+    }
+    if let Some(tag) = snapshot.tag() {
+        items.push(SectionItem::new(format!("{tag_icon} Tag: {tag}")));
     }
     Section::new(
         SECTION_HEADERS,
@@ -1328,6 +1332,26 @@ mod tests {
         GitLogEntry::new(hash.to_owned(), summary.to_owned())
     }
 
+    fn flatten_section_ids(section: &Section, ids: &mut Vec<&'static str>) {
+        ids.push(match section.id() {
+            SECTION_HEADERS => SECTION_HEADERS,
+            SECTION_IN_PROGRESS => SECTION_IN_PROGRESS,
+            SECTION_STAGED => SECTION_STAGED,
+            SECTION_UNSTAGED => SECTION_UNSTAGED,
+            SECTION_UNTRACKED => SECTION_UNTRACKED,
+            SECTION_STASHES => SECTION_STASHES,
+            SECTION_UNPULLED => SECTION_UNPULLED,
+            SECTION_UNPUSHED => SECTION_UNPUSHED,
+            SECTION_REMOTE => SECTION_REMOTE,
+            SECTION_RECENT => SECTION_RECENT,
+            SECTION_COMMIT => SECTION_COMMIT,
+            _ => panic!("unexpected section id `{}`", section.id()),
+        });
+        for child in section.children() {
+            flatten_section_ids(child, ids);
+        }
+    }
+
     #[test]
     fn git_status_keymaps_export_prefix_starters_and_commands() {
         assert_eq!(status_prefix_for_chord("F"), Some(GitStatusPrefix::Pull));
@@ -1414,14 +1438,53 @@ mod tests {
     }
 
     #[test]
-    fn status_sections_show_recent_commits_once_without_upstream() {
-        let snapshot = GitStatusSnapshot::default().with_recent(vec![log_entry("abc123", "seed")]);
+    fn status_header_section_uses_magit_style_labels() {
+        let snapshot = GitStatusSnapshot::default()
+            .with_head(Some(log_entry("abc1234", "seed")))
+            .with_upstreams(Some("origin/main".to_owned()), Some("fork/main".to_owned()))
+            .with_tag(Some("v1.2.3".to_owned()));
+        let section = status_header_section(&snapshot);
+        let lines = section
+            .items()
+            .iter()
+            .map(|item| item.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(lines.iter().any(|line| line.contains("Head:")));
+        assert!(lines.iter().any(|line| line.contains("Merge: origin/main")));
+        assert!(lines.iter().any(|line| line.contains("Push: fork/main")));
+        assert!(lines.iter().any(|line| line.contains("Tag: v1.2.3")));
+        assert!(!lines.iter().any(|line| line.contains("Upstream:")));
+    }
+
+    #[test]
+    fn status_sections_render_change_sections_as_top_level_headers() {
+        let snapshot = GitStatusSnapshot::default().with_status(
+            editor_git::parse_status(" M src/main.rs\n?? notes.txt\n").expect("status snapshot"),
+        );
         let sections = status_sections(&snapshot);
-        let ids = sections
+        let status = sections
+            .sections()
+            .iter()
+            .find(|section| section.id() == SECTION_HEADERS)
+            .expect("status root should be present");
+        assert!(status.children().is_empty());
+        let top_level_ids = sections
             .sections()
             .iter()
             .map(|section| section.id())
             .collect::<Vec<_>>();
+        assert!(top_level_ids.contains(&SECTION_UNSTAGED));
+        assert!(top_level_ids.contains(&SECTION_UNTRACKED));
+    }
+
+    #[test]
+    fn status_sections_show_recent_commits_once_without_upstream() {
+        let snapshot = GitStatusSnapshot::default().with_recent(vec![log_entry("abc123", "seed")]);
+        let sections = status_sections(&snapshot);
+        let mut ids = Vec::new();
+        for section in sections.sections() {
+            flatten_section_ids(section, &mut ids);
+        }
         assert!(ids.contains(&SECTION_RECENT));
         assert!(!ids.contains(&SECTION_UNPULLED));
         assert!(!ids.contains(&SECTION_UNPUSHED));
@@ -1458,11 +1521,10 @@ mod tests {
             .with_recent(vec![log_entry("abc123", "seed")])
             .with_unpushed(vec![log_entry("def456", "ahead")]);
         let sections = status_sections(&snapshot);
-        let ids = sections
-            .sections()
-            .iter()
-            .map(|section| section.id())
-            .collect::<Vec<_>>();
+        let mut ids = Vec::new();
+        for section in sections.sections() {
+            flatten_section_ids(section, &mut ids);
+        }
         assert!(ids.contains(&SECTION_UNPUSHED));
         assert!(!ids.contains(&SECTION_RECENT));
     }

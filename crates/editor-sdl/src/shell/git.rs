@@ -301,7 +301,7 @@ pub(super) fn git_status_header_item_spans(
     let rest_offset = indent_bytes + content_start + rest_start;
     match label {
         "Head" => git_status_head_spans(line, rest, rest_offset, spans),
-        "Upstream" => git_status_upstream_spans(line, rest, rest_offset, spans),
+        "Merge" => git_status_upstream_spans(line, rest, rest_offset, spans),
         _ => {
             push_span_bytes(
                 spans,
@@ -405,6 +405,16 @@ pub(super) fn git_status_upstream_spans(
         "behind",
         TOKEN_GIT_STATUS_SECTION_COUNT,
     );
+}
+
+fn git_head_tag(root: &Path) -> Option<String> {
+    git_read_command_output_optional(
+        root,
+        "describe --tags --abbrev=0",
+        &["describe", "--tags", "--abbrev=0"],
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty())
 }
 
 pub(super) fn git_status_entry_item_spans(
@@ -2109,6 +2119,19 @@ fn git_push_remote_name(root: &Path, snapshot: &GitStatusSnapshot) -> Option<Str
         })
         .or_else(|| snapshot.upstream().and_then(remote_name_from_ref))
         .or_else(|| snapshot.push_remote().and_then(remote_name_from_ref))
+}
+
+fn status_output_upstream(status_output: &str) -> Option<String> {
+    status_output.lines().find_map(|line| {
+        let line = line.strip_prefix("## ")?;
+        let (_, tracking) = line.split_once("...")?;
+        let upstream = tracking
+            .split_once(" [")
+            .map(|(upstream, _)| upstream)
+            .unwrap_or(tracking)
+            .trim();
+        (!upstream.is_empty()).then(|| upstream.to_owned())
+    })
 }
 
 pub(super) fn fetch_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
@@ -4289,6 +4312,13 @@ fn git_read_command_output_optional(root: &Path, label: &str, args: &[&str]) -> 
     git_read_command_output(root, label, args).ok()
 }
 
+fn git_read_log_oneline_optional(root: &Path, label: &str, revision: &str) -> Vec<GitLogEntry> {
+    let limit = GIT_LOG_LIMIT.to_string();
+    git_read_command_output_optional(root, label, &["log", "-n", &limit, "--oneline", revision])
+        .map(|output| parse_log_oneline(&output))
+        .unwrap_or_default()
+}
+
 fn git_read_command_output_allow_exit_codes(
     root: &Path,
     label: &str,
@@ -4382,48 +4412,29 @@ pub(super) fn git_status_snapshot(
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
     )
     .map(|value| value.trim().to_owned())
-    .filter(|value| !value.is_empty());
+    .filter(|value| !value.is_empty())
+    .or_else(|| status_output_upstream(&status_output));
     let push_remote = git_read_command_output_optional(
         root,
         "rev-parse --abbrev-ref @{push}",
         &["rev-parse", "--abbrev-ref", "@{push}"],
     )
     .map(|value| value.trim().to_owned())
-    .filter(|value| !value.is_empty());
+    .filter(|value| !value.is_empty())
+    .or_else(|| upstream.clone());
+    let tag = git_head_tag(root);
 
     let stash_output = git_read_command_output_optional(root, "stash list", &["stash", "list"])
         .unwrap_or_default();
     let stashes = parse_stash_list(&stash_output);
 
     let unpulled = if head_exists && upstream.is_some() {
-        let output = git_read_command_output(
-            root,
-            "log --oneline ..@{upstream}",
-            &[
-                "log",
-                "-n",
-                &GIT_LOG_LIMIT.to_string(),
-                "--oneline",
-                "..@{upstream}",
-            ],
-        )?;
-        parse_log_oneline(&output)
+        git_read_log_oneline_optional(root, "log --oneline ..@{upstream}", "..@{upstream}")
     } else {
         Vec::new()
     };
     let unpushed = if head_exists && upstream.is_some() {
-        let output = git_read_command_output(
-            root,
-            "log --oneline @{upstream}..",
-            &[
-                "log",
-                "-n",
-                &GIT_LOG_LIMIT.to_string(),
-                "--oneline",
-                "@{upstream}..",
-            ],
-        )?;
-        parse_log_oneline(&output)
+        git_read_log_oneline_optional(root, "log --oneline @{upstream}..", "@{upstream}..")
     } else {
         Vec::new()
     };
@@ -4436,6 +4447,7 @@ pub(super) fn git_status_snapshot(
         .with_status(status)
         .with_head(head)
         .with_upstreams(upstream, push_remote)
+        .with_tag(tag)
         .with_stashes(stashes)
         .with_unpulled(unpulled)
         .with_unpushed(unpushed)
@@ -4609,6 +4621,29 @@ mod tests {
             git_push_remote_name(&root, &snapshot),
             Some("origin".to_owned())
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_output_upstream_reads_short_branch_tracking_ref() {
+        assert_eq!(
+            status_output_upstream("## master...origin/master [ahead 2, behind 1]\n M file.rs\n"),
+            Some("origin/master".to_owned())
+        );
+        assert_eq!(status_output_upstream("## master\n"), None);
+    }
+
+    #[test]
+    fn git_read_log_oneline_optional_returns_empty_for_unknown_revision() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+
+        let entries =
+            git_read_log_oneline_optional(&root, "log --oneline ..@{upstream}", "..@{upstream}");
+
+        assert!(entries.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

@@ -21,5 +21,13 @@ pub fn package() -> PluginPackage {
                 Some("buffers.close"),
             )],
         ),
+        PluginCommand::new(
+            "buffer.toggle_line_wrap",
+            "Toggles automatic line wrapping for the active buffer.",
+            vec![PluginAction::emit_hook(
+                "buffer.toggle_line_wrap",
+                None::<&str>,
+            )],
+        ),
     ])
 }

@@ -204,6 +204,19 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.hover_signature_icon()().as_str()
     }
 
+    fn picker_providers(&self) -> Vec<editor_plugin_api::PickerProviderSpec> {
+        self.module.picker_providers()().into_iter().collect()
+    }
+
+    fn picker_provider_items(
+        &self,
+        context: &editor_plugin_api::PickerProviderContext,
+    ) -> Option<Vec<editor_plugin_api::PickerItemSpec>> {
+        self.module.picker_provider_items()(context.clone())
+            .into_option()
+            .map(|items| items.into_iter().collect())
+    }
+
     fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
         self.module.acp_clients()()
             .into_iter()
@@ -215,6 +228,24 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.acp_client_by_id()(id.to_owned().into())
             .into_option()
             .map(Into::into)
+    }
+
+    fn acp_picker_items(
+        &self,
+        context: &editor_plugin_api::AcpPickerContext,
+    ) -> Vec<editor_plugin_api::AcpPickerItemSpec> {
+        self.module.acp_picker_items()(context.clone())
+            .into_iter()
+            .collect()
+    }
+
+    fn db_browser_items(
+        &self,
+        context: &editor_plugin_api::DbBrowserContext,
+    ) -> Vec<editor_plugin_api::DbBrowserItemSpec> {
+        self.module.db_browser_items()(context.clone())
+            .into_iter()
+            .collect()
     }
 
     fn workspace_roots(&self) -> Vec<editor_plugin_api::WorkspaceRoot> {

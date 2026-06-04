@@ -1,147 +1,129 @@
-# User Configuration Unification PRD
+# User-Owned Extension Surfaces Migration PRD
 
 ## 1. Executive Summary
 
-- **Problem Statement**: Volt splits user-facing behavior across the compiled `user` crate and host crates such as `editor-plugin-host` and `editor-sdl`. This creates duplicated defaults, stringly-typed feature contracts, and first-party capabilities that internal code can use but external users cannot.
-- **Proposed Solution**: Make the `user` crate the single source of truth for all editor behavior and policy that is meant to be customizable, then extend `user/sdk` so first-party features and third-party plugins use the same high-level abstractions.
+- **Problem Statement**: Volt still has several user-facing behaviors whose entries, actions, or picker rows can only be changed by editing shell or source modules outside `user/`. These seams block first-party features from becoming reusable extension surfaces and force customization through host-side string dispatch.
+- **Proposed Solution**: Move remaining user-defined entry shaping and action declaration into typed `user/sdk` contracts consumed from `user/*`, while keeping execution engines, live host services, and SDL rendering in host crates.
 - **Success Criteria**:
-  - 100% of non-SDL user-facing defaults currently duplicated in host crates move behind `user/sdk` abstractions consumed from the compiled `user` crate.
-  - `editor-plugin-host::NullUserLibrary` contains no behavior-specific policy defaults beyond an empty bootstrap fallback.
-  - At least 5 first-party feature areas currently implemented with host-only command/keybinding tables are rebuilt using public `user/sdk` abstractions.
-  - Adding or changing a first-party package command, keybinding, buffer contract, or feature spec requires edits only in `user/*` plus shared SDK types, not bespoke `editor-sdl` tables.
-  - `cargo xtask ci` and `cargo run -p volt -- --shell-hidden` pass after migration.
+  - New user-defined entries or actions require edits only in `user/` unless the feature needs a new host primitive.
+  - No migrated feature uses shell-side string `match detail` dispatch for user-defined behavior.
+  - Current command names, hook names, buffer kinds, and visible behavior stay compatible during migration.
+  - Each migrated surface has proof that user-only customization changes runtime behavior.
+  - Each migrated surface has shell action conversion coverage and compatibility coverage for existing command and hook names.
+  - `cargo xtask ci`, `cargo run -p volt -- --shell-hidden`, and `graphify update .` remain required validation for implementation changes.
 
 ## 2. User Experience & Functionality
 
 - **User Personas**:
-  - Volt core maintainer evolving built-in features without duplicating policy between crates.
-  - Power user editing `user/*.rs` to customize behavior and ship a compiled user library.
-  - Third-party plugin author who needs the same feature-building primitives that first-party packages use.
+  - Volt maintainer removing extension blockers without rewriting editor internals.
+  - Power user editing `user/*.rs` to customize picker entries, action labels, commands, and feature defaults.
+  - Plugin author who needs typed public contracts instead of private shell-only tables and hook details.
 
 - **User Stories**:
-  - As a Volt maintainer, I want first-party feature defaults defined in `user` so host crates stop carrying competing policy.
-  - As a plugin author, I want typed SDK builders for commands, buffers, actions, keybindings, hooks, and feature specs so I can build plugins with the same capabilities as built-in packages.
-  - As a user customizing Volt, I want behavior changes to live in one place so modifying `user` is sufficient to change compiled runtime behavior.
-  - As a maintainer, I want a migration map of remaining host-owned configuration so work can be sequenced and verified crate by crate.
+  - As a Volt maintainer, I want picker rows and action specs for first-party features declared in `user` so feature policy has one owner.
+  - As a power user, I want to add or change a Git, DB, ACP, Oil, Vim, or picker action without editing `editor-sdl`.
+  - As a plugin author, I want typed action specs and contexts so I can compose with host engines without relying on undocumented strings.
+  - As a maintainer, I want current command names, hook names, and buffer kinds preserved so existing packages and tests keep working.
 
 - **Acceptance Criteria**:
-  - Every customizable default duplicated in host fallback code has one canonical owner in `user`.
-  - Public `user/sdk` exposes typed abstractions for feature areas now represented by ad hoc strings or host-only tables.
-  - First-party packages use those public abstractions instead of private host-only equivalents.
-  - Host crates retain engine behavior and SDL-only implementation details, but not end-user policy.
-  - Documentation includes a migration table listing source crate, target abstraction, rationale, and rollout priority.
+  - Remaining user-owned picker entry shaping moves behind `user/sdk` contexts and specs where the entry is configurable.
+  - Host code converts typed user action specs into existing engine calls without exposing direct `EditorRuntime` mutation.
+  - String details remain only as compatibility input/output where required by existing commands or hooks, not as the primary customization model.
+  - Live host-owned services, such as workspace search, Git execution, DB sessions, ACP clients, Vim editing mechanics, and SDL rendering, remain in host crates.
+  - Each migration lands focused tests for user-only customization, shell action conversion, and existing command/hook compatibility.
 
 - **Non-Goals**:
-  - Exposing SDL shell windowing, renderer, layout padding, or other presentation internals as user configuration.
-  - Moving low-level engine constants such as protocol timeouts, cache sizes, or filesystem resolution heuristics into `user` unless they directly define end-user behavior.
-  - Preserving ABI compatibility during this refactor.
-  - Replacing all internal shell code with plugins in one step.
+  - No direct user access to mutate `EditorRuntime`.
+  - No moving Git, DB, or ACP execution engines into `user/`.
+  - No broad rewrite of SDL rendering, input dispatch, pane management, text editing, or core editor mechanics.
+  - No attempt to migrate every hard-coded shell string; scope is extension blockers only.
+  - No breaking rename of existing command names, hook names, or buffer kinds.
 
 ## 3. AI System Requirements
 
-- **Tool Requirements**: Not applicable. This is a product and architecture refactor for local Rust code and plugin APIs.
-- **Evaluation Strategy**: Use repository analysis, targeted migration tests, `cargo xtask ci`, and runtime smoke coverage instead of model-quality evaluation.
+- **Tool Requirements**: Not applicable. This is a local Rust architecture and product-surface migration.
+- **Evaluation Strategy**: Use repository analysis, targeted Rust tests, hidden SDL smoke coverage, and graph maintenance. Model-quality evaluation is not part of this PRD.
 
 ## 4. Technical Specifications
 
 - **Architecture Overview**:
-  - `user/sdk` becomes the public product surface for configurable behavior and plugin composition.
-  - `user` becomes the only default policy implementation. It defines built-in packages, feature specs, commands, keybindings, buffers, feature-specific defaults, and textual/help surfaces.
-  - `editor-plugin-host` becomes a thin adapter that loads `UserLibrary`, registers exported specs, and provides only minimal empty fallback behavior when no library is available.
-  - `editor-sdl` remains owner of rendering, input dispatch, and host execution, but consumes typed feature specs instead of private command tables and scattered hook strings where behavior is intended to be extensible.
+  - `user/sdk` defines typed contexts and action specs for user-owned extension surfaces.
+  - `user/*` defines first-party entries, actions, labels, keybindings, and package metadata through those public SDK types.
+  - `editor-plugin-host` adapts exported package metadata and feature specs into runtime registration without owning feature policy.
+  - `editor-sdl` keeps rendering, input dispatch, and execution engines, but converts typed user specs into host actions.
+  - Existing command, hook, and buffer identifiers remain stable compatibility contracts.
 
 - **Integration Points**:
-  - `user/sdk::UserLibrary`:
-    - Expand from provider/default getters into typed feature registries and builders.
-    - Promote first-party reusable types out of `user/*` into `user/sdk` when those types describe plugin-visible behavior.
+  - `user/sdk`:
+    - Add small typed specs per feature instead of one generic catch-all abstraction.
+    - Use context structs for host-provided data that `user` may shape into entries.
+    - Keep specs declarative: labels, ids, command ids, hook ids, action variants, and metadata.
   - `user`:
-    - Continue exporting packages, themes, syntax, LSP, DAP, and behavior defaults.
-    - Add first-party feature specs for areas still split between `user` metadata and host-side command execution tables.
-  - `editor-plugin-host`:
-    - Remove duplicated product defaults from `NullUserLibrary`.
-    - Resolve feature specs generically rather than hard-coding fallback command identities and UI strings.
+    - Own default first-party definitions in focused modules such as `user/git.rs`, `user/oil.rs`, `user/acp.rs`, `user/db.rs`, and Vim/picker-related modules.
+    - Provide customization proof tests by changing only user-owned definitions in test libraries or fixtures.
   - `editor-sdl`:
-    - Replace host-only command/keybinding tables with SDK-backed specs where behavior is meant to be user-extensible.
-    - Keep SDL-only mechanics private.
+    - Replace shell-side action table and `match detail` customization with conversion from typed specs.
+    - Preserve engine ownership and validate filesystem, process, DB, Git, and ACP effects in host code.
+  - `editor-plugin-host`:
+    - Register new typed specs with existing command, hook, and keymap registries.
+    - Keep fallback behavior minimal and compatibility-focused.
 
-- **Security & Privacy**:
-  - No new network or credential surface should be introduced by this refactor.
-  - Existing sensitive flows such as DB connection storage and external command execution must continue using current host enforcement paths.
-  - SDK abstractions must describe intent, not allow bypass of host validation for filesystem, process, or network actions.
+### Module Plans
 
-### Current State Findings
-
-| Area                             | Current state                                                                                                                   | Evidence                                                                      | Why this is a problem                                                                                           |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Fallback user policy             | `editor-plugin-host::NullUserLibrary` duplicates terminal, hover, oil, statusline, diagnostics, gitfringe, and browser defaults | `crates/editor-plugin-host/src/lib.rs`                                        | Split ownership creates drift between built-in user library and host fallback behavior                          |
-| Oil help and contextual UX       | User owns oil defaults and keybindings, but `editor-sdl` still owns contextual help keybinding descriptions                     | `user/oil.rs`, `crates/editor-sdl/src/shell/picker.rs`                        | Same feature described in two places; external plugins cannot reuse help rendering model                        |
-| Git status interaction model     | Host owns `GIT_STATUS_COMMANDS` command table and contextual keybinding help                                                    | `crates/editor-sdl/src/shell/git.rs`, `crates/editor-sdl/src/shell/picker.rs` | First-party git feature uses privileged shell-only abstractions unavailable to plugin authors                   |
-| Hook and feature contracts       | Many feature contracts are raw strings spread through `editor-sdl` and `user`                                                   | `crates/editor-sdl/src/shell/mod.rs`, `user/browser.rs`, `user/db.rs`         | String coupling makes extension fragile and obscures which hooks are public                                     |
-| Browser and DB package contracts | User defines package metadata and buffer kinds, but host still contains paired internal logic and command routing               | `user/browser.rs`, `user/db.rs`, `crates/editor-sdl/src/shell/mod.rs`         | External users can trigger shells of features, but not compose all underlying behavior with shared abstractions |
-
-### Migration Table
-
-| Priority | Source crate/file                                             | Current hard-coded or split behavior                                                                      | Target owner/abstraction                                                                 | Notes                                                                               |
-| -------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| P0       | `crates/editor-plugin-host/src/lib.rs`                        | `NullUserLibrary` behavior defaults for terminal, hover, oil, browser, statusline, diagnostics, gitfringe | `user` as canonical default policy; `NullUserLibrary` reduced to empty/minimal bootstrap | Highest drift risk; first place to remove duplicate policy                          |
-| P0       | `crates/editor-sdl/src/shell/git.rs`                          | `GIT_STATUS_COMMANDS` host-only command table                                                             | `user/sdk::GitFeatureSpec` plus `user/git.rs` default instance                           | Lets first-party and third-party git UIs share same abstraction                     |
-| P0       | `crates/editor-sdl/src/shell/picker.rs`                       | Contextual help tables for git/oil views                                                                  | `user/sdk::ContextHelpSpec` or per-buffer help metadata                                  | Removes duplicate command descriptions and keybinding docs                          |
-| P0       | `crates/editor-sdl/src/shell/mod.rs`                          | Public-ish hook names, buffer kinds, feature IDs spread as raw constants                                  | `user/sdk` typed modules/builders for public feature contracts                           | Public contracts must stop being shell-local string literals                        |
-| P1       | `user/oil.rs` plus `editor-sdl`                               | Oil actions split between user keybinding config and host action execution model                          | `user/sdk::OilFeatureSpec` or generic directory feature spec                             | Keep UI engine in host, move behavior contract fully public                         |
-| P1       | `user/browser.rs` plus `editor-sdl`                           | Browser commands/buffers exposed, but navigation/focus contract still stringly and partial                | `user/sdk::BrowserFeatureSpec`                                                           | Maintain hidden SDL implementation while making behavior contract public            |
-| P1       | `user/db.rs` plus `editor-sdl`                                | DB hooks and buffer kinds declared in user, execution lifecycle owned only by host                        | `user/sdk::DbFeatureSpec`                                                                | Needed so third-party packages can define richer DB workflows using same primitives |
-| P1       | `user/terminal.rs` plus `editor-plugin-host`                  | Terminal defaults owned by user but fallback shell policy duplicated in host                              | `user/sdk::TerminalFeatureSpec` or keep current config plus remove fallback duplication  | Small move, high clarity                                                            |
-| P2       | `user/autocomplete.rs`, `user/hover.rs`, `editor-plugin-host` | Provider concepts public, but host still seeds built-in provider defaults                                 | Public provider registries with explicit empty-state handling                            | Makes no-library bootstrap deterministic and less magical                           |
-| P2       | `user/lib.rs` package export pattern                          | First-party features assembled as module-local functions without consistent shared builders               | SDK builder APIs used by both first-party and third-party packages                       | Improves symmetry and docs                                                          |
-
-### Proposed Public Abstractions
-
-- `FeatureSpec` pattern in `user/sdk` for first-party-capable surfaces:
-  - `GitFeatureSpec`
-  - `OilFeatureSpec`
-  - `BrowserFeatureSpec`
-  - `DbFeatureSpec`
-  - `TerminalFeatureSpec`
-- Typed public hook catalog:
-  - Public hooks moved from shell-local constants into SDK modules when users are expected to emit or subscribe to them.
-  - Internal-only SDL hooks remain private.
-- Shared help and interaction metadata:
-  - Per-buffer or per-feature contextual help entries.
-  - Typed action ids instead of free-form command text where practical.
-- Builder-style package composition:
-  - Internal `user` modules should use the same SDK builders exposed to third-party plugin authors.
+| Area | Current blocker | Target contract | Migration plan |
+| --- | --- | --- | --- |
+| Picker parity | Remaining workspace dashboard item shaping still lives in shell paths. | User-owned picker provider path for dashboard items; host-owned live workspace search stays separate. | Move configurable dashboard row shaping to `user` provider specs. Keep fuzzy matching, live filesystem/workspace search, and picker rendering in host. |
+| Vim | `editor.vim.edit` behavior depends on detail strings dispatched in shell code. | `VimActionSpec` and `VimActionContext`. | Introduce typed Vim action registry in `user/sdk`, migrate user-defined Vim edit bindings to typed specs, and make shell convert specs into current edit engine calls. |
+| Git | Git status command bindings and Git pickers are built from shell-owned tables/builders. | `GitActionSpec`. | Move Git status action declarations, picker labels, and command binding metadata to `user/git.rs`; keep repository status, staging, diff, and process execution in host. |
+| Oil | Oil commands/keybindings duplicate string action mapping between user config and shell execution. | `OilKeyAction` emission and typed Oil action specs. | Make commands and keybindings emit typed Oil actions, remove duplicated shell string mapping, and keep directory buffer mechanics in host. |
+| ACP | Mode, model, session, and slash pickers are shaped by ACP shell code. | `AcpPickerContext` and `AcpActionSpec`. | Let `user/acp.rs` shape ACP picker entries from host-provided contexts while host keeps ACP client/session execution. |
+| DB | DB browser rows and actions are shaped in host-owned browser logic. | `DbBrowserContext`, `DbBrowserItemSpec`, and `DbActionSpec`. | Move DB browser row/action shaping to `user/db.rs`; keep connection handling, query execution, schema inspection, and credentials in host. |
 
 ### Requirements
 
-1. `user` must be canonical owner of all configurable defaults that affect first-party editor behavior outside SDL-only presentation concerns.
-2. `editor-plugin-host` must not invent alternate defaults for behavior that already exists in `user`.
-3. Every hook, action id, buffer kind, and command contract intended for user/plugin authors must be exported through `user/sdk` as a documented public abstraction.
-4. First-party features implemented in host crates must consume those public abstractions rather than bespoke internal tables when the behavior is extensible.
-5. SDK naming must distinguish public extensibility contracts from private shell implementation details.
-6. Migration must preserve ability to compile built-in `user` library and load it through current application bootstrap.
+1. User-owned specs must be typed and feature-specific enough to avoid recreating stringly coupling under a new name.
+2. Host action conversion must be explicit, testable, and narrow: each action variant maps to an existing host primitive or a newly added primitive.
+3. Compatibility strings for existing command details or hook payloads must be converted at the boundary and documented as legacy-compatible inputs.
+4. User contexts must contain only data needed for shaping entries and action specs, not mutable runtime handles.
+5. Live searches and execution engines remain host-owned because they depend on filesystem, process, network, credential, or session state.
+6. Every migrated feature must keep existing package exports and startup behavior stable.
+
+### Acceptance Checklist
+
+For each migrated area:
+
+- User-only customization proof test: changing a `user/` definition changes the exported entry/action without shell/source edits.
+- Shell action conversion test: typed action spec maps to the intended host primitive and rejects unsupported data.
+- Compatibility test: existing command names, hook names, buffer kinds, and legacy detail payloads continue to work.
+- Runtime validation: `cargo xtask ci` and `cargo run -p volt -- --shell-hidden` pass.
+- Graph validation: `graphify update .` runs after code changes so `graphify-out/` stays current.
 
 ## 5. Risks & Roadmap
 
 - **Phased Rollout**:
   - **MVP**:
-    - Remove duplicated policy from `NullUserLibrary`.
-    - Publish typed public hook modules and feature-spec scaffolding in `user/sdk`.
-    - Migrate one feature slice end to end: recommended order is git or oil.
+    - Land one small typed action surface end to end, preferably Oil or picker parity.
+    - Add compatibility tests for existing command and hook names.
+    - Prove customization by editing only `user/` test definitions.
   - **v1.1**:
-    - Migrate browser, DB, terminal, and contextual help metadata.
-    - Convert first-party `user/*` modules to SDK builders so examples reflect intended public usage.
+    - Migrate Vim and Git action specs.
+    - Remove shell-side string `match detail` paths for migrated user-defined behavior.
+    - Keep legacy detail parsing only at compatibility boundaries.
+  - **v1.2**:
+    - Migrate ACP and DB picker shaping.
+    - Add context structs and item specs that expose host data without runtime mutation access.
   - **v2.0**:
-    - Finish remaining host-owned feature contracts.
-    - Document plugin-author workflow for composing full-feature plugins with same primitives used internally.
+    - Audit remaining extension blockers and decide whether each needs a typed SDK contract or should stay host-private.
 
 - **Technical Risks**:
-  - Over-exposing internal shell details could freeze poor abstractions into the public SDK.
-  - Large ABI and trait changes may cause broad compile churn across `user`, `volt`, and test helpers.
-  - Feature-spec design could become too generic and recreate stringly coupling under a different name.
-  - Partial migration could leave three sources of truth instead of two if fallback behavior is not removed early.
+  - Specs may expose too much shell detail and freeze unstable internals.
+  - Specs may be too generic and preserve string coupling under typed wrappers.
+  - Partial migration can leave duplicate action declarations in both `user` and `editor-sdl`.
+  - Compatibility conversion can hide behavior drift if tests only cover happy paths.
 
 - **Mitigations**:
-  - Keep SDL mechanics private and expose only product-level behavior contracts.
-  - Migrate one feature family at a time with tests that prove first-party code uses public SDK only.
-  - Add compile-time and test assertions that built-in packages round-trip through the same public abstractions available to plugin authors.
-  - Treat `editor-plugin-host` fallback behavior as temporary bootstrap only, with explicit tests guarding minimal scope.
+  - Keep each spec tied to a concrete feature and action family.
+  - Move one surface at a time and delete replaced shell-owned builders in the same change.
+  - Require one user-only customization test, one shell conversion test, and one compatibility test per migrated feature.
+  - Keep host engines responsible for validation, credentials, filesystem/process effects, session state, and rendering.
+  - Run `cargo xtask ci`, hidden shell smoke, and `graphify update .` for implementation changes before marking migrations complete.

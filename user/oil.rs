@@ -191,12 +191,15 @@ pub fn chord_action(prefix_pending: bool, chord: &str) -> Option<OilKeyAction> {
 fn oil_action_command(
     name: &'static str,
     description: &'static str,
-    action: &'static str,
+    action: OilKeyAction,
 ) -> PluginCommand {
+    let Some(detail) = action.hook_detail() else {
+        return PluginCommand::new(name, description, Vec::new());
+    };
     PluginCommand::new(
         name,
         description,
-        vec![PluginAction::emit_hook(oil_hooks::ACTION, Some(action))],
+        vec![PluginAction::emit_hook(oil_hooks::ACTION, Some(detail))],
     )
 }
 
@@ -224,65 +227,73 @@ pub fn package() -> PluginPackage {
         oil_action_command(
             "oil.open-entry",
             "Opens the selected oil entry.",
-            "open-entry",
+            OilKeyAction::OpenEntry,
         ),
         oil_action_command(
             "oil.open-vertical-split",
             "Opens the selected oil entry in a vertical split.",
-            "open-vertical-split",
+            OilKeyAction::OpenVerticalSplit,
         ),
         oil_action_command(
             "oil.open-horizontal-split",
             "Opens the selected oil entry in a horizontal split.",
-            "open-horizontal-split",
+            OilKeyAction::OpenHorizontalSplit,
         ),
         oil_action_command(
             "oil.open-new-pane",
             "Opens the selected oil entry in a new pane.",
-            "open-new-pane",
+            OilKeyAction::OpenNewPane,
         ),
         oil_action_command(
             "oil.preview-entry",
             "Previews the selected oil entry.",
-            "preview-entry",
+            OilKeyAction::PreviewEntry,
         ),
-        oil_action_command("oil.refresh", "Refreshes the active oil buffer.", "refresh"),
-        oil_action_command("oil.close", "Closes the active oil buffer.", "close"),
+        oil_action_command(
+            "oil.refresh",
+            "Refreshes the active oil buffer.",
+            OilKeyAction::Refresh,
+        ),
+        oil_action_command(
+            "oil.close",
+            "Closes the active oil buffer.",
+            OilKeyAction::Close,
+        ),
         oil_action_command(
             "oil.open-workspace-root",
             "Opens the workspace root in the active oil buffer.",
-            "open-workspace-root",
+            OilKeyAction::OpenWorkspaceRoot,
         ),
         oil_action_command(
             "oil.set-root",
             "Sets the active oil root to the selected directory.",
-            "set-root",
+            OilKeyAction::SetRoot,
         ),
-        oil_action_command("oil.show-help", "Shows oil help.", "show-help"),
+        oil_action_command("oil.show-help", "Shows oil help.", OilKeyAction::ShowHelp),
         oil_action_command(
             "oil.cycle-sort",
             "Cycles the active oil sort mode.",
-            "cycle-sort",
+            OilKeyAction::CycleSort,
         ),
         oil_action_command(
             "oil.toggle-hidden",
             "Toggles hidden files in the active oil buffer.",
-            "toggle-hidden",
+            OilKeyAction::ToggleHidden,
         ),
         oil_action_command(
             "oil.toggle-trash",
             "Toggles trash mode in the active oil buffer.",
-            "toggle-trash",
+            OilKeyAction::ToggleTrash,
         ),
         oil_action_command(
             "oil.open-external",
             "Opens the selected oil entry externally.",
-            "open-external",
+            OilKeyAction::OpenExternal,
         ),
         oil_action_command(
             "oil.set-tab-local-root",
             "Sets the tab-local oil root to the selected directory.",
-            "set-tab-local-root",
+            OilKeyAction::SetTabLocalRoot,
         ),
         PluginCommand::new(
             "oil.git-worktree",
@@ -607,6 +618,18 @@ mod tests {
         ] {
             assert!(names.contains(&name), "missing command {name}");
         }
+
+        let open_entry = package
+            .commands()
+            .iter()
+            .find(|command| command.name() == "oil.open-entry")
+            .expect("oil.open-entry command");
+        assert_eq!(
+            open_entry.actions()[0]
+                .hook()
+                .and_then(|hook| hook.detail()),
+            OilKeyAction::OpenEntry.hook_detail()
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    VimActionSpec, VimEditAction,
 };
 
 // Change this to customize the leader key for Vim bindings.
@@ -176,168 +177,137 @@ pub fn package() -> PluginPackage {
             "editor.mode.normal",
             "normal",
         ),
-        hook_command(
+        vim_edit_command(
             "vim.enter-visual-mode",
             "Switches the editor into Vim visual mode.",
-            "editor.vim.edit",
-            "enter-visual",
+            VimEditAction::EnterVisual,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.enter-visual-line-mode",
             "Switches the editor into Vim linewise visual mode.",
-            "editor.vim.edit",
-            "enter-visual-line",
+            VimEditAction::EnterVisualLine,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.enter-visual-block-mode",
             "Switches the editor into Vim blockwise visual mode.",
-            "editor.vim.edit",
-            "enter-visual-block",
+            VimEditAction::EnterVisualBlock,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.delete-char",
             "Deletes the character under the cursor.",
-            "editor.vim.edit",
-            "delete-char",
+            VimEditAction::DeleteChar,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.delete-char-before",
             "Deletes the character before the cursor.",
-            "editor.vim.edit",
-            "delete-char-before",
+            VimEditAction::DeleteCharBefore,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.delete-line-end",
             "Deletes from the cursor to the end of the line.",
-            "editor.vim.edit",
-            "delete-line-end",
+            VimEditAction::DeleteLineEnd,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.change-line-end",
             "Changes from the cursor to the end of the line.",
-            "editor.vim.edit",
-            "change-line-end",
+            VimEditAction::ChangeLineEnd,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.yank-line",
             "Yanks the current line.",
-            "editor.vim.edit",
-            "yank-line",
+            VimEditAction::YankLine,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.substitute-char",
             "Substitutes characters under the cursor and enters insert mode.",
-            "editor.vim.edit",
-            "substitute-char",
+            VimEditAction::SubstituteChar,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.substitute-line",
             "Substitutes the current line and enters insert mode.",
-            "editor.vim.edit",
-            "substitute-line",
+            VimEditAction::SubstituteLine,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.replace-char",
             "Replaces characters under the cursor without entering insert mode.",
-            "editor.vim.edit",
-            "replace-char",
+            VimEditAction::ReplaceChar,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.enter-replace-mode",
             "Enters Vim replace mode.",
-            "editor.vim.edit",
-            "enter-replace-mode",
+            VimEditAction::EnterReplaceMode,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.toggle-case",
             "Toggles the case of characters under the cursor.",
-            "editor.vim.edit",
-            "toggle-case",
+            VimEditAction::ToggleCase,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-delete-operator",
             "Starts a Vim delete operator-pending command.",
-            "editor.vim.edit",
-            "start-delete-operator",
+            VimEditAction::StartDeleteOperator,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-change-operator",
             "Starts a Vim change operator-pending command.",
-            "editor.vim.edit",
-            "start-change-operator",
+            VimEditAction::StartChangeOperator,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-yank-operator",
             "Starts a Vim yank operator-pending command.",
-            "editor.vim.edit",
-            "start-yank-operator",
+            VimEditAction::StartYankOperator,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-format-operator",
             "Starts a Vim format operator.",
-            "editor.vim.edit",
-            "start-format-operator",
+            VimEditAction::StartFormatOperator,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-format",
             "Formats the current visual selection.",
-            "editor.vim.edit",
-            "visual-format",
+            VimEditAction::VisualFormat,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.toggle-line-comment",
             "Toggles a line comment on the current line.",
-            "editor.vim.edit",
-            "toggle-line-comment",
+            VimEditAction::ToggleLineComment,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-toggle-comment",
             "Toggles line comments across the current visual selection.",
-            "editor.vim.edit",
-            "visual-toggle-comment",
+            VimEditAction::VisualToggleComment,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.append-after-cursor",
             "Appends after the cursor and enters insert mode.",
-            "editor.vim.edit",
-            "append",
+            VimEditAction::Append,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.append-line-end",
             "Appends at the end of the line and enters insert mode.",
-            "editor.vim.edit",
-            "append-line-end",
+            VimEditAction::AppendLineEnd,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.insert-line-start",
             "Inserts at the first non-blank character on the line.",
-            "editor.vim.edit",
-            "insert-line-start",
+            VimEditAction::InsertLineStart,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.open-line-below",
             "Opens a new line below and enters insert mode.",
-            "editor.vim.edit",
-            "open-line-below",
+            VimEditAction::OpenLineBelow,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.open-line-above",
             "Opens a new line above and enters insert mode.",
-            "editor.vim.edit",
-            "open-line-above",
+            VimEditAction::OpenLineAbove,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.undo",
             "Undoes the previous change.",
-            "editor.vim.edit",
-            "undo",
+            VimEditAction::Undo,
         ),
-        hook_command(
-            "vim.redo",
-            "Redoes the next change.",
-            "editor.vim.edit",
-            "redo",
-        ),
+        vim_edit_command("vim.redo", "Redoes the next change.", VimEditAction::Redo),
         hook_command(
             "vim.scroll-half-page-down",
             "Scrolls down by half a page in Vim normal mode.",
@@ -374,245 +344,205 @@ pub fn package() -> PluginPackage {
             "editor.vim.scroll-line-up",
             "scroll-line-up",
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-g-prefix",
             "Starts a Vim g-prefixed motion.",
-            "editor.vim.edit",
-            "start-g-prefix",
+            VimEditAction::StartGPrefix,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-find-forward",
             "Starts a Vim f motion on the current line.",
-            "editor.vim.edit",
-            "start-find-forward",
+            VimEditAction::StartFindForward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-find-backward",
             "Starts a Vim F motion on the current line.",
-            "editor.vim.edit",
-            "start-find-backward",
+            VimEditAction::StartFindBackward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-till-forward",
             "Starts a Vim t motion on the current line.",
-            "editor.vim.edit",
-            "start-till-forward",
+            VimEditAction::StartTillForward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-till-backward",
             "Starts a Vim T motion on the current line.",
-            "editor.vim.edit",
-            "start-till-backward",
+            VimEditAction::StartTillBackward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.repeat-find-next",
             "Repeats the last Vim find motion forward.",
-            "editor.vim.edit",
-            "repeat-find-next",
+            VimEditAction::RepeatFindNext,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.repeat-find-previous",
             "Repeats the last Vim find motion backward.",
-            "editor.vim.edit",
-            "repeat-find-previous",
+            VimEditAction::RepeatFindPrevious,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-search-forward",
             "Opens a Vim-style forward search prompt.",
-            "editor.vim.edit",
-            "start-search-forward",
+            VimEditAction::StartSearchForward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-search-backward",
             "Opens a Vim-style backward search prompt.",
-            "editor.vim.edit",
-            "start-search-backward",
+            VimEditAction::StartSearchBackward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.search-word-forward",
             "Searches forward for the word under the cursor.",
-            "editor.vim.edit",
-            "search-word-forward",
+            VimEditAction::SearchWordForward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.search-word-backward",
             "Searches backward for the word under the cursor.",
-            "editor.vim.edit",
-            "search-word-backward",
+            VimEditAction::SearchWordBackward,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.repeat-search-next",
             "Repeats the last Vim search in the same direction.",
-            "editor.vim.edit",
-            "repeat-search-next",
+            VimEditAction::RepeatSearchNext,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.repeat-search-previous",
             "Repeats the last Vim search in the opposite direction.",
-            "editor.vim.edit",
-            "repeat-search-previous",
+            VimEditAction::RepeatSearchPrevious,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.select-register",
             "Selects a Vim register for the next operation.",
-            "editor.vim.edit",
-            "select-register",
+            VimEditAction::SelectRegister,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.set-mark",
             "Sets a Vim mark at the current cursor.",
-            "editor.vim.edit",
-            "set-mark",
+            VimEditAction::SetMark,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.goto-mark-line",
             "Jumps to the line of a Vim mark.",
-            "editor.vim.edit",
-            "goto-mark-line",
+            VimEditAction::GotoMarkLine,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.goto-mark",
             "Jumps to the exact position of a Vim mark.",
-            "editor.vim.edit",
-            "goto-mark",
+            VimEditAction::GotoMark,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.toggle-macro-record",
             "Starts or stops Vim macro recording.",
-            "editor.vim.edit",
-            "toggle-macro-record",
+            VimEditAction::ToggleMacroRecord,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-macro-playback",
             "Plays back a recorded Vim macro.",
-            "editor.vim.edit",
-            "start-macro-playback",
+            VimEditAction::StartMacroPlayback,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.put-after",
             "Puts the most recent Vim yank after the cursor.",
-            "editor.vim.edit",
-            "put-after",
+            VimEditAction::PutAfter,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.put-before",
             "Puts the most recent Vim yank before the cursor.",
-            "editor.vim.edit",
-            "put-before",
+            VimEditAction::PutBefore,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-put-after",
             "Replaces the current visual selection with the most recent Vim yank.",
-            "editor.vim.edit",
-            "visual-put-after",
+            VimEditAction::VisualPutAfter,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-put-before",
             "Replaces the current visual selection with the most recent Vim yank before the cursor.",
-            "editor.vim.edit",
-            "visual-put-before",
+            VimEditAction::VisualPutBefore,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-delete",
             "Deletes the current visual selection.",
-            "editor.vim.edit",
-            "visual-delete",
+            VimEditAction::VisualDelete,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-change",
             "Changes the current visual selection.",
-            "editor.vim.edit",
-            "visual-change",
+            VimEditAction::VisualChange,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-replace-char",
             "Replaces each character in the current visual selection with the next typed character.",
-            "editor.vim.edit",
-            "visual-replace-char",
+            VimEditAction::VisualReplaceChar,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-block-insert",
             "Inserts before the visual block selection and enters insert mode.",
-            "editor.vim.edit",
-            "visual-block-insert",
+            VimEditAction::VisualBlockInsert,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-block-append",
             "Appends after the visual block selection and enters insert mode.",
-            "editor.vim.edit",
-            "visual-block-append",
+            VimEditAction::VisualBlockAppend,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-yank",
             "Yanks the current visual selection.",
-            "editor.vim.edit",
-            "visual-yank",
+            VimEditAction::VisualYank,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-toggle-case",
             "Toggles the case of the current visual selection.",
-            "editor.vim.edit",
-            "visual-toggle-case",
+            VimEditAction::VisualToggleCase,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-lowercase",
             "Lowercases the current visual selection.",
-            "editor.vim.edit",
-            "visual-lowercase",
+            VimEditAction::VisualLowercase,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-uppercase",
             "Uppercases the current visual selection.",
-            "editor.vim.edit",
-            "visual-uppercase",
+            VimEditAction::VisualUppercase,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-indent",
             "Indents each selected line in visual mode.",
-            "editor.vim.edit",
-            "visual-indent",
+            VimEditAction::VisualIndent,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-outdent",
             "Outdents each selected line in visual mode.",
-            "editor.vim.edit",
-            "visual-outdent",
+            VimEditAction::VisualOutdent,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-join",
             "Joins the selected visual lines into a single line.",
-            "editor.vim.edit",
-            "visual-join",
+            VimEditAction::VisualJoin,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-move-down",
             "Moves selected visual lines down one line and reindents them.",
-            "editor.vim.edit",
-            "visual-move-down",
+            VimEditAction::VisualMoveDown,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-move-up",
             "Moves selected visual lines up one line and reindents them.",
-            "editor.vim.edit",
-            "visual-move-up",
+            VimEditAction::VisualMoveUp,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.visual-swap-anchor",
             "Swaps the active and anchor ends of the current visual selection.",
-            "editor.vim.edit",
-            "visual-swap-anchor",
+            VimEditAction::VisualSwapAnchor,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-visual-inner-text-object",
             "Starts a visual-mode inner text object selection.",
-            "editor.vim.edit",
-            "start-visual-inner-text-object",
+            VimEditAction::StartVisualInnerTextObject,
         ),
-        hook_command(
+        vim_edit_command(
             "vim.start-visual-around-text-object",
             "Starts a visual-mode around text object selection.",
-            "editor.vim.edit",
-            "start-visual-around-text-object",
+            VimEditAction::StartVisualAroundTextObject,
         ),
         PluginCommand::new(
             "vim.command-line",
@@ -1114,8 +1044,8 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Workspace,
         ),
         leader_binding("o b", "browser.open", PluginKeymapScope::Workspace),
-        leader_binding("o t", "terminal.popup", PluginKeymapScope::Workspace),
-        leader_binding("o T", "terminal.open", PluginKeymapScope::Workspace),
+        leader_binding("o t", "terminal.open", PluginKeymapScope::Workspace),
+        leader_binding("o T", "terminal.popup", PluginKeymapScope::Workspace),
         leader_binding("o u", "browser.url", PluginKeymapScope::Workspace),
         leader_binding("q m", "quickfix.toggle-mark", PluginKeymapScope::Popup),
     ];
@@ -1135,6 +1065,10 @@ fn hook_command(name: &str, description: &str, hook_name: &str, detail: &str) ->
         description,
         vec![PluginAction::emit_hook(hook_name, Some(detail))],
     )
+}
+
+fn vim_edit_command(name: &str, description: &str, action: VimActionSpec) -> PluginCommand {
+    hook_command(name, description, "editor.vim.edit", action.hook_detail())
 }
 
 fn normal_binding(chord: &str, command_name: &str, scope: PluginKeymapScope) -> PluginKeyBinding {
@@ -1171,6 +1105,20 @@ fn visual_binding_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_exports_vim_edit_actions_as_typed_details() {
+        let package = package();
+        let command = package
+            .commands()
+            .iter()
+            .find(|command| command.name() == "vim.delete-char")
+            .expect("delete char command");
+        assert_eq!(
+            command.actions()[0].hook().and_then(|hook| hook.detail()),
+            Some(VimEditAction::DeleteChar.hook_detail())
+        );
+    }
 
     #[test]
     fn package_exports_lsp_navigation_bindings() {

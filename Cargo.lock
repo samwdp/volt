@@ -1497,6 +1497,7 @@ dependencies = [
 name = "editor-db"
 version = "0.1.0"
 dependencies = [
+ "editor-plugin-api",
  "keyring",
  "keyring-core",
  "postgres",

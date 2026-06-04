@@ -18,12 +18,13 @@ use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 use serde_json::Number;
 
 use crate::{
-    AcpClient, AutocompleteProvider, AutocompleteProviderItem, BrowserFeatureSpec,
-    ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, GhostTextContext, GhostTextLine,
-    GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix, HoverProvider,
-    HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults, OilFeatureSpec,
-    OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, StatuslineContext,
-    TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
+    AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, AutocompleteProviderItem,
+    BrowserFeatureSpec, ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, GhostTextContext,
+    GhostTextLine, GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix,
+    HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults,
+    OilFeatureSpec, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode,
+    PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
+    TerminalFeatureSpec, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -1902,6 +1903,7 @@ pub struct AbiGitStatusSnapshot {
     branch: ROption<RString>,
     upstream: ROption<RString>,
     push_remote: ROption<RString>,
+    tag: ROption<RString>,
     ahead: usize,
     behind: usize,
     head: ROption<AbiGitLogEntry>,
@@ -1928,6 +1930,10 @@ impl From<GitStatusSnapshot> for AbiGitStatusSnapshot {
                 .into(),
             push_remote: value
                 .push_remote()
+                .map(|value| RString::from(value.to_owned()))
+                .into(),
+            tag: value
+                .tag()
                 .map(|value| RString::from(value.to_owned()))
                 .into(),
             ahead: value.ahead(),
@@ -2015,6 +2021,7 @@ impl From<AbiGitStatusSnapshot> for GitStatusSnapshot {
                 value.upstream.into_option().map(RString::into_string),
                 value.push_remote.into_option().map(RString::into_string),
             )
+            .with_tag(value.tag.into_option().map(RString::into_string))
             .with_stashes(value.stashes.into_iter().map(Into::into).collect())
             .with_unpulled(value.unpulled.into_iter().map(Into::into).collect())
             .with_unpushed(value.unpushed.into_iter().map(Into::into).collect())
@@ -2233,8 +2240,12 @@ pub struct UserLibraryModule {
     pub hover_line_limit: extern "C" fn() -> usize,
     pub hover_token_icon: extern "C" fn() -> RStr<'static>,
     pub hover_signature_icon: extern "C" fn() -> RStr<'static>,
+    pub picker_providers: extern "C" fn() -> RVec<PickerProviderSpec>,
+    pub picker_provider_items:
+        extern "C" fn(PickerProviderContext) -> ROption<RVec<crate::PickerItemSpec>>,
     pub acp_clients: extern "C" fn() -> RVec<AbiAcpClient>,
     pub acp_client_by_id: extern "C" fn(RString) -> ROption<AbiAcpClient>,
+    pub acp_picker_items: extern "C" fn(AcpPickerContext) -> RVec<AcpPickerItemSpec>,
     pub workspace_roots: extern "C" fn() -> RVec<AbiWorkspaceRoot>,
     pub terminal_config: extern "C" fn() -> AbiTerminalConfig,
     pub commandline_enabled: extern "C" fn() -> bool,
@@ -2286,6 +2297,7 @@ pub struct UserLibraryModule {
     pub headerline_lines: extern "C" fn(AbiGhostTextContext) -> RVec<RString>,
     pub pdf_open_mode: extern "C" fn() -> AbiPdfOpenMode,
     pub pane_config_v1: extern "C" fn() -> AbiPaneConfig,
+    pub db_browser_items: extern "C" fn(crate::DbBrowserContext) -> RVec<crate::DbBrowserItemSpec>,
     #[sabi(last_prefix_field)]
     pub reserved_feature_contracts_v2: extern "C" fn() -> bool,
 }

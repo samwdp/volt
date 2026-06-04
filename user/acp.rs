@@ -1,6 +1,6 @@
 use editor_plugin_api::{
-    PluginAction, PluginBuffer, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    PluginVimMode, plugin_hooks,
+    AcpActionSpec, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, PluginAction, PluginBuffer,
+    PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, plugin_hooks,
 };
 
 pub const ACP_BUFFER_KIND: &str = "acp";
@@ -51,6 +51,34 @@ pub fn clients() -> Vec<AcpClientConfig> {
 
 pub fn client_by_id(id: &str) -> Option<AcpClientConfig> {
     clients().into_iter().find(|client| client.id == id)
+}
+
+pub fn picker_items(context: &AcpPickerContext) -> Vec<AcpPickerItemSpec> {
+    context
+        .options
+        .iter()
+        .map(|option| {
+            let detail = acp_picker_detail(option.detail.as_str(), option.current);
+            let action = match context.kind {
+                AcpPickerKind::Modes => AcpActionSpec::set_mode(option.id.clone()),
+                AcpPickerKind::Models => AcpActionSpec::set_model(option.id.clone()),
+                AcpPickerKind::Sessions => AcpActionSpec::load_session(option.id.clone()),
+                AcpPickerKind::SlashCommands => {
+                    AcpActionSpec::insert_slash_command(option.id.clone())
+                }
+            };
+            AcpPickerItemSpec::new(option.id.clone(), option.label.clone(), detail, action)
+        })
+        .collect()
+}
+
+fn acp_picker_detail(detail: &str, current: bool) -> String {
+    match (detail.is_empty(), current) {
+        (true, true) => "current".to_owned(),
+        (false, true) => format!("{detail} | current"),
+        (false, false) => detail.to_owned(),
+        (true, false) => String::new(),
+    }
 }
 
 /// Returns the metadata for ACP commands.
@@ -162,4 +190,49 @@ fn hook_command(
         description,
         vec![PluginAction::emit_hook(hook_name, detail)],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use editor_plugin_api::AcpPickerOption;
+
+    #[test]
+    fn picker_items_mark_current_models() {
+        let context =
+            AcpPickerContext::new(AcpPickerKind::Models, "ACP Models").with_options(vec![
+                AcpPickerOption::new("sonnet", "Claude Sonnet")
+                    .with_detail("fast")
+                    .with_current(true),
+            ]);
+
+        let items = picker_items(&context);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "Claude Sonnet");
+        assert_eq!(items[0].detail(), "fast | current");
+        assert_eq!(
+            items[0].action(),
+            &AcpActionSpec::set_model("sonnet".to_owned())
+        );
+    }
+
+    #[test]
+    fn picker_items_preserve_slash_command_labels() {
+        let context = AcpPickerContext::new(AcpPickerKind::SlashCommands, "ACP Slash Commands")
+            .with_options(vec![
+                AcpPickerOption::new("fix", "/fix").with_detail("Fix selected issue"),
+            ]);
+
+        let items = picker_items(&context);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id(), "fix");
+        assert_eq!(items[0].label(), "/fix");
+        assert_eq!(items[0].detail(), "Fix selected issue");
+        assert_eq!(
+            items[0].action(),
+            &AcpActionSpec::insert_slash_command("fix".to_owned())
+        );
+    }
 }

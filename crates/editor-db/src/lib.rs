@@ -1,7 +1,7 @@
 #![doc = r#"Database sessions, secure remembered connections, schema browsing, and SQL execution."#]
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,6 +11,10 @@ use std::{
 #[cfg(test)]
 use std::sync::Mutex;
 
+use editor_plugin_api::{
+    DbActionSpec, DbBrowserContext, DbBrowserItemContext, DbBrowserItemKind, DbBrowserItemSpec,
+    DbBrowserKind,
+};
 use keyring_core::Entry;
 use postgres::{Client as PostgresClient, NoTls, SimpleQueryMessage};
 use rusqlite::{Connection as SqliteConnection, types::ValueRef as SqliteValueRef};
@@ -176,6 +180,41 @@ pub struct DbBrowserBufferView {
     pub actions_by_line: Vec<Option<DbBrowserAction>>,
 }
 
+pub type DbBrowserItemRenderer<'a> = dyn Fn(&DbBrowserContext) -> Vec<DbBrowserItemSpec> + 'a;
+
+fn default_db_browser_items(context: &DbBrowserContext) -> Vec<DbBrowserItemSpec> {
+    context
+        .items
+        .iter()
+        .map(|item| {
+            DbBrowserItemSpec::new(
+                default_db_browser_line(item),
+                item.default_action.clone().into(),
+            )
+        })
+        .collect()
+}
+
+fn default_db_browser_line(item: &DbBrowserItemContext) -> String {
+    match item.kind {
+        DbBrowserItemKind::Header | DbBrowserItemKind::Empty => item.label.to_string(),
+        DbBrowserItemKind::ActiveConnection | DbBrowserItemKind::RememberedConnection => {
+            format!(
+                "{} {}{}",
+                item.engine,
+                item.label,
+                if item.active { " [active]" } else { "" }
+            )
+        }
+        DbBrowserItemKind::Table => format!("▦ {}", item.label),
+        DbBrowserItemKind::View => format!("◫ {}", item.label),
+        DbBrowserItemKind::Index => format!("◎ {}", item.label),
+        DbBrowserItemKind::HistoryEntry | DbBrowserItemKind::Snippet => {
+            format!("{} {} :: {}", item.engine, item.label, item.detail)
+        }
+    }
+}
+
 /// Stored snippet metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbSnippet {
@@ -289,6 +328,68 @@ impl QualifiedName {
             None => self.name.clone(),
         }
     }
+}
+
+fn db_browser_action_from_spec(spec: &DbActionSpec) -> Result<DbBrowserAction, String> {
+    match spec {
+        DbActionSpec::ActivateRemembered { alias } => Ok(DbBrowserAction::ActivateRemembered {
+            alias: alias.to_string(),
+        }),
+        DbActionSpec::DisconnectSession { session_id } => Ok(DbBrowserAction::DisconnectSession {
+            session_id: DbSessionId(*session_id),
+        }),
+        DbActionSpec::OpenTablePreview {
+            session_id,
+            schema,
+            table,
+        } => Ok(DbBrowserAction::OpenTablePreview {
+            session_id: DbSessionId(*session_id),
+            table: qualified_name_from_spec(
+                schema
+                    .clone()
+                    .into_option()
+                    .map(|schema| schema.into_string()),
+                table.to_string(),
+            )?,
+        }),
+        DbActionSpec::ExploreRows {
+            session_id,
+            schema,
+            table,
+        } => Ok(DbBrowserAction::ExploreRows {
+            session_id: DbSessionId(*session_id),
+            table: qualified_name_from_spec(
+                schema
+                    .clone()
+                    .into_option()
+                    .map(|schema| schema.into_string()),
+                table.to_string(),
+            )?,
+        }),
+        DbActionSpec::RefreshSchema { session_id } => Ok(DbBrowserAction::RefreshSchema {
+            session_id: DbSessionId(*session_id),
+        }),
+        DbActionSpec::OpenHistoryEntry { session_id, sql } => {
+            Ok(DbBrowserAction::OpenHistoryEntry {
+                session_id: DbSessionId(*session_id),
+                sql: sql.to_string(),
+            })
+        }
+        DbActionSpec::OpenSnippet { id } => Ok(DbBrowserAction::OpenSnippet { id: id.to_string() }),
+        DbActionSpec::DeleteSnippet { id } => {
+            Ok(DbBrowserAction::DeleteSnippet { id: id.to_string() })
+        }
+        DbActionSpec::DeleteRemembered { alias } => Ok(DbBrowserAction::DeleteRemembered {
+            alias: alias.to_string(),
+        }),
+    }
+}
+
+fn qualified_name_from_spec(schema: Option<String>, name: String) -> Result<QualifiedName, String> {
+    if name.trim().is_empty() {
+        return Err("database browser table action requires a table name".to_owned());
+    }
+    Ok(QualifiedName { schema, name })
 }
 
 trait SecretStore: Send + Sync {
@@ -478,6 +579,43 @@ impl DbService {
     /// Attaches a prompt buffer used for `db.connect`.
     pub fn attach_prompt_buffer(&mut self, buffer_key: u64) {
         self.prompt_buffers.insert(buffer_key);
+    }
+
+    fn render_db_browser_context(
+        &mut self,
+        buffer_key: u64,
+        kind: DbBrowserBufferKind,
+        context: DbBrowserContext,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
+        let specs = renderer(&context);
+        if specs.len() != context.items.len() {
+            return Err(format!(
+                "database browser renderer returned {} rows for {} input rows",
+                specs.len(),
+                context.items.len()
+            ));
+        }
+        let mut lines = Vec::with_capacity(specs.len());
+        let mut actions = Vec::with_capacity(specs.len());
+        for spec in specs {
+            lines.push(spec.line().to_owned());
+            actions.push(spec.action().map(db_browser_action_from_spec).transpose()?);
+        }
+        let view = DbBrowserBufferView {
+            title: context.title.to_string(),
+            lines,
+            actions_by_line: actions.clone(),
+        };
+        self.browser_buffers.insert(
+            buffer_key,
+            DbBrowserBufferState {
+                kind,
+                title: view.title.clone(),
+                actions_by_line: actions,
+            },
+        );
+        Ok(view)
     }
 
     /// Returns whether `buffer_key` is the DB connect prompt.
@@ -726,69 +864,72 @@ impl DbService {
         &mut self,
         buffer_key: u64,
     ) -> Result<DbBrowserBufferView, String> {
-        let active_ids = self.sessions.keys().copied().collect::<BTreeSet<_>>();
+        self.render_connections_buffer_with(buffer_key, &default_db_browser_items)
+    }
+
+    pub fn render_connections_buffer_with(
+        &mut self,
+        buffer_key: u64,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
         let active = self.session_summaries();
-        let mut lines = vec![
-            "Database connections".to_owned(),
-            String::new(),
-            "Active sessions".to_owned(),
+        let mut items = vec![
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Database connections"),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Active sessions"),
         ];
-        let mut actions = vec![None, None, None];
         if active.is_empty() {
-            lines.push("(no active sessions)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no active sessions)",
+            ));
         } else {
             for session in active {
-                lines.push(format!(
-                    "{} {}{}",
-                    session.engine.label(),
-                    session.alias,
-                    if session.active { " [active]" } else { "" }
-                ));
-                actions.push(Some(DbBrowserAction::DisconnectSession {
-                    session_id: session.id,
-                }));
+                items.push(
+                    DbBrowserItemContext::new(DbBrowserItemKind::ActiveConnection, session.alias)
+                        .with_engine(session.engine.label())
+                        .with_session_id(session.id.get())
+                        .with_active(session.active)
+                        .with_default_action(DbActionSpec::disconnect_session(session.id.get())),
+                );
             }
         }
-        lines.push(String::new());
-        actions.push(None);
-        lines.push("Remembered connections".to_owned());
-        actions.push(None);
+        items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
+        items.push(DbBrowserItemContext::new(
+            DbBrowserItemKind::Header,
+            "Remembered connections",
+        ));
         if self.persisted.remembered.is_empty() {
-            lines.push("(no remembered connections)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no remembered connections)",
+            ));
         } else {
             for remembered in &self.persisted.remembered {
                 let already_active = self
                     .sessions
                     .values()
                     .any(|session| session.alias.eq_ignore_ascii_case(&remembered.alias));
-                lines.push(format!(
-                    "{} {}{}",
-                    remembered.engine.label(),
-                    remembered.alias,
-                    if already_active { " [active]" } else { "" }
-                ));
-                actions.push(Some(DbBrowserAction::ActivateRemembered {
-                    alias: remembered.alias.clone(),
-                }));
+                items.push(
+                    DbBrowserItemContext::new(
+                        DbBrowserItemKind::RememberedConnection,
+                        remembered.alias.clone(),
+                    )
+                    .with_engine(remembered.engine.label())
+                    .with_active(already_active)
+                    .with_remembered(true)
+                    .with_default_action(DbActionSpec::activate_remembered(
+                        remembered.alias.clone(),
+                    )),
+                );
             }
         }
-        let view = DbBrowserBufferView {
-            title: "*db-connections*".to_owned(),
-            lines,
-            actions_by_line: actions.clone(),
-        };
-        self.browser_buffers.insert(
+        self.render_db_browser_context(
             buffer_key,
-            DbBrowserBufferState {
-                kind: DbBrowserBufferKind::Connections,
-                title: view.title.clone(),
-                actions_by_line: actions,
-            },
-        );
-        let _ = active_ids;
-        Ok(view)
+            DbBrowserBufferKind::Connections,
+            DbBrowserContext::new(DbBrowserKind::Connections, "*db-connections*").with_items(items),
+            renderer,
+        )
     }
 
     /// Returns buffer lines and actions for the schema browser.
@@ -796,6 +937,15 @@ impl DbService {
         &mut self,
         buffer_key: u64,
         session_id: Option<DbSessionId>,
+    ) -> Result<DbBrowserBufferView, String> {
+        self.render_schema_buffer_with(buffer_key, session_id, &default_db_browser_items)
+    }
+
+    pub fn render_schema_buffer_with(
+        &mut self,
+        buffer_key: u64,
+        session_id: Option<DbSessionId>,
+        renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
         let session_id = session_id
             .or(self.active_session_id)
@@ -805,91 +955,111 @@ impl DbService {
             .sessions
             .get(&session_id)
             .ok_or_else(|| format!("session `{}` is not active", session_id.get()))?;
-        let mut lines = vec![
-            format!("Schema explorer: {}", session.alias),
-            format!("Engine: {}", session.engine.label()),
-            String::new(),
-            "Tables".to_owned(),
+        let mut items = vec![
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                format!("Schema explorer: {}", session.alias),
+            ),
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                format!("Engine: {}", session.engine.label()),
+            ),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Tables"),
         ];
-        let mut actions = vec![None, None, None, None];
         if session.schema_cache.tables.is_empty() {
-            lines.push("(no tables)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no tables)",
+            ));
         } else {
             for table in &session.schema_cache.tables {
-                lines.push(format!("{} {}", table_icon(), table.name.display()));
-                actions.push(Some(DbBrowserAction::OpenTablePreview {
-                    session_id,
-                    table: table.name.clone(),
-                }));
+                items.push(
+                    DbBrowserItemContext::new(DbBrowserItemKind::Table, table.name.display())
+                        .with_session_id(session_id.get())
+                        .with_table(table.name.schema.clone(), table.name.name.clone())
+                        .with_default_action(DbActionSpec::open_table_preview(
+                            session_id.get(),
+                            table.name.schema.clone(),
+                            table.name.name.clone(),
+                        )),
+                );
                 for column in &table.columns {
-                    lines.push(format!(
-                        "  - {}: {}{}",
-                        column.name,
-                        column.data_type,
-                        if column.nullable { " nullable" } else { "" }
+                    items.push(DbBrowserItemContext::new(
+                        DbBrowserItemKind::Header,
+                        format!(
+                            "  - {}: {}{}",
+                            column.name,
+                            column.data_type,
+                            if column.nullable { " nullable" } else { "" }
+                        ),
                     ));
-                    actions.push(None);
                 }
             }
         }
-        lines.push(String::new());
-        actions.push(None);
-        lines.push("Views".to_owned());
-        actions.push(None);
+        items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
+        items.push(DbBrowserItemContext::new(
+            DbBrowserItemKind::Header,
+            "Views",
+        ));
         if session.schema_cache.views.is_empty() {
-            lines.push("(no views)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no views)",
+            ));
         } else {
             for view in &session.schema_cache.views {
-                lines.push(format!("{} {}", view_icon(), view.name.display()));
-                actions.push(Some(DbBrowserAction::OpenTablePreview {
-                    session_id,
-                    table: view.name.clone(),
-                }));
+                items.push(
+                    DbBrowserItemContext::new(DbBrowserItemKind::View, view.name.display())
+                        .with_session_id(session_id.get())
+                        .with_table(view.name.schema.clone(), view.name.name.clone())
+                        .with_default_action(DbActionSpec::open_table_preview(
+                            session_id.get(),
+                            view.name.schema.clone(),
+                            view.name.name.clone(),
+                        )),
+                );
                 for column in &view.columns {
-                    lines.push(format!(
-                        "  - {}: {}{}",
-                        column.name,
-                        column.data_type,
-                        if column.nullable { " nullable" } else { "" }
+                    items.push(DbBrowserItemContext::new(
+                        DbBrowserItemKind::Header,
+                        format!(
+                            "  - {}: {}{}",
+                            column.name,
+                            column.data_type,
+                            if column.nullable { " nullable" } else { "" }
+                        ),
                     ));
-                    actions.push(None);
                 }
             }
         }
-        lines.push(String::new());
-        actions.push(None);
-        lines.push("Indexes".to_owned());
-        actions.push(None);
+        items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
+        items.push(DbBrowserItemContext::new(
+            DbBrowserItemKind::Header,
+            "Indexes",
+        ));
         if session.schema_cache.indexes.is_empty() {
-            lines.push("(no indexes)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no indexes)",
+            ));
         } else {
             for index in &session.schema_cache.indexes {
-                lines.push(format!(
-                    "{} {} -> {}",
-                    index_icon(),
-                    index.name,
-                    index.table.display()
+                items.push(DbBrowserItemContext::new(
+                    DbBrowserItemKind::Index,
+                    format!("{} -> {}", index.name, index.table.display()),
                 ));
-                actions.push(None);
             }
         }
-        let view = DbBrowserBufferView {
-            title: format!("*db-schema {}*", session.alias),
-            lines,
-            actions_by_line: actions.clone(),
-        };
-        self.browser_buffers.insert(
+        self.render_db_browser_context(
             buffer_key,
-            DbBrowserBufferState {
-                kind: DbBrowserBufferKind::Schema { session_id },
-                title: view.title.clone(),
-                actions_by_line: actions,
-            },
-        );
-        Ok(view)
+            DbBrowserBufferKind::Schema { session_id },
+            DbBrowserContext::new(
+                DbBrowserKind::Schema,
+                format!("*db-schema {}*", session.alias),
+            )
+            .with_items(items),
+            renderer,
+        )
     }
 
     /// Returns buffer lines and actions for recent query history.
@@ -897,48 +1067,51 @@ impl DbService {
         &mut self,
         buffer_key: u64,
     ) -> Result<DbBrowserBufferView, String> {
-        let mut lines = vec!["Query history".to_owned(), String::new()];
-        let mut actions = vec![None, None];
+        self.render_history_buffer_with(buffer_key, &default_db_browser_items)
+    }
+
+    pub fn render_history_buffer_with(
+        &mut self,
+        buffer_key: u64,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
+        let mut items = vec![
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Query history"),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
+        ];
         if self.persisted.history.is_empty() {
-            lines.push("(no history)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no history)",
+            ));
         } else {
             for entry in self.persisted.history.iter().rev() {
-                lines.push(format!(
-                    "{} {} :: {}",
-                    entry.engine.label(),
-                    entry.session_alias,
-                    summarize_sql(&entry.sql)
-                ));
+                let mut item = DbBrowserItemContext::new(
+                    DbBrowserItemKind::HistoryEntry,
+                    entry.session_alias.clone(),
+                )
+                .with_engine(entry.engine.label())
+                .with_detail(summarize_sql(&entry.sql))
+                .with_sql(entry.sql.clone());
                 if let Some(session_id) = self
                     .sessions
                     .values()
                     .find(|session| session.alias.eq_ignore_ascii_case(&entry.session_alias))
                     .map(|session| session.id)
                 {
-                    actions.push(Some(DbBrowserAction::OpenHistoryEntry {
-                        sql: entry.sql.clone(),
-                        session_id,
-                    }));
-                } else {
-                    actions.push(None);
+                    item = item.with_session_id(session_id.get()).with_default_action(
+                        DbActionSpec::open_history_entry(session_id.get(), entry.sql.clone()),
+                    );
                 }
+                items.push(item);
             }
         }
-        let view = DbBrowserBufferView {
-            title: "*db-history*".to_owned(),
-            lines,
-            actions_by_line: actions.clone(),
-        };
-        self.browser_buffers.insert(
+        self.render_db_browser_context(
             buffer_key,
-            DbBrowserBufferState {
-                kind: DbBrowserBufferKind::History,
-                title: view.title.clone(),
-                actions_by_line: actions,
-            },
-        );
-        Ok(view)
+            DbBrowserBufferKind::History,
+            DbBrowserContext::new(DbBrowserKind::History, "*db-history*").with_items(items),
+            renderer,
+        )
     }
 
     /// Returns buffer lines and actions for saved snippets.
@@ -946,38 +1119,41 @@ impl DbService {
         &mut self,
         buffer_key: u64,
     ) -> Result<DbBrowserBufferView, String> {
-        let mut lines = vec!["Saved query snippets".to_owned(), String::new()];
-        let mut actions = vec![None, None];
+        self.render_snippets_buffer_with(buffer_key, &default_db_browser_items)
+    }
+
+    pub fn render_snippets_buffer_with(
+        &mut self,
+        buffer_key: u64,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
+        let mut items = vec![
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Saved query snippets"),
+            DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
+        ];
         if self.persisted.snippets.is_empty() {
-            lines.push("(no snippets)".to_owned());
-            actions.push(None);
+            items.push(DbBrowserItemContext::new(
+                DbBrowserItemKind::Empty,
+                "(no snippets)",
+            ));
         } else {
             for snippet in &self.persisted.snippets {
-                lines.push(format!(
-                    "{} {} :: {}",
-                    snippet.engine.label(),
-                    snippet.name,
-                    summarize_sql(&snippet.sql)
-                ));
-                actions.push(Some(DbBrowserAction::OpenSnippet {
-                    id: snippet.id.clone(),
-                }));
+                items.push(
+                    DbBrowserItemContext::new(DbBrowserItemKind::Snippet, snippet.name.clone())
+                        .with_engine(snippet.engine.label())
+                        .with_detail(summarize_sql(&snippet.sql))
+                        .with_sql(snippet.sql.clone())
+                        .with_id(snippet.id.clone())
+                        .with_default_action(DbActionSpec::open_snippet(snippet.id.clone())),
+                );
             }
         }
-        let view = DbBrowserBufferView {
-            title: "*db-snippets*".to_owned(),
-            lines,
-            actions_by_line: actions.clone(),
-        };
-        self.browser_buffers.insert(
+        self.render_db_browser_context(
             buffer_key,
-            DbBrowserBufferState {
-                kind: DbBrowserBufferKind::Snippets,
-                title: view.title.clone(),
-                actions_by_line: actions,
-            },
-        );
-        Ok(view)
+            DbBrowserBufferKind::Snippets,
+            DbBrowserContext::new(DbBrowserKind::Snippets, "*db-snippets*").with_items(items),
+            renderer,
+        )
     }
 
     /// Re-renders a previously attached browser buffer using its stored browser kind.
@@ -985,18 +1161,28 @@ impl DbService {
         &mut self,
         buffer_key: u64,
     ) -> Result<DbBrowserBufferView, String> {
+        self.rerender_browser_buffer_with(buffer_key, &default_db_browser_items)
+    }
+
+    pub fn rerender_browser_buffer_with(
+        &mut self,
+        buffer_key: u64,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
         let state = self
             .browser_buffers
             .get(&buffer_key)
             .cloned()
             .ok_or_else(|| format!("buffer `{buffer_key}` is not an attached DB browser buffer"))?;
         match state.kind {
-            DbBrowserBufferKind::Connections => self.render_connections_buffer(buffer_key),
-            DbBrowserBufferKind::Schema { session_id } => {
-                self.render_schema_buffer(buffer_key, Some(session_id))
+            DbBrowserBufferKind::Connections => {
+                self.render_connections_buffer_with(buffer_key, renderer)
             }
-            DbBrowserBufferKind::History => self.render_history_buffer(buffer_key),
-            DbBrowserBufferKind::Snippets => self.render_snippets_buffer(buffer_key),
+            DbBrowserBufferKind::Schema { session_id } => {
+                self.render_schema_buffer_with(buffer_key, Some(session_id), renderer)
+            }
+            DbBrowserBufferKind::History => self.render_history_buffer_with(buffer_key, renderer),
+            DbBrowserBufferKind::Snippets => self.render_snippets_buffer_with(buffer_key, renderer),
         }
     }
 
@@ -2317,18 +2503,6 @@ fn sanitize_file_component(value: &str) -> String {
     }
 }
 
-fn table_icon() -> &'static str {
-    "▦"
-}
-
-fn view_icon() -> &'static str {
-    "◫"
-}
-
-fn index_icon() -> &'static str {
-    "◎"
-}
-
 fn escape_bracket(value: &str) -> String {
     value.replace(']', "]]")
 }
@@ -2534,6 +2708,57 @@ mod tests {
                 }
             }))
         );
+    }
+
+    #[test]
+    fn db_browser_renderer_customizes_rows_and_preserves_actions() {
+        let mut service = test_service();
+        let session_id = DbSessionId(7);
+        insert_test_session(
+            &mut service,
+            session_id,
+            "local",
+            DbEngine::Sqlite,
+            "sqlite://local.db",
+        );
+        service.active_session_id = Some(session_id);
+
+        let view = service
+            .render_connections_buffer_with(42, &|context| {
+                context
+                    .items
+                    .iter()
+                    .map(|item| {
+                        let line = if item.kind == DbBrowserItemKind::ActiveConnection {
+                            format!("custom {}", item.label)
+                        } else {
+                            item.label.to_string()
+                        };
+                        DbBrowserItemSpec::new(line, item.default_action.clone().into())
+                    })
+                    .collect()
+            })
+            .expect("connections render");
+
+        assert!(view.lines.iter().any(|line| line == "custom local"));
+        let line_index = view
+            .lines
+            .iter()
+            .position(|line| line == "custom local")
+            .expect("custom line");
+        assert!(matches!(
+            service.browser_action(42, line_index),
+            Some(DbBrowserAction::DisconnectSession { session_id: id }) if id == session_id
+        ));
+    }
+
+    #[test]
+    fn db_browser_renderer_rejects_row_count_mismatch() {
+        let mut service = test_service();
+        let error = service
+            .render_connections_buffer_with(42, &|_| Vec::new())
+            .expect_err("mismatched renderer should fail");
+        assert!(error.contains("database browser renderer returned"));
     }
 
     #[test]

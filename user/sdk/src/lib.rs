@@ -58,6 +58,15 @@ pub mod hover_hooks {
     pub const PREVIOUS: &str = "ui.hover.previous";
 }
 
+/// Hook name constants for picker UI.
+pub mod picker_hooks {
+    pub const OPEN: &str = "ui.picker.open";
+    pub const NEXT: &str = "ui.picker.next";
+    pub const PREVIOUS: &str = "ui.picker.previous";
+    pub const SUBMIT: &str = "ui.picker.submit";
+    pub const CANCEL: &str = "ui.picker.cancel";
+}
+
 /// Hook name constants for the LSP subsystem.
 pub mod lsp_hooks {
     pub const START: &str = "lsp.server-start";
@@ -284,6 +293,7 @@ pub struct PluginBuffer {
     sections: ROption<PluginBufferSections>,
     evaluate_handler: ROption<RString>,
     evaluate_target_section: ROption<RString>,
+    line_wrap: bool,
     key_bindings: RVec<PluginKeyBinding>,
 }
 
@@ -336,6 +346,853 @@ pub struct GhostTextLine {
     pub text: String,
 }
 
+/// Built-in or user-defined source used to populate a picker.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum PickerSource {
+    /// User library supplies entries without any shell-side provider code.
+    User,
+    Static,
+    Commands,
+    Buffers,
+    BufferClose,
+    Keybindings,
+    Themes,
+    IconFonts,
+    AcpClients,
+    TreesitterLanguages,
+    WorkspaceProjects,
+    WorkspaceDashboard,
+    WorkspaceSwitch,
+    WorkspaceDelete,
+    WorkspaceFiles,
+    WorkspaceSearch,
+    UndoTree,
+}
+
+/// Action executed when a user-defined static picker entry is submitted.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub enum PickerActionSpec {
+    NoOp,
+    ExecuteCommand {
+        command: RString,
+    },
+    ExecuteCommands {
+        commands: RVec<RString>,
+    },
+    EmitHook {
+        hook: RString,
+        detail: ROption<RString>,
+    },
+    FocusBuffer {
+        buffer_id: u64,
+    },
+    CloseBuffer {
+        buffer_id: u64,
+    },
+    OpenAcpClient {
+        client_id: RString,
+    },
+    OpenFile {
+        path: RString,
+    },
+    CreateWorkspaceFile {
+        root: RString,
+    },
+    InstallTreeSitterLanguage {
+        language_id: RString,
+    },
+    CreateWorkspace {
+        name: RString,
+        root: RString,
+    },
+    SwitchWorkspace {
+        workspace_id: u64,
+    },
+    DeleteWorkspace {
+        workspace_id: u64,
+    },
+    UndoTreeNode {
+        buffer_id: u64,
+        node_id: usize,
+    },
+    CopyToClipboard {
+        text: RString,
+    },
+    ActivateTheme {
+        theme_id: RString,
+    },
+}
+
+impl PickerActionSpec {
+    pub fn no_op() -> Self {
+        Self::NoOp
+    }
+
+    pub fn execute_command(command: impl Into<RString>) -> Self {
+        Self::ExecuteCommand {
+            command: command.into(),
+        }
+    }
+
+    pub fn execute_commands<I, S>(commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<RString>,
+    {
+        Self::ExecuteCommands {
+            commands: commands.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn emit_hook(hook: impl Into<RString>, detail: Option<impl Into<RString>>) -> Self {
+        Self::EmitHook {
+            hook: hook.into(),
+            detail: detail.map(Into::into).into(),
+        }
+    }
+
+    pub fn open_file(path: impl Into<RString>) -> Self {
+        Self::OpenFile { path: path.into() }
+    }
+
+    pub fn focus_buffer(buffer_id: u64) -> Self {
+        Self::FocusBuffer { buffer_id }
+    }
+
+    pub fn close_buffer(buffer_id: u64) -> Self {
+        Self::CloseBuffer { buffer_id }
+    }
+
+    pub fn open_acp_client(client_id: impl Into<RString>) -> Self {
+        Self::OpenAcpClient {
+            client_id: client_id.into(),
+        }
+    }
+
+    pub fn create_workspace_file(root: impl Into<RString>) -> Self {
+        Self::CreateWorkspaceFile { root: root.into() }
+    }
+
+    pub fn install_tree_sitter_language(language_id: impl Into<RString>) -> Self {
+        Self::InstallTreeSitterLanguage {
+            language_id: language_id.into(),
+        }
+    }
+
+    pub fn create_workspace(name: impl Into<RString>, root: impl Into<RString>) -> Self {
+        Self::CreateWorkspace {
+            name: name.into(),
+            root: root.into(),
+        }
+    }
+
+    pub fn switch_workspace(workspace_id: u64) -> Self {
+        Self::SwitchWorkspace { workspace_id }
+    }
+
+    pub fn delete_workspace(workspace_id: u64) -> Self {
+        Self::DeleteWorkspace { workspace_id }
+    }
+
+    pub fn undo_tree_node(buffer_id: u64, node_id: usize) -> Self {
+        Self::UndoTreeNode { buffer_id, node_id }
+    }
+
+    pub fn copy_to_clipboard(text: impl Into<RString>) -> Self {
+        Self::CopyToClipboard { text: text.into() }
+    }
+
+    pub fn activate_theme(theme_id: impl Into<RString>) -> Self {
+        Self::ActivateTheme {
+            theme_id: theme_id.into(),
+        }
+    }
+}
+
+/// One entry in a user-defined static picker.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PickerItemSpec {
+    id: RString,
+    label: RString,
+    detail: RString,
+    preview: ROption<RString>,
+    search_text: ROption<RString>,
+    fringe: ROption<RString>,
+    action: PickerActionSpec,
+}
+
+impl PickerItemSpec {
+    pub fn new(
+        id: impl Into<RString>,
+        label: impl Into<RString>,
+        detail: impl Into<RString>,
+        action: PickerActionSpec,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            detail: detail.into(),
+            preview: ROption::RNone,
+            search_text: ROption::RNone,
+            fringe: ROption::RNone,
+            action,
+        }
+    }
+
+    pub fn with_preview(mut self, preview: impl Into<RString>) -> Self {
+        self.preview = ROption::RSome(preview.into());
+        self
+    }
+
+    pub fn with_search_text(mut self, search_text: impl Into<RString>) -> Self {
+        self.search_text = ROption::RSome(search_text.into());
+        self
+    }
+
+    pub fn with_fringe(mut self, fringe: impl Into<RString>) -> Self {
+        self.fringe = ROption::RSome(fringe.into());
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    pub fn detail(&self) -> &str {
+        self.detail.as_str()
+    }
+
+    pub fn preview(&self) -> Option<&str> {
+        self.preview.as_ref().map(RString::as_str).into()
+    }
+
+    pub fn search_text(&self) -> Option<&str> {
+        self.search_text.as_ref().map(RString::as_str).into()
+    }
+
+    pub fn fringe(&self) -> Option<&str> {
+        self.fringe.as_ref().map(RString::as_str).into()
+    }
+
+    pub fn action(&self) -> &PickerActionSpec {
+        &self.action
+    }
+}
+
+/// Declares a picker provider that can be opened with `ui.picker.open`.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PickerProviderSpec {
+    id: RString,
+    title: RString,
+    source: PickerSource,
+    items: RVec<PickerItemSpec>,
+}
+
+impl PickerProviderSpec {
+    pub fn new(id: impl Into<RString>, title: impl Into<RString>, source: PickerSource) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            source,
+            items: RVec::new(),
+        }
+    }
+
+    pub fn static_items(
+        id: impl Into<RString>,
+        title: impl Into<RString>,
+        items: Vec<PickerItemSpec>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            source: PickerSource::Static,
+            items: items.into(),
+        }
+    }
+
+    pub fn user(id: impl Into<RString>, title: impl Into<RString>) -> Self {
+        Self::new(id, title, PickerSource::User)
+    }
+
+    pub fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    pub fn title(&self) -> &str {
+        self.title.as_str()
+    }
+
+    pub const fn source(&self) -> PickerSource {
+        self.source
+    }
+
+    pub fn items(&self) -> &[PickerItemSpec] {
+        self.items.as_slice()
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerCommandContext {
+    pub name: RString,
+    pub description: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerBufferContext {
+    pub id: u64,
+    pub display_name: RString,
+    pub kind_label: RString,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub dirty: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerKeybindingContext {
+    pub id: RString,
+    pub chord: RString,
+    pub scope: RString,
+    pub vim_mode: RString,
+    pub command_names: RVec<RString>,
+    pub description: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerSyntaxLanguageContext {
+    pub id: RString,
+    pub detail: RString,
+    pub preview: ROption<RString>,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerWorkspaceContext {
+    pub id: u64,
+    pub name: RString,
+    pub root: ROption<RString>,
+    pub is_default: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerWorkspaceFileContext {
+    pub path: RString,
+    pub label: RString,
+    pub detail: RString,
+    pub search_text: RString,
+    pub fringe: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerThemeContext {
+    pub id: RString,
+    pub name: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerIconContext {
+    pub id: RString,
+    pub label: RString,
+    pub detail: RString,
+    pub glyph: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerAcpClientContext {
+    pub id: RString,
+    pub label: RString,
+    pub detail: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerUndoTreeContext {
+    pub buffer_id: u64,
+    pub node_id: usize,
+    pub label: RString,
+    pub detail: RString,
+    pub preview: ROption<RString>,
+    pub selected: bool,
+}
+
+/// Host-collected facts used by user modules to build picker entries.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PickerProviderContext {
+    pub provider_id: RString,
+    pub title: RString,
+    pub source: PickerSource,
+    pub commands: RVec<PickerCommandContext>,
+    pub buffers: RVec<PickerBufferContext>,
+    pub keybindings: RVec<PickerKeybindingContext>,
+    pub syntax_languages: RVec<PickerSyntaxLanguageContext>,
+    pub workspaces: RVec<PickerWorkspaceContext>,
+    pub workspace_files: RVec<PickerWorkspaceFileContext>,
+    pub workspace_root: ROption<RString>,
+    pub themes: RVec<PickerThemeContext>,
+    pub icons: RVec<PickerIconContext>,
+    pub acp_clients: RVec<PickerAcpClientContext>,
+    pub undo_tree: RVec<PickerUndoTreeContext>,
+}
+
+impl PickerProviderContext {
+    pub fn new(
+        provider_id: impl Into<RString>,
+        title: impl Into<RString>,
+        source: PickerSource,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            title: title.into(),
+            source,
+            commands: RVec::new(),
+            buffers: RVec::new(),
+            keybindings: RVec::new(),
+            syntax_languages: RVec::new(),
+            workspaces: RVec::new(),
+            workspace_files: RVec::new(),
+            workspace_root: ROption::RNone,
+            themes: RVec::new(),
+            icons: RVec::new(),
+            acp_clients: RVec::new(),
+            undo_tree: RVec::new(),
+        }
+    }
+}
+
+/// ACP picker family whose rows can be shaped by user configuration.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AcpPickerKind {
+    Modes,
+    Models,
+    Sessions,
+    SlashCommands,
+}
+
+/// Host-provided ACP picker option data.
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct AcpPickerOption {
+    pub id: RString,
+    pub label: RString,
+    pub detail: RString,
+    pub current: bool,
+}
+
+impl AcpPickerOption {
+    pub fn new(id: impl Into<RString>, label: impl Into<RString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            detail: RString::new(),
+            current: false,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<RString>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn with_current(mut self, current: bool) -> Self {
+        self.current = current;
+        self
+    }
+}
+
+/// Host-collected facts used by user modules to shape ACP picker entries.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AcpPickerContext {
+    pub kind: AcpPickerKind,
+    pub title: RString,
+    pub options: RVec<AcpPickerOption>,
+}
+
+impl AcpPickerContext {
+    pub fn new(kind: AcpPickerKind, title: impl Into<RString>) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            options: RVec::new(),
+        }
+    }
+
+    pub fn with_options(mut self, options: Vec<AcpPickerOption>) -> Self {
+        self.options = options.into();
+        self
+    }
+}
+
+/// Action executed when an ACP picker entry is submitted.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub enum AcpActionSpec {
+    SetMode { mode_id: RString },
+    SetModel { model_id: RString },
+    LoadSession { session_id: RString },
+    InsertSlashCommand { command: RString },
+}
+
+impl AcpActionSpec {
+    pub fn set_mode(mode_id: impl Into<RString>) -> Self {
+        Self::SetMode {
+            mode_id: mode_id.into(),
+        }
+    }
+
+    pub fn set_model(model_id: impl Into<RString>) -> Self {
+        Self::SetModel {
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn load_session(session_id: impl Into<RString>) -> Self {
+        Self::LoadSession {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn insert_slash_command(command: impl Into<RString>) -> Self {
+        Self::InsertSlashCommand {
+            command: command.into(),
+        }
+    }
+}
+
+/// One user-shaped ACP picker row.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AcpPickerItemSpec {
+    id: RString,
+    label: RString,
+    detail: RString,
+    action: AcpActionSpec,
+}
+
+impl AcpPickerItemSpec {
+    pub fn new(
+        id: impl Into<RString>,
+        label: impl Into<RString>,
+        detail: impl Into<RString>,
+        action: AcpActionSpec,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            detail: detail.into(),
+            action,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    pub fn detail(&self) -> &str {
+        self.detail.as_str()
+    }
+
+    pub fn action(&self) -> &AcpActionSpec {
+        &self.action
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum DbBrowserKind {
+    Connections,
+    Schema,
+    History,
+    Snippets,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum DbBrowserItemKind {
+    Header,
+    Empty,
+    ActiveConnection,
+    RememberedConnection,
+    Table,
+    View,
+    Index,
+    HistoryEntry,
+    Snippet,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub enum DbActionSpec {
+    ActivateRemembered {
+        alias: RString,
+    },
+    DisconnectSession {
+        session_id: u64,
+    },
+    OpenTablePreview {
+        session_id: u64,
+        schema: ROption<RString>,
+        table: RString,
+    },
+    ExploreRows {
+        session_id: u64,
+        schema: ROption<RString>,
+        table: RString,
+    },
+    RefreshSchema {
+        session_id: u64,
+    },
+    OpenHistoryEntry {
+        session_id: u64,
+        sql: RString,
+    },
+    OpenSnippet {
+        id: RString,
+    },
+    DeleteSnippet {
+        id: RString,
+    },
+    DeleteRemembered {
+        alias: RString,
+    },
+}
+
+impl DbActionSpec {
+    pub fn activate_remembered(alias: impl Into<RString>) -> Self {
+        Self::ActivateRemembered {
+            alias: alias.into(),
+        }
+    }
+
+    pub fn disconnect_session(session_id: u64) -> Self {
+        Self::DisconnectSession { session_id }
+    }
+
+    pub fn open_table_preview(
+        session_id: u64,
+        schema: Option<impl Into<RString>>,
+        table: impl Into<RString>,
+    ) -> Self {
+        Self::OpenTablePreview {
+            session_id,
+            schema: schema.map(Into::into).into(),
+            table: table.into(),
+        }
+    }
+
+    pub fn explore_rows(
+        session_id: u64,
+        schema: Option<impl Into<RString>>,
+        table: impl Into<RString>,
+    ) -> Self {
+        Self::ExploreRows {
+            session_id,
+            schema: schema.map(Into::into).into(),
+            table: table.into(),
+        }
+    }
+
+    pub fn refresh_schema(session_id: u64) -> Self {
+        Self::RefreshSchema { session_id }
+    }
+
+    pub fn open_history_entry(session_id: u64, sql: impl Into<RString>) -> Self {
+        Self::OpenHistoryEntry {
+            session_id,
+            sql: sql.into(),
+        }
+    }
+
+    pub fn open_snippet(id: impl Into<RString>) -> Self {
+        Self::OpenSnippet { id: id.into() }
+    }
+
+    pub fn delete_snippet(id: impl Into<RString>) -> Self {
+        Self::DeleteSnippet { id: id.into() }
+    }
+
+    pub fn delete_remembered(alias: impl Into<RString>) -> Self {
+        Self::DeleteRemembered {
+            alias: alias.into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct DbBrowserItemContext {
+    pub kind: DbBrowserItemKind,
+    pub label: RString,
+    pub detail: RString,
+    pub engine: RString,
+    pub session_id: ROption<u64>,
+    pub active: bool,
+    pub remembered: bool,
+    pub schema: ROption<RString>,
+    pub table: ROption<RString>,
+    pub sql: ROption<RString>,
+    pub id: ROption<RString>,
+    pub default_action: ROption<DbActionSpec>,
+}
+
+impl DbBrowserItemContext {
+    pub fn new(kind: DbBrowserItemKind, label: impl Into<RString>) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            detail: RString::new(),
+            engine: RString::new(),
+            session_id: ROption::RNone,
+            active: false,
+            remembered: false,
+            schema: ROption::RNone,
+            table: ROption::RNone,
+            sql: ROption::RNone,
+            id: ROption::RNone,
+            default_action: ROption::RNone,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<RString>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn with_engine(mut self, engine: impl Into<RString>) -> Self {
+        self.engine = engine.into();
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: u64) -> Self {
+        self.session_id = ROption::RSome(session_id);
+        self
+    }
+
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    pub fn with_remembered(mut self, remembered: bool) -> Self {
+        self.remembered = remembered;
+        self
+    }
+
+    pub fn with_table(
+        mut self,
+        schema: Option<impl Into<RString>>,
+        table: impl Into<RString>,
+    ) -> Self {
+        self.schema = schema.map(Into::into).into();
+        self.table = ROption::RSome(table.into());
+        self
+    }
+
+    pub fn with_sql(mut self, sql: impl Into<RString>) -> Self {
+        self.sql = ROption::RSome(sql.into());
+        self
+    }
+
+    pub fn with_id(mut self, id: impl Into<RString>) -> Self {
+        self.id = ROption::RSome(id.into());
+        self
+    }
+
+    pub fn with_default_action(mut self, action: DbActionSpec) -> Self {
+        self.default_action = ROption::RSome(action);
+        self
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct DbBrowserContext {
+    pub kind: DbBrowserKind,
+    pub title: RString,
+    pub items: RVec<DbBrowserItemContext>,
+}
+
+impl DbBrowserContext {
+    pub fn new(kind: DbBrowserKind, title: impl Into<RString>) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            items: RVec::new(),
+        }
+    }
+
+    pub fn with_items(mut self, items: impl Into<RVec<DbBrowserItemContext>>) -> Self {
+        self.items = items.into();
+        self
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct DbBrowserItemSpec {
+    line: RString,
+    action: ROption<DbActionSpec>,
+}
+
+impl DbBrowserItemSpec {
+    pub fn new(line: impl Into<RString>, action: Option<DbActionSpec>) -> Self {
+        Self {
+            line: line.into(),
+            action: action.into(),
+        }
+    }
+
+    pub fn line(&self) -> &str {
+        self.line.as_str()
+    }
+
+    pub fn action(&self) -> Option<&DbActionSpec> {
+        self.action.as_ref().into()
+    }
+}
+
+fn default_db_browser_line(item: &DbBrowserItemContext) -> String {
+    match item.kind {
+        DbBrowserItemKind::Header | DbBrowserItemKind::Empty => item.label.to_string(),
+        DbBrowserItemKind::ActiveConnection | DbBrowserItemKind::RememberedConnection => {
+            format!(
+                "{} {}{}",
+                item.engine,
+                item.label,
+                if item.active { " [active]" } else { "" }
+            )
+        }
+        DbBrowserItemKind::Table => format!("▦ {}", item.label),
+        DbBrowserItemKind::View => format!("◫ {}", item.label),
+        DbBrowserItemKind::Index => format!("◎ {}", item.label),
+        DbBrowserItemKind::HistoryEntry | DbBrowserItemKind::Snippet => {
+            format!("{} {} :: {}", item.engine, item.label, item.detail)
+        }
+    }
+}
+
 /// Stable contract implemented by the compiled user extension library.
 pub trait UserLibrary: Send + Sync {
     fn packages(&self) -> Vec<PluginPackage> {
@@ -374,11 +1231,60 @@ pub trait UserLibrary: Send + Sync {
     fn hover_signature_icon(&self) -> &'static str {
         editor_icons::symbols::md::MD_SIGNATURE
     }
+    fn picker_providers(&self) -> Vec<PickerProviderSpec> {
+        Vec::new()
+    }
+    fn picker_provider_items(
+        &self,
+        context: &PickerProviderContext,
+    ) -> Option<Vec<PickerItemSpec>> {
+        self.picker_providers()
+            .into_iter()
+            .find(|provider| {
+                provider.id() == context.provider_id.as_str()
+                    && provider.source() == PickerSource::Static
+            })
+            .map(|provider| provider.items().to_vec())
+    }
     fn acp_clients(&self) -> Vec<AcpClient> {
         Vec::new()
     }
     fn acp_client_by_id(&self, _id: &str) -> Option<AcpClient> {
         None
+    }
+    fn acp_picker_items(&self, context: &AcpPickerContext) -> Vec<AcpPickerItemSpec> {
+        context
+            .options
+            .iter()
+            .map(|option| {
+                let action = match context.kind {
+                    AcpPickerKind::Modes => AcpActionSpec::set_mode(option.id.clone()),
+                    AcpPickerKind::Models => AcpActionSpec::set_model(option.id.clone()),
+                    AcpPickerKind::Sessions => AcpActionSpec::load_session(option.id.clone()),
+                    AcpPickerKind::SlashCommands => {
+                        AcpActionSpec::insert_slash_command(option.id.clone())
+                    }
+                };
+                AcpPickerItemSpec::new(
+                    option.id.clone(),
+                    option.label.clone(),
+                    option.detail.clone(),
+                    action,
+                )
+            })
+            .collect()
+    }
+    fn db_browser_items(&self, context: &DbBrowserContext) -> Vec<DbBrowserItemSpec> {
+        context
+            .items
+            .iter()
+            .map(|item| {
+                DbBrowserItemSpec::new(
+                    default_db_browser_line(item),
+                    item.default_action.clone().into(),
+                )
+            })
+            .collect()
     }
     fn workspace_roots(&self) -> Vec<WorkspaceRoot> {
         Vec::new()
@@ -594,6 +1500,11 @@ pub trait UserLibrary: Send + Sync {
             .map(|buffer| buffer.key_bindings().to_vec())
             .unwrap_or_default()
     }
+    fn plugin_buffer_line_wrap(&self, kind: &str) -> bool {
+        self.plugin_buffer(kind)
+            .map(|buffer| buffer.line_wrap())
+            .unwrap_or(true)
+    }
     fn run_plugin_buffer_evaluator(&self, _handler: &str, _input: &str) -> Vec<String> {
         Vec::new()
     }
@@ -620,6 +1531,7 @@ impl PluginBuffer {
             sections: ROption::RNone,
             evaluate_handler: ROption::RNone,
             evaluate_target_section: ROption::RNone,
+            line_wrap: true,
             key_bindings: RVec::new(),
         }
     }
@@ -645,6 +1557,12 @@ impl PluginBuffer {
     /// Attaches keybindings that are only active while this buffer kind is focused.
     pub fn with_key_bindings(mut self, key_bindings: Vec<PluginKeyBinding>) -> Self {
         self.key_bindings = key_bindings.into();
+        self
+    }
+
+    /// Controls whether this buffer wraps long lines by default.
+    pub fn with_line_wrap(mut self, line_wrap: bool) -> Self {
+        self.line_wrap = line_wrap;
         self
     }
 
@@ -685,6 +1603,11 @@ impl PluginBuffer {
     /// Returns the keybindings attached to this buffer kind.
     pub fn key_bindings(&self) -> &[PluginKeyBinding] {
         self.key_bindings.as_slice()
+    }
+
+    /// Returns whether this buffer wraps long lines by default.
+    pub const fn line_wrap(&self) -> bool {
+        self.line_wrap
     }
 }
 
@@ -806,6 +1729,250 @@ impl ContextHelpSpec {
     }
 }
 
+/// User-declared Vim edit action carried through the legacy hook detail boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimEditAction {
+    EnterVisual,
+    EnterVisualLine,
+    EnterVisualBlock,
+    DeleteChar,
+    DeleteCharBefore,
+    DeleteLineEnd,
+    ChangeLineEnd,
+    YankLine,
+    SubstituteChar,
+    SubstituteLine,
+    ReplaceChar,
+    EnterReplaceMode,
+    ToggleCase,
+    StartDeleteOperator,
+    StartChangeOperator,
+    StartYankOperator,
+    StartFormatOperator,
+    VisualFormat,
+    ToggleLineComment,
+    VisualToggleComment,
+    Append,
+    AppendLineEnd,
+    InsertLineStart,
+    OpenLineBelow,
+    OpenLineAbove,
+    Undo,
+    Redo,
+    MulticursorAddNextMatch,
+    MulticursorSelectAllMatches,
+    StartGPrefix,
+    StartFindForward,
+    StartFindBackward,
+    StartTillForward,
+    StartTillBackward,
+    RepeatFindNext,
+    RepeatFindPrevious,
+    StartSearchForward,
+    StartSearchBackward,
+    SearchWordForward,
+    SearchWordBackward,
+    RepeatSearchNext,
+    RepeatSearchPrevious,
+    SelectRegister,
+    SetMark,
+    GotoMarkLine,
+    GotoMark,
+    ToggleMacroRecord,
+    StartMacroPlayback,
+    PutAfter,
+    PutBefore,
+    VisualPutAfter,
+    VisualPutBefore,
+    VisualDelete,
+    VisualChange,
+    VisualReplaceChar,
+    VisualBlockInsert,
+    VisualBlockAppend,
+    VisualYank,
+    VisualToggleCase,
+    VisualLowercase,
+    VisualUppercase,
+    VisualIndent,
+    VisualOutdent,
+    VisualJoin,
+    VisualMoveDown,
+    VisualMoveUp,
+    VisualSwapAnchor,
+    StartVisualInnerTextObject,
+    StartVisualAroundTextObject,
+}
+
+/// Public Vim action spec used by user Vim bindings.
+pub type VimActionSpec = VimEditAction;
+
+/// Host-visible context for one user-declared Vim action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VimActionContext {
+    pub action: VimActionSpec,
+}
+
+impl VimActionContext {
+    pub const fn new(action: VimActionSpec) -> Self {
+        Self { action }
+    }
+
+    pub const fn action(self) -> VimActionSpec {
+        self.action
+    }
+}
+
+impl VimEditAction {
+    pub fn hook_detail(self) -> &'static str {
+        match self {
+            Self::EnterVisual => "enter-visual",
+            Self::EnterVisualLine => "enter-visual-line",
+            Self::EnterVisualBlock => "enter-visual-block",
+            Self::DeleteChar => "delete-char",
+            Self::DeleteCharBefore => "delete-char-before",
+            Self::DeleteLineEnd => "delete-line-end",
+            Self::ChangeLineEnd => "change-line-end",
+            Self::YankLine => "yank-line",
+            Self::SubstituteChar => "substitute-char",
+            Self::SubstituteLine => "substitute-line",
+            Self::ReplaceChar => "replace-char",
+            Self::EnterReplaceMode => "enter-replace-mode",
+            Self::ToggleCase => "toggle-case",
+            Self::StartDeleteOperator => "start-delete-operator",
+            Self::StartChangeOperator => "start-change-operator",
+            Self::StartYankOperator => "start-yank-operator",
+            Self::StartFormatOperator => "start-format-operator",
+            Self::VisualFormat => "visual-format",
+            Self::ToggleLineComment => "toggle-line-comment",
+            Self::VisualToggleComment => "visual-toggle-comment",
+            Self::Append => "append",
+            Self::AppendLineEnd => "append-line-end",
+            Self::InsertLineStart => "insert-line-start",
+            Self::OpenLineBelow => "open-line-below",
+            Self::OpenLineAbove => "open-line-above",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::MulticursorAddNextMatch => "multicursor-add-next-match",
+            Self::MulticursorSelectAllMatches => "multicursor-select-all-matches",
+            Self::StartGPrefix => "start-g-prefix",
+            Self::StartFindForward => "start-find-forward",
+            Self::StartFindBackward => "start-find-backward",
+            Self::StartTillForward => "start-till-forward",
+            Self::StartTillBackward => "start-till-backward",
+            Self::RepeatFindNext => "repeat-find-next",
+            Self::RepeatFindPrevious => "repeat-find-previous",
+            Self::StartSearchForward => "start-search-forward",
+            Self::StartSearchBackward => "start-search-backward",
+            Self::SearchWordForward => "search-word-forward",
+            Self::SearchWordBackward => "search-word-backward",
+            Self::RepeatSearchNext => "repeat-search-next",
+            Self::RepeatSearchPrevious => "repeat-search-previous",
+            Self::SelectRegister => "select-register",
+            Self::SetMark => "set-mark",
+            Self::GotoMarkLine => "goto-mark-line",
+            Self::GotoMark => "goto-mark",
+            Self::ToggleMacroRecord => "toggle-macro-record",
+            Self::StartMacroPlayback => "start-macro-playback",
+            Self::PutAfter => "put-after",
+            Self::PutBefore => "put-before",
+            Self::VisualPutAfter => "visual-put-after",
+            Self::VisualPutBefore => "visual-put-before",
+            Self::VisualDelete => "visual-delete",
+            Self::VisualChange => "visual-change",
+            Self::VisualReplaceChar => "visual-replace-char",
+            Self::VisualBlockInsert => "visual-block-insert",
+            Self::VisualBlockAppend => "visual-block-append",
+            Self::VisualYank => "visual-yank",
+            Self::VisualToggleCase => "visual-toggle-case",
+            Self::VisualLowercase => "visual-lowercase",
+            Self::VisualUppercase => "visual-uppercase",
+            Self::VisualIndent => "visual-indent",
+            Self::VisualOutdent => "visual-outdent",
+            Self::VisualJoin => "visual-join",
+            Self::VisualMoveDown => "visual-move-down",
+            Self::VisualMoveUp => "visual-move-up",
+            Self::VisualSwapAnchor => "visual-swap-anchor",
+            Self::StartVisualInnerTextObject => "start-visual-inner-text-object",
+            Self::StartVisualAroundTextObject => "start-visual-around-text-object",
+        }
+    }
+
+    pub fn from_hook_detail(detail: &str) -> Option<Self> {
+        match detail {
+            "enter-visual" => Some(Self::EnterVisual),
+            "enter-visual-line" => Some(Self::EnterVisualLine),
+            "enter-visual-block" => Some(Self::EnterVisualBlock),
+            "delete-char" => Some(Self::DeleteChar),
+            "delete-char-before" => Some(Self::DeleteCharBefore),
+            "delete-line-end" => Some(Self::DeleteLineEnd),
+            "change-line-end" => Some(Self::ChangeLineEnd),
+            "yank-line" => Some(Self::YankLine),
+            "substitute-char" => Some(Self::SubstituteChar),
+            "substitute-line" => Some(Self::SubstituteLine),
+            "replace-char" => Some(Self::ReplaceChar),
+            "enter-replace-mode" => Some(Self::EnterReplaceMode),
+            "toggle-case" => Some(Self::ToggleCase),
+            "start-delete-operator" => Some(Self::StartDeleteOperator),
+            "start-change-operator" => Some(Self::StartChangeOperator),
+            "start-yank-operator" => Some(Self::StartYankOperator),
+            "start-format-operator" => Some(Self::StartFormatOperator),
+            "visual-format" => Some(Self::VisualFormat),
+            "toggle-line-comment" => Some(Self::ToggleLineComment),
+            "visual-toggle-comment" => Some(Self::VisualToggleComment),
+            "append" => Some(Self::Append),
+            "append-line-end" => Some(Self::AppendLineEnd),
+            "insert-line-start" => Some(Self::InsertLineStart),
+            "open-line-below" => Some(Self::OpenLineBelow),
+            "open-line-above" => Some(Self::OpenLineAbove),
+            "undo" => Some(Self::Undo),
+            "redo" => Some(Self::Redo),
+            "multicursor-add-next-match" => Some(Self::MulticursorAddNextMatch),
+            "multicursor-select-all-matches" => Some(Self::MulticursorSelectAllMatches),
+            "start-g-prefix" => Some(Self::StartGPrefix),
+            "start-find-forward" => Some(Self::StartFindForward),
+            "start-find-backward" => Some(Self::StartFindBackward),
+            "start-till-forward" => Some(Self::StartTillForward),
+            "start-till-backward" => Some(Self::StartTillBackward),
+            "repeat-find-next" => Some(Self::RepeatFindNext),
+            "repeat-find-previous" => Some(Self::RepeatFindPrevious),
+            "start-search-forward" => Some(Self::StartSearchForward),
+            "start-search-backward" => Some(Self::StartSearchBackward),
+            "search-word-forward" => Some(Self::SearchWordForward),
+            "search-word-backward" => Some(Self::SearchWordBackward),
+            "repeat-search-next" => Some(Self::RepeatSearchNext),
+            "repeat-search-previous" => Some(Self::RepeatSearchPrevious),
+            "select-register" => Some(Self::SelectRegister),
+            "set-mark" => Some(Self::SetMark),
+            "goto-mark-line" => Some(Self::GotoMarkLine),
+            "goto-mark" => Some(Self::GotoMark),
+            "toggle-macro-record" => Some(Self::ToggleMacroRecord),
+            "start-macro-playback" => Some(Self::StartMacroPlayback),
+            "put-after" => Some(Self::PutAfter),
+            "put-before" => Some(Self::PutBefore),
+            "visual-put-after" => Some(Self::VisualPutAfter),
+            "visual-put-before" => Some(Self::VisualPutBefore),
+            "visual-delete" => Some(Self::VisualDelete),
+            "visual-change" => Some(Self::VisualChange),
+            "visual-replace-char" => Some(Self::VisualReplaceChar),
+            "visual-block-insert" => Some(Self::VisualBlockInsert),
+            "visual-block-append" => Some(Self::VisualBlockAppend),
+            "visual-yank" => Some(Self::VisualYank),
+            "visual-toggle-case" => Some(Self::VisualToggleCase),
+            "visual-lowercase" => Some(Self::VisualLowercase),
+            "visual-uppercase" => Some(Self::VisualUppercase),
+            "visual-indent" => Some(Self::VisualIndent),
+            "visual-outdent" => Some(Self::VisualOutdent),
+            "visual-join" => Some(Self::VisualJoin),
+            "visual-move-down" => Some(Self::VisualMoveDown),
+            "visual-move-up" => Some(Self::VisualMoveUp),
+            "visual-swap-anchor" => Some(Self::VisualSwapAnchor),
+            "start-visual-inner-text-object" => Some(Self::StartVisualInnerTextObject),
+            "start-visual-around-text-object" => Some(Self::StartVisualAroundTextObject),
+            _ => None,
+        }
+    }
+}
+
 /// User-configurable sort mode for oil directory buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OilSortMode {
@@ -852,6 +2019,56 @@ pub enum OilKeyAction {
     OpenExternal,
     SetTabLocalRoot,
     CreateGitWorktree,
+}
+
+impl OilKeyAction {
+    /// Returns the legacy hook detail used at the plugin action boundary.
+    pub fn hook_detail(self) -> Option<&'static str> {
+        match self {
+            Self::OpenEntry => Some("open-entry"),
+            Self::OpenVerticalSplit => Some("open-vertical-split"),
+            Self::OpenHorizontalSplit => Some("open-horizontal-split"),
+            Self::OpenNewPane => Some("open-new-pane"),
+            Self::PreviewEntry => Some("preview-entry"),
+            Self::Refresh => Some("refresh"),
+            Self::Close => Some("close"),
+            Self::StartPrefix => None,
+            Self::OpenParent => Some("open-parent"),
+            Self::OpenWorkspaceRoot => Some("open-workspace-root"),
+            Self::SetRoot => Some("set-root"),
+            Self::ShowHelp => Some("show-help"),
+            Self::CycleSort => Some("cycle-sort"),
+            Self::ToggleHidden => Some("toggle-hidden"),
+            Self::ToggleTrash => Some("toggle-trash"),
+            Self::OpenExternal => Some("open-external"),
+            Self::SetTabLocalRoot => Some("set-tab-local-root"),
+            Self::CreateGitWorktree => Some("git-worktree"),
+        }
+    }
+
+    /// Converts legacy hook detail into the typed oil action contract.
+    pub fn from_hook_detail(detail: &str) -> Option<Self> {
+        match detail {
+            "open-entry" => Some(Self::OpenEntry),
+            "open-vertical-split" => Some(Self::OpenVerticalSplit),
+            "open-horizontal-split" => Some(Self::OpenHorizontalSplit),
+            "open-new-pane" => Some(Self::OpenNewPane),
+            "preview-entry" => Some(Self::PreviewEntry),
+            "refresh" => Some(Self::Refresh),
+            "close" => Some(Self::Close),
+            "open-parent" => Some(Self::OpenParent),
+            "open-workspace-root" => Some(Self::OpenWorkspaceRoot),
+            "set-root" => Some(Self::SetRoot),
+            "show-help" => Some(Self::ShowHelp),
+            "cycle-sort" => Some(Self::CycleSort),
+            "toggle-hidden" => Some(Self::ToggleHidden),
+            "toggle-trash" => Some(Self::ToggleTrash),
+            "open-external" => Some(Self::OpenExternal),
+            "set-tab-local-root" => Some(Self::SetTabLocalRoot),
+            "git-worktree" => Some(Self::CreateGitWorktree),
+            _ => None,
+        }
+    }
 }
 
 /// User-configurable default options for new oil directory buffers.
@@ -1673,9 +2890,10 @@ impl PluginPackage {
 #[cfg(test)]
 mod tests {
     use super::{
-        PluginAction, PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate,
+        OilKeyAction, PluginAction, PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate,
         PluginBufferSections, PluginCommand, PluginHookBinding, PluginHookDeclaration,
-        PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+        PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, VimActionContext,
+        VimActionSpec, VimEditAction,
     };
 
     #[test]
@@ -1767,6 +2985,12 @@ mod tests {
             Some("Output")
         );
         assert_eq!(package.buffers()[0].key_bindings()[0].chord(), "Ctrl+Enter");
+        assert!(package.buffers()[0].line_wrap());
+        assert!(
+            !PluginBuffer::new("table", vec!["wide"])
+                .with_line_wrap(false)
+                .line_wrap()
+        );
     }
 
     #[test]
@@ -1789,5 +3013,122 @@ mod tests {
             vec!["vim.scroll-half-page-down", "vim.center-current-line"]
         );
         assert_eq!(binding.vim_mode(), PluginVimMode::Normal);
+    }
+
+    #[test]
+    fn oil_key_action_hook_details_round_trip() {
+        for action in [
+            OilKeyAction::OpenEntry,
+            OilKeyAction::OpenVerticalSplit,
+            OilKeyAction::OpenHorizontalSplit,
+            OilKeyAction::OpenNewPane,
+            OilKeyAction::PreviewEntry,
+            OilKeyAction::Refresh,
+            OilKeyAction::Close,
+            OilKeyAction::OpenParent,
+            OilKeyAction::OpenWorkspaceRoot,
+            OilKeyAction::SetRoot,
+            OilKeyAction::ShowHelp,
+            OilKeyAction::CycleSort,
+            OilKeyAction::ToggleHidden,
+            OilKeyAction::ToggleTrash,
+            OilKeyAction::OpenExternal,
+            OilKeyAction::SetTabLocalRoot,
+            OilKeyAction::CreateGitWorktree,
+        ] {
+            let detail = action
+                .hook_detail()
+                .expect("action should expose legacy hook detail");
+            assert_eq!(OilKeyAction::from_hook_detail(detail), Some(action));
+        }
+        assert_eq!(OilKeyAction::StartPrefix.hook_detail(), None);
+        assert_eq!(OilKeyAction::from_hook_detail("__unknown__"), None);
+    }
+
+    #[test]
+    fn vim_edit_action_hook_details_round_trip() {
+        for action in [
+            VimEditAction::EnterVisual,
+            VimEditAction::EnterVisualLine,
+            VimEditAction::EnterVisualBlock,
+            VimEditAction::DeleteChar,
+            VimEditAction::DeleteCharBefore,
+            VimEditAction::DeleteLineEnd,
+            VimEditAction::ChangeLineEnd,
+            VimEditAction::YankLine,
+            VimEditAction::SubstituteChar,
+            VimEditAction::SubstituteLine,
+            VimEditAction::ReplaceChar,
+            VimEditAction::EnterReplaceMode,
+            VimEditAction::ToggleCase,
+            VimEditAction::StartDeleteOperator,
+            VimEditAction::StartChangeOperator,
+            VimEditAction::StartYankOperator,
+            VimEditAction::StartFormatOperator,
+            VimEditAction::VisualFormat,
+            VimEditAction::ToggleLineComment,
+            VimEditAction::VisualToggleComment,
+            VimEditAction::Append,
+            VimEditAction::AppendLineEnd,
+            VimEditAction::InsertLineStart,
+            VimEditAction::OpenLineBelow,
+            VimEditAction::OpenLineAbove,
+            VimEditAction::Undo,
+            VimEditAction::Redo,
+            VimEditAction::MulticursorAddNextMatch,
+            VimEditAction::MulticursorSelectAllMatches,
+            VimEditAction::StartGPrefix,
+            VimEditAction::StartFindForward,
+            VimEditAction::StartFindBackward,
+            VimEditAction::StartTillForward,
+            VimEditAction::StartTillBackward,
+            VimEditAction::RepeatFindNext,
+            VimEditAction::RepeatFindPrevious,
+            VimEditAction::StartSearchForward,
+            VimEditAction::StartSearchBackward,
+            VimEditAction::SearchWordForward,
+            VimEditAction::SearchWordBackward,
+            VimEditAction::RepeatSearchNext,
+            VimEditAction::RepeatSearchPrevious,
+            VimEditAction::SelectRegister,
+            VimEditAction::SetMark,
+            VimEditAction::GotoMarkLine,
+            VimEditAction::GotoMark,
+            VimEditAction::ToggleMacroRecord,
+            VimEditAction::StartMacroPlayback,
+            VimEditAction::PutAfter,
+            VimEditAction::PutBefore,
+            VimEditAction::VisualPutAfter,
+            VimEditAction::VisualPutBefore,
+            VimEditAction::VisualDelete,
+            VimEditAction::VisualChange,
+            VimEditAction::VisualReplaceChar,
+            VimEditAction::VisualBlockInsert,
+            VimEditAction::VisualBlockAppend,
+            VimEditAction::VisualYank,
+            VimEditAction::VisualToggleCase,
+            VimEditAction::VisualLowercase,
+            VimEditAction::VisualUppercase,
+            VimEditAction::VisualIndent,
+            VimEditAction::VisualOutdent,
+            VimEditAction::VisualJoin,
+            VimEditAction::VisualMoveDown,
+            VimEditAction::VisualMoveUp,
+            VimEditAction::VisualSwapAnchor,
+            VimEditAction::StartVisualInnerTextObject,
+            VimEditAction::StartVisualAroundTextObject,
+        ] {
+            assert_eq!(
+                VimEditAction::from_hook_detail(action.hook_detail()),
+                Some(action)
+            );
+        }
+        assert_eq!(VimEditAction::from_hook_detail("__unknown__"), None);
+    }
+
+    #[test]
+    fn vim_action_context_carries_typed_spec() {
+        let context = VimActionContext::new(VimActionSpec::DeleteChar);
+        assert_eq!(context.action(), VimEditAction::DeleteChar);
     }
 }

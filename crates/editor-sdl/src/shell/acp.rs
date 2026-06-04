@@ -1411,6 +1411,44 @@ pub(super) fn acp_load_session(
     open_acp_client_buffer(runtime, &client_id, false, Some(target_session_id)).map(|_| ())
 }
 
+fn acp_picker_entries(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    context: &AcpPickerContext,
+) -> Vec<PickerEntry> {
+    shell_user_library(runtime)
+        .acp_picker_items(context)
+        .into_iter()
+        .map(|item| acp_picker_entry(buffer_id, item))
+        .collect()
+}
+
+fn acp_picker_entry(buffer_id: BufferId, item: AcpPickerItemSpec) -> PickerEntry {
+    let action = match item.action() {
+        AcpActionSpec::SetMode { mode_id } => PickerAction::AcpSetMode {
+            buffer_id,
+            mode_id: mode_id.to_string(),
+        },
+        AcpActionSpec::SetModel { model_id } => PickerAction::AcpSetModel {
+            buffer_id,
+            model_id: model_id.to_string(),
+        },
+        AcpActionSpec::LoadSession { session_id } => PickerAction::AcpLoadSession {
+            buffer_id,
+            session_id: session_id.to_string(),
+        },
+        AcpActionSpec::InsertSlashCommand { command } => PickerAction::AcpInsertSlashCommand {
+            buffer_id,
+            command: command.to_string(),
+        },
+    };
+    PickerEntry {
+        item: PickerItem::new(item.id(), item.label(), item.detail(), None::<String>),
+        action,
+        quickfix: None,
+    }
+}
+
 pub(super) fn acp_pick_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let manager = runtime
@@ -1435,27 +1473,16 @@ pub(super) fn acp_pick_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
         return Ok(());
     }
     let current_mode = mode_state.current_mode_id.clone();
-    let entries = mode_state
+    let options = mode_state
         .available_modes
         .into_iter()
         .map(|mode| {
-            let label = format_acp_mode_label(&mode.id);
-            let detail = (mode.id == current_mode).then_some("current".to_owned());
-            PickerEntry {
-                item: PickerItem::new(
-                    mode.id.to_string(),
-                    label,
-                    detail.unwrap_or_default(),
-                    None::<String>,
-                ),
-                action: PickerAction::AcpSetMode {
-                    buffer_id,
-                    mode_id: mode.id.to_string(),
-                },
-                quickfix: None,
-            }
+            AcpPickerOption::new(mode.id.to_string(), format_acp_mode_label(&mode.id))
+                .with_current(mode.id == current_mode)
         })
         .collect();
+    let context = AcpPickerContext::new(AcpPickerKind::Modes, "ACP Modes").with_options(options);
+    let entries = acp_picker_entries(runtime, buffer_id, &context);
     let picker = PickerOverlay::from_entries("ACP Modes", entries);
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
@@ -1485,32 +1512,21 @@ pub(super) fn acp_pick_model(runtime: &mut EditorRuntime) -> Result<(), String> 
         return Ok(());
     }
     let current_model = model_state.current_model_id.clone();
-    let entries = model_state
+    let options = model_state
         .available_models
         .into_iter()
         .map(|model| {
-            let mut detail = model
+            let detail = model
                 .description
                 .clone()
                 .unwrap_or_else(|| model.model_id.to_string());
-            if model.model_id == current_model {
-                detail.push_str(" | current");
-            }
-            PickerEntry {
-                item: PickerItem::new(
-                    model.model_id.to_string(),
-                    model.name,
-                    detail,
-                    None::<String>,
-                ),
-                action: PickerAction::AcpSetModel {
-                    buffer_id,
-                    model_id: model.model_id.to_string(),
-                },
-                quickfix: None,
-            }
+            AcpPickerOption::new(model.model_id.to_string(), model.name)
+                .with_detail(detail)
+                .with_current(model.model_id == current_model)
         })
         .collect();
+    let context = AcpPickerContext::new(AcpPickerKind::Models, "ACP Models").with_options(options);
+    let entries = acp_picker_entries(runtime, buffer_id, &context);
     let picker = PickerOverlay::from_entries("ACP Models", entries);
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
@@ -1919,7 +1935,7 @@ fn open_slash_command_picker(
         }
         commands
     };
-    let entries = commands
+    let options = commands
         .into_iter()
         .map(|command| {
             let mut detail = command.description.clone();
@@ -1928,21 +1944,13 @@ fn open_slash_command_picker(
             {
                 detail.push_str(&format!(" | {}", input.hint));
             }
-            PickerEntry {
-                item: PickerItem::new(
-                    command.name.as_str(),
-                    format!("/{}", command.name),
-                    detail,
-                    None::<String>,
-                ),
-                action: PickerAction::AcpInsertSlashCommand {
-                    buffer_id,
-                    command: command.name,
-                },
-                quickfix: None,
-            }
+            AcpPickerOption::new(command.name.clone(), format!("/{}", command.name))
+                .with_detail(detail)
         })
         .collect();
+    let context = AcpPickerContext::new(AcpPickerKind::SlashCommands, "ACP Slash Commands")
+        .with_options(options);
+    let entries = acp_picker_entries(runtime, buffer_id, &context);
     let mut picker = PickerOverlay::from_entries("ACP Slash Commands", entries);
     match trigger {
         CompletionTrigger::Auto(query) => {
@@ -2738,7 +2746,7 @@ impl AcpManager {
                     return Ok(());
                 }
                 let current_session = self.buffers.get(&buffer_id).cloned();
-                let entries = sessions
+                let options = sessions
                     .into_iter()
                     .map(|session| {
                         let title = session
@@ -2749,27 +2757,17 @@ impl AcpManager {
                         if let Some(updated_at) = session.updated_at {
                             detail.push_str(&format!(" | {updated_at}"));
                         }
-                        if current_session
+                        let is_current = current_session
                             .as_ref()
-                            .is_some_and(|current| *current == session.session_id)
-                        {
-                            detail.push_str(" | current");
-                        }
-                        PickerEntry {
-                            item: PickerItem::new(
-                                session.session_id.to_string(),
-                                title,
-                                detail,
-                                None::<String>,
-                            ),
-                            action: PickerAction::AcpLoadSession {
-                                buffer_id,
-                                session_id: session.session_id.to_string(),
-                            },
-                            quickfix: None,
-                        }
+                            .is_some_and(|current| *current == session.session_id);
+                        AcpPickerOption::new(session.session_id.to_string(), title)
+                            .with_detail(detail)
+                            .with_current(is_current)
                     })
                     .collect();
+                let context = AcpPickerContext::new(AcpPickerKind::Sessions, "ACP Sessions")
+                    .with_options(options);
+                let entries = acp_picker_entries(runtime, buffer_id, &context);
                 let picker = PickerOverlay::from_entries("ACP Sessions", entries)
                     .with_result_order(PickerResultOrder::Source);
                 shell_ui_mut(runtime)?.set_picker(picker);

@@ -1611,6 +1611,8 @@ pub(super) fn buffer_cursor_screen_anchor(
         visible_rows,
         wrap_cols,
         indent_size,
+        buffer.scroll_col,
+        buffer.line_wrap(),
     );
     let mut cursor_row_on_screen = None;
     let mut cursor_col_on_screen = None;
@@ -1700,6 +1702,8 @@ pub(super) fn buffer_point_at_screen(
         visible_rows,
         wrap_cols,
         indent_size,
+        buffer.scroll_col,
+        buffer.line_wrap(),
     );
     let mut visual_row = 0usize;
     for wrapped in wrapped_lines {
@@ -1764,6 +1768,8 @@ pub(super) fn collect_wrapped_lines(
     max_rows: usize,
     wrap_cols: usize,
     indent_size: usize,
+    scroll_col: usize,
+    line_wrap: bool,
 ) -> Vec<WrappedLine> {
     if max_rows == 0 {
         return Vec::new();
@@ -1780,8 +1786,28 @@ pub(super) fn collect_wrapped_lines(
         let char_map = LineCharMap::with_tab_width(&line, tab_width);
         let (leading_indent_cols, _) = leading_whitespace_info(&line, tab_width);
         let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
-        let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
-        let segments = wrap_line_segments(&char_map, wrap_cols, continuation_cols);
+        let (continuation_indent_cols, segments) = if line_wrap {
+            let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
+            (
+                continuation_indent_cols,
+                wrap_line_segments(&char_map, wrap_cols, continuation_cols),
+            )
+        } else {
+            let start_col = char_map.char_col_for_display_col(scroll_col);
+            let end_display_col = scroll_col.saturating_add(wrap_cols);
+            let end_col = if end_display_col >= char_map.display_col_at(char_map.len()) {
+                char_map.len()
+            } else {
+                char_map.char_col_for_display_col(end_display_col)
+            };
+            (
+                0,
+                vec![LineWrapSegment {
+                    start_col: start_col.min(end_col),
+                    end_col,
+                }],
+            )
+        };
         visual_rows = visual_rows.saturating_add(segments.len());
         lines.push(WrappedLine {
             line_index,
@@ -2164,8 +2190,15 @@ fn render_buffer_with_view_state(
         let headerline_rows = headerline_lines.len();
         let body_y = layout.body_y + headerline_rows as i32 * line_height;
         let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
-        let wrapped_lines =
-            collect_wrapped_lines(buffer, scroll_row, visible_rows, wrap_cols, indent_size);
+        let wrapped_lines = collect_wrapped_lines(
+            buffer,
+            scroll_row,
+            visible_rows,
+            wrap_cols,
+            indent_size,
+            view_state.scroll_col,
+            buffer.line_wrap(),
+        );
         let mut cursor_row_on_screen = None;
         let mut cursor_col_on_screen = None;
         let mut cursor_indent_cols = 0usize;
