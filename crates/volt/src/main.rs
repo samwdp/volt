@@ -1392,16 +1392,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_loaded_user_library_validation_rejects_static_syntax_languages() {
+    fn runtime_loaded_user_library_validation_accepts_grammar_backed_syntax_languages() {
         let library = DynamicUserLibrary::new(user::user_library_module());
-        let error = validate_runtime_user_library(&library)
-            .expect_err("runtime-loaded ABI wrapper should reject static syntax loaders");
-        assert!(error.contains("static tree-sitter loaders"));
+        validate_runtime_user_library(&library)
+            .expect("runtime-loaded ABI wrapper should accept grammar-backed syntax loaders");
     }
 
     #[test]
-    fn builtin_user_library_validation_accepts_static_syntax_languages() {
+    fn builtin_user_library_validation_accepts_grammar_backed_syntax_languages() {
         validate_runtime_user_library(&user::UserLibraryImpl)
-            .expect("built-in user library should use static syntax loaders directly");
+            .expect("built-in user library should accept grammar-backed syntax loaders");
     }
 }

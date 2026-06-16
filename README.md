@@ -17,6 +17,7 @@
 `volt` is a greenfield native text editor project built in Rust. The long-term direction is an Emacs-inspired, 4coder-style editor with a Rust core, a compiled `user` extension library, and native rendering.
 
 ---
+
 ## Workspace layout
 
 - `crates/volt` - process entry point and startup bootstrap for the `volt` executable

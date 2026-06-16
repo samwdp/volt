@@ -270,6 +270,90 @@ fn razor_config() -> LanguageConfiguration {
     )
 }
 
+fn csharp_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "csharp",
+        ["cs"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter/tree-sitter-c-sharp.git",
+            ".",
+            "src",
+            "tree-sitter-c-sharp",
+            "tree_sitter_c_sharp",
+        ),
+        [
+            CaptureThemeMapping::new("attribute", "syntax.attribute"),
+            CaptureThemeMapping::new("comment", "syntax.comment"),
+            CaptureThemeMapping::new("constant.builtin", "syntax.constant.builtin"),
+            CaptureThemeMapping::new("constructor", "syntax.constructor"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("module", "syntax.module"),
+            CaptureThemeMapping::new("number", "syntax.number"),
+            CaptureThemeMapping::new("operator", "syntax.operator"),
+            CaptureThemeMapping::new("property.definition", "syntax.property"),
+            CaptureThemeMapping::new("punctuation.bracket", "syntax.punctuation.bracket"),
+            CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
+            CaptureThemeMapping::new("string", "syntax.string"),
+            CaptureThemeMapping::new("string.escape", "syntax.string.escape"),
+            CaptureThemeMapping::new("type", "syntax.type"),
+            CaptureThemeMapping::new("type.builtin", "syntax.type.builtin"),
+            CaptureThemeMapping::new("variable", "syntax.variable"),
+            CaptureThemeMapping::new("variable.parameter", "syntax.variable.parameter"),
+        ],
+    )
+}
+
+fn csharp_grammar_available() -> bool {
+    let install_root = default_grammars_root();
+    install_root
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-c-sharp.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-c-sharp.dylib"
+        } else {
+            "libtree-sitter-c-sharp.so"
+        })
+        .exists()
+}
+
+fn typescript_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "typescript",
+        ["ts"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter/tree-sitter-typescript.git",
+            ".",
+            "typescript/src",
+            "tree-sitter-typescript",
+            "tree_sitter_typescript",
+        ),
+        [
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("variable", "syntax.variable"),
+            CaptureThemeMapping::new("type", "syntax.type"),
+            CaptureThemeMapping::new("string", "syntax.string"),
+            CaptureThemeMapping::new("number", "syntax.number"),
+            CaptureThemeMapping::new("operator", "syntax.operator"),
+            CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
+        ],
+    )
+}
+
+fn typescript_grammar_available() -> bool {
+    let install_root = default_grammars_root();
+    install_root
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-typescript.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-typescript.dylib"
+        } else {
+            "libtree-sitter-typescript.so"
+        })
+        .exists()
+}
+
 fn razor_grammar_available() -> bool {
     let install_root = default_grammars_root();
     install_root
@@ -280,6 +364,44 @@ fn razor_grammar_available() -> bool {
             "libtree-sitter-razor.dylib"
         } else {
             "libtree-sitter-razor.so"
+        })
+        .exists()
+}
+
+fn zig_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "zig",
+        ["zig"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter-grammars/tree-sitter-zig.git",
+            ".",
+            "src",
+            "tree-sitter-zig",
+            "tree_sitter_zig",
+        ),
+        [
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("variable", "syntax.variable"),
+            CaptureThemeMapping::new("type", "syntax.type"),
+            CaptureThemeMapping::new("constant", "syntax.constant"),
+            CaptureThemeMapping::new("string", "syntax.string"),
+            CaptureThemeMapping::new("number", "syntax.number"),
+            CaptureThemeMapping::new("operator", "syntax.operator"),
+            CaptureThemeMapping::new("punctuation.delimiter", "syntax.punctuation.delimiter"),
+        ],
+    )
+}
+
+fn zig_grammar_available() -> bool {
+    let install_root = default_grammars_root();
+    install_root
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-zig.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-zig.dylib"
+        } else {
+            "libtree-sitter-zig.so"
         })
         .exists()
 }
@@ -378,6 +500,117 @@ fn razor_bundled_highlights_query_compiles() {
             .any(|span| span.capture_name == "keyword.coroutine"),
         "expected @await to produce a keyword.coroutine span, got {:?}",
         snapshot.highlight_spans
+    );
+}
+
+#[test]
+fn csharp_flat_grammar_uses_bundled_queries() {
+    let install_root = default_grammars_root();
+    if !csharp_grammar_available() {
+        eprintln!(
+            "SKIP: csharp grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(csharp_config()));
+
+    let buffer = TextBuffer::from_text(
+        "class Demo {\n    void Run() {\n        var xs = numbers is [.. var rest];\n    }\n}\n",
+    );
+    let snapshot = must(registry.highlight_buffer_for_language("csharp", &buffer));
+    assert_eq!(snapshot.language_id, "csharp");
+    assert!(!snapshot.has_errors);
+    assert!(
+        !snapshot.highlight_spans.is_empty(),
+        "csharp bundled highlights produced no spans"
+    );
+}
+
+#[test]
+fn typescript_blank_line_before_closing_object_dedents_to_sibling_indent() {
+    let install_root = default_grammars_root();
+    if !typescript_grammar_available() {
+        eprintln!(
+            "SKIP: typescript grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(typescript_config()));
+
+    let buffer = TextBuffer::from_text(
+        ";\nexport const Endpoints = (builder: EndpointBuilder<any, any, any>) => ({\n  getOutdoorTrackingHistoryByCustomer: builder.query<DashboardTrackingHistory[], TrackingHistoryAttributes, DashboardTrackingHistoryDto[]>({\n    query: (args: TrackingHistoryAttributes) => `outdoordashboard/trackingactivity/${args.customerId}?days=${args.days}`,\n    transformResponse: (response: DashboardTrackingHistoryDto[]) => toDashboardTrackingHistorySummaries(response),\n    transformErrorResponse: (response: { status: string | number }, _meta, _arg) => response.status,\n    providesTags: [{ type: HOURLY_TAG, id: 'LIST' }],\n    keepUnusedDataFor: 300\n  }),\n\n});\n",
+    );
+
+    assert_eq!(
+        must(registry.desired_indent_for_language("typescript", &buffer, 9, 2)),
+        Some(2)
+    );
+}
+
+#[test]
+fn typescript_blank_line_after_outer_object_opener_uses_sibling_indent() {
+    let install_root = default_grammars_root();
+    if !typescript_grammar_available() {
+        eprintln!(
+            "SKIP: typescript grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(typescript_config()));
+
+    let buffer = TextBuffer::from_text(
+        ";\nexport const Endpoints = (builder: EndpointBuilder<any, any, any>) => ({\n\n  getOutdoorTrackingHistoryByCustomer: builder.query<DashboardTrackingHistory[], TrackingHistoryAttributes, DashboardTrackingHistoryDto[]>({\n    query: (args: TrackingHistoryAttributes) => `outdoordashboard/trackingactivity/${args.customerId}?days=${args.days}`,\n    transformResponse: (response: DashboardTrackingHistoryDto[]) => toDashboardTrackingHistorySummaries(response),\n    transformErrorResponse: (response: { status: string | number }, _meta, _arg) => response.status,\n    providesTags: [{ type: HOURLY_TAG, id: 'LIST' }],\n    keepUnusedDataFor: 300\n  }),\n});\n",
+    );
+
+    assert_eq!(
+        must(registry.desired_indent_for_language("typescript", &buffer, 2, 2)),
+        Some(2)
+    );
+}
+
+#[test]
+fn zig_flat_grammar_uses_bundled_queries() {
+    std::thread::Builder::new()
+        .name("zig-query-regression".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(zig_flat_grammar_uses_bundled_queries_on_app_sized_stack)
+        .expect("spawn zig query regression thread")
+        .join()
+        .expect("zig query regression thread panicked");
+}
+
+fn zig_flat_grammar_uses_bundled_queries_on_app_sized_stack() {
+    let install_root = default_grammars_root();
+    if !zig_grammar_available() {
+        eprintln!("SKIP: zig grammar not found at {}", install_root.display());
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(zig_config()));
+
+    let buffer = TextBuffer::from_text(
+        "const std = @import(\"std\");\npub fn main() void {\n    std.debug.print(\"hi\\n\", .{});\n}\n",
+    );
+    let snapshot = must(registry.highlight_buffer_for_language("zig", &buffer));
+    assert_eq!(snapshot.language_id, "zig");
+    assert!(!snapshot.has_errors);
+    assert!(
+        !snapshot.highlight_spans.is_empty(),
+        "zig bundled highlights produced no spans"
     );
 }
 

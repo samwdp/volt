@@ -1355,11 +1355,12 @@ mod tests {
                 Some(language.file_extensions().to_vec())
             );
 
-            if let Some(grammar) = language.grammar() {
-                assert!(!grammar.repository_url().is_empty());
-                assert!(!grammar.install_dir_name().is_empty());
-                assert!(!grammar.symbol_name().is_empty());
-            }
+            let grammar = language
+                .grammar()
+                .unwrap_or_else(|| panic!("language `{}` missing grammar metadata", language.id()));
+            assert!(!grammar.repository_url().is_empty());
+            assert!(!grammar.install_dir_name().is_empty());
+            assert!(!grammar.symbol_name().is_empty());
         }
     }
 
@@ -1552,6 +1553,12 @@ mod tests {
 
     #[test]
     fn tsx_highlight_query_compiles() {
+        if std::env::var_os("VOLT_TEST_INSTALLED_GRAMMARS").is_none() {
+            eprintln!(
+                "skipping installed grammar query compile test; set VOLT_TEST_INSTALLED_GRAMMARS=1"
+            );
+            return;
+        }
         let mut registry = SyntaxRegistry::new();
         for language in syntax_languages()
             .into_iter()
@@ -1587,5 +1594,102 @@ mod tests {
                 ),
             )
             .expect("tsx query should compile");
+    }
+
+    #[test]
+    fn every_installed_grammar_highlight_query_compiles() {
+        if std::env::var_os("VOLT_TEST_INSTALLED_GRAMMARS").is_none() {
+            eprintln!(
+                "skipping installed grammar query compile test; set VOLT_TEST_INSTALLED_GRAMMARS=1"
+            );
+            return;
+        }
+
+        let languages = syntax_languages();
+        let requested_languages = std::env::var("VOLT_TEST_GRAMMAR_ID").ok().map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        });
+        let mut checked = Vec::new();
+        let mut failures = Vec::new();
+        for language in languages {
+            if requested_languages
+                .as_ref()
+                .is_some_and(|requested| !requested.contains(language.id()))
+            {
+                continue;
+            }
+            let mut registry = SyntaxRegistry::new();
+            registry
+                .register_all(syntax_languages())
+                .expect("registering syntax languages");
+            if !registry
+                .is_installed(language.id())
+                .expect("checking grammar install")
+            {
+                continue;
+            }
+            eprintln!("checking installed grammar highlight: {}", language.id());
+            let snapshot = match registry
+                .highlight_buffer_for_language(language.id(), &TextBuffer::from_text("value = 1\n"))
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", language.id()));
+                    std::mem::forget(registry);
+                    continue;
+                }
+            };
+            assert_eq!(snapshot.language_id, language.id());
+            checked.push(language.id().to_owned());
+            // Runtime syntax registries live for the worker's lifetime. Keep this installed-grammar
+            // stress test equivalent; unloading tree-sitter DLL/query state mid-process is unsafe.
+            std::mem::forget(registry);
+        }
+        assert!(
+            failures.is_empty(),
+            "installed grammar highlight failures:\n{}",
+            failures.join("\n")
+        );
+        assert!(!checked.is_empty(), "no installed grammars were checked");
+        eprintln!(
+            "checked installed grammar highlights: {}",
+            checked.join(", ")
+        );
+    }
+
+    #[test]
+    fn recompile_installed_tree_sitter_grammars() {
+        if std::env::var_os("VOLT_RECOMPILE_INSTALLED_GRAMMARS").is_none() {
+            eprintln!(
+                "skipping installed grammar recompile; set VOLT_RECOMPILE_INSTALLED_GRAMMARS=1"
+            );
+            return;
+        }
+
+        let mut registry = SyntaxRegistry::new();
+        registry
+            .register_all(syntax_languages())
+            .expect("registering syntax languages");
+        let report = registry.recompile_installed_languages_best_effort();
+        eprintln!(
+            "recompiled installed grammars: {}",
+            report.recompiled().join(", ")
+        );
+        if !report.failed().is_empty() {
+            eprintln!(
+                "failed installed grammars: {}",
+                report
+                    .failed()
+                    .iter()
+                    .map(|failure| format!("{} ({})", failure.language_id(), failure.message()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 }

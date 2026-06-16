@@ -1,11 +1,7 @@
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
 };
-use editor_syntax::{CaptureThemeMapping, Language, LanguageConfiguration};
-
-fn toml_language() -> Language {
-    tree_sitter_toml_ng::LANGUAGE.into()
-}
+use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 /// Returns the metadata for the TOML language package.
 pub fn package() -> PluginPackage {
@@ -37,11 +33,16 @@ pub fn package() -> PluginPackage {
 
 /// Returns the syntax registration for the TOML tree-sitter language.
 pub fn syntax_language() -> LanguageConfiguration {
-    LanguageConfiguration::new(
+    LanguageConfiguration::from_grammar(
         "toml",
         ["toml"],
-        toml_language,
-        tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        GrammarSource::new(
+            "https://github.com/tree-sitter-grammars/tree-sitter-toml",
+            ".",
+            "src",
+            "tree-sitter-toml",
+            "tree_sitter_toml",
+        ),
         [
             CaptureThemeMapping::new("comment", "syntax.comment"),
             CaptureThemeMapping::new("constant.builtin", "syntax.constant.builtin"),
@@ -58,6 +59,8 @@ pub fn syntax_language() -> LanguageConfiguration {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -82,14 +85,19 @@ mod tests {
     }
 
     #[test]
-    fn syntax_language_registers_toml_language() {
+    fn syntax_language_registers_toml_grammar() {
         let language = syntax_language();
+        let grammar = language.grammar().expect("toml grammar metadata missing");
 
         assert_eq!(language.id(), "toml");
         assert_eq!(language.file_extensions(), ["toml"]);
-        assert!(
-            language.grammar().is_none(),
-            "TOML now uses a pinned static grammar crate"
+        assert_eq!(
+            grammar.repository_url(),
+            "https://github.com/tree-sitter-grammars/tree-sitter-toml"
         );
+        assert_eq!(grammar.install_dir_name(), "tree-sitter-toml");
+        assert_eq!(grammar.symbol_name(), "tree_sitter_toml");
+        assert_eq!(grammar.grammar_dir(), Path::new("."));
+        assert_eq!(grammar.source_dir(), Path::new("src"));
     }
 }

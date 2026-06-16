@@ -8,8 +8,6 @@
   (named_imports)
   (object)
   (object_pattern)
-  (parenthesized_expression)
-  (return_statement)
   (statement_block)
   (switch_case)
   (switch_default)
@@ -27,17 +25,25 @@
 (expression_statement
   (call_expression) @indent.begin)
 
+((return_statement) @indent.begin
+  (#not-lua-match? @indent.begin "^return%s*%("))
+
+
 (arrow_function
   body: (_) @_body
-  (#not-kind-eq? @_body "statement_block")) @indent.begin
+  (#not-kind-eq? @_body "statement_block" "parenthesized_expression")) @indent.begin
 
 (assignment_expression
   right: (_) @_right
-  (#not-kind-eq? @_right "arrow_function")) @indent.begin
+  (#not-kind-eq? @_right "arrow_function" "parenthesized_expression")) @indent.begin
 
 (variable_declarator
   value: (_) @_value
-  (#not-kind-eq? @_value "arrow_function" "call_expression")) @indent.begin
+  (#not-kind-eq? @_value "arrow_function" "call_expression" "parenthesized_expression")) @indent.begin
+
+(parenthesized_expression
+  (_) @_inner
+  (#not-kind-eq? @_inner "object" "array")) @indent.begin
 
 (arguments
   ")" @indent.end)

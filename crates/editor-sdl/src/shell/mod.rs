@@ -346,6 +346,7 @@ const PLUGIN_EVALUATE_SEPARATOR_PREFIX: &str = plugin_hooks::EVALUATE_SEPARATOR_
 const HOOK_PLUGIN_RUN_COMMAND: &str = plugin_hooks::RUN_COMMAND;
 const HOOK_PLUGIN_RERUN_COMMAND: &str = plugin_hooks::RERUN_COMMAND;
 const HOOK_PLUGIN_SWITCH_PANE: &str = plugin_hooks::SWITCH_PANE;
+const HOOK_TREESITTER_RECOMPILE_INSTALLED: &str = "treesitter.recompile-installed";
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
 const HOOK_GIT_DIFF_OPEN: &str = git_hooks::DIFF_OPEN;
 const HOOK_GIT_LOG_OPEN: &str = git_hooks::LOG_OPEN;
@@ -1265,14 +1266,18 @@ fn desired_indent_columns_for_text(
         }
     }
     let (mut indent_columns, _) = leading_whitespace_info(&base_line, indent_size);
-    if indent_size > 0 && matches!(base_line.trim_end().chars().last(), Some('{') | Some('[')) {
+    let base_trimmed = base_line.trim_end();
+    if indent_size > 0
+        && (matches!(base_trimmed.chars().last(), Some('{') | Some('['))
+            || opening_tag_name_before_cursor(base_trimmed).is_some())
+    {
         indent_columns = indent_columns.saturating_add(indent_size);
     }
     let current_line = buffer.line(line_index).unwrap_or_default();
-    if matches!(
-        current_line.trim_start().chars().next(),
-        Some('}') | Some(']')
-    ) {
+    let current_trimmed = current_line.trim_start();
+    if matches!(current_trimmed.chars().next(), Some('}') | Some(']'))
+        || current_trimmed.starts_with("</")
+    {
         indent_columns = indent_columns.saturating_sub(indent_size);
     }
     indent_columns
@@ -1297,13 +1302,17 @@ fn desired_reindent_columns_for_line(
         }
     }
     let (mut indent_columns, _) = leading_whitespace_info(&base_line, indent_size);
-    if indent_size > 0 && matches!(base_line.trim_end().chars().last(), Some('{') | Some('[')) {
+    let base_trimmed = base_line.trim_end();
+    if indent_size > 0
+        && (matches!(base_trimmed.chars().last(), Some('{') | Some('['))
+            || opening_tag_name_before_cursor(base_trimmed).is_some())
+    {
         indent_columns = indent_columns.saturating_add(indent_size);
     }
-    if matches!(
-        current_line.trim_start().chars().next(),
-        Some('}') | Some(']')
-    ) {
+    let current_trimmed = current_line.trim_start();
+    if matches!(current_trimmed.chars().next(), Some('}') | Some(']'))
+        || current_trimmed.starts_with("</")
+    {
         indent_columns = indent_columns.saturating_sub(indent_size);
     }
     indent_columns
@@ -1335,6 +1344,59 @@ fn should_split_insert_newline_for_pair(buffer: &ShellBuffer) -> bool {
         return false;
     };
     matches!((previous, next), ('{', '}') | ('[', ']'))
+        || should_split_insert_newline_for_tag_pair(buffer)
+}
+
+fn should_split_insert_newline_for_tag_pair(buffer: &ShellBuffer) -> bool {
+    let cursor = buffer.cursor_point();
+    let Some(line) = buffer.text.line(cursor.line) else {
+        return false;
+    };
+    let split_index = byte_index_for_char_column(&line, cursor.column);
+    let before = &line[..split_index];
+    let after = &line[split_index..];
+    let Some(open_name) = opening_tag_name_before_cursor(before) else {
+        return false;
+    };
+    let Some(close_name) = closing_tag_name_after_cursor(after) else {
+        return false;
+    };
+    open_name == close_name
+}
+
+fn byte_index_for_char_column(line: &str, column: usize) -> usize {
+    line.char_indices()
+        .nth(column)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len())
+}
+
+fn opening_tag_name_before_cursor(before: &str) -> Option<&str> {
+    let trimmed = before.trim_end();
+    let open_end = trimmed.strip_suffix('>')?;
+    let open_start = open_end.rfind('<')?;
+    let tag = open_end[open_start + 1..].trim_start();
+    if tag.starts_with('/') || tag.starts_with('!') || tag.starts_with('?') || tag.ends_with('/') {
+        return None;
+    }
+    tag_name(tag)
+}
+
+fn closing_tag_name_after_cursor(after: &str) -> Option<&str> {
+    let tag = after.trim_start().strip_prefix("</")?;
+    tag_name(tag)
+}
+
+fn tag_name(tag: &str) -> Option<&str> {
+    let end = tag
+        .char_indices()
+        .find_map(|(index, character)| (!is_tag_name_character(character)).then_some(index))
+        .unwrap_or(tag.len());
+    (end > 0).then_some(&tag[..end])
+}
+
+fn is_tag_name_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.')
 }
 
 fn insert_newline_inside_pair(
@@ -1375,13 +1437,54 @@ fn desired_indent_for_buffer(
         let buffer = shell_buffer(runtime, buffer_id)?;
         buffer.text.clone()
     };
-    Ok(syntax_indent.unwrap_or_else(|| {
-        indent_string_from_columns(
-            desired_indent_columns_for_text(&text, line_index, indent_size),
+    if let Some(indent) = syntax_indent {
+        return Ok(adjust_tag_child_indent(
+            &text,
+            line_index,
             indent_size,
             use_tabs,
-        )
-    }))
+            &indent,
+        ));
+    }
+    Ok(indent_string_from_columns(
+        desired_indent_columns_for_text(&text, line_index, indent_size),
+        indent_size,
+        use_tabs,
+    ))
+}
+
+fn adjust_tag_child_indent(
+    buffer: &TextBuffer,
+    line_index: usize,
+    indent_size: usize,
+    use_tabs: bool,
+    syntax_indent: &str,
+) -> String {
+    let Some(previous_line) = previous_nonblank_line(buffer, line_index) else {
+        return syntax_indent.to_owned();
+    };
+    if opening_tag_name_before_cursor(previous_line.trim_end()).is_none() {
+        return syntax_indent.to_owned();
+    }
+    let (base_columns, _) = leading_whitespace_info(&previous_line, indent_size);
+    let max_columns = base_columns.saturating_add(indent_size);
+    let (syntax_columns, _) = leading_whitespace_info(syntax_indent, indent_size);
+    if syntax_columns <= max_columns {
+        return syntax_indent.to_owned();
+    }
+    indent_string_from_columns(max_columns, indent_size, use_tabs)
+}
+
+fn previous_nonblank_line(buffer: &TextBuffer, line_index: usize) -> Option<String> {
+    let mut index = line_index;
+    while index > 0 {
+        index = index.saturating_sub(1);
+        let line = buffer.line(index)?;
+        if !line.trim().is_empty() {
+            return Some(line);
+        }
+    }
+    None
 }
 
 fn syntax_indent_for_buffer(
@@ -1401,6 +1504,9 @@ fn syntax_indent_for_buffer(
     let Some(language_id) = language_id else {
         return Ok(None);
     };
+    if language_id == "tsx" {
+        return Ok(None);
+    }
     let mut parse_session = {
         let ui = shell_ui_mut(runtime)?;
         ui.take_indent_parse_session(buffer_id)
@@ -2972,6 +3078,7 @@ pub(crate) struct ShellBuffer {
     syntax_dirty: bool,
     syntax_requested_revision: Option<u64>,
     syntax_requested_window: Option<SyntaxLineWindow>,
+    syntax_requested_at: Option<Instant>,
     syntax_applied_window: Option<SyntaxLineWindow>,
     lsp_enabled: bool,
     lsp_diagnostics: Vec<LspDiagnostic>,
@@ -3820,6 +3927,7 @@ impl ShellBuffer {
             syntax_dirty: false,
             syntax_requested_revision: None,
             syntax_requested_window: None,
+            syntax_requested_at: None,
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
@@ -3889,6 +3997,7 @@ impl ShellBuffer {
             syntax_dirty: false,
             syntax_requested_revision: None,
             syntax_requested_window: None,
+            syntax_requested_at: None,
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
@@ -3961,6 +4070,7 @@ impl ShellBuffer {
             syntax_dirty: false,
             syntax_requested_revision: None,
             syntax_requested_window: None,
+            syntax_requested_at: None,
             syntax_applied_window: None,
             lsp_enabled: true,
             lsp_diagnostics: Vec::new(),
@@ -5210,6 +5320,7 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.syntax_requested_revision = Some(self.text.revision());
         self.syntax_requested_window = syntax_window;
+        self.syntax_requested_at = None;
         self.syntax_applied_window = syntax_window;
         self.last_edit_at = None;
     }
@@ -5432,6 +5543,7 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.syntax_requested_revision = None;
         self.syntax_requested_window = None;
+        self.syntax_requested_at = None;
         self.syntax_applied_window = None;
         self.last_edit_at = None;
         self.scroll_row = 0;
@@ -5454,6 +5566,7 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.syntax_requested_revision = None;
         self.syntax_requested_window = None;
+        self.syntax_requested_at = None;
         self.syntax_applied_window = None;
         self.last_edit_at = None;
         let line_count = self.line_count();
@@ -5487,6 +5600,7 @@ impl ShellBuffer {
         self.syntax_dirty = false;
         self.syntax_requested_revision = None;
         self.syntax_requested_window = None;
+        self.syntax_requested_at = None;
         self.syntax_applied_window = None;
         self.last_edit_at = None;
         let line_count = self.line_count();
@@ -5511,6 +5625,7 @@ impl ShellBuffer {
         if self.kind == BufferKind::File || self.language_id.is_some() {
             self.syntax_dirty = true;
             self.syntax_requested_window = None;
+            self.syntax_requested_at = None;
             self.syntax_applied_window = None;
             self.last_edit_at = Some(Instant::now());
             self.mark_git_fringe_dirty();
@@ -5522,6 +5637,7 @@ impl ShellBuffer {
             self.syntax_dirty = true;
             self.syntax_requested_revision = None;
             self.syntax_requested_window = None;
+            self.syntax_requested_at = None;
             self.syntax_applied_window = None;
             self.last_edit_at = None;
         }
@@ -5530,6 +5646,7 @@ impl ShellBuffer {
     fn mark_syntax_refresh_requested(&mut self, syntax_window: Option<SyntaxLineWindow>) {
         self.syntax_requested_revision = Some(self.text.revision());
         self.syntax_requested_window = syntax_window;
+        self.syntax_requested_at = Some(Instant::now());
     }
 
     fn syntax_refresh_due(&self, now: Instant) -> bool {
@@ -5540,8 +5657,12 @@ impl ShellBuffer {
         } else {
             SYNTAX_REFRESH_COLD_DEBOUNCE
         };
+        let request_timed_out = self.syntax_requested_revision == Some(self.text.revision())
+            && self.syntax_requested_at.is_some_and(|requested_at| {
+                now.duration_since(requested_at) >= SYNTAX_REFRESH_REQUEST_TIMEOUT
+            });
         self.syntax_dirty
-            && self.syntax_requested_revision != Some(self.text.revision())
+            && (self.syntax_requested_revision != Some(self.text.revision()) || request_timed_out)
             && self
                 .last_edit_at
                 .map(|last_edit_at| now.duration_since(last_edit_at) >= debounce)
@@ -5557,7 +5678,8 @@ impl ShellBuffer {
     }
 
     fn worker_syntax_window(&self) -> Option<SyntaxLineWindow> {
-        self.full_syntax_window()
+        self.desired_syntax_window()
+            .or_else(|| self.full_syntax_window())
     }
 
     fn desired_syntax_window(&self) -> Option<SyntaxLineWindow> {
@@ -5603,6 +5725,7 @@ impl ShellBuffer {
         self.syntax_dirty = true;
         self.syntax_requested_revision = None;
         self.syntax_requested_window = None;
+        self.syntax_requested_at = None;
         self.last_edit_at = None;
     }
 
@@ -14989,6 +15112,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_PLUGIN_SWITCH_PANE,
         "Switches focus between the active plugin buffer's split panes.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_TREESITTER_RECOMPILE_INSTALLED,
+        "Recompiles every currently installed Tree-sitter grammar.",
+    )?;
 
     runtime
         .subscribe_hook(
@@ -15019,6 +15147,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_PLUGIN_RERUN_COMMAND,
             "shell.plugin-rerun-command",
             |_, runtime| rerun_compile_command(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_TREESITTER_RECOMPILE_INSTALLED,
+            "shell.treesitter-recompile-installed",
+            |_, runtime| recompile_installed_tree_sitter_languages(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -20800,6 +20935,7 @@ fn push_file_reload_worker_error(errors: &Arc<Mutex<Vec<String>>>, message: Stri
     }
 }
 
+#[derive(Clone)]
 struct SyntaxRefreshWorkerRequest {
     buffer_id: BufferId,
     buffer_revision: u64,
@@ -20829,18 +20965,25 @@ struct SyntaxRefreshStats {
     highlight_spans: usize,
 }
 
-const SYNTAX_REFRESH_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+const SYNTAX_REFRESH_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
+const SYNTAX_REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct SyntaxRefreshWorkerState {
-    request_tx: Option<Sender<SyntaxRefreshWorkerRequest>>,
+    workers: BTreeMap<BufferId, Sender<SyntaxRefreshWorkerRequest>>,
     results: Arc<Mutex<Vec<SyntaxRefreshWorkerResult>>>,
+    configs: Vec<LanguageConfiguration>,
+    install_root: Option<PathBuf>,
+    query_asset_root: Option<PathBuf>,
 }
 
 impl SyntaxRefreshWorkerState {
     fn disabled() -> Self {
         Self {
-            request_tx: None,
+            workers: BTreeMap::new(),
             results: Arc::new(Mutex::new(Vec::new())),
+            configs: Vec::new(),
+            install_root: None,
+            query_asset_root: None,
         }
     }
 
@@ -20850,13 +20993,24 @@ impl SyntaxRefreshWorkerState {
         install_root: PathBuf,
         query_asset_root: Option<PathBuf>,
     ) {
+        self.configs = configs;
+        self.install_root = Some(install_root);
+        self.query_asset_root = query_asset_root;
+        self.workers.clear();
+        self.results = Arc::new(Mutex::new(Vec::new()));
+    }
+
+    fn start_worker(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
+        let Some(install_root) = self.install_root.clone() else {
+            return false;
+        };
+        let query_asset_root = self.query_asset_root.clone();
+        let configs = self.configs.clone();
+        let buffer_id = request.buffer_id;
         let (request_tx, request_rx) = mpsc::channel::<SyntaxRefreshWorkerRequest>();
-        let results = Arc::new(Mutex::new(Vec::new()));
-        let worker_results = Arc::clone(&results);
+        let worker_results = Arc::clone(&self.results);
         let spawn_result = std::thread::Builder::new()
-            .name("volt-syntax-refresh".to_owned())
-            // SQL grammar refresh can exhaust Windows' default thread stack.
-            // Give tree-sitter a larger worker stack and keep parsing off UI thread.
+            .name(format!("volt-syntax-refresh-{}", buffer_id.get()))
             .stack_size(SYNTAX_REFRESH_WORKER_STACK_SIZE)
             .spawn(move || {
                 let mut registry = SyntaxRegistry::with_install_root(install_root);
@@ -20867,47 +21021,49 @@ impl SyntaxRefreshWorkerState {
                     }
                 }
                 let mut parse_sessions = BTreeMap::<BufferId, SyntaxParseSession>::new();
-                while let Ok(request) = request_rx.recv() {
-                    let mut latest_by_buffer = BTreeMap::new();
-                    latest_by_buffer.insert(request.buffer_id, request);
+                let mut request = request;
+                loop {
                     while let Ok(newer_request) = request_rx.try_recv() {
-                        latest_by_buffer.insert(newer_request.buffer_id, newer_request);
+                        request = newer_request;
                     }
-                    for request in latest_by_buffer.into_values() {
-                        let result = process_syntax_refresh_request(
-                            &mut registry,
-                            &mut parse_sessions,
-                            request,
-                        );
-                        if let Ok(mut results) = worker_results.lock() {
-                            results.push(result);
-                        } else {
-                            return;
-                        }
+                    let result =
+                        process_syntax_refresh_request(&mut registry, &mut parse_sessions, request);
+                    if let Ok(mut results) = worker_results.lock() {
+                        results.push(result);
+                    } else {
+                        return;
                     }
+                    let Ok(next_request) = request_rx.recv() else {
+                        return;
+                    };
+                    request = next_request;
                 }
             });
         match spawn_result {
             Ok(_) => {
-                self.request_tx = Some(request_tx);
-                self.results = results;
+                self.workers.insert(buffer_id, request_tx);
+                true
             }
             Err(error) => {
                 eprintln!("failed to start syntax refresh worker: {error}");
-                self.request_tx = None;
-                self.results = Arc::new(Mutex::new(Vec::new()));
+                false
             }
         }
     }
 
     fn is_configured(&self) -> bool {
-        self.request_tx.is_some()
+        self.install_root.is_some()
     }
 
-    fn send(&self, request: SyntaxRefreshWorkerRequest) {
-        if let Some(request_tx) = self.request_tx.as_ref() {
-            let _ = request_tx.send(request);
+    fn send(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
+        let buffer_id = request.buffer_id;
+        if let Some(request_tx) = self.workers.get(&buffer_id) {
+            if request_tx.send(request.clone()).is_ok() {
+                return true;
+            }
+            self.workers.remove(&buffer_id);
         }
+        self.start_worker(request)
     }
 
     fn take_results(&self) -> Vec<SyntaxRefreshWorkerResult> {
@@ -27734,8 +27890,8 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
                 buffer_revision: buffer.text.revision(),
                 path: buffer.path().map(Path::to_path_buf),
                 buffer_language_id: buffer.language_id().map(str::to_owned),
-                // Keep whole-file highlighting on the worker so the main thread only
-                // applies the finished snapshot instead of parsing visible windows inline.
+                // Prefer visible-window highlighting so first paint lands fast, then expand on
+                // demand as scrolling changes the requested window.
                 syntax_window: buffer.worker_syntax_window(),
                 text: buffer.text.clone(),
             })
@@ -27748,13 +27904,16 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
 
     {
         let ui = shell_ui_mut(runtime)?;
-        for request in &requests {
-            if let Some(buffer) = ui.buffer_mut(request.buffer_id) {
-                buffer.mark_syntax_refresh_requested(request.syntax_window);
-            }
-        }
         for request in requests {
-            ui.syntax_refresh_worker.send(request);
+            let buffer_id = request.buffer_id;
+            let syntax_window = request.syntax_window;
+            if ui.syntax_refresh_worker.send(request) {
+                if let Some(buffer) = ui.buffer_mut(buffer_id) {
+                    buffer.mark_syntax_refresh_requested(syntax_window);
+                }
+            } else if let Some(buffer) = ui.buffer_mut(buffer_id) {
+                buffer.force_syntax_refresh();
+            }
         }
     }
 
@@ -28262,8 +28421,13 @@ fn normalize_git_output_path(raw_path: &str) -> PathBuf {
 
 #[cfg(windows)]
 fn normalize_git_output_path_windows(trimmed: &str) -> Option<PathBuf> {
-    let trimmed = trimmed.strip_prefix('/')?;
-    let (drive, rest) = trimmed.split_once('/').unwrap_or((trimmed, ""));
+    let trimmed = trimmed.replace('\\', "/");
+    let trimmed = trimmed.strip_prefix('/').unwrap_or(trimmed.as_str());
+    let (drive, rest) = if let Some((drive, rest)) = trimmed.split_once(":/") {
+        (drive, rest)
+    } else {
+        trimmed.split_once('/').unwrap_or((trimmed.trim(), ""))
+    };
     if drive.len() != 1 || !drive.chars().all(|ch| ch.is_ascii_alphabetic()) {
         return None;
     }
@@ -29084,6 +29248,10 @@ fn install_tree_sitter_language(
     language_id: &str,
 ) -> Result<(), String> {
     treesitter_install::install_tree_sitter_language(runtime, language_id)
+}
+
+fn recompile_installed_tree_sitter_languages(runtime: &mut EditorRuntime) -> Result<(), String> {
+    treesitter_install::recompile_installed_tree_sitter_languages(runtime)
 }
 
 fn file_open_detail(path: &Path) -> Option<String> {

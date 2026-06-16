@@ -2258,9 +2258,11 @@ fn run_git_push_in_popup_buffer(
             command_label,
             program: "git".to_owned(),
             args,
+            env: Vec::new(),
             cwd: root,
             on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
             notify_on_success: true,
+            notify_on_failure: true,
         },
     )?;
     Ok(())
@@ -2608,7 +2610,7 @@ fn git_common_dir(root: &Path) -> Result<PathBuf, String> {
             root.display()
         ));
     }
-    let path = PathBuf::from(common_dir);
+    let path = normalize_git_output_path(common_dir);
     let path = if path.is_absolute() {
         path
     } else {
@@ -2646,7 +2648,7 @@ fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, St
                 entries.push(entry);
             }
             current = Some(GitWorktreeListEntry {
-                path: PathBuf::from(path),
+                path: normalize_git_output_path(path),
                 branch: None,
                 head: None,
                 bare: false,
@@ -4502,6 +4504,18 @@ mod tests {
 
         state.set_snapshot(Some(summary("main", "def456", 0, 0)));
         assert!(state.take_changed());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_worktree_list_parser_normalizes_windows_drive_paths() {
+        let entries = parse_git_worktree_list(
+            "worktree w:/w/ftc-ui-web\nHEAD abc123\nbranch refs/heads/main\n\n",
+        )
+        .expect("worktree list parses");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from(r"W:\w\ftc-ui-web"));
     }
 
     fn temp_dir() -> std::path::PathBuf {

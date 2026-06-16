@@ -1,5 +1,8 @@
 use super::{
-    treesitter_install::{TreeSitterInstallState, continue_tree_sitter_install},
+    treesitter_install::{
+        TreeSitterInstallState, TreeSitterRecompileState, continue_tree_sitter_install,
+        continue_tree_sitter_recompile,
+    },
     *,
 };
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
@@ -13,6 +16,14 @@ use std::{
 pub(super) enum StreamedCommandExitAction {
     RefreshGitStatusBuffersAndCloseBuffer,
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
+    ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct StreamedCommandOutcome {
+    pub(super) success: bool,
+    pub(super) exit_code: Option<i32>,
+    pub(super) error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -22,9 +33,11 @@ pub(super) struct StreamedCommandSpec {
     pub(super) command_label: String,
     pub(super) program: String,
     pub(super) args: Vec<String>,
+    pub(super) env: Vec<(String, String)>,
     pub(super) cwd: PathBuf,
     pub(super) on_exit: StreamedCommandExitAction,
     pub(super) notify_on_success: bool,
+    pub(super) notify_on_failure: bool,
 }
 
 #[derive(Debug)]
@@ -34,9 +47,11 @@ struct StreamedCommandRequest {
     command_label: String,
     program: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
     cwd: PathBuf,
     on_exit: StreamedCommandExitAction,
     notify_on_success: bool,
+    notify_on_failure: bool,
 }
 
 #[derive(Debug)]
@@ -54,6 +69,7 @@ enum StreamedCommandUpdate {
         error: Option<String>,
         on_exit: StreamedCommandExitAction,
         notify_on_success: bool,
+        notify_on_failure: bool,
     },
 }
 
@@ -151,9 +167,11 @@ pub(super) fn continue_streamed_command_popup(
         command_label: spec.command_label,
         program: spec.program,
         args: spec.args,
+        env: spec.env,
         cwd: spec.cwd,
         on_exit: spec.on_exit,
         notify_on_success: spec.notify_on_success,
+        notify_on_failure: spec.notify_on_failure,
     };
     shell_ui_mut(runtime)?
         .streamed_command_worker
@@ -198,6 +216,7 @@ pub(super) fn refresh_pending_streamed_commands(
                 error,
                 on_exit,
                 notify_on_success,
+                notify_on_failure,
             } => {
                 if !shell_ui_mut(runtime)?
                     .streamed_command_worker
@@ -205,7 +224,7 @@ pub(super) fn refresh_pending_streamed_commands(
                 {
                     continue;
                 }
-                if !success || notify_on_success {
+                if (success && notify_on_success) || (!success && notify_on_failure) {
                     shell_ui_mut(runtime)?.apply_notification(
                         streamed_command_notification(
                             buffer_id,
@@ -218,29 +237,53 @@ pub(super) fn refresh_pending_streamed_commands(
                         now,
                     );
                 }
-                if success {
-                    match on_exit {
-                        StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
+                let outcome = StreamedCommandOutcome {
+                    success,
+                    exit_code,
+                    error,
+                };
+                match on_exit {
+                    StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
+                        if outcome.success {
                             buffers_to_close.push(buffer_id);
                             refresh_git_status = true;
                         }
-                        StreamedCommandExitAction::ContinueTreeSitterInstall(state) => {
-                            if let Err(error) =
+                    }
+                    StreamedCommandExitAction::ContinueTreeSitterInstall(state) => {
+                        if outcome.success
+                            && let Err(error) =
                                 continue_tree_sitter_install(runtime, buffer_id, *state)
-                            {
-                                append_streamed_command_error(runtime, buffer_id, &error)?;
-                                shell_ui_mut(runtime)?.apply_notification(
-                                    streamed_command_notification(
-                                        buffer_id,
-                                        &popup_title,
-                                        &command_label,
-                                        false,
-                                        None,
-                                        Some(&error),
-                                    ),
-                                    now,
-                                );
-                            }
+                        {
+                            append_streamed_command_error(runtime, buffer_id, &error)?;
+                            shell_ui_mut(runtime)?.apply_notification(
+                                streamed_command_notification(
+                                    buffer_id,
+                                    &popup_title,
+                                    &command_label,
+                                    false,
+                                    None,
+                                    Some(&error),
+                                ),
+                                now,
+                            );
+                        }
+                    }
+                    StreamedCommandExitAction::ContinueTreeSitterRecompile(state) => {
+                        if let Err(error) =
+                            continue_tree_sitter_recompile(runtime, buffer_id, *state, outcome)
+                        {
+                            append_streamed_command_error(runtime, buffer_id, &error)?;
+                            shell_ui_mut(runtime)?.apply_notification(
+                                streamed_command_notification(
+                                    buffer_id,
+                                    &popup_title,
+                                    &command_label,
+                                    false,
+                                    None,
+                                    Some(&error),
+                                ),
+                                now,
+                            );
                         }
                     }
                 }
@@ -292,6 +335,15 @@ fn streamed_command_notification(
     }
 }
 
+pub(super) fn append_streamed_command_lines(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    lines: &[String],
+) -> Result<(), String> {
+    shell_buffer_mut(runtime, buffer_id)?.append_output_lines(lines);
+    Ok(())
+}
+
 fn append_streamed_command_header(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
@@ -330,9 +382,11 @@ fn run_streamed_command(
         command_label,
         program,
         args,
+        env,
         cwd,
         on_exit,
         notify_on_success,
+        notify_on_failure,
     } = request;
     let (program, args) = supervised_command_if_resolved(
         &program,
@@ -344,6 +398,7 @@ fn run_streamed_command(
     let mut command = Command::new(&program);
     command
         .args(&args)
+        .envs(env)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -364,6 +419,7 @@ fn run_streamed_command(
                     error: Some(format!("Failed to start process: {error}")),
                     on_exit,
                     notify_on_success,
+                    notify_on_failure,
                 },
             );
             return;
@@ -399,6 +455,7 @@ fn run_streamed_command(
                 error: None,
                 on_exit,
                 notify_on_success,
+                notify_on_failure,
             },
         ),
         Err(error) => push_streamed_command_update(
@@ -414,6 +471,7 @@ fn run_streamed_command(
                 )),
                 on_exit,
                 notify_on_success,
+                notify_on_failure,
             },
         ),
     }

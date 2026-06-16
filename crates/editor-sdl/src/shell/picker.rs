@@ -199,7 +199,7 @@ fn picker_provider_context(
                     };
                     let preview = language.grammar().map(|grammar| {
                         grammar
-                            .install_directory(registry.install_root())
+                            .installed_library_path(registry.install_root())
                             .display()
                             .to_string()
                     });

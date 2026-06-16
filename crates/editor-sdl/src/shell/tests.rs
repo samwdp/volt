@@ -100,6 +100,64 @@ fn wait_for_buffer_syntax_refresh(
     ))
 }
 
+#[test]
+fn stalled_syntax_request_becomes_due_again() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*stalled-syntax-request*",
+        vec!["fn main() {}".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.set_language_id(Some("rust".to_owned()));
+    buffer.force_syntax_refresh();
+    buffer.mark_syntax_refresh_requested(buffer.full_syntax_window());
+    let requested_at = buffer
+        .syntax_requested_at
+        .ok_or_else(|| "syntax request timestamp missing".to_owned())?;
+
+    assert!(!buffer.syntax_refresh_due(requested_at));
+    assert!(buffer.syntax_refresh_due(
+        requested_at + SYNTAX_REFRESH_REQUEST_TIMEOUT + Duration::from_millis(1)
+    ));
+    Ok(())
+}
+
+#[test]
+fn disconnected_syntax_worker_restarts_without_stranding_buffers() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*disconnected-syntax-worker*",
+        vec!["fn main() {}".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.force_syntax_refresh();
+    }
+    let (request_tx, request_rx) = mpsc::channel();
+    drop(request_rx);
+    shell_ui_mut(&mut state.runtime)?
+        .syntax_refresh_worker
+        .workers
+        .insert(buffer_id, request_tx);
+
+    refresh_pending_syntax(&mut state.runtime)?;
+    assert!(
+        shell_ui(&state.runtime)?
+            .syntax_refresh_worker
+            .is_configured()
+    );
+    assert!(
+        shell_ui(&state.runtime)?
+            .syntax_refresh_worker
+            .workers
+            .contains_key(&buffer_id)
+    );
+    Ok(())
+}
+
 fn sync_active_buffer_layout_for_test(state: &mut ShellState) -> Result<(), String> {
     const RENDER_WIDTH: u32 = 960;
     const RENDER_HEIGHT: u32 = 640;
@@ -457,6 +515,10 @@ fn normalize_git_output_path_converts_git_for_windows_drive_roots() {
     assert_eq!(
         normalize_git_output_path(r"P:\volt\target\release\user"),
         PathBuf::from(r"P:\volt\target\release\user")
+    );
+    assert_eq!(
+        normalize_git_output_path("w:/w/ftc-ui-web"),
+        PathBuf::from(r"W:\w\ftc-ui-web")
     );
     assert_eq!(normalize_git_output_path(".git"), PathBuf::from(".git"));
 }
@@ -3657,7 +3719,7 @@ fn ensure_visible_builds_wrap_cache_for_large_buffers() -> Result<(), String> {
 }
 
 #[test]
-fn worker_syntax_window_covers_the_full_buffer() -> Result<(), String> {
+fn worker_syntax_window_matches_visible_window() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_text_test_buffer(
         &mut state,
@@ -3675,13 +3737,7 @@ fn worker_syntax_window_covers_the_full_buffer() -> Result<(), String> {
     let worker = buffer
         .worker_syntax_window()
         .ok_or_else(|| "worker syntax window should exist".to_owned())?;
-    let full = buffer
-        .full_syntax_window()
-        .ok_or_else(|| "full syntax window should exist".to_owned())?;
-
-    assert_eq!(worker, full);
-    assert!(worker.contains(desired));
-    assert_ne!(worker, desired);
+    assert_eq!(worker, desired);
     Ok(())
 }
 
@@ -10957,6 +11013,241 @@ fn insert_mode_enter_splits_bracket_pair_into_indented_line() -> Result<(), Stri
     assert_eq!(buffer.text.line(1).as_deref(), Some("    "));
     assert_eq!(buffer.text.line(2).as_deref(), Some("];"));
     assert_eq!(buffer.cursor_point(), TextPoint::new(1, 4));
+    Ok(())
+}
+
+#[test]
+fn insert_mode_enter_in_tsx_uses_two_space_indent_query() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    if !syntax_registry_mut(&mut state.runtime)?
+        .is_installed("tsx")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*tsx-enter*", vec!["<div></div>".to_owned()])?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("tsx".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 5));
+    }
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(0).as_deref(), Some("<div>"));
+    assert_eq!(buffer.text.line(1).as_deref(), Some("  "));
+    assert_eq!(buffer.text.line(2).as_deref(), Some("</div>"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(1, 2));
+    Ok(())
+}
+
+#[test]
+fn format_current_line_indent_uses_inherited_tsx_queries() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    if !syntax_registry_mut(&mut state.runtime)?
+        .is_installed("tsx")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*tsx-indent-query*",
+        vec!["<div>".to_owned(), String::new(), "</div>".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("tsx".to_owned()));
+        buffer.set_cursor(TextPoint::new(1, 0));
+    }
+
+    format_current_line_indent(&mut state.runtime, buffer_id, 2, false)?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .line(1)
+            .as_deref(),
+        Some("  ")
+    );
+    Ok(())
+}
+
+#[test]
+fn vim_open_line_below_in_tsx_uses_inherited_indent_queries() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    if !syntax_registry_mut(&mut state.runtime)?
+        .is_installed("tsx")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*tsx-vim-open-line*",
+        vec![
+            "export default function Dashboard() {".to_owned(),
+            "  return (".to_owned(),
+            "    <div className=\"flex flex-1 flex-col gap-4 p-4\">".to_owned(),
+            "      <div className=\"flex items-center justify-between\">".to_owned(),
+            "      </div>".to_owned(),
+            "    </div>".to_owned(),
+            "  );".to_owned(),
+            "}".to_owned(),
+        ],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("tsx".to_owned()));
+        buffer.set_cursor(TextPoint::new(2, 4));
+    }
+
+    state
+        .handle_text_input("o")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(3).as_deref(), Some("      "));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(3, 6));
+    Ok(())
+}
+
+#[test]
+fn vim_open_line_below_before_typescript_closing_object_dedents_to_sibling_indent()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    if !syntax_registry_mut(&mut state.runtime)?
+        .is_installed("typescript")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*typescript-vim-open-line*",
+        vec![
+            ";".to_owned(),
+            "export const Endpoints = (builder: EndpointBuilder<any, any, any>) => ({"
+                .to_owned(),
+            "  getOutdoorTrackingHistoryByCustomer: builder.query<DashboardTrackingHistory[], TrackingHistoryAttributes, DashboardTrackingHistoryDto[]>({".to_owned(),
+            "    query: (args: TrackingHistoryAttributes) => `outdoordashboard/trackingactivity/${args.customerId}?days=${args.days}`,".to_owned(),
+            "    transformResponse: (response: DashboardTrackingHistoryDto[]) => toDashboardTrackingHistorySummaries(response),".to_owned(),
+            "    transformErrorResponse: (response: { status: string | number }, _meta, _arg) => response.status,".to_owned(),
+            "    providesTags: [{ type: HOURLY_TAG, id: 'LIST' }],".to_owned(),
+            "    keepUnusedDataFor: 300".to_owned(),
+            "  }),".to_owned(),
+            "});".to_owned(),
+        ],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("typescript".to_owned()));
+        buffer.set_cursor(TextPoint::new(8, 2));
+    }
+
+    state
+        .runtime
+        .emit_hook(
+            HOOK_VIM_EDIT,
+            HookEvent::new().with_detail("open-line-below"),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(9).as_deref(), Some("  "));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(9, 2));
+    Ok(())
+}
+
+#[test]
+fn vim_open_line_below_after_typescript_outer_object_opener_uses_sibling_indent()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    if !syntax_registry_mut(&mut state.runtime)?
+        .is_installed("typescript")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*typescript-vim-open-top-level-entry*",
+        vec![
+            ";".to_owned(),
+            "export const Endpoints = (builder: EndpointBuilder<any, any, any>) => ({"
+                .to_owned(),
+            "  getOutdoorTrackingHistoryByCustomer: builder.query<DashboardTrackingHistory[], TrackingHistoryAttributes, DashboardTrackingHistoryDto[]>({".to_owned(),
+            "    query: (args: TrackingHistoryAttributes) => `outdoordashboard/trackingactivity/${args.customerId}?days=${args.days}`,".to_owned(),
+            "    transformResponse: (response: DashboardTrackingHistoryDto[]) => toDashboardTrackingHistorySummaries(response),".to_owned(),
+            "    transformErrorResponse: (response: { status: string | number }, _meta, _arg) => response.status,".to_owned(),
+            "    providesTags: [{ type: HOURLY_TAG, id: 'LIST' }],".to_owned(),
+            "    keepUnusedDataFor: 300".to_owned(),
+            "  }),".to_owned(),
+            "});".to_owned(),
+        ],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("typescript".to_owned()));
+        buffer.set_cursor(TextPoint::new(1, 0));
+    }
+
+    state
+        .handle_text_input("o")
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(buffer.text.line(2).as_deref(), Some("  "));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 2));
+    Ok(())
+}
+
+#[test]
+fn recompile_installed_tree_sitter_languages_notifies_when_no_grammars_are_installed()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let install_root = TempTestDir::new("treesitter-recompile-empty");
+    state
+        .runtime
+        .services_mut()
+        .insert(editor_syntax::SyntaxRegistry::with_install_root(
+            install_root.path(),
+        ));
+
+    recompile_installed_tree_sitter_languages(&mut state.runtime)?;
+
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    let notifications = shell_ui(&state.runtime)?.visible_notifications(Instant::now());
+    let notification = notifications
+        .into_iter()
+        .find(|notification| notification.key == "treesitter.recompile-installed")
+        .ok_or_else(|| "tree-sitter recompile notification was not shown".to_owned())?;
+    assert_eq!(notification.title, "Tree-sitter recompile complete");
+    assert_eq!(
+        notification.body_lines,
+        vec!["No installed Tree-sitter grammars found.".to_owned()]
+    );
     Ok(())
 }
 

@@ -10,14 +10,24 @@ pub fn package() -> PluginPackage {
         true,
         "Tree-sitter grammar installation and picker commands.",
     )
-    .with_commands(vec![PluginCommand::new(
-        "treesitter.install",
-        "Installs a registered Tree-sitter grammar from the picker.",
-        vec![PluginAction::emit_hook(
-            "ui.picker.open",
-            Some("treesitter.languages"),
-        )],
-    )])
+    .with_commands(vec![
+        PluginCommand::new(
+            "treesitter.install",
+            "Installs a registered Tree-sitter grammar from the picker.",
+            vec![PluginAction::emit_hook(
+                "ui.picker.open",
+                Some("treesitter.languages"),
+            )],
+        ),
+        PluginCommand::new(
+            "treesitter.recompile-installed",
+            "Recompiles all installed Tree-sitter grammars.",
+            vec![PluginAction::emit_hook(
+                "treesitter.recompile-installed",
+                None::<&str>,
+            )],
+        ),
+    ])
 }
 
 pub fn picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
@@ -37,4 +47,27 @@ pub fn picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
             item
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_exports_recompile_installed_command() {
+        let package = package();
+        let command = package
+            .commands()
+            .iter()
+            .find(|command| command.name() == "treesitter.recompile-installed")
+            .expect("treesitter.recompile-installed command");
+
+        assert!(
+            command.actions().iter().any(|action| action
+                .hook()
+                .is_some_and(|hook| hook.hook_name() == "treesitter.recompile-installed"
+                    && hook.detail().is_none())),
+            "command must emit treesitter.recompile-installed"
+        );
+    }
 }

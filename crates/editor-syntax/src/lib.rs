@@ -5,8 +5,11 @@ use std::{
     env,
     error::Error,
     fmt, fs,
+    mem::ManuallyDrop,
+    ops::ControlFlow,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,8 +17,8 @@ use editor_buffer::{TextBuffer, TextByteChunks, TextEdit, TextPoint};
 use editor_path::PathMatcher;
 pub use tree_sitter::Language;
 use tree_sitter::{
-    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryPredicateArg, QueryProperty, Range,
-    StreamingIterator, TextProvider, Tree,
+    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg,
+    QueryProperty, Range, StreamingIterator, TextProvider, Tree,
 };
 use tree_sitter_language::LanguageFn;
 
@@ -28,6 +31,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const DEFAULT_QUERY_ASSET_SEARCH_DEPTH: usize = 6;
 const MAX_INJECTION_DEPTH: usize = 8;
+const INDENT_QUERY_MATCH_LIMIT: u32 = 1024;
+const INDENT_QUERY_PROGRESS_LIMIT: usize = 100_000;
 const QUERY_ASSET_DIR_CANDIDATES: &[&[&str]] = &[
     &["crates", "volt", "assets", "grammars", "queries"],
     &["assets", "grammars", "queries"],
@@ -44,6 +49,15 @@ fn configure_background_command(_command: &mut Command) {
         use std::os::windows::process::CommandExt as _;
 
         _command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+#[cfg(windows)]
+fn windows_msvc_target_triple() -> &'static str {
+    match env::consts::ARCH {
+        "aarch64" => "aarch64-pc-windows-msvc",
+        "x86" => "i686-pc-windows-msvc",
+        _ => "x86_64-pc-windows-msvc",
     }
 }
 
@@ -130,47 +144,14 @@ impl GrammarSource {
         &self.symbol_name
     }
 
-    /// Returns the installed grammar directory under the configured install root.
-    pub fn install_directory(&self, install_root: &Path) -> PathBuf {
+    /// Returns the legacy installed grammar directory under the configured install root.
+    pub fn legacy_install_directory(&self, install_root: &Path) -> PathBuf {
         install_root.join(&self.install_dir_name)
-    }
-
-    /// Returns the installed highlight query path.
-    pub fn installed_highlight_query_path(&self, install_root: &Path) -> PathBuf {
-        self.installed_query_path(install_root, "highlights.scm")
-    }
-
-    /// Returns the installed indent query path.
-    pub fn installed_indent_query_path(&self, install_root: &Path) -> PathBuf {
-        self.installed_query_path(install_root, "indents.scm")
-    }
-
-    /// Returns the installed injections query path.
-    pub fn installed_injections_query_path(&self, install_root: &Path) -> PathBuf {
-        self.installed_query_path(install_root, "injections.scm")
-    }
-
-    /// Returns the installed locals query path.
-    pub fn installed_locals_query_path(&self, install_root: &Path) -> PathBuf {
-        self.installed_query_path(install_root, "locals.scm")
-    }
-
-    /// Returns the installed folds query path.
-    pub fn installed_folds_query_path(&self, install_root: &Path) -> PathBuf {
-        self.installed_query_path(install_root, "folds.scm")
-    }
-
-    /// Returns the installed query path for an arbitrary query file.
-    pub fn installed_query_path(&self, install_root: &Path, file_name: &str) -> PathBuf {
-        self.install_directory(install_root)
-            .join("queries")
-            .join(file_name)
     }
 
     /// Returns the installed shared library path.
     pub fn installed_library_path(&self, install_root: &Path) -> PathBuf {
-        self.install_directory(install_root)
-            .join(shared_library_file_name(&self.install_dir_name))
+        install_root.join(shared_library_file_name(&self.install_dir_name))
     }
 }
 
@@ -181,6 +162,50 @@ pub struct InstallCommandSpec {
     program: String,
     args: Vec<String>,
     cwd: PathBuf,
+    env: Vec<(String, String)>,
+}
+
+/// One failed grammar recompile entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrammarRecompileFailure {
+    language_id: String,
+    message: String,
+}
+
+impl GrammarRecompileFailure {
+    /// Returns the language id that failed to recompile.
+    pub fn language_id(&self) -> &str {
+        &self.language_id
+    }
+
+    /// Returns the failure message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Result of a best-effort installed grammar recompile pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrammarRecompileReport {
+    recompiled: Vec<String>,
+    failed: Vec<GrammarRecompileFailure>,
+}
+
+impl GrammarRecompileReport {
+    /// Returns language ids that recompiled successfully.
+    pub fn recompiled(&self) -> &[String] {
+        &self.recompiled
+    }
+
+    /// Returns failed language ids with error messages.
+    pub fn failed(&self) -> &[GrammarRecompileFailure] {
+        &self.failed
+    }
+
+    /// Reports whether every attempted grammar recompiled successfully.
+    pub fn is_success(&self) -> bool {
+        self.failed.is_empty()
+    }
 }
 
 impl InstallCommandSpec {
@@ -195,7 +220,21 @@ impl InstallCommandSpec {
             program: program.into(),
             args,
             cwd: cwd.into(),
+            env: Vec::new(),
         }
+    }
+
+    fn with_env<I, K, V>(mut self, env: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.env = env
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
     }
 
     /// Returns the human-readable command label.
@@ -216,6 +255,11 @@ impl InstallCommandSpec {
     /// Returns the command working directory.
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    /// Returns environment variables required by the command.
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
     }
 }
 
@@ -250,9 +294,14 @@ impl LanguageInstallPlan {
         self.grammar_dir().join(self.grammar.source_dir())
     }
 
-    /// Returns the stable install directory under the registry install root.
+    /// Returns the grammar library install root.
     pub fn install_dir(&self) -> PathBuf {
-        self.grammar.install_directory(&self.install_root)
+        self.install_root.clone()
+    }
+
+    /// Returns the installed shared library path for this grammar.
+    pub fn installed_library_path(&self) -> PathBuf {
+        self.grammar.installed_library_path(&self.install_root)
     }
 
     /// Ensures the temporary clone parent exists before launching `git clone`.
@@ -288,18 +337,12 @@ impl LanguageInstallPlan {
         )
     }
 
-    /// Creates the install directory and copies bundled query assets into place.
+    /// Creates the install directory and verifies bundled query assets are available.
     pub fn prepare_install_root(&self) -> Result<(), SyntaxError> {
         ensure_cloned_grammar_dir_exists(&self.grammar_dir())?;
         fs::create_dir_all(&self.install_root)
             .map_err(|error| io_error("create grammar install root", &self.install_root, error))?;
-        let install_dir = self.install_dir();
-        if install_dir.exists() {
-            fs::remove_dir_all(&install_dir)
-                .map_err(|error| io_error("replace installed grammar", &install_dir, error))?;
-        }
-        fs::create_dir_all(&install_dir)
-            .map_err(|error| io_error("create install directory", &install_dir, error))?;
+        remove_legacy_grammar_install_directory(&self.grammar, &self.install_root)?;
         let query_asset_root = self
             .query_asset_root
             .as_deref()
@@ -308,17 +351,15 @@ impl LanguageInstallPlan {
                 path: self.install_root.clone(),
                 message: "bundled tree-sitter query assets are not configured".to_owned(),
             })?;
-        install_bundled_queries(&self.config, query_asset_root, &self.install_root)?;
-        ensure_installed_highlight_query_path(
-            &self.config,
-            &self
-                .grammar
-                .installed_highlight_query_path(&self.install_root),
-        )?;
-        let highlight_query_path = self
-            .grammar
-            .installed_highlight_query_path(&self.install_root);
-        if !highlight_query_path.exists() {
+        if self.config.extra_highlight_query().is_none()
+            && resolve_bundled_query_source(
+                query_asset_root,
+                self.config.id(),
+                "highlights.scm",
+                &mut Vec::new(),
+            )?
+            .is_none()
+        {
             return Err(SyntaxError::Io {
                 operation: "locate bundled highlight query".to_owned(),
                 path: query_asset_root
@@ -369,6 +410,53 @@ impl LanguageInstallPlan {
         let scanner_c = source_dir.join("scanner.c");
         let scanner_cpp = source_dir.join("scanner.cc");
         let output_path = self.grammar.installed_library_path(&self.install_root);
+        if cfg!(windows) {
+            let target = windows_msvc_target_triple();
+            let compiler =
+                find_msvc_tools::find_tool(target, "cl.exe").ok_or_else(|| SyntaxError::Io {
+                    operation: "locate MSVC compiler".to_owned(),
+                    path: self.install_root.clone(),
+                    message: format!("could not find cl.exe for {target}"),
+                })?;
+            let mut env = compiler
+                .env()
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            env.sort_by(|left, right| left.0.cmp(&right.0));
+            let program = compiler.path().display().to_string();
+            let mut args = vec![
+                "/nologo".to_owned(),
+                "/LD".to_owned(),
+                "/I".to_owned(),
+                source_dir.display().to_string(),
+                format!("/Fo{}{}", source_dir.display(), std::path::MAIN_SEPARATOR),
+            ];
+            if scanner_cpp.exists() {
+                args.push("/EHsc".to_owned());
+            }
+            args.push(parser_path.display().to_string());
+            if scanner_c.exists() {
+                args.push(scanner_c.display().to_string());
+            }
+            if scanner_cpp.exists() {
+                args.push(scanner_cpp.display().to_string());
+            }
+            args.push(format!("/Fe:{}", output_path.display()));
+            args.extend(["/link".to_owned(), "/NOIMPLIB".to_owned()]);
+            return Ok(InstallCommandSpec::new(
+                format!("{} {}", program, args.join(" ")),
+                program,
+                args,
+                self.grammar_dir(),
+            )
+            .with_env(env));
+        }
         let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
         let mut args = Vec::new();
         if cfg!(target_os = "macos") {
@@ -933,14 +1021,22 @@ impl fmt::Display for SyntaxError {
 impl Error for SyntaxError {}
 
 struct LoadedLanguage {
-    _library: Option<libloading::Library>,
-    language: Language,
     query: Query,
-    indent_query: Option<Query>,
-    injections_query: Option<Query>,
-    locals_query: Option<Query>,
-    folds_query: Option<Query>,
+    indent_query: DeferredQuery,
+    injections_query: DeferredQuery,
+    locals_query: DeferredQuery,
+    folds_query: DeferredQuery,
     capture_mappings: BTreeMap<String, String>,
+    // Query values must drop before their language handle.
+    language: Language,
+    // Must drop after every tree-sitter value above; destructors may still access grammar data.
+    _library: Option<ManuallyDrop<libloading::Library>>,
+}
+
+struct DeferredQuery {
+    kind_label: &'static str,
+    source: Option<String>,
+    compiled: OnceLock<Option<Query>>,
 }
 
 struct ParsedHighlight {
@@ -986,6 +1082,44 @@ impl LoadedLanguage {
             .get(capture_name)
             .cloned()
             .unwrap_or_else(|| format!("syntax.{capture_name}"))
+    }
+
+    fn has_injections(&self) -> bool {
+        self.injections_query.has_source()
+    }
+}
+
+impl DeferredQuery {
+    fn from_source(kind_label: &'static str, source: Option<String>) -> Self {
+        Self {
+            kind_label,
+            source,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    fn has_source(&self) -> bool {
+        self.source.is_some() || self.compiled.get().is_some_and(Option::is_some)
+    }
+
+    fn query<'a>(
+        &'a self,
+        language: &Language,
+        language_id: &str,
+    ) -> Result<Option<&'a Query>, SyntaxError> {
+        if self.compiled.get().is_none() {
+            let compiled = match self.source.as_deref() {
+                Some(source) => Some(compile_query_source(
+                    language,
+                    language_id,
+                    self.kind_label,
+                    source,
+                )?),
+                None => None,
+            };
+            let _ = self.compiled.set(compiled);
+        }
+        Ok(self.compiled.get().and_then(|query| query.as_ref()))
     }
 }
 
@@ -1147,14 +1281,24 @@ impl SyntaxRegistry {
         };
 
         Ok(match config.grammar() {
-            Some(grammar) => {
-                grammar.installed_library_path(&self.install_root).exists()
-                    && grammar
-                        .installed_highlight_query_path(&self.install_root)
-                        .exists()
-            }
+            Some(grammar) => grammar.installed_library_path(&self.install_root).exists(),
             None => true,
         })
+    }
+
+    /// Returns installed grammar-backed language ids in registration order.
+    pub fn installed_grammar_language_ids(&self) -> Vec<String> {
+        let mut seen_libraries = BTreeSet::new();
+        self.language_order
+            .iter()
+            .filter_map(|language_id| {
+                let config = self.languages.get(language_id)?;
+                let grammar = config.grammar()?;
+                let library_path = grammar.installed_library_path(&self.install_root);
+                (library_path.exists() && seen_libraries.insert(library_path))
+                    .then(|| language_id.clone())
+            })
+            .collect()
     }
 
     /// Builds a reusable install plan for one grammar-backed language.
@@ -1205,9 +1349,47 @@ impl SyntaxRegistry {
             run_install_command(language_id, &generate_command)?;
         }
         run_install_command(language_id, &install_plan.compile_command()?)?;
+        remove_compiler_sidecar_artifacts(
+            &install_plan
+                .grammar
+                .installed_library_path(&install_plan.install_root),
+        )?;
         let install_dir = install_plan.install_dir();
         self.invalidate_language(language_id)?;
         Ok(install_dir)
+    }
+
+    /// Finalizes one grammar-backed language install after external commands have run.
+    pub fn finalize_language_install(
+        &mut self,
+        install_plan: &LanguageInstallPlan,
+    ) -> Result<(), SyntaxError> {
+        remove_compiler_sidecar_artifacts(&install_plan.installed_library_path())?;
+        self.invalidate_language(install_plan.language_id())
+    }
+
+    /// Recompiles all currently installed grammar-backed languages.
+    pub fn recompile_installed_languages(&mut self) -> Result<Vec<String>, SyntaxError> {
+        let language_ids = self.installed_grammar_language_ids();
+        for language_id in &language_ids {
+            self.install_language(language_id)?;
+        }
+        Ok(language_ids)
+    }
+
+    /// Recompiles all currently installed grammar-backed languages, continuing after failures.
+    pub fn recompile_installed_languages_best_effort(&mut self) -> GrammarRecompileReport {
+        let mut report = GrammarRecompileReport::default();
+        for language_id in self.installed_grammar_language_ids() {
+            match self.install_language(&language_id) {
+                Ok(_) => report.recompiled.push(language_id),
+                Err(error) => report.failed.push(GrammarRecompileFailure {
+                    language_id,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        report
     }
 
     /// Parses and highlights a buffer for a known file extension.
@@ -1464,8 +1646,8 @@ impl SyntaxRegistry {
         let has_injections = self
             .loaded
             .get(&language_id)
-            .and_then(|loaded| loaded.injections_query.as_ref())
-            .is_some();
+            .map(LoadedLanguage::has_injections)
+            .unwrap_or(false);
 
         let base_parse = if needs_inline_ranges || has_injections {
             Some(highlight_loaded_language_with_tree(
@@ -1562,10 +1744,12 @@ impl SyntaxRegistry {
         }
 
         let injection_regions = {
-            let Some(injections_query) = self
-                .loaded
-                .get(host_language_id)
-                .and_then(|loaded| loaded.injections_query.as_ref())
+            let Some(loaded) = self.loaded.get(host_language_id) else {
+                return Ok(InjectionHighlights::default());
+            };
+            let Some(injections_query) = loaded
+                .injections_query
+                .query(&loaded.language, host_language_id)?
             else {
                 return Ok(InjectionHighlights::default());
             };
@@ -1585,6 +1769,15 @@ impl SyntaxRegistry {
             else {
                 continue;
             };
+            // A self-injection covering the entire current buffer cannot make progress. This can
+            // happen when a query's `#offset!` directive is unavailable to this query runner: the
+            // injected parser sees the same tagged template again and recursively reinjects it.
+            if injection_language_id == host_language_id
+                && region.start_byte == 0
+                && region.end_byte == buffer.byte_count()
+            {
+                continue;
+            }
             if host_config
                 .additional_highlight_languages()
                 .iter()
@@ -1672,10 +1865,10 @@ impl SyntaxRegistry {
             return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
         }
         self.ensure_loaded_language(language_id)?;
-        Ok(self
-            .loaded
-            .get(language_id)
-            .and_then(|loaded| loaded.injections_query.as_ref()))
+        let Some(loaded) = self.loaded.get(language_id) else {
+            return Ok(None);
+        };
+        loaded.injections_query.query(&loaded.language, language_id)
     }
 
     /// Returns the compiled locals query for a language, loading it if needed.
@@ -1689,10 +1882,10 @@ impl SyntaxRegistry {
             return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
         }
         self.ensure_loaded_language(language_id)?;
-        Ok(self
-            .loaded
-            .get(language_id)
-            .and_then(|loaded| loaded.locals_query.as_ref()))
+        let Some(loaded) = self.loaded.get(language_id) else {
+            return Ok(None);
+        };
+        loaded.locals_query.query(&loaded.language, language_id)
     }
 
     /// Returns the compiled folds query for a language, loading it if needed.
@@ -1706,10 +1899,10 @@ impl SyntaxRegistry {
             return Err(SyntaxError::UnknownLanguage(language_id.to_owned()));
         }
         self.ensure_loaded_language(language_id)?;
-        Ok(self
-            .loaded
-            .get(language_id)
-            .and_then(|loaded| loaded.folds_query.as_ref()))
+        let Some(loaded) = self.loaded.get(language_id) else {
+            return Ok(None);
+        };
+        loaded.folds_query.query(&loaded.language, language_id)
     }
 
     /// Parses and highlights a buffer using a file path's extension.
@@ -1791,53 +1984,46 @@ fn load_language(
             let query_source =
                 append_query_source(highlight_query.to_owned(), config.extra_highlight_query());
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
-            let indent_query = config
-                .extra_indent_query()
-                .map(|query| compile_query_source(&language, config.id(), "indent", query))
-                .transpose()?;
-            let injections_query = config
-                .extra_injections_query()
-                .map(|query| compile_query_source(&language, config.id(), "injections", query))
-                .transpose()?;
-            let locals_query = config
-                .extra_locals_query()
-                .map(|query| compile_query_source(&language, config.id(), "locals", query))
-                .transpose()?;
-            let folds_query = config
-                .extra_folds_query()
-                .map(|query| compile_query_source(&language, config.id(), "folds", query))
-                .transpose()?;
             Ok(LoadedLanguage {
                 _library: None,
                 language,
                 query,
-                indent_query,
-                injections_query,
-                locals_query,
-                folds_query,
+                indent_query: DeferredQuery::from_source(
+                    "indent",
+                    config.extra_indent_query().map(str::to_owned),
+                ),
+                injections_query: DeferredQuery::from_source(
+                    "injections",
+                    config.extra_injections_query().map(str::to_owned),
+                ),
+                locals_query: DeferredQuery::from_source(
+                    "locals",
+                    config.extra_locals_query().map(str::to_owned),
+                ),
+                folds_query: DeferredQuery::from_source(
+                    "folds",
+                    config.extra_folds_query().map(str::to_owned),
+                ),
                 capture_mappings,
             })
         }
         LanguageLoader::Grammar { grammar } => {
-            let install_dir = grammar.install_directory(install_root);
+            let install_dir = install_root.to_path_buf();
             let library_path = grammar.installed_library_path(install_root);
-            let query_path = grammar.installed_highlight_query_path(install_root);
-            if !library_path.exists() || !query_path.exists() {
+            if !library_path.exists() {
                 return Err(SyntaxError::GrammarNotInstalled {
                     language_id: config.id().to_owned(),
                     install_dir,
                 });
             }
 
-            let query_source = append_query_source(
-                read_query_source_preferring_bundled(
-                    &query_path,
-                    query_asset_root,
-                    config.id(),
-                    "highlights.scm",
-                )?,
+            let query_source = required_query_source(
+                query_asset_root,
+                config.id(),
+                "highlights.scm",
+                "highlight",
                 config.extra_highlight_query(),
-            );
+            )?;
             let library = unsafe {
                 // SAFETY: The library path is chosen by the installer for a tree-sitter grammar
                 // compiled from generated parser sources. We keep the `Library` alive for at least
@@ -1865,58 +2051,46 @@ fn load_language(
             };
             let language = Language::new(language_fn);
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
-            let indent_query_source = maybe_read_query_source_preferring_bundled(
-                &grammar.installed_indent_query_path(install_root),
-                query_asset_root,
-                config.id(),
-                "indents.scm",
-            )?;
-            let indent_query_source = match (indent_query_source, config.extra_indent_query()) {
-                (Some(source), extra_query) => Some(append_query_source(source, extra_query)),
-                (None, Some(extra_query)) => Some(extra_query.to_owned()),
-                (None, None) => None,
-            };
-            let indent_query = indent_query_source
-                .map(|source| compile_query_source(&language, config.id(), "indent", &source))
-                .transpose()?;
-            let injections_query = load_optional_query(
-                &language,
-                config,
-                install_root,
-                query_asset_root,
-                &grammar.installed_injections_query_path(install_root),
-                "injections.scm",
-                "injections",
-                config.extra_injections_query(),
-            )?;
-            let locals_query = load_optional_query(
-                &language,
-                config,
-                install_root,
-                query_asset_root,
-                &grammar.installed_locals_query_path(install_root),
-                "locals.scm",
-                "locals",
-                config.extra_locals_query(),
-            )?;
-            let folds_query = load_optional_query(
-                &language,
-                config,
-                install_root,
-                query_asset_root,
-                &grammar.installed_folds_query_path(install_root),
-                "folds.scm",
-                "folds",
-                config.extra_folds_query(),
-            )?;
             Ok(LoadedLanguage {
-                _library: Some(library),
+                _library: Some(ManuallyDrop::new(library)),
                 language,
                 query,
-                indent_query,
-                injections_query,
-                locals_query,
-                folds_query,
+                indent_query: DeferredQuery::from_source(
+                    "indent",
+                    optional_query_source(
+                        query_asset_root,
+                        config.id(),
+                        "indents.scm",
+                        config.extra_indent_query(),
+                    )?,
+                ),
+                injections_query: DeferredQuery::from_source(
+                    "injections",
+                    optional_query_source(
+                        query_asset_root,
+                        config.id(),
+                        "injections.scm",
+                        config.extra_injections_query(),
+                    )?,
+                ),
+                locals_query: DeferredQuery::from_source(
+                    "locals",
+                    optional_query_source(
+                        query_asset_root,
+                        config.id(),
+                        "locals.scm",
+                        config.extra_locals_query(),
+                    )?,
+                ),
+                folds_query: DeferredQuery::from_source(
+                    "folds",
+                    optional_query_source(
+                        query_asset_root,
+                        config.id(),
+                        "folds.scm",
+                        config.extra_folds_query(),
+                    )?,
+                ),
                 capture_mappings,
             })
         }
@@ -1939,53 +2113,17 @@ fn compile_query_source(
     query_kind: &str,
     source: &str,
 ) -> Result<Query, SyntaxError> {
-    Query::new(language, source).map_err(|error| SyntaxError::InvalidQuery {
+    // Upstream queries sometimes use Vim's `\c` prefix for case-insensitive regexes.
+    // tree-sitter's regex engine accepts the equivalent inline `(?i)` flag.
+    let source = source.replace("\\\\c", "(?i)");
+    Query::new(language, &source).map_err(|error| SyntaxError::InvalidQuery {
         language_id: language_id.to_owned(),
         query_kind: query_kind.to_owned(),
         message: error.to_string(),
     })
 }
 
-fn read_installed_query_source(
-    query_path: &Path,
-    query_asset_root: Option<&Path>,
-    _language_id: &str,
-    file_name: &str,
-) -> Result<String, SyntaxError> {
-    let raw_source = fs::read_to_string(query_path)
-        .map_err(|error| io_error("read installed query", query_path, error))?;
-    resolve_query_source_from_raw(
-        &raw_source,
-        query_path,
-        query_asset_root,
-        file_name,
-        &mut Vec::new(),
-    )
-}
-
-/// Reads query source for a grammar-backed language, preferring the live bundled asset when
-/// `query_asset_root` is configured and contains `<language_id>/<file_name>`. Falls back to
-/// the installed query file when no bundled asset is present. This ensures a stale installed
-/// query file can never shadow a corrected bundled query asset.
-fn read_query_source_preferring_bundled(
-    installed_path: &Path,
-    query_asset_root: Option<&Path>,
-    language_id: &str,
-    file_name: &str,
-) -> Result<String, SyntaxError> {
-    if let Some(asset_root) = query_asset_root
-        && let Some(source) =
-            resolve_bundled_query_source(asset_root, language_id, file_name, &mut Vec::new())?
-    {
-        return Ok(source);
-    }
-    read_installed_query_source(installed_path, query_asset_root, language_id, file_name)
-}
-
-/// Like [`read_query_source_preferring_bundled`] but returns `Ok(None)` when neither the
-/// bundled asset nor the installed file exists.
-fn maybe_read_query_source_preferring_bundled(
-    installed_path: &Path,
+fn maybe_read_bundled_query_source(
     query_asset_root: Option<&Path>,
     language_id: &str,
     file_name: &str,
@@ -1996,40 +2134,40 @@ fn maybe_read_query_source_preferring_bundled(
     {
         return Ok(Some(source));
     }
-    if !installed_path.exists() {
-        return Ok(None);
-    }
-    read_installed_query_source(installed_path, query_asset_root, language_id, file_name).map(Some)
+    Ok(None)
 }
 
-/// Loads an optional compiled query from the installed path, merging in any extra query text.
-///
-/// Returns `Ok(None)` when neither an installed file nor an extra query exists.
-#[allow(clippy::too_many_arguments)]
-fn load_optional_query(
-    language: &Language,
-    config: &LanguageConfiguration,
-    _install_root: &Path,
+fn required_query_source(
     query_asset_root: Option<&Path>,
-    installed_path: &Path,
+    language_id: &str,
     file_name: &str,
     kind_label: &str,
     extra_query: Option<&str>,
-) -> Result<Option<Query>, SyntaxError> {
-    let source_from_file = maybe_read_query_source_preferring_bundled(
-        installed_path,
-        query_asset_root,
-        config.id(),
-        file_name,
-    )?;
-    let merged_source = match (source_from_file, extra_query) {
+) -> Result<String, SyntaxError> {
+    optional_query_source(query_asset_root, language_id, file_name, extra_query)?.ok_or_else(|| {
+        SyntaxError::Io {
+            operation: format!("locate bundled {kind_label} query"),
+            path: query_asset_root
+                .map(|root| root.join(language_id).join(file_name))
+                .unwrap_or_else(|| PathBuf::from(file_name)),
+            message: format!("bundled {file_name} is missing for language `{language_id}`"),
+        }
+    })
+}
+
+fn optional_query_source(
+    query_asset_root: Option<&Path>,
+    language_id: &str,
+    file_name: &str,
+    extra_query: Option<&str>,
+) -> Result<Option<String>, SyntaxError> {
+    let source_from_file =
+        maybe_read_bundled_query_source(query_asset_root, language_id, file_name)?;
+    Ok(match (source_from_file, extra_query) {
         (Some(source), extra) => Some(append_query_source(source, extra)),
         (None, Some(extra)) => Some(extra.to_owned()),
         (None, None) => None,
-    };
-    merged_source
-        .map(|source| compile_query_source(language, config.id(), kind_label, &source))
-        .transpose()
+    })
 }
 
 fn resolve_query_source_from_raw(
@@ -2144,67 +2282,20 @@ fn parse_query_inherits(source: &str) -> (Vec<String>, String) {
     (inherited_languages, body)
 }
 
-fn install_bundled_queries(
-    config: &LanguageConfiguration,
-    query_asset_root: &Path,
+fn remove_legacy_grammar_install_directory(
+    grammar: &GrammarSource,
     install_root: &Path,
 ) -> Result<(), SyntaxError> {
-    let Some(grammar) = config.grammar() else {
-        return Ok(());
-    };
-    let language_query_dir = query_asset_root.join(config.id());
-    if !language_query_dir.is_dir() {
-        return Ok(());
+    let legacy_dir = grammar.legacy_install_directory(install_root);
+    if legacy_dir.exists() {
+        fs::remove_dir_all(&legacy_dir).map_err(|error| {
+            io_error(
+                "remove legacy grammar install directory",
+                &legacy_dir,
+                error,
+            )
+        })?;
     }
-
-    let install_queries_dir = grammar.install_directory(install_root).join("queries");
-    fs::create_dir_all(&install_queries_dir).map_err(|error| {
-        io_error(
-            "create installed query directory",
-            &install_queries_dir,
-            error,
-        )
-    })?;
-
-    for entry in fs::read_dir(&language_query_dir)
-        .map_err(|error| io_error("read query asset directory", &language_query_dir, error))?
-    {
-        let entry = entry
-            .map_err(|error| io_error("read query asset entry", &language_query_dir, error))?;
-        let entry_path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|error| io_error("read query asset metadata", &entry_path, error))?;
-        if metadata.is_dir() {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy().to_string();
-        let destination = install_queries_dir.join(&file_name);
-        if entry_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("scm"))
-        {
-            let source = resolve_bundled_query_source(
-                query_asset_root,
-                config.id(),
-                &file_name,
-                &mut Vec::new(),
-            )?
-            .unwrap_or_default();
-            fs::write(&destination, source)
-                .map_err(|error| io_error("write installed query", &destination, error))?;
-        } else {
-            fs::copy(&entry_path, &destination).map_err(|error| SyntaxError::Io {
-                operation: "copy query asset".to_owned(),
-                path: entry_path,
-                message: error.to_string(),
-            })?;
-        }
-    }
-
     Ok(())
 }
 
@@ -2242,7 +2333,7 @@ fn desired_indent_for_loaded_language(
     indent_width: usize,
     parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<Option<usize>, SyntaxError> {
-    let Some(indent_query) = loaded.indent_query.as_ref() else {
+    let Some(indent_query) = loaded.indent_query.query(&loaded.language, language_id)? else {
         return Ok(None);
     };
     if line_index >= buffer.line_count() || indent_width == 0 {
@@ -2251,6 +2342,7 @@ fn desired_indent_for_loaded_language(
 
     let parse_result = parse_tree(language_id, loaded, buffer, parse_session)?;
     let mut query_cursor = QueryCursor::new();
+    query_cursor.set_match_limit(INDENT_QUERY_MATCH_LIMIT);
     query_cursor.set_point_range(
         Point {
             row: line_index,
@@ -2269,11 +2361,23 @@ fn desired_indent_for_loaded_language(
     let mut zero = false;
     let mut fallback_to_auto = false;
     let mut aligned_indent: Option<usize> = None;
-    let mut matches = query_cursor.matches(
+    let mut progress_steps = 0usize;
+    let mut progress_callback = |_: &tree_sitter::QueryCursorState| {
+        progress_steps = progress_steps.saturating_add(1);
+        if progress_steps > INDENT_QUERY_PROGRESS_LIMIT {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let query_options = QueryCursorOptions::new().progress_callback(&mut progress_callback);
+    let mut matches = query_cursor.matches_with_options(
         indent_query,
         parse_result.tree.root_node(),
         TextBufferProvider { buffer },
+        query_options,
     );
+    let mut aborted = false;
     loop {
         matches.advance();
         let Some(query_match) = matches.get() else {
@@ -2327,6 +2431,13 @@ fn desired_indent_for_loaded_language(
                 _ => {}
             }
         }
+    }
+    drop(matches);
+    if query_cursor.did_exceed_match_limit() || progress_steps > INDENT_QUERY_PROGRESS_LIMIT {
+        aborted = true;
+    }
+    if aborted {
+        return Ok(None);
     }
 
     if zero {
@@ -3497,6 +3608,7 @@ fn run_install_command(
 ) -> Result<(), SyntaxError> {
     let mut command = Command::new(command_spec.program());
     configure_background_command(&mut command);
+    command.envs(command_spec.env().iter().cloned());
     let output = command
         .args(command_spec.args())
         .current_dir(command_spec.cwd())
@@ -3517,22 +3629,16 @@ fn run_install_command(
     Ok(())
 }
 
-fn ensure_installed_highlight_query_path(
-    config: &LanguageConfiguration,
-    query_path: &Path,
-) -> Result<(), SyntaxError> {
-    if query_path.exists() || config.extra_highlight_query().is_none() {
-        return Ok(());
+fn remove_compiler_sidecar_artifacts(library_path: &Path) -> Result<(), SyntaxError> {
+    for extension in ["exp", "lib"] {
+        let artifact_path = library_path.with_extension(extension);
+        if artifact_path.exists() {
+            fs::remove_file(&artifact_path).map_err(|error| {
+                io_error("remove compiler sidecar artifact", &artifact_path, error)
+            })?;
+        }
     }
-    let parent = query_path.parent().ok_or_else(|| SyntaxError::Io {
-        operation: "locate highlight query parent".to_owned(),
-        path: query_path.to_path_buf(),
-        message: "installed highlight query path has no parent directory".to_owned(),
-    })?;
-    fs::create_dir_all(parent)
-        .map_err(|error| io_error("create highlight query directory", parent, error))?;
-    fs::write(query_path, "")
-        .map_err(|error| io_error("create placeholder highlight query", query_path, error))
+    Ok(())
 }
 
 fn io_error(operation: &str, path: &Path, error: std::io::Error) -> SyntaxError {
@@ -3615,15 +3721,26 @@ fn default_query_asset_root() -> Option<PathBuf> {
         );
     }
 
+    resolve_query_asset_root_from_roots(roots)
+}
+
+fn resolve_query_asset_root_from_roots(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    let mut fallback = None;
     for root in roots {
         for parts in QUERY_ASSET_DIR_CANDIDATES {
             let candidate = asset_path_from_parts(&root, parts);
-            if candidate.is_dir() {
+            if !candidate.is_dir() {
+                continue;
+            }
+            if root.join("Cargo.toml").is_file() {
                 return Some(candidate);
             }
+            fallback.get_or_insert(candidate);
         }
     }
-    None
+    fallback
 }
 
 fn asset_path_from_parts(base: &Path, parts: &[&str]) -> PathBuf {
@@ -3671,10 +3788,10 @@ mod tests {
     };
 
     use super::{
-        CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxError,
-        SyntaxParseSession, SyntaxRegistry, ensure_installed_highlight_query_path,
-        install_bundled_queries, maybe_read_query_source_preferring_bundled,
-        read_query_source_preferring_bundled, resolve_bundled_query_source,
+        CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration,
+        LanguageInstallPlan, SyntaxError, SyntaxParseSession, SyntaxRegistry, compile_query_source,
+        maybe_read_bundled_query_source, optional_query_source, resolve_bundled_query_source,
+        resolve_query_asset_root_from_roots,
     };
     use editor_buffer::{TextBuffer, TextPoint};
 
@@ -4092,6 +4209,27 @@ fn main() {
     }
 
     #[test]
+    fn whole_buffer_self_injection_is_ignored() {
+        let mut registry = SyntaxRegistry::new();
+        must(
+            registry.register(rust_configuration().with_extra_injections_query(
+                r#"((source_file) @injection.content
+  (#set! injection.language "rust"))"#,
+            )),
+        );
+
+        let buffer = TextBuffer::from_text("fn main() {}\n");
+        let snapshot = must(registry.highlight_buffer_for_language("rust", &buffer));
+        let function_spans = snapshot
+            .highlight_spans
+            .iter()
+            .filter(|span| span.capture_name == "function")
+            .count();
+
+        assert_eq!(function_spans, 1);
+    }
+
+    #[test]
     fn visible_spans_filters_to_line_window() {
         let mut registry = SyntaxRegistry::new();
         must(registry.register(rust_configuration()));
@@ -4204,7 +4342,7 @@ fn main() {
     }
 
     #[test]
-    fn grammar_configuration_uses_install_root_paths() {
+    fn grammar_configuration_uses_flat_install_root_paths() {
         let grammar = GrammarSource::new(
             "https://example.com/tree-sitter-rust.git",
             ".",
@@ -4215,22 +4353,12 @@ fn main() {
         let install_root = PathBuf::from("volt-grammars");
 
         assert_eq!(
-            grammar.install_directory(&install_root),
+            grammar.legacy_install_directory(&install_root),
             install_root.join("tree-sitter-rust")
         );
         assert_eq!(
-            grammar.installed_highlight_query_path(&install_root),
-            install_root
-                .join("tree-sitter-rust")
-                .join("queries")
-                .join("highlights.scm")
-        );
-        assert_eq!(
-            grammar.installed_indent_query_path(&install_root),
-            install_root
-                .join("tree-sitter-rust")
-                .join("queries")
-                .join("indents.scm")
+            grammar.installed_library_path(&install_root).parent(),
+            Some(install_root.as_path())
         );
         assert!(
             grammar
@@ -4258,7 +4386,7 @@ fn main() {
                 install_dir,
             } => {
                 assert_eq!(language_id, "rust");
-                assert_eq!(install_dir, install_root.join("tree-sitter-rust"));
+                assert_eq!(install_dir, install_root);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -4374,39 +4502,178 @@ fn main() {
                 .is_none()
         );
         let compile = plan.compile_command().expect("compile command");
-        assert_eq!(compile.program(), "c++");
-        assert!(compile.args().contains(&"-std=c++14".to_owned()));
+        if cfg!(windows) {
+            assert!(compile.program().ends_with("cl.exe"));
+            assert!(compile.args().contains(&"/LD".to_owned()));
+            assert!(compile.args().contains(&"/EHsc".to_owned()));
+            assert!(compile.args().contains(&"/link".to_owned()));
+            assert!(compile.args().contains(&"/NOIMPLIB".to_owned()));
+            assert!(compile.args().iter().any(|arg| arg.starts_with("/Fo")));
+            assert!(compile.args().iter().any(|arg| arg.starts_with("/Fe:")));
+        } else {
+            assert_eq!(compile.program(), "c++");
+            assert!(compile.args().contains(&"-std=c++14".to_owned()));
+        }
         assert!(compile.args().iter().any(|arg| arg.ends_with("parser.c")));
         assert!(compile.args().iter().any(|arg| arg.ends_with("scanner.cc")));
     }
 
     #[test]
-    fn extra_highlight_query_can_seed_missing_installed_query_file() {
-        let query_path = std::env::temp_dir().join(format!(
-            "volt-extra-query-{}-{}.scm",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        ));
-        let config =
-            installable_rust_configuration().with_extra_highlight_query("(identifier) @function");
+    fn install_plan_compile_command_uses_windows_msvc_for_c_scanner() {
+        let install_root = TempTestDir::new("install-plan-c-scanner-install");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "zig",
+            ["zig"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-zig.git",
+                ".",
+                "src",
+                "tree-sitter-zig",
+                "tree_sitter_zig",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let plan = registry
+            .prepare_language_install("zig")
+            .expect("plan")
+            .expect("grammar-backed plan");
+        let source_dir = plan.source_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        fs::write(source_dir.join("parser.c"), "/* parser */").expect("write parser.c");
+        fs::write(source_dir.join("scanner.c"), "/* scanner */").expect("write scanner.c");
 
-        must(ensure_installed_highlight_query_path(&config, &query_path));
+        let compile = plan.compile_command().expect("compile command");
 
-        assert!(query_path.exists());
-        assert_eq!(std::fs::read_to_string(&query_path).unwrap_or_default(), "");
-
-        if query_path.exists() {
-            let _ = std::fs::remove_file(&query_path);
+        if cfg!(windows) {
+            assert!(compile.program().ends_with("cl.exe"));
+            assert!(compile.env().iter().any(|(name, _)| name == "PATH"));
+            assert!(compile.args().contains(&"/LD".to_owned()));
+            assert!(compile.args().contains(&"/link".to_owned()));
+            assert!(compile.args().contains(&"/NOIMPLIB".to_owned()));
+            assert!(!compile.args().contains(&"/EHsc".to_owned()));
+        } else {
+            assert_eq!(compile.program(), "cc");
+            assert!(!compile.args().contains(&"-std=c++14".to_owned()));
         }
+        assert!(compile.args().iter().any(|arg| arg.ends_with("parser.c")));
+        assert!(compile.args().iter().any(|arg| arg.ends_with("scanner.c")));
     }
 
     #[test]
-    fn bundled_query_install_flattens_inherited_queries() {
+    fn installed_grammar_language_ids_only_returns_installed_grammar_languages() {
+        let install_root = TempTestDir::new("installed-grammar-language-ids");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(rust_configuration()));
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "zig",
+            ["zig"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-zig.git",
+                ".",
+                "src",
+                "tree-sitter-zig",
+                "tree_sitter_zig",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "tsx",
+            ["tsx"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-typescript.git",
+                ".",
+                "tsx/src",
+                "tree-sitter-tsx",
+                "tree_sitter_tsx",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "zig-alias",
+            ["zig-alias"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-zig.git",
+                ".",
+                "src",
+                "tree-sitter-zig",
+                "tree_sitter_zig",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let zig_library = registry
+            .language("zig")
+            .and_then(LanguageConfiguration::grammar)
+            .expect("zig grammar")
+            .installed_library_path(install_root.path());
+        fs::write(&zig_library, "fake dll").expect("write installed zig marker");
+
+        assert_eq!(
+            registry.installed_grammar_language_ids(),
+            ["zig".to_owned()]
+        );
+    }
+
+    #[test]
+    fn finalize_language_install_removes_compiler_sidecars() {
+        let install_root = TempTestDir::new("finalize-language-install");
+        let mut registry = SyntaxRegistry::with_install_root(install_root.path());
+        must(registry.register(LanguageConfiguration::from_grammar(
+            "zig",
+            ["zig"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-zig.git",
+                ".",
+                "src",
+                "tree-sitter-zig",
+                "tree_sitter_zig",
+            ),
+            [CaptureThemeMapping::new("keyword", "syntax.keyword")],
+        )));
+        let plan = registry
+            .prepare_language_install("zig")
+            .expect("plan")
+            .expect("grammar-backed plan");
+        let library_path = plan.installed_library_path();
+        fs::write(&library_path, "fake dll").expect("write installed zig library");
+        fs::write(library_path.with_extension("exp"), "fake exp").expect("write installed zig exp");
+        fs::write(library_path.with_extension("lib"), "fake lib").expect("write installed zig lib");
+
+        registry
+            .finalize_language_install(&plan)
+            .expect("finalize language install");
+
+        assert!(!library_path.with_extension("exp").exists());
+        assert!(!library_path.with_extension("lib").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_msvc_target_triple_matches_current_architecture() {
+        let expected = match env::consts::ARCH {
+            "aarch64" => "aarch64-pc-windows-msvc",
+            "x86" => "i686-pc-windows-msvc",
+            _ => "x86_64-pc-windows-msvc",
+        };
+
+        assert_eq!(super::windows_msvc_target_triple(), expected);
+    }
+
+    #[test]
+    fn extra_highlight_query_can_supply_missing_bundled_query() {
+        let source = must(optional_query_source(
+            None,
+            "test-lang",
+            "highlights.scm",
+            Some("(identifier) @function"),
+        ));
+
+        assert_eq!(source.as_deref(), Some("(identifier) @function"));
+    }
+
+    #[test]
+    fn bundled_query_resolution_flattens_inherited_queries() {
         let asset_root = TempTestDir::new("query-assets");
-        let install_root = TempTestDir::new("query-install");
         let base_dir = asset_root.path().join("base");
         let child_dir = asset_root.path().join("child");
         fs::create_dir_all(&base_dir).expect("create base query dir");
@@ -4431,29 +4698,116 @@ fn main() {
             [CaptureThemeMapping::new("variable", "syntax.variable")],
         );
 
-        must(install_bundled_queries(
-            &config,
+        let source = must(resolve_bundled_query_source(
             asset_root.path(),
-            install_root.path(),
-        ));
+            config.id(),
+            "highlights.scm",
+            &mut Vec::new(),
+        ))
+        .expect("child query should resolve");
 
-        let installed = fs::read_to_string(
-            config
-                .grammar()
-                .expect("grammar config")
-                .installed_highlight_query_path(install_root.path()),
-        )
-        .expect("read installed query");
-        assert!(installed.contains("(identifier) @variable"));
-        assert!(installed.contains("(string_literal) @string"));
-        assert!(!installed.contains("; inherits:"));
+        assert!(source.contains("(identifier) @variable"));
+        assert!(source.contains("(string_literal) @string"));
+        assert!(!source.contains("; inherits:"));
     }
 
-    /// When both an installed query file and a bundled asset exist, the bundled asset must win.
-    /// This guards against stale installed queries (e.g. the markdown-inline highlights.scm
-    /// written to `%LOCALAPPDATA%\volt\grammars`) shadowing a corrected repo asset.
     #[test]
-    fn bundled_query_asset_wins_over_stale_installed_query() {
+    fn query_asset_root_prefers_workspace_source_over_staged_target_copy() {
+        let workspace_root = TempTestDir::new("query-root-workspace");
+        let staged_root = workspace_root.path().join("target").join("debug");
+
+        fs::create_dir_all(
+            workspace_root
+                .path()
+                .join("crates")
+                .join("volt")
+                .join("assets")
+                .join("grammars")
+                .join("queries"),
+        )
+        .expect("create workspace asset tree");
+        fs::create_dir_all(staged_root.join("assets").join("grammars").join("queries"))
+            .expect("create staged asset tree");
+        fs::write(workspace_root.path().join("Cargo.toml"), "[workspace]\n")
+            .expect("write workspace Cargo.toml");
+
+        let resolved = resolve_query_asset_root_from_roots([
+            staged_root.clone(),
+            workspace_root.path().to_path_buf(),
+        ])
+        .expect("resolve query asset root");
+
+        assert_eq!(
+            resolved,
+            workspace_root
+                .path()
+                .join("crates")
+                .join("volt")
+                .join("assets")
+                .join("grammars")
+                .join("queries")
+        );
+    }
+
+    #[test]
+    fn prepare_install_root_does_not_copy_queries_and_removes_legacy_query_dir() {
+        let asset_root = TempTestDir::new("prepare-flat-query-assets");
+        let install_root = TempTestDir::new("prepare-flat-install");
+        let clone_root = TempTestDir::new("prepare-flat-clone");
+        let lang_id = "child";
+        let asset_dir = asset_root.path().join(lang_id);
+        fs::create_dir_all(&asset_dir).expect("create asset dir");
+        fs::write(asset_dir.join("highlights.scm"), "(identifier) @variable\n")
+            .expect("write highlight query");
+        let legacy_dir = install_root.path().join("tree-sitter-child");
+        fs::create_dir_all(legacy_dir.join("queries")).expect("create legacy query dir");
+        fs::write(
+            legacy_dir.join("queries").join("highlights.scm"),
+            "(identifier) @stale\n",
+        )
+        .expect("write stale installed query");
+        fs::create_dir_all(clone_root.path()).expect("create clone root");
+        let config = LanguageConfiguration::from_grammar(
+            lang_id,
+            ["child"],
+            GrammarSource::new(
+                "https://example.com/tree-sitter-child.git",
+                ".",
+                "src",
+                "tree-sitter-child",
+                "tree_sitter_child",
+            ),
+            [CaptureThemeMapping::new("variable", "syntax.variable")],
+        );
+        let plan = LanguageInstallPlan {
+            config,
+            grammar: GrammarSource::new(
+                "https://example.com/tree-sitter-child.git",
+                ".",
+                "src",
+                "tree-sitter-child",
+                "tree_sitter_child",
+            ),
+            install_root: install_root.path().to_path_buf(),
+            query_asset_root: Some(asset_root.path().to_path_buf()),
+            temp_clone_root: clone_root.path().to_path_buf(),
+        };
+
+        must(plan.prepare_install_root());
+
+        assert!(
+            !legacy_dir.exists(),
+            "legacy per-language query directory should be removed"
+        );
+        assert!(
+            install_root.path().exists(),
+            "flat grammar install root should remain"
+        );
+    }
+
+    /// Query loading only uses bundled assets; stale installed query files are ignored.
+    #[test]
+    fn bundled_query_asset_ignores_stale_installed_query() {
         let asset_root = TempTestDir::new("bundled-wins-asset");
         let install_root = TempTestDir::new("bundled-wins-install");
         let lang_id = "test-lang";
@@ -4478,13 +4832,12 @@ fn main() {
         fs::write(&installed_path, "(identifier) @variable.stale\n")
             .expect("write stale installed highlights");
 
-        // With query_asset_root configured, the bundled asset must be returned.
-        let source = must(read_query_source_preferring_bundled(
-            &installed_path,
+        let source = must(maybe_read_bundled_query_source(
             Some(asset_root.path()),
             lang_id,
             "highlights.scm",
-        ));
+        ))
+        .expect("bundled query should exist");
         assert!(
             source.contains("@variable.bundled"),
             "expected bundled content, got: {source:?}"
@@ -4494,22 +4847,20 @@ fn main() {
             "stale installed content leaked into result: {source:?}"
         );
 
-        // Without a query_asset_root, the installed file is the only source.
-        let fallback = must(read_query_source_preferring_bundled(
-            &installed_path,
+        let fallback = must(maybe_read_bundled_query_source(
             None,
             lang_id,
             "highlights.scm",
         ));
         assert!(
-            fallback.contains("@variable.stale"),
-            "expected installed fallback content, got: {fallback:?}"
+            fallback.is_none(),
+            "installed query files are not fallback sources"
         );
     }
 
-    /// When both an installed optional query and a bundled asset exist, the bundled asset wins.
+    /// Optional query loading only uses bundled assets and extra query text.
     #[test]
-    fn bundled_optional_query_asset_wins_over_stale_installed_query() {
+    fn bundled_optional_query_asset_ignores_stale_installed_query() {
         let asset_root = TempTestDir::new("bundled-opt-asset");
         let install_root = TempTestDir::new("bundled-opt-install");
         let lang_id = "test-lang-opt";
@@ -4530,41 +4881,39 @@ fn main() {
         fs::write(&installed_path, "(block) @indent.stale\n")
             .expect("write stale installed indents");
 
-        let source = must(maybe_read_query_source_preferring_bundled(
-            &installed_path,
+        let source = must(optional_query_source(
             Some(asset_root.path()),
             lang_id,
             "indents.scm",
+            None,
         ));
         assert!(
             source.as_deref().unwrap_or("").contains("@indent.bundled"),
             "expected bundled content, got: {source:?}"
         );
 
-        // When bundled asset is absent, installed file is returned.
+        // When bundled asset is absent, installed files are ignored.
         let absent_asset_root = TempTestDir::new("bundled-opt-absent");
-        let fallback = must(maybe_read_query_source_preferring_bundled(
-            &installed_path,
+        let fallback = must(optional_query_source(
             Some(absent_asset_root.path()),
             lang_id,
             "indents.scm",
+            None,
         ));
         assert!(
-            fallback.as_deref().unwrap_or("").contains("@indent.stale"),
-            "expected installed fallback, got: {fallback:?}"
+            fallback.is_none(),
+            "installed optional query files are not fallback sources"
         );
 
-        // When neither bundled nor installed file exists, returns None.
-        let nonexistent = install_root.path().join("nonexistent.scm");
-        let none_result = must(maybe_read_query_source_preferring_bundled(
-            &nonexistent,
+        let extra = must(optional_query_source(
             Some(absent_asset_root.path()),
             lang_id,
             "indents.scm",
+            Some("(block) @indent.extra"),
         ));
         assert!(
-            none_result.is_none(),
-            "expected None when neither source exists"
+            extra.as_deref().unwrap_or("").contains("@indent.extra"),
+            "extra query should be used when bundled query is absent"
         );
     }
 
@@ -4830,40 +5179,6 @@ fn main() {
             registry.folds_query_for_language("not-registered"),
             Err(SyntaxError::UnknownLanguage(_))
         ));
-    }
-
-    #[test]
-    fn grammar_source_installed_paths_include_new_query_kinds() {
-        let grammar = GrammarSource::new(
-            "https://example.com/tree-sitter-rust.git",
-            ".",
-            "src",
-            "tree-sitter-rust",
-            "tree_sitter_rust",
-        );
-        let install_root = PathBuf::from("volt-grammars");
-
-        assert_eq!(
-            grammar.installed_injections_query_path(&install_root),
-            install_root
-                .join("tree-sitter-rust")
-                .join("queries")
-                .join("injections.scm")
-        );
-        assert_eq!(
-            grammar.installed_locals_query_path(&install_root),
-            install_root
-                .join("tree-sitter-rust")
-                .join("queries")
-                .join("locals.scm")
-        );
-        assert_eq!(
-            grammar.installed_folds_query_path(&install_root),
-            install_root
-                .join("tree-sitter-rust")
-                .join("queries")
-                .join("folds.scm")
-        );
     }
 
     // --- Query predicate evaluation tests ---
@@ -5213,6 +5528,19 @@ fn main() {
             lua_pattern_matches("else", "^else$"),
             "^else$ should match exact 'else'"
         );
+    }
+
+    #[test]
+    fn query_compiler_accepts_vim_case_insensitive_regex_prefix() {
+        let language = rust_language();
+        let query = compile_query_source(
+            &language,
+            "rust",
+            "highlight",
+            r#"((identifier) @function (#match? @function "\\c^main$"))"#,
+        );
+
+        assert!(query.is_ok(), "query failed: {query:?}");
     }
 
     #[test]

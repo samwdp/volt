@@ -1624,6 +1624,7 @@ version = "0.1.0"
 dependencies = [
  "editor-buffer",
  "editor-path",
+ "find-msvc-tools",
  "libloading 0.8.9",
  "tree-sitter",
  "tree-sitter-html",
@@ -6364,26 +6365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-sequel"
-version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-toml-ng"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9adc2c898ae49730e857d75be403da3f92bb81d8e37a2f918a08dd10de5ebb1"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tstr"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6909,8 +6890,6 @@ dependencies = [
  "editor-syntax",
  "editor-theme",
  "toml",
- "tree-sitter-sequel",
- "tree-sitter-toml-ng",
 ]
 
 [[package]]
