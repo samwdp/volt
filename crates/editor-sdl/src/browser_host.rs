@@ -326,6 +326,11 @@ struct DesktopBrowserHostService {
 impl DesktopBrowserHostService {
     fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel();
+        // On Linux the wry `WebContext` is backed by WebKitGTK, which requires GTK to be
+        // initialized before any webkit2gtk type (such as `ApplicationInfo`) is constructed.
+        // Initialize GTK up front so building the `WebContext` below does not panic.
+        #[cfg(target_os = "linux")]
+        let gtk_initialized = gtk::init().is_ok();
         Self {
             disabled_reason: None,
             event_tx,
@@ -333,7 +338,7 @@ impl DesktopBrowserHostService {
             instances: BTreeMap::new(),
             web_context: wry::WebContext::new(None),
             #[cfg(target_os = "linux")]
-            gtk_initialized: false,
+            gtk_initialized,
         }
     }
 

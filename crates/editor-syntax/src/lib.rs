@@ -52,7 +52,6 @@ fn configure_background_command(_command: &mut Command) {
     }
 }
 
-#[cfg(windows)]
 fn windows_msvc_target_triple() -> &'static str {
     match env::consts::ARCH {
         "aarch64" => "aarch64-pc-windows-msvc",
