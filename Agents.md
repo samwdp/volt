@@ -75,8 +75,10 @@ non-obvious runtime caveats, not one-off setup steps.
 
 ### Lint / test caveats on Linux
 - Full gate is `cargo xtask ci` (fmt-check -> check -> clippy `-D warnings` -> test), per README.
-- Known pre-existing Linux failures unrelated to environment setup: several tests hard-code
-  Windows `\` path separators and fail on Linux (the `editor-syntax` `registry_*` filename/glob
-  cases and `volt-user` `picker::tests::buffer_picker_shows_file_name_first_and_keeps_path_search`),
-  and `editor-sdl` has 2 pre-existing warnings (`unused import: env`, `unused_assignments`) that
-  trip clippy's `-D warnings`. The rest of the workspace builds/tests cleanly.
+- `cargo xtask ci` passes end-to-end on Linux (fmt-check, check, clippy `-D warnings`, and the
+  full test suite). Tests are separator-agnostic, so run them from any host.
+- Windows-only code paths (e.g. the MSVC grammar-compile branch in `editor-syntax`, the
+  `#[cfg(windows)]` worktree test in `editor-fs`) can't be exercised on Linux. To at least
+  compile/clippy-check them, cross-check against the Windows target, which needs mingw for the
+  C-backed crates: `rustup target add x86_64-pc-windows-gnu` (+ `gcc-mingw-w64-x86-64`), then
+  e.g. `cargo clippy -p editor-syntax --all-targets --target x86_64-pc-windows-gnu -- -D warnings`.
