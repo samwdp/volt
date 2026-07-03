@@ -342,12 +342,19 @@ fn buffer_picker_label(buffer: &editor_plugin_api::PickerBufferContext) -> Strin
         .path
         .as_ref()
         .into_option()
-        .and_then(|path| {
-            Path::new(path.as_str())
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
+        .and_then(|path| path_file_name(path.as_str()))
         .unwrap_or_else(|| buffer.display_name.to_string())
+}
+
+/// Extracts the final path component, treating both `/` and `\` as separators so
+/// Windows-style buffer paths render a clean file name on every host platform.
+fn path_file_name(path: &str) -> Option<String> {
+    let name = path
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 fn buffer_picker_detail(buffer: &editor_plugin_api::PickerBufferContext) -> String {
