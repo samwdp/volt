@@ -1,6 +1,7 @@
+#[cfg(target_os = "windows")]
+use std::env;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };

@@ -97,6 +97,9 @@ async fn spawn_background_command(
         }
     }
 
+    // `launch_env` carries the refreshed environment into the Windows-only node-manager
+    // retry below; on other platforms the initial value is intentionally never read.
+    #[cfg_attr(not(windows), allow(unused_assignments))]
     let mut launch_env = None;
     let should_retry = matches!(
         &spawn_result,
