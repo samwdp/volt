@@ -957,3 +957,288 @@ pre {
         grid-template-columns: auto auto;
     }
 }
+
+/* ─── Doc hub cards ───────────────────────────────────────────────────────── */
+
+.doc-hub-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.doc-hub-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 100%;
+    padding: 22px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(14px);
+    transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.doc-hub-card:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.doc-hub-card h3 {
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+.doc-hub-card p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.65;
+    font-size: 0.95rem;
+    flex: 1;
+}
+
+.doc-hub-tag {
+    align-self: flex-start;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-cyan);
+    border: 1px solid rgba(0, 232, 255, 0.24);
+    border-radius: 999px;
+    padding: 3px 9px;
+    background: rgba(0, 232, 255, 0.06);
+}
+
+/* ─── Tabs ──────────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 18px 0 0;
+}
+
+.tab-button {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 0.86rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.tab-button:hover,
+.tab-button.is-active {
+    color: var(--text);
+    border-color: rgba(0, 232, 255, 0.34);
+    background: rgba(0, 232, 255, 0.08);
+}
+
+.tab-panel {
+    display: none;
+    margin-top: 16px;
+}
+
+.tab-panel.is-active {
+    display: block;
+}
+
+/* ─── Collapsible reference blocks ──────────────────────────────────────────── */
+
+.collapse-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 16px 0 24px;
+}
+
+.collapse-item {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: rgba(7, 11, 17, 0.55);
+    overflow: hidden;
+}
+
+.collapse-trigger {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.collapse-trigger code {
+    color: var(--accent-green);
+}
+
+.collapse-chevron {
+    color: var(--accent-cyan);
+    transition: transform 180ms ease;
+}
+
+.collapse-item.is-open .collapse-chevron {
+    transform: rotate(90deg);
+}
+
+.collapse-body {
+    display: none;
+    padding: 0 16px 16px;
+    color: var(--text-dim);
+    line-height: 1.7;
+    font-size: 0.95rem;
+}
+
+.collapse-item.is-open .collapse-body {
+    display: block;
+}
+
+.collapse-body pre {
+    margin: 10px 0 0;
+    padding: 14px 16px;
+    overflow-x: auto;
+    background: rgba(7, 11, 17, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-sm);
+}
+
+.collapse-body pre code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.84rem;
+    color: var(--text);
+}
+
+/* ─── Code blocks with copy affordance ──────────────────────────────────────── */
+
+.code-block {
+    position: relative;
+    margin: 14px 0 22px;
+}
+
+.code-block pre {
+    margin: 0;
+    padding: 20px 22px 20px 22px;
+    overflow-x: auto;
+    background: rgba(7, 11, 17, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-md);
+    line-height: 1.65;
+}
+
+.code-block .copy-button {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+}
+
+/* ─── Doc search ────────────────────────────────────────────────────────────── */
+
+.doc-search {
+    position: relative;
+    margin: 0 0 24px;
+}
+
+.doc-search input {
+    width: 100%;
+    padding: 14px 16px 14px 42px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--line);
+    background: rgba(7, 11, 17, 0.72);
+    color: var(--text);
+    outline: none;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.doc-search input:focus {
+    border-color: rgba(0, 232, 255, 0.42);
+    box-shadow: 0 0 0 3px rgba(0, 232, 255, 0.08);
+}
+
+.doc-search::before {
+    content: "⌕";
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-dim);
+    font-size: 1rem;
+    pointer-events: none;
+}
+
+.doc-search-hint {
+    margin: 8px 0 0;
+    font-size: 0.84rem;
+    color: var(--text-dim);
+}
+
+.is-search-hidden {
+    display: none !important;
+}
+
+/* ─── Config map ────────────────────────────────────────────────────────────── */
+
+.config-map {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 18px 0 24px;
+}
+
+.config-map-card {
+    padding: 16px 18px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+    transition: border-color 180ms ease, background 180ms ease;
+}
+
+.config-map-card:hover,
+.config-map-card.is-active {
+    border-color: rgba(0, 232, 255, 0.34);
+    background: rgba(0, 232, 255, 0.06);
+}
+
+.config-map-card strong {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.config-map-card span {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.callout {
+    padding: 16px 18px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(186, 230, 126, 0.24);
+    background: rgba(186, 230, 126, 0.06);
+    color: var(--text-dim);
+    line-height: 1.7;
+    margin: 18px 0;
+}
+
+.callout strong {
+    color: var(--accent-green);
+}
+
+@media (max-width: 900px) {
+    .doc-hub-grid,
+    .config-map {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

@@ -18,6 +18,7 @@ and shows how to edit the builtin plugins that ship with Volt.
   - [Hooks](#hooks)
   - [Keybindings](#keybindings)
   - [Plugin Buffers](#plugin-buffers)
+  - [Plugin Configuration Files](#plugin-configuration-files)
 - [Creating a New Plugin](#creating-a-new-plugin)
   - [Step 1 — Create the Module File](#step-1--create-the-module-file)
   - [Step 2 — Define the Package](#step-2--define-the-package)
@@ -234,6 +235,90 @@ PluginBuffer::new("calculator", vec!["a = 1", "b = 2", "sqrt(a + b)"])
 When the user triggers `plugin.evaluate`, the host calls back into the user
 library's evaluator for the buffer kind and replaces the output section with the
 returned lines.
+
+### Plugin Configuration Files
+
+Several first-party plugins read **runtime YAML configuration** from
+`user/config.yaml` and the child files it references under `user/config/`.
+This lets you change behavior without recompiling the user library. The SDL shell
+watches these files and reloads them while Volt is running.
+
+See the dedicated [Configuration guide](config.html) for the full walkthrough,
+field reference, and hot-reload details.
+
+#### File layout
+
+The master file is a reference table, not a YAML include:
+
+```yaml
+# user/config.yaml
+workspace: config/workspace.yaml
+acp: config/acp.yaml
+ui: config/ui.yaml
+oil: config/oil.yaml
+```
+
+Volt resolves the config root from the executable path (preferring the workspace
+`user/` directory during development) and loads each referenced child file
+through `user/config.rs`.
+
+#### Plugins backed by YAML today
+
+| Plugin module   | Config section   | What you can change at runtime                          |
+|-----------------|------------------|---------------------------------------------------------|
+| `workspace.rs`  | `workspace`      | Project search roots and `max_depth`                    |
+| `acp.rs`        | `acp`            | ACP client list, commands, args, env, cwd               |
+| `picker.rs`     | `ui`             | Picker label truncation strategy                        |
+| `ligatures.rs`  | `ui`             | Font ligature enablement                                |
+| `pane.rs`       | `ui.pane`        | Golden-ratio pane sizing                                |
+| `terminal.rs`   | `ui.terminal`    | Default shell program and args                          |
+| `oil.rs`        | `oil`            | Hidden files, sort mode, trash, oil keybindings         |
+
+Theme colors and shared editor options still live in `user/themes/*.toml` and
+`user/themes/global.toml` and are reloaded separately from the theme watcher.
+
+#### Example — change the terminal shell without rebuilding
+
+Edit `user/config/ui.yaml`:
+
+```yaml
+terminal:
+  program: pwsh
+  args: ["-NoLogo"]
+```
+
+Save the file. The next time `user/terminal.rs` calls `crate::config::load()`,
+the terminal buffer uses the updated shell.
+
+#### Example — change oil defaults and chords
+
+Edit `user/config/oil.yaml`:
+
+```yaml
+defaults:
+  show_hidden: true
+  sort_mode: type-then-name-desc
+  trash_enabled: true
+
+keybindings:
+  open_entry: Space
+  toggle_hidden: "."
+```
+
+`user/oil.rs` maps this section into `OilFeatureSpec` through
+`config.defaults.oil_defaults()` and `config.keybindings.oil_keybindings()`.
+
+#### Adding YAML config to your own plugin
+
+1. Create a child file such as `user/config/myplugin.yaml`.
+2. Add a pointer in `user/config.yaml` (for example `myplugin: config/myplugin.yaml`).
+3. Extend `user/config.rs` with a `Deserialize` section type and load it in `load_from_root`.
+4. Read values from your plugin with `crate::config::load().myplugin`.
+
+Keep YAML parsing centralized in `config.rs` so every plugin shares one schema,
+reload path, and parse-error handling. Package metadata (commands, hooks, and
+keybindings) still requires a rebuild because it is compiled into the user
+shared library.
 
 ---
 
@@ -589,24 +674,16 @@ pub fn package() -> PluginPackage {
 
 ### Changing the Terminal Shell
 
-In `user/terminal.rs`, edit the `default_shell_program()` function:
+Prefer editing `user/config/ui.yaml` so the change applies at runtime:
 
-```rust
-pub fn default_shell_program() -> String {
-    if cfg!(target_os = "windows") {
-        // Change to your preferred Windows shell:
-        "pwsh".to_owned()
-        // "bash".to_owned()
-        // "nu".to_owned()
-    } else {
-        // Change to your preferred Unix shell:
-        env::var("SHELL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "/bin/sh".to_owned())
-    }
-}
+```yaml
+terminal:
+  program: pwsh
+  args: ["-NoLogo"]
 ```
+
+If the configured program is empty, `user/terminal.rs` falls back to the
+platform default shell compiled into the user library.
 
 ### Adding a Build Command for a New Language
 
@@ -629,21 +706,23 @@ pub fn default_build_command(language: &str) -> Option<&'static str> {
 
 ### Modifying Oil Directory Browser Defaults
 
-In `user/oil.rs`, edit the `defaults()` function to change the initial state of
-the directory browser:
+Edit `user/config/oil.yaml` to change defaults and keybindings without
+recompiling:
 
-```rust
-pub fn defaults() -> OilDefaults {
-    OilDefaults {
-        show_hidden: true,       // show dotfiles by default
-        sort_mode: OilSortMode::TypeThenName,
-        trash_enabled: true,     // use trash instead of permanent delete
-    }
-}
+```yaml
+defaults:
+  show_hidden: true
+  sort_mode: type-then-name
+  trash_enabled: true
+
+keybindings:
+  open_entry: Enter
+  prefix: g
+  toggle_hidden: "."
 ```
 
-You can also change keybindings in the `keybindings()` function in the same
-file.
+`user/oil.rs` reads this file through `crate::config::load().oil` when building
+`OilFeatureSpec`.
 
 ### Editing the Statusline
 

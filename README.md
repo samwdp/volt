@@ -38,6 +38,7 @@
 - `crates/editor-plugin-host` - plugin hosting and loading services
 - `user` - compiled user extension library and packages
 - `xtask` - developer automation commands
+- `docs/` - static documentation site (`docs/index.html`) covering architecture, plugins, runtime YAML config, and language setup
 
 ## Developer commands
 

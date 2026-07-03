@@ -45,6 +45,7 @@
             <div class="topbar-actions">
                 <a class="button button-ghost" href="architecture-diagram.html">Open Diagram</a>
                 <a class="button button-ghost" href="user-packages.html">User Packages</a>
+                <a class="button button-ghost" href="config.html">Configuration</a>
                 <a class="button button-ghost" href="language.html">Add a Language</a>
                 <a class="button button-ghost" href="changelog.html">Changelog</a>
                 <a class="button button-primary" href="#commands">Get Started</a>
@@ -70,12 +71,12 @@
 
                     <div class="hero-metrics">
                         <article class="metric-card reveal">
-                            <span class="metric-value">16</span>
-                            <span class="metric-label">workspace crates</span>
+                            <span class="metric-value">18</span>
+                            <span class="metric-label">editor crates</span>
                         </article>
                         <article class="metric-card reveal">
-                            <span class="metric-value">1</span>
-                            <span class="metric-label">compiled user layer</span>
+                            <span class="metric-value">YAML</span>
+                            <span class="metric-label">runtime plugin config</span>
                         </article>
                         <article class="metric-card reveal">
                             <span class="metric-value">3</span>
@@ -146,7 +147,14 @@
                         possible instead of being scattered across the core.
                     </p>
                     <p style="margin-top:14px;">
-                        <a class="text-link" href="user-packages.html">Read the user packages guide &rarr;</a>
+                        Selected plugin settings also load from <code>user/config.yaml</code> at
+                        runtime — workspace roots, ACP clients, terminal defaults, and oil chords
+                        can change without a rebuild.
+                    </p>
+                    <p style="margin-top:14px;">
+                        <a class="text-link" href="user-packages.html">User packages guide &rarr;</a>
+                        &nbsp;·&nbsp;
+                        <a class="text-link" href="config.html">Configuration guide &rarr;</a>
                     </p>
                 </article>
 
@@ -159,6 +167,58 @@
                         shell all have explicit homes.
                     </p>
                 </article>
+            </section>
+
+            <section class="section" id="guides">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Documentation hub</p>
+                        <h2>Pick the guide that matches your task.</h2>
+                    </div>
+                </div>
+
+                <div class="doc-search reveal" data-searchable>
+                    <input type="search" data-doc-search placeholder="Search guides — plugins, config, languages, hooks…" aria-label="Search documentation">
+                    <p class="doc-search-hint" data-doc-search-hint>Filter guides, hooks, and config keys.</p>
+                </div>
+
+                <div class="doc-hub-grid">
+                    <a class="doc-hub-card reveal" href="user-packages.html" data-searchable>
+                        <span class="doc-hub-tag">Plugins</span>
+                        <h3>User Packages</h3>
+                        <p>Create plugins, wire hooks and commands, edit builtins, and understand the compiled user library ABI.</p>
+                    </a>
+
+                    <a class="doc-hub-card reveal" href="config.html" data-searchable>
+                        <span class="doc-hub-tag">Runtime YAML</span>
+                        <h3>Configuration</h3>
+                        <p>Edit <code>user/config.yaml</code> and child files for workspace discovery, ACP, UI defaults, and oil without recompiling.</p>
+                    </a>
+
+                    <a class="doc-hub-card reveal" href="language.html" data-searchable>
+                        <span class="doc-hub-tag">Languages</span>
+                        <h3>Adding a Language</h3>
+                        <p>Register tree-sitter grammars, theme mappings, hook bindings, and optional LSP servers for a new language.</p>
+                    </a>
+
+                    <a class="doc-hub-card reveal" href="architecture-diagram.html" data-searchable>
+                        <span class="doc-hub-tag">Architecture</span>
+                        <h3>System Diagram</h3>
+                        <p>Explore the full runtime topology from the SDL shell through the plugin host to buffers, syntax, and tooling crates.</p>
+                    </a>
+
+                    <a class="doc-hub-card reveal" href="changelog.html" data-searchable>
+                        <span class="doc-hub-tag">History</span>
+                        <h3>Changelog</h3>
+                        <p>Track new packages, rendering changes, language additions, and documentation updates across releases.</p>
+                    </a>
+
+                    <article class="doc-hub-card reveal" data-searchable>
+                        <span class="doc-hub-tag">Customize</span>
+                        <h3>Three customization layers</h3>
+                        <p><strong>Rust modules</strong> in <code>user/*.rs</code> for commands and hooks. <strong>YAML config</strong> for runtime plugin data. <strong>TOML themes</strong> for colors and shared editor options.</p>
+                    </article>
+                </div>
             </section>
 
             <section class="section architecture-section" id="architecture">
@@ -297,6 +357,8 @@
                             <li><code>editor-jobs</code></li>
                             <li><code>editor-terminal</code></li>
                             <li><code>editor-git</code></li>
+                            <li><code>editor-db</code></li>
+                            <li><code>editor-path</code></li>
                         </ul>
                     </article>
 
@@ -413,11 +475,13 @@
                 <p class="sidebar-nav-label">On this page</p>
                 <ul>
                     <li><a href="#overview">Overview</a></li>
+                    <li><a href="#guides">Guides</a></li>
                     <li><a href="#architecture">Architecture</a></li>
                     <li><a href="#crates">Crates</a></li>
                     <li><a href="#workflows">Workflows</a></li>
                     <li><a href="#commands">Commands</a></li>
                     <li><a href="user-packages.html">Packages ↗</a></li>
+                    <li><a href="config.html">Configuration ↗</a></li>
                     <li><a href="language.html">Languages ↗</a></li>
                     <li><a href="changelog.html">Changelog ↗</a></li>
                 </ul>

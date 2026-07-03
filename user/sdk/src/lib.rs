@@ -101,6 +101,7 @@ pub mod oil_hooks {
 /// Hook name constants for the browser buffer.
 pub mod browser_hooks {
     pub const OPEN: &str = "ui.browser.open";
+    pub const OPEN_BUFFER: &str = "ui.browser.open-buffer";
     pub const OPEN_POPUP: &str = "ui.browser.open-popup";
     pub const URL: &str = "ui.browser.url";
     pub const FOCUS_INPUT: &str = "ui.browser.focus-input";

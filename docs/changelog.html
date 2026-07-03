@@ -263,6 +263,7 @@
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="config.html">Configuration</a>
                 <a class="button button-ghost" href="user-packages.html">User Packages</a>
                 <a class="button button-ghost" href="language.html">Add a Language</a>
                 <a class="button button-primary" href="#unreleased">Latest</a>
@@ -320,6 +321,27 @@
                         <div class="cl-section">
                             <p class="cl-section-label">UI &amp; Docs</p>
                             <ul>
+                                <li>
+                                    <strong>Runtime YAML configuration guide.</strong> New
+                                    <code>docs/config.html</code> page documents
+                                    <code>user/config.yaml</code>, child section files, hot reload,
+                                    and how plugins read settings through
+                                    <code>crate::config::load()</code>.
+                                    <span class="cl-tag cl-tag-docs">docs</span>
+                                </li>
+                                <li>
+                                    <strong>Documentation site interactivity.</strong> Guide hub search,
+                                    tabbed config examples, collapsible walkthroughs, and automatic copy
+                                    buttons on code blocks across the docs site.
+                                    <span class="cl-tag cl-tag-docs">docs</span>
+                                </li>
+                                <li>
+                                    <strong>Plugin docs now cover config files.</strong> The user packages
+                                    guide explains YAML-backed settings for workspace, ACP, UI, terminal,
+                                    and oil plugins, with oil/terminal examples preferring config over Rust
+                                    edits.
+                                    <span class="cl-tag cl-tag-docs">docs</span>
+                                </li>
                                 <li>
                                     <strong>Adjusted plugin section bottom spacing</strong> in the docs
                                     for better visual rhythm.

@@ -69,6 +69,14 @@ pub fn package() -> PluginPackage {
             vec![PluginAction::emit_hook(browser_hooks::URL, None::<&str>)],
         ),
         PluginCommand::new(
+            "browser.open-buffer",
+            "Opens the active file in a split browser buffer.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::OPEN_BUFFER,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
             "browser.focus-input",
             "Focuses the browser input section and enters insert mode.",
             vec![PluginAction::emit_hook(
@@ -160,6 +168,12 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "browser.url")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.open-buffer")
         );
     }
 

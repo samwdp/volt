@@ -302,6 +302,7 @@ const DB_HISTORY_BUFFER_NAME: &str = "*db-history*";
 const DB_SNIPPETS_BUFFER_NAME: &str = "*db-snippets*";
 const DB_RESULTS_BUFFER_NAME: &str = "*db-results*";
 const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
+const HOOK_BROWSER_OPEN_BUFFER: &str = browser_hooks::OPEN_BUFFER;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = browser_hooks::FOCUS_INPUT;
@@ -13830,6 +13831,17 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         return FrameOutcome::Continue;
                     }
                 };
+                // Child webviews composite above the SDL canvas, so hide them before we paint
+                // overlays such as the picker or a non-browser popup.
+                if let Err(error) = state.sync_browser_hosts(
+                    canvas.window(),
+                    render_width,
+                    render_height,
+                    cell_width,
+                    line_height as i32,
+                ) {
+                    state.record_shell_error("shell.browser-host", error);
+                }
                 let should_render = last_scene.is_none()
                     || had_events
                     || theme_reload_changed
@@ -13891,15 +13903,6 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 } else {
                     Instant::now()
                 };
-                if let Err(error) = state.sync_browser_hosts(
-                    canvas.window(),
-                    render_width,
-                    render_height,
-                    cell_width,
-                    line_height as i32,
-                ) {
-                    state.record_shell_error("shell.browser-host", error);
-                }
                 if let Some(frame) = typing_frame.take() {
                     state.record_typing_frame(frame.finish(frame_started.elapsed(), presented_at));
                 }
@@ -15283,6 +15286,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_BROWSER_OPEN_BUFFER,
+        "Opens the active file in a split browser buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_BROWSER_OPEN_POPUP,
         "Focuses the browser popup after opening it.",
     )?;
@@ -16579,6 +16587,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             open_browser_buffer_in_split(runtime, None)?;
             Ok(())
         })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_OPEN_BUFFER,
+            "shell.browser-open-buffer",
+            |_, runtime| {
+                open_active_buffer_in_browser_split(runtime)?;
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(

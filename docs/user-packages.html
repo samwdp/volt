@@ -266,6 +266,7 @@
 
             <div class="topbar-actions">
                 <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="config.html">Configuration</a>
                 <a class="button button-ghost" href="language.html">Add a Language</a>
                 <a class="button button-ghost" href="changelog.html">Changelog</a>
                 <a class="button button-primary" href="#creating-a-new-plugin">Get Started</a>
@@ -299,6 +300,7 @@
                     <ul>
                         <li><a href="#architecture-overview">Architecture Overview</a></li>
                         <li><a href="#core-concepts">Core Concepts</a></li>
+                        <li><a href="#plugin-configuration-files">Configuration Files</a></li>
                         <li><a href="#creating-a-new-plugin">Creating a New Plugin</a></li>
                         <li><a href="#complete-plugin-examples">Complete Plugin Examples</a></li>
                         <li><a href="#editing-builtin-plugins">Editing Builtin Plugins</a></li>
@@ -522,6 +524,80 @@ PluginAction::emit_hook("lsp.server-start", Some("rust-analyzer"))</code></pre>
                         user library&#8217;s evaluator for the buffer kind and replaces the output section
                         with the returned lines.
                     </p>
+
+                    <h3 id="plugin-configuration-files" class="reveal">Plugin Configuration Files</h3>
+                    <p class="reveal">
+                        Several first-party plugins read <strong>runtime YAML configuration</strong> from
+                        <code>user/config.yaml</code> and the child files it references under
+                        <code>user/config/</code>. Edit workspace discovery, ACP clients, UI defaults, and
+                        oil behavior without recompiling. The SDL shell reloads these files while Volt is
+                        running.
+                    </p>
+                    <p class="reveal">
+                        See the dedicated <a href="config.html">Configuration guide</a> for field
+                        reference, hot reload, and a walkthrough for adding config to your own plugin.
+                    </p>
+
+                    <h4 class="reveal">Master file layout</h4>
+<pre class="reveal"><code># user/config.yaml
+workspace: config/workspace.yaml
+acp: config/acp.yaml
+ui: config/ui.yaml
+oil: config/oil.yaml</code></pre>
+
+                    <h4 class="reveal">Plugins backed by YAML today</h4>
+                    <table class="reveal" data-searchable>
+                        <thead>
+                            <tr><th>Plugin module</th><th>Section</th><th>Runtime settings</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>workspace.rs</code></td><td><code>workspace</code></td><td>Project search roots and depth</td></tr>
+                            <tr><td><code>acp.rs</code></td><td><code>acp</code></td><td>ACP client commands and args</td></tr>
+                            <tr><td><code>picker.rs</code></td><td><code>ui</code></td><td>Picker truncation strategy</td></tr>
+                            <tr><td><code>terminal.rs</code></td><td><code>ui.terminal</code></td><td>Default shell program and args</td></tr>
+                            <tr><td><code>oil.rs</code></td><td><code>oil</code></td><td>Hidden files, sort mode, trash, chords</td></tr>
+                        </tbody>
+                    </table>
+
+                    <div class="tab-bar reveal" data-tab-group="plugin-config-examples" role="tablist" aria-label="Configuration examples">
+                        <button class="tab-button is-active" type="button" data-tab="terminal" role="tab">Terminal shell</button>
+                        <button class="tab-button" type="button" data-tab="oil" role="tab">Oil defaults</button>
+                        <button class="tab-button" type="button" data-tab="wiring" role="tab">Plugin wiring</button>
+                    </div>
+
+                    <div class="tab-panel is-active" data-tab-panel="terminal" role="tabpanel">
+<pre><code># user/config/ui.yaml
+terminal:
+  program: pwsh
+  args: ["-NoLogo"]</code></pre>
+                        <p>Save the file while Volt is running. The next <code>crate::config::load()</code> call in <code>user/terminal.rs</code> picks up the new shell.</p>
+                    </div>
+
+                    <div class="tab-panel" data-tab-panel="oil" role="tabpanel" hidden>
+<pre><code># user/config/oil.yaml
+defaults:
+  show_hidden: true
+  sort_mode: type-then-name-desc
+  trash_enabled: true
+
+keybindings:
+  open_entry: Space
+  toggle_hidden: "."</code></pre>
+                        <p><code>user/oil.rs</code> maps this into <code>OilFeatureSpec</code> through <code>config.defaults.oil_defaults()</code> and <code>config.keybindings.oil_keybindings()</code>.</p>
+                    </div>
+
+                    <div class="tab-panel" data-tab-panel="wiring" role="tabpanel" hidden>
+<pre><code>// user/oil.rs
+pub fn feature_spec() -&gt; OilFeatureSpec {
+    let config = crate::config::load().oil;
+    OilFeatureSpec {
+        defaults: config.defaults.oil_defaults(),
+        keybindings: config.keybindings.oil_keybindings(),
+        // ...
+    }
+}</code></pre>
+                        <p>To add config for a new plugin, extend <code>user/config.rs</code> with a typed section, point to it from <code>config.yaml</code>, and read it with <code>crate::config::load()</code>.</p>
+                    </div>
                 </section>
 
                 <hr>
@@ -866,21 +942,16 @@ const LEADER_KEY: &amp;str = "Comma";</code></pre>
 }</code></pre>
 
                     <h3 class="reveal">Changing the Terminal Shell</h3>
-                    <p class="reveal">In <code>user/terminal.rs</code>, edit the <code>default_shell_program()</code> function:</p>
-<pre class="reveal"><code>pub fn default_shell_program() -&gt; String {
-    if cfg!(target_os = "windows") {
-        // Change to your preferred Windows shell:
-        "pwsh".to_owned()
-        // "bash".to_owned()
-        // "nu".to_owned()
-    } else {
-        // Change to your preferred Unix shell:
-        env::var("SHELL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "/bin/sh".to_owned())
-    }
-}</code></pre>
+                    <p class="reveal">
+                        Prefer editing <code>user/config/ui.yaml</code> so the change applies at runtime:
+                    </p>
+<pre class="reveal"><code>terminal:
+  program: pwsh
+  args: ["-NoLogo"]</code></pre>
+                    <p class="reveal">
+                        If the configured program is empty, <code>user/terminal.rs</code> falls back to
+                        the platform default shell compiled into the user library.
+                    </p>
 
                     <h3 class="reveal">Adding a Build Command for a New Language</h3>
                     <p class="reveal">
@@ -902,19 +973,21 @@ const LEADER_KEY: &amp;str = "Comma";</code></pre>
 
                     <h3 class="reveal">Modifying Oil Directory Browser Defaults</h3>
                     <p class="reveal">
-                        In <code>user/oil.rs</code>, edit the <code>defaults()</code> function to
-                        change the initial state of the directory browser:
+                        Edit <code>user/config/oil.yaml</code> to change defaults and keybindings without
+                        recompiling:
                     </p>
-<pre class="reveal"><code>pub fn defaults() -&gt; OilDefaults {
-    OilDefaults {
-        show_hidden: true,       // show dotfiles by default
-        sort_mode: OilSortMode::TypeThenName,
-        trash_enabled: true,     // use trash instead of permanent delete
-    }
-}</code></pre>
+<pre class="reveal"><code>defaults:
+  show_hidden: true
+  sort_mode: type-then-name
+  trash_enabled: true
+
+keybindings:
+  open_entry: Enter
+  prefix: g
+  toggle_hidden: "."</code></pre>
                     <p class="reveal">
-                        You can also change keybindings in the <code>keybindings()</code> function in the
-                        same file.
+                        <code>user/oil.rs</code> reads this file through <code>crate::config::load().oil</code>
+                        when building <code>OilFeatureSpec</code>.
                     </p>
 
                     <h3 class="reveal">Editing the Statusline</h3>
@@ -1258,12 +1331,14 @@ cargo test -p volt-user tests::user_library_exports_themes -- --exact</code></pr
                 <ul>
                     <li><a href="#architecture-overview">Architecture</a></li>
                     <li><a href="#core-concepts">Concepts</a></li>
+                    <li><a href="#plugin-configuration-files">Config Files</a></li>
                     <li><a href="#creating-a-new-plugin">Create a Plugin</a></li>
                     <li><a href="#complete-plugin-examples">Examples</a></li>
                     <li><a href="#editing-builtin-plugins">Edit Builtins</a></li>
                     <li><a href="#autocomplete-providers">Autocomplete</a></li>
                     <li><a href="#adding-language-support">Languages</a></li>
                     <li><a href="#building-and-testing">Build &amp; Test</a></li>
+                    <li><a href="config.html">Configuration ↗</a></li>
                     <li><a href="changelog.html">Changelog ↗</a></li>
                 </ul>
             </nav>

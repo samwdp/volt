@@ -87,6 +87,39 @@ pub(super) fn normalize_browser_url(raw_url: &str) -> String {
     format!("https://{trimmed}")
 }
 
+pub(super) fn path_to_file_url(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let mut url = String::from("file://");
+    if !raw.starts_with('/') {
+        url.push('/');
+    }
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'.' | b'_' | b'~') {
+            url.push(char::from(byte));
+        } else {
+            url.push('%');
+            url.push_str(&format!("{byte:02X}"));
+        }
+    }
+    url
+}
+
+pub(super) fn open_active_buffer_in_browser_split(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let Some(path) = shell_buffer(runtime, buffer_id)?.path() else {
+        record_runtime_error(
+            runtime,
+            "browser.open-buffer",
+            "active buffer does not have a file path",
+        );
+        return Ok(());
+    };
+    let url = path_to_file_url(path);
+    open_browser_buffer_in_split(runtime, Some(&url))
+}
+
 pub(super) fn open_detected_browser_url(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let Some(url) = shell_buffer(runtime, buffer_id)
@@ -564,6 +597,12 @@ mod tests {
             browser_display_url(&state),
             Some("https://volt.test/requested")
         );
+    }
+
+    #[test]
+    fn path_to_file_url_encodes_spaces() {
+        let path = std::path::Path::new(r"C:\volt docs\page.html");
+        assert_eq!(path_to_file_url(path), "file:///C:/volt%20docs/page.html");
     }
 }
 

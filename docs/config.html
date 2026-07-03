@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration &#8211; Volt Docs</title>
+    <meta
+        name="description"
+        content="Volt runtime YAML configuration: master config file, child sections, hot reload, and how plugins read settings without recompiling."
+    >
+    <link rel="icon" type="image/x-icon" href="assets/logo.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@400;600;700&amp;family=Orbitron:wght@700;800;900&amp;display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .guide-body { max-width: 880px; margin: 0 auto; }
+        .guide-body h2 {
+            font-family: "Orbitron", sans-serif;
+            font-size: clamp(1.6rem, 3.5vw, 2.4rem);
+            margin: 56px 0 18px;
+            letter-spacing: -0.02em;
+        }
+        .guide-body h3 { font-size: 1.18rem; margin: 36px 0 12px; color: var(--accent-cyan); }
+        .guide-body h4 { font-size: 1rem; margin: 24px 0 8px; color: var(--accent-green); }
+        .guide-body p, .guide-body li { color: var(--text-dim); line-height: 1.8; font-size: 1.02rem; }
+        .guide-body ul, .guide-body ol { padding-left: 22px; margin: 10px 0 18px; }
+        .guide-body li { margin-bottom: 6px; }
+        .guide-body a {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+            text-decoration-color: rgba(0, 232, 255, 0.3);
+            text-underline-offset: 3px;
+        }
+        .guide-body strong { color: var(--text); }
+        .guide-body code {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.9em;
+            padding: 2px 7px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--accent-green);
+        }
+        .guide-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0 22px;
+            font-size: 0.95rem;
+        }
+        .guide-body th {
+            text-align: left;
+            padding: 12px 14px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--accent-cyan);
+            border-bottom: 2px solid rgba(0, 232, 255, 0.22);
+            background: rgba(0, 232, 255, 0.04);
+        }
+        .guide-body td {
+            padding: 10px 14px;
+            color: var(--text-dim);
+            border-bottom: 1px solid var(--line);
+        }
+        .guide-body hr {
+            border: none;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--line-strong), transparent);
+            margin: 48px 0;
+        }
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 232, 255, 0.25);
+            background: rgba(0, 232, 255, 0.06);
+            color: var(--text);
+            font-size: 0.88rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        @media (min-width: 861px) { .toc-card { display: none; } }
+        .toc-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 26px 30px;
+            margin: 28px 0 44px;
+        }
+        .toc-card h2 { font-size: 1.1rem !important; margin: 0 0 14px !important; color: var(--accent-cyan); }
+        .toc-card ul { columns: 2; column-gap: 28px; }
+        .toc-card li { break-inside: avoid; }
+    </style>
+</head>
+<body>
+    <div class="site-shell">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+
+        <header class="topbar topbar--slim">
+            <a class="brand" href="index.html" aria-label="Volt Docs home">
+                <span class="brand-mark">
+                    <img class="brand-logo" src="assets/logo.svg" alt="Volt logo">
+                </span>
+                <span class="brand-copy">
+                    <strong>Volt Docs</strong>
+                    <small>Runtime configuration</small>
+                </span>
+            </a>
+
+            <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="page-sidebar">Menu</button>
+
+            <div class="topbar-actions">
+                <a class="button button-ghost" href="index.html">&#8592; Home</a>
+                <a class="button button-ghost" href="user-packages.html">User Packages</a>
+                <a class="button button-ghost" href="language.html">Add a Language</a>
+                <a class="button button-primary" href="#file-layout">Get Started</a>
+            </div>
+        </header>
+
+        <div class="page-layout">
+        <main id="top">
+            <section class="hero section" style="display:block;">
+                <div class="hero-copy reveal" style="max-width:880px;margin:0 auto;">
+                    <a class="back-link" href="index.html">&#8592; Back to Volt Docs</a>
+                    <p class="eyebrow">Runtime YAML</p>
+                    <h1 style="max-width:none;font-size:clamp(2.2rem,4.6vw,4.4rem);">Configuration</h1>
+                    <p class="hero-text">
+                        Volt loads selected plugin settings from YAML files under <code>user/</code>.
+                        Edit workspace discovery, ACP clients, UI defaults, and oil behavior without
+                        recompiling the user library. The SDL shell watches these files and reloads
+                        them while the editor is running.
+                    </p>
+                </div>
+            </section>
+
+            <div class="guide-body">
+                <nav class="toc-card reveal" aria-label="Table of contents">
+                    <h2>Contents</h2>
+                    <ul>
+                        <li><a href="#overview">Overview</a></li>
+                        <li><a href="#file-layout">File layout</a></li>
+                        <li><a href="#sections">Config sections</a></li>
+                        <li><a href="#hot-reload">Hot reload</a></li>
+                        <li><a href="#plugin-wiring">Plugin wiring</a></li>
+                        <li><a href="#add-config">Add config to a plugin</a></li>
+                    </ul>
+                </nav>
+
+                <div class="doc-search reveal" data-searchable>
+                    <input type="search" data-doc-search placeholder="Search config keys, plugins, or file names…" aria-label="Search configuration guide">
+                    <p class="doc-search-hint" data-doc-search-hint>Filter guides, hooks, and config keys.</p>
+                </div>
+
+                <section id="overview" data-searchable>
+                    <h2 class="reveal">Overview</h2>
+                    <p class="reveal">
+                        The compiled <code>user</code> library still owns package metadata, commands,
+                        hooks, and keybindings. For settings that change often, Volt also supports a
+                        <strong>runtime config layer</strong> implemented in <code>user/config.rs</code>.
+                    </p>
+                    <div class="callout reveal">
+                        <strong>No rebuild required.</strong>
+                        Changes to <code>user/config.yaml</code> and the referenced child files under
+                        <code>user/config/</code> are picked up while Volt is running. Rust modules read
+                        the latest values through <code>crate::config::load()</code>.
+                    </div>
+                    <p class="reveal">
+                        Theme colors and shared editor options still live in
+                        <code>user/themes/*.toml</code> and <code>user/themes/global.toml</code>.
+                        See the <a href="user-packages.html#editing-builtin-plugins">user packages guide</a>
+                        for theme and statusline customization.
+                    </p>
+                </section>
+
+                <hr>
+
+                <section id="file-layout" data-searchable>
+                    <h2 class="reveal">File layout</h2>
+                    <p class="reveal">
+                        The master file is a <strong>reference table</strong>, not a YAML include. Volt
+                        reads <code>user/config.yaml</code>, then loads each child path listed there.
+                    </p>
+<pre class="reveal"><code># user/config.yaml
+workspace: config/workspace.yaml
+acp: config/acp.yaml
+ui: config/ui.yaml
+oil: config/oil.yaml</code></pre>
+                    <p class="reveal">
+                        At startup the host resolves the config root by walking upward from the
+                        executable directory and preferring the workspace <code>user/</code> directory
+                        when a <code>Cargo.toml</code> is found nearby.
+                    </p>
+
+                    <div class="config-map reveal" data-config-map="[data-tab-group='config-sections']">
+                        <article class="config-map-card is-active" data-config-target="workspace" tabindex="0" role="button">
+                            <strong>workspace.yaml</strong>
+                            <span>Project picker search roots and depth limits.</span>
+                        </article>
+                        <article class="config-map-card" data-config-target="acp" tabindex="0" role="button">
+                            <strong>acp.yaml</strong>
+                            <span>Agent Client Protocol executables and launch args.</span>
+                        </article>
+                        <article class="config-map-card" data-config-target="ui" tabindex="0" role="button">
+                            <strong>ui.yaml</strong>
+                            <span>Picker truncation, ligatures, pane layout, terminal shell.</span>
+                        </article>
+                        <article class="config-map-card" data-config-target="oil" tabindex="0" role="button">
+                            <strong>oil.yaml</strong>
+                            <span>Directory browser defaults and keybindings.</span>
+                        </article>
+                    </div>
+                </section>
+
+                <hr>
+
+                <section id="sections" data-searchable>
+                    <h2 class="reveal">Config sections</h2>
+                    <p class="reveal">
+                        Click a card above or use the tabs below to inspect each child file. Every
+                        example matches the repository defaults in <code>user/config/</code>.
+                    </p>
+
+                    <div class="tab-bar reveal" data-tab-group="config-sections" role="tablist" aria-label="Configuration sections">
+                        <button class="tab-button is-active" type="button" data-tab="workspace" role="tab" aria-selected="true">workspace</button>
+                        <button class="tab-button" type="button" data-tab="acp" role="tab" aria-selected="false">acp</button>
+                        <button class="tab-button" type="button" data-tab="ui" role="tab" aria-selected="false">ui</button>
+                        <button class="tab-button" type="button" data-tab="oil" role="tab" aria-selected="false">oil</button>
+                    </div>
+
+                    <div class="tab-panel is-active" data-tab-panel="workspace" role="tabpanel">
+                        <h3>Workspace discovery</h3>
+                        <p>Consumed by <code>user/workspace.rs</code> when building the project picker.</p>
+<pre><code># user/config/workspace.yaml
+project_search_roots:
+  - path: P:\
+    max_depth: 4
+  - path: W:\
+    max_depth: 4
+  - path: C:\Users\sam\
+    max_depth: 4</code></pre>
+                        <p>Paths that do not exist on the current machine are filtered out automatically.</p>
+                    </div>
+
+                    <div class="tab-panel" data-tab-panel="acp" role="tabpanel" hidden>
+                        <h3>ACP clients</h3>
+                        <p>Consumed by <code>user/acp.rs</code> when shaping the agent picker and launching sessions.</p>
+<pre><code># user/config/acp.yaml
+clients:
+  - id: agent
+    label: Cursor Agent(ACP)
+    command: agent
+    args:
+      - acp
+      - --yolo
+  - id: codex
+    label: Codex (ACP)
+    command: codex-acp</code></pre>
+                        <p>Optional fields: <code>env</code> as <code>key</code>/<code>value</code> pairs and <code>cwd</code> for the child process.</p>
+                    </div>
+
+                    <div class="tab-panel" data-tab-panel="ui" role="tabpanel" hidden>
+                        <h3>UI, terminal, and pane defaults</h3>
+                        <p>Read by <code>user/picker.rs</code>, <code>user/ligatures.rs</code>, <code>user/pane.rs</code>, and <code>user/terminal.rs</code>.</p>
+<pre><code># user/config/ui.yaml
+picker_truncate_strategy: auto
+ligatures_enabled: true
+
+pane:
+  golden_ratio: true
+
+terminal:
+  program: nu
+  args: []</code></pre>
+                        <h4>Picker truncation values</h4>
+                        <p><code>end-ellipsis</code>, <code>start-ellipsis</code>, <code>middle-ellipsis</code>, <code>shrink-directories</code>, <code>shrink-all</code>, <code>file-name</code>, <code>file-name-with-parent</code>, <code>parent-initial-file-name</code>, <code>shrink-leading-keep-tail</code>, <code>full</code>, <code>auto</code></p>
+                    </div>
+
+                    <div class="tab-panel" data-tab-panel="oil" role="tabpanel" hidden>
+                        <h3>Oil directory browser</h3>
+                        <p>Consumed by <code>user/oil.rs</code> through <code>feature_spec()</code>.</p>
+<pre><code># user/config/oil.yaml
+defaults:
+  show_hidden: false
+  sort_mode: type-then-name
+  trash_enabled: false
+
+keybindings:
+  open_entry: Enter
+  open_vertical_split: Ctrl+\\
+  prefix: g
+  toggle_hidden: "."</code></pre>
+                        <p>Sort modes: <code>type-then-name</code> or <code>type-then-name-desc</code>. All oil chords use the same canonical <code>Ctrl+</code> prefix format as package keybindings.</p>
+                    </div>
+
+                    <h3 class="reveal" style="margin-top:40px;">Plugins backed by YAML today</h3>
+                    <table class="reveal" data-searchable>
+                        <thead>
+                            <tr><th>Plugin module</th><th>Config section</th><th>What changes at runtime</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><code>workspace.rs</code></td><td><code>workspace</code></td><td>Project search roots and depth</td></tr>
+                            <tr><td><code>acp.rs</code></td><td><code>acp</code></td><td>ACP client list and launch commands</td></tr>
+                            <tr><td><code>picker.rs</code></td><td><code>ui</code></td><td>Picker label truncation strategy</td></tr>
+                            <tr><td><code>ligatures.rs</code></td><td><code>ui</code></td><td>Font ligature enablement</td></tr>
+                            <tr><td><code>pane.rs</code></td><td><code>ui.pane</code></td><td>Golden-ratio split sizing</td></tr>
+                            <tr><td><code>terminal.rs</code></td><td><code>ui.terminal</code></td><td>Default shell program and args</td></tr>
+                            <tr><td><code>oil.rs</code></td><td><code>oil</code></td><td>Hidden files, sort mode, trash, chords</td></tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <hr>
+
+                <section id="hot-reload" data-searchable>
+                    <h2 class="reveal">Hot reload</h2>
+                    <p class="reveal">
+                        The SDL shell fingerprints <code>user/config.yaml</code> and every referenced
+                        child file on a short polling interval. When a file changes on disk, the next
+                        frame marks the config stale and plugin modules see the updated values the
+                        next time they call <code>crate::config::load()</code>.
+                    </p>
+                    <p class="reveal">
+                        Packaged builds copy the <code>user/</code> tree next to the executable, so
+                        edit the staged <code>user/config/</code> directory beside <code>volt</code>
+                        when you are not running from a development checkout.
+                    </p>
+                </section>
+
+                <hr>
+
+                <section id="plugin-wiring" data-searchable>
+                    <h2 class="reveal">How plugins read config</h2>
+                    <p class="reveal">
+                        First-party plugins do not parse YAML directly. They call the shared loader and
+                        map typed sections into SDK exports:
+                    </p>
+<pre class="reveal"><code>// user/oil.rs
+pub fn feature_spec() -&gt; OilFeatureSpec {
+    let config = crate::config::load().oil;
+    OilFeatureSpec {
+        defaults: config.defaults.oil_defaults(),
+        keybindings: config.keybindings.oil_keybindings(),
+        // ...
+    }
+}</code></pre>
+<pre class="reveal"><code>// user/terminal.rs
+pub fn default_shell_program() -&gt; String {
+    let terminal = crate::config::load().ui.terminal;
+    if terminal.program.trim().is_empty() {
+        default_shell_program_fallback()
+    } else {
+        terminal.program
+    }
+}</code></pre>
+                </section>
+
+                <hr>
+
+                <section id="add-config" data-searchable>
+                    <h2 class="reveal">Add config to your plugin</h2>
+                    <p class="reveal">
+                        To expose YAML-backed settings for a new or existing plugin, extend the shared
+                        loader in <code>user/config.rs</code> and read it from your module.
+                    </p>
+
+                    <div class="collapse-list reveal">
+                        <article class="collapse-item is-open" data-collapse>
+                            <button class="collapse-trigger" type="button" data-collapse-trigger aria-expanded="true">
+                                <span>1. Add a child file and master reference</span>
+                                <span class="collapse-chevron">&#8250;</span>
+                            </button>
+                            <div class="collapse-body" data-collapse-body>
+                                <p>Create <code>user/config/myplugin.yaml</code> and add a pointer in the master file:</p>
+<pre><code># user/config.yaml
+myplugin: config/myplugin.yaml</code></pre>
+                            </div>
+                        </article>
+
+                        <article class="collapse-item" data-collapse>
+                            <button class="collapse-trigger" type="button" data-collapse-trigger aria-expanded="false">
+                                <span>2. Deserialize the section in <code>config.rs</code></span>
+                                <span class="collapse-chevron">&#8250;</span>
+                            </button>
+                            <div class="collapse-body" data-collapse-body hidden>
+<pre><code>#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct MyPluginSection {
+    pub greeting: String,
+}
+
+// In MasterConfig:
+myplugin: Option&lt;String&gt;,
+
+// In load_from_root:
+if let Some(path) = master.myplugin.as_deref() {
+    config.myplugin = read_section::&lt;MyPluginSection&gt;(root_dir, path)
+        .unwrap_or_default();
+}</code></pre>
+                            </div>
+                        </article>
+
+                        <article class="collapse-item" data-collapse>
+                            <button class="collapse-trigger" type="button" data-collapse-trigger aria-expanded="false">
+                                <span>3. Read it from the plugin module</span>
+                                <span class="collapse-chevron">&#8250;</span>
+                            </button>
+                            <div class="collapse-body" data-collapse-body hidden>
+<pre><code>pub fn greeting_message() -&gt; String {
+    crate::config::load().myplugin.greeting
+}</code></pre>
+                                <p>Use the value when building commands, feature specs, or exported SDK types. Keep parsing in <code>config.rs</code> so every plugin shares one schema and reload path.</p>
+                            </div>
+                        </article>
+                    </div>
+
+                    <p class="reveal">
+                        Commands, hooks, and keybindings still require a rebuild because they are
+                        compiled into the user shared library. YAML is for <strong>data</strong> that
+                        should change quickly: launch commands, search roots, truncation modes, and
+                        feature defaults.
+                    </p>
+                </section>
+            </div>
+        </main>
+
+        <aside class="page-sidebar" id="page-sidebar" aria-label="Page navigation">
+            <nav class="sidebar-nav" aria-label="On this page">
+                <p class="sidebar-nav-label">On this page</p>
+                <ul>
+                    <li><a href="#overview">Overview</a></li>
+                    <li><a href="#file-layout">File layout</a></li>
+                    <li><a href="#sections">Sections</a></li>
+                    <li><a href="#hot-reload">Hot reload</a></li>
+                    <li><a href="#plugin-wiring">Plugin wiring</a></li>
+                    <li><a href="#add-config">Add config</a></li>
+                    <li><a href="user-packages.html">Packages ↗</a></li>
+                </ul>
+            </nav>
+        </aside>
+        </div>
+
+        <footer class="site-footer">
+            <p><strong>Volt</strong> runtime config keeps plugin data editable without losing the compiled package model.</p>
+            <a href="#top">Back to top</a>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

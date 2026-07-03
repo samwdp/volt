@@ -13250,6 +13250,83 @@ fn browser_url_command_opens_split_browser_with_detected_url() -> Result<(), Str
 }
 
 #[test]
+fn browser_open_buffer_command_opens_split_with_file_url() -> Result<(), String> {
+    let root = unique_temp_dir("browser-open-buffer");
+    let html_path = root.join("page.html");
+    std::fs::write(&html_path, "<html><body>preview</body></html>")
+        .map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer.text = TextBuffer::from_text("<html><body>preview</body></html>");
+        buffer.text.set_path(html_path.clone());
+    }
+
+    open_active_buffer_in_browser_split(&mut state.runtime)?;
+
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.pane_count(), 2);
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser split buffer missing".to_owned())?;
+    assert!(buffer_is_browser(&buffer.kind));
+    let expected_url = path_to_file_url(&html_path);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .and_then(|state| state.requested_url.as_deref()),
+        Some(expected_url.as_str())
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn browser_open_buffer_command_uses_existing_split_pane() -> Result<(), String> {
+    let root = unique_temp_dir("browser-open-buffer-split");
+    let html_path = root.join("preview.html");
+    std::fs::write(&html_path, "<html></html>").map_err(|error| error.to_string())?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let source_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer.text = TextBuffer::from_text("<html></html>");
+        buffer.text.set_path(html_path.clone());
+    }
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 2);
+    focus_test_buffer(&mut state, source_buffer_id)?;
+
+    open_active_buffer_in_browser_split(&mut state.runtime)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.pane_count(), 2);
+    let browser_buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = ui
+        .buffer(browser_buffer_id)
+        .ok_or_else(|| "browser buffer missing".to_owned())?;
+    assert!(buffer_is_browser(&buffer.kind));
+    assert!(
+        ui.panes()
+            .is_some_and(|panes| panes.iter().any(|pane| pane.buffer_id == source_buffer_id)),
+        "source file buffer should remain open in the other pane"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn sync_active_browser_buffer_enters_insert_mode() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let workspace_id = state
