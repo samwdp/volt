@@ -30939,7 +30939,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => Vec::new(),
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => {
-                user_library.git_commit_template()
+                user_library.git_commit_template(&editor_git::GitStatusSnapshot::default())
             }
             BufferKind::File => vec![
                 format!("{name} is a file-backed buffer placeholder."),

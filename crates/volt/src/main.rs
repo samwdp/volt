@@ -348,8 +348,8 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.git_status_sections()(snapshot.clone().into()).into()
     }
 
-    fn git_commit_template(&self) -> Vec<String> {
-        self.module.git_commit_template()()
+    fn git_commit_template(&self, snapshot: &editor_git::GitStatusSnapshot) -> Vec<String> {
+        self.module.git_commit_template()(snapshot.clone().into())
             .into_iter()
             .map(|line| line.into_string())
             .collect()

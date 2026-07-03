@@ -1398,7 +1398,7 @@ pub trait UserLibrary: Send + Sync {
     fn git_status_sections(&self, _snapshot: &GitStatusSnapshot) -> SectionTree {
         SectionTree::default()
     }
-    fn git_commit_template(&self) -> Vec<String> {
+    fn git_commit_template(&self, _snapshot: &GitStatusSnapshot) -> Vec<String> {
         Vec::new()
     }
     fn git_prefix_for_chord(&self, _chord: &str) -> Option<GitStatusPrefix> {

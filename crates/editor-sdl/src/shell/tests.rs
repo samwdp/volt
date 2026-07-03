@@ -359,7 +359,7 @@ impl UserLibrary for HeaderlineTestUserLibrary {
         editor_core::SectionTree::default()
     }
 
-    fn git_commit_template(&self) -> Vec<String> {
+    fn git_commit_template(&self, _snapshot: &editor_git::GitStatusSnapshot) -> Vec<String> {
         Vec::new()
     }
 

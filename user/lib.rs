@@ -374,8 +374,8 @@ impl UserLibrary for UserLibraryImpl {
         git::status_sections(snapshot)
     }
 
-    fn git_commit_template(&self) -> Vec<String> {
-        git::commit_buffer_template()
+    fn git_commit_template(&self, snapshot: &editor_git::GitStatusSnapshot) -> Vec<String> {
+        git::commit_buffer_template(snapshot)
     }
 
     fn git_prefix_for_chord(&self, chord: &str) -> Option<GitStatusPrefix> {
@@ -738,9 +738,9 @@ extern "C" fn exported_git_status_sections(snapshot: AbiGitStatusSnapshot) -> Ab
     UserLibraryImpl.git_status_sections(&snapshot.into()).into()
 }
 
-extern "C" fn exported_git_commit_template() -> RVec<RString> {
+extern "C" fn exported_git_commit_template(snapshot: AbiGitStatusSnapshot) -> RVec<RString> {
     UserLibraryImpl
-        .git_commit_template()
+        .git_commit_template(&snapshot.into())
         .into_iter()
         .map(Into::into)
         .collect::<Vec<RString>>()

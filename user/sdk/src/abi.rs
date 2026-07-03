@@ -2316,7 +2316,7 @@ pub struct UserLibraryModule {
     ) -> AbiSectionTree,
     pub oil_strip_entry_icon_prefix: extern "C" fn(RString) -> RString,
     pub git_status_sections: extern "C" fn(AbiGitStatusSnapshot) -> AbiSectionTree,
-    pub git_commit_template: extern "C" fn() -> RVec<RString>,
+    pub git_commit_template: extern "C" fn(AbiGitStatusSnapshot) -> RVec<RString>,
     pub git_prefix_for_chord: extern "C" fn(RString) -> ROption<AbiGitStatusPrefix>,
     pub git_command_for_chord:
         extern "C" fn(ROption<AbiGitStatusPrefix>, RString) -> ROption<RStr<'static>>,

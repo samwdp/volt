@@ -997,11 +997,84 @@ pub fn status_sections(snapshot: &GitStatusSnapshot) -> SectionTree {
 }
 
 /// Returns the default commit buffer template.
-pub fn commit_buffer_template() -> Vec<String> {
-    vec![
-        "# Write the commit message below. Lines starting with # are ignored.".to_owned(),
-        "".to_owned(),
-    ]
+pub fn commit_buffer_template(snapshot: &GitStatusSnapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(
+        "# Please enter the commit message for your changes. Lines starting with '#' will be ignored, and an empty message aborts the commit."
+            .to_owned(),
+    );
+    lines.push("#".to_owned());
+
+    if let Some(branch) = snapshot.branch() {
+        lines.push(format!("# On branch {branch}"));
+    }
+
+    if snapshot.head().is_some() {
+        if let Some(upstream) = snapshot.upstream() {
+            let ahead = snapshot.ahead();
+            let behind = snapshot.behind();
+            match (ahead, behind) {
+                (0, 0) => {
+                    lines.push(format!("# Your branch is up to date with '{upstream}'."));
+                }
+                (ahead, 0) => {
+                    lines.push(format!(
+                        "# Your branch is ahead of '{upstream}' by {ahead} {}.",
+                        commit_count_label(ahead)
+                    ));
+                }
+                (0, behind) => {
+                    lines.push(format!(
+                        "# Your branch is behind '{upstream}' by {behind} {}.",
+                        commit_count_label(behind)
+                    ));
+                }
+                (ahead, behind) => {
+                    lines.push(format!(
+                        "# Your branch and '{upstream}' have diverged, and have {ahead} and {behind} different commits each, respectively."
+                    ));
+                }
+            }
+        }
+    } else {
+        lines.push("#".to_owned());
+        lines.push("# Initial commit".to_owned());
+    }
+
+    lines.push("#".to_owned());
+    lines.push("# Changes to be committed:".to_owned());
+    if snapshot.staged().is_empty() {
+        lines.push("#\t(use \"git restore --staged <file>...\" to unstage)".to_owned());
+        lines.push("#\t(no changes added to commit)".to_owned());
+    } else {
+        let mut staged = snapshot.staged().to_vec();
+        staged.sort_by(|left, right| left.path().cmp(right.path()));
+        for entry in staged {
+            lines.push(format!(
+                "#\t{}:   {}",
+                staged_change_description(entry.index_status()),
+                entry.path()
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines
+}
+
+fn commit_count_label(count: usize) -> &'static str {
+    if count == 1 { "commit" } else { "commits" }
+}
+
+fn staged_change_description(code: char) -> &'static str {
+    match code {
+        'A' => "new file",
+        'C' => "copied",
+        'D' => "deleted",
+        'M' => "modified",
+        'R' => "renamed",
+        'T' => "typechange",
+        _ => "modified",
+    }
 }
 
 fn status_header_section(snapshot: &GitStatusSnapshot) -> Section {
@@ -1527,5 +1600,64 @@ mod tests {
         }
         assert!(ids.contains(&SECTION_UNPUSHED));
         assert!(!ids.contains(&SECTION_RECENT));
+    }
+
+    #[test]
+    fn commit_buffer_template_matches_git_commit_message_format() {
+        let snapshot = GitStatusSnapshot::default()
+            .with_head(Some(log_entry("abc1234", "seed")))
+            .with_upstreams(Some("origin/master".to_owned()), None)
+            .with_status(editor_git::RepositoryStatus::new(
+                Some("master".to_owned()),
+                0,
+                0,
+                vec![
+                    StatusEntry::new("Cargo.lock", 'M', ' '),
+                    StatusEntry::new("user/config.rs", 'A', ' '),
+                    StatusEntry::new("bold.png", 'D', ' '),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ));
+        let lines = commit_buffer_template(&snapshot);
+        assert!(lines[0].contains("Please enter the commit message"));
+        assert!(lines.iter().any(|line| line == "# On branch master"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line == "# Your branch is up to date with 'origin/master'." })
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "# Changes to be committed:")
+        );
+        assert!(lines.iter().any(|line| line == "#\tmodified:   Cargo.lock"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "#\tnew file:   user/config.rs")
+        );
+        assert!(lines.iter().any(|line| line == "#\tdeleted:   bold.png"));
+        assert_eq!(lines.last().map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn commit_buffer_template_shows_initial_commit_without_head() {
+        let snapshot = GitStatusSnapshot::default().with_status(editor_git::RepositoryStatus::new(
+            Some("master".to_owned()),
+            0,
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let lines = commit_buffer_template(&snapshot);
+        assert!(lines.iter().any(|line| line == "# Initial commit"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "#\t(no changes added to commit)")
+        );
     }
 }

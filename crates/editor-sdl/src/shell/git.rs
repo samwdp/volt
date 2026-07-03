@@ -898,14 +898,16 @@ pub(super) fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), 
             )
             .map_err(|error| error.to_string())?
     };
+    let root = git_root(runtime)?;
+    let snapshot = git_status_snapshot(runtime, &root)?;
+    let user_library = shell_user_library(runtime);
+    let template = user_library.git_commit_template(&snapshot);
     let buffer = runtime
         .model()
         .workspace(workspace_id)
         .map_err(|error| error.to_string())?
         .buffer(buffer_id)
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
-    let template = shell_user_library(runtime).git_commit_template();
-    let user_library = shell_user_library(runtime);
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, template, &*user_library);
     shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
