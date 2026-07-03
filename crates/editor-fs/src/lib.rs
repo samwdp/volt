@@ -632,7 +632,14 @@ mod tests {
             .find(|project| project.root() == worktree)
             .expect("worktree should be discovered");
         assert_eq!(worktree_project.repository_name(), "repo-store");
-        assert_eq!(worktree_project.repository_root(), repo);
+        // The worktree `.git` reference is written with a canonicalized (long-form) path, so
+        // the resolved repository root can differ from `repo` purely by 8.3 short-name vs
+        // long-name (e.g. `RUNNER~1` vs `runneradmin`) on some Windows hosts. Compare the
+        // canonicalized forms so the assertion is stable regardless of short-name expansion.
+        assert_eq!(
+            worktree_project.repository_root().canonicalize()?,
+            repo.canonicalize()?,
+        );
         assert_eq!(
             worktree_project.worktree_parent_name().as_deref(),
             Some("project")
