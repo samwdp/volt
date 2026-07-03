@@ -75,7 +75,8 @@ non-obvious runtime caveats, not one-off setup steps.
 
 ### Lint / test caveats on Linux
 - Full gate is `cargo xtask ci` (fmt-check -> check -> clippy `-D warnings` -> test), per README.
-- Known pre-existing Linux failures unrelated to environment setup: 3 `editor-syntax` tests
-  (`registry_*` filename/glob cases) assume Windows `\` path separators and fail on Linux, and
-  `editor-sdl` has 2 pre-existing warnings (`unused import: env`, `unused_assignments`) that trip
-  clippy's `-D warnings`. The rest of the workspace builds/tests cleanly.
+- Known pre-existing Linux failures unrelated to environment setup: several tests hard-code
+  Windows `\` path separators and fail on Linux (the `editor-syntax` `registry_*` filename/glob
+  cases and `volt-user` `picker::tests::buffer_picker_shows_file_name_first_and_keeps_path_search`),
+  and `editor-sdl` has 2 pre-existing warnings (`unused import: env`, `unused_assignments`) that
+  trip clippy's `-D warnings`. The rest of the workspace builds/tests cleanly.
