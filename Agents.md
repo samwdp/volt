@@ -46,3 +46,39 @@ Rules:
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
 - For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
 - After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+
+## Cursor Cloud specific instructions
+
+These notes are for cloud agents running in the pre-provisioned VM (system libs, the Rust
+toolchain, and `cargo`-fetched dependencies are already baked into the snapshot). They capture
+non-obvious runtime caveats, not one-off setup steps.
+
+### Toolchain / build
+- Volt needs Rust **stable >= 1.91** (edition 2024). The snapshot ships a recent stable
+  toolchain; if a fresh VM ever regresses to an older stable, run `rustup default stable`.
+- Linux native libraries (GTK3, WebKit2GTK 4.1, SDL/X11/mesa/audio) are required and already
+  installed. If `pkg-config` errors reappear, reinstall the exact package set from
+  `.github/workflows/ci.yml` (documented in `README.md` under "Linux native dependencies").
+
+### Running the GUI (non-obvious)
+- Volt is a native SDL3 desktop app, so it needs a display. Use the VNC desktop on
+  `DISPLAY=:1` (this is what the Cursor Desktop pane and screen recording capture), or a headless
+  `Xvfb` display. There is **no GPU**, so export `LIBGL_ALWAYS_SOFTWARE=1` and set a writable
+  `XDG_RUNTIME_DIR` (e.g. `/tmp/xdg-runtime`, `chmod 700`).
+- Startup eagerly constructs the embedded browser host (WebKitGTK via `wry`), so even
+  `--shell-hidden` requires a valid display + working GTK; it will not run purely headless.
+- Run the editor: `DISPLAY=:1 XDG_RUNTIME_DIR=/tmp/xdg-runtime LIBGL_ALWAYS_SOFTWARE=1 cargo run -p volt`.
+- Headless one-frame smoke test (still needs the display/GTK above): `cargo run -p volt -- --shell-hidden`.
+- `--bootstrap-demo` tries to highlight Rust and fails with `GrammarNotInstalled` unless the
+  tree-sitter Rust grammar has been installed under `~/.local/share/volt/grammars` (network clone
+  + C compile). This is not required for the SDL shell.
+
+### Lint / test caveats on Linux
+- Full gate is `cargo xtask ci` (fmt-check -> check -> clippy `-D warnings` -> test), per README.
+- `cargo xtask ci` passes end-to-end on Linux (fmt-check, check, clippy `-D warnings`, and the
+  full test suite). Tests are separator-agnostic, so run them from any host.
+- Windows-only code paths (e.g. the MSVC grammar-compile branch in `editor-syntax`, the
+  `#[cfg(windows)]` worktree test in `editor-fs`) can't be exercised on Linux. To at least
+  compile/clippy-check them, cross-check against the Windows target, which needs mingw for the
+  C-backed crates: `rustup target add x86_64-pc-windows-gnu` (+ `gcc-mingw-w64-x86-64`), then
+  e.g. `cargo clippy -p editor-syntax --all-targets --target x86_64-pc-windows-gnu -- -D warnings`.

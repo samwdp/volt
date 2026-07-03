@@ -224,6 +224,7 @@ impl InstallCommandSpec {
         }
     }
 
+    #[cfg(windows)]
     fn with_env<I, K, V>(mut self, env: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -410,7 +411,8 @@ impl LanguageInstallPlan {
         let scanner_c = source_dir.join("scanner.c");
         let scanner_cpp = source_dir.join("scanner.cc");
         let output_path = self.grammar.installed_library_path(&self.install_root);
-        if cfg!(windows) {
+        #[cfg(windows)]
+        {
             let target = windows_msvc_target_triple();
             let compiler =
                 find_msvc_tools::find_tool(target, "cl.exe").ok_or_else(|| SyntaxError::Io {
@@ -449,41 +451,44 @@ impl LanguageInstallPlan {
             }
             args.push(format!("/Fe:{}", output_path.display()));
             args.extend(["/link".to_owned(), "/NOIMPLIB".to_owned()]);
-            return Ok(InstallCommandSpec::new(
+            Ok(InstallCommandSpec::new(
                 format!("{} {}", program, args.join(" ")),
                 program,
                 args,
                 self.grammar_dir(),
             )
-            .with_env(env));
+            .with_env(env))
         }
-        let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
-        let mut args = Vec::new();
-        if cfg!(target_os = "macos") {
-            args.extend(["-fPIC".to_owned(), "-dynamiclib".to_owned()]);
-        } else {
-            args.extend(["-fPIC".to_owned(), "-shared".to_owned()]);
+        #[cfg(not(windows))]
+        {
+            let compiler = if scanner_cpp.exists() { "c++" } else { "cc" };
+            let mut args = Vec::new();
+            if cfg!(target_os = "macos") {
+                args.extend(["-fPIC".to_owned(), "-dynamiclib".to_owned()]);
+            } else {
+                args.extend(["-fPIC".to_owned(), "-shared".to_owned()]);
+            }
+            if scanner_cpp.exists() {
+                args.push("-std=c++14".to_owned());
+            }
+            args.push(parser_path.display().to_string());
+            if scanner_c.exists() {
+                args.push(scanner_c.display().to_string());
+            }
+            if scanner_cpp.exists() {
+                args.push(scanner_cpp.display().to_string());
+            }
+            args.push("-I".to_owned());
+            args.push(source_dir.display().to_string());
+            args.push("-o".to_owned());
+            args.push(output_path.display().to_string());
+            Ok(InstallCommandSpec::new(
+                format!("{compiler} {}", args.join(" ")),
+                compiler,
+                args,
+                self.grammar_dir(),
+            ))
         }
-        if scanner_cpp.exists() {
-            args.push("-std=c++14".to_owned());
-        }
-        args.push(parser_path.display().to_string());
-        if scanner_c.exists() {
-            args.push(scanner_c.display().to_string());
-        }
-        if scanner_cpp.exists() {
-            args.push(scanner_cpp.display().to_string());
-        }
-        args.push("-I".to_owned());
-        args.push(source_dir.display().to_string());
-        args.push("-o".to_owned());
-        args.push(output_path.display().to_string());
-        Ok(InstallCommandSpec::new(
-            format!("{compiler} {}", args.join(" ")),
-            compiler,
-            args,
-            self.grammar_dir(),
-        ))
     }
 }
 
@@ -3931,7 +3936,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .language_for_path("src\\main.rs")
+                .language_for_path("src/main.rs")
                 .map(|language| language.id()),
             Some("rust")
         );
@@ -3962,19 +3967,19 @@ mod tests {
 
         assert_eq!(
             registry
-                .language_for_path("project\\CMakeLists.txt")
+                .language_for_path("project/CMakeLists.txt")
                 .map(LanguageConfiguration::id),
             Some("cmake")
         );
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(LanguageConfiguration::id),
             Some("dockerfile")
         );
         assert_eq!(
             registry
-                .language_for_path("notes\\guide.txt")
+                .language_for_path("notes/guide.txt")
                 .map(LanguageConfiguration::id),
             Some("plaintext")
         );
@@ -3993,7 +3998,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(|language| language.id()),
             Some("dockerfile")
         );
@@ -4007,7 +4012,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(|language| language.id()),
             Some("dockerfile")
         );
