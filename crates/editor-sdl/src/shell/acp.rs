@@ -10,20 +10,20 @@ use std::{
 
 use agent_client_protocol::{Agent, Client, ClientSideConnection};
 use agent_client_protocol::{
-    AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
+    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
     CreateTerminalResponse, Error, FileSystemCapabilities, Implementation, InitializeRequest,
-    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, ModelId,
-    ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
-    ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionMode,
-    SessionModeId, SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
-    ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, Meta,
+    ModelId, ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, Plan, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionInfo,
+    SessionInfoUpdate, SessionMode, SessionModeId, SessionModeState, SessionModelState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use async_trait::async_trait;
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
@@ -3463,11 +3463,18 @@ async fn connect_acp_client(
         }
     });
 
+    let capability_meta = Meta::from_iter([
+        ("terminal_output".into(), true.into()),
+        ("terminal-auth".into(), true.into()),
+        ("parameterizedModelPicker".into(), true.into()),
+    ]);
     let capabilities = ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()
             .read_text_file(true)
             .write_text_file(true))
-        .terminal(true);
+        .terminal(true)
+        .auth(AuthCapabilities::new().terminal(true))
+        .meta(capability_meta);
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST)
         .client_capabilities(capabilities)
         .client_info(

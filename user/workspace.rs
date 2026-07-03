@@ -1,10 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
 use editor_git::list_repository_files;
 use editor_plugin_api::{
-    PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PluginAction,
-    PluginCommand, PluginPackage,
+    PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
+    PluginAction, PluginCommand, PluginPackage,
 };
 
 /// Returns the metadata for the workspace management package.
@@ -22,7 +26,7 @@ pub fn package() -> PluginPackage {
         ),
         picker_command(
             "workspace.switch",
-            "Switches to one of the open workspaces.",
+            "Switches to an open workspace or opens a discovered project.",
             "workspace.switch",
         ),
         picker_command(
@@ -78,25 +82,22 @@ pub fn package() -> PluginPackage {
     ])
 }
 
-/// Returns the configured project discovery roots.
-///
-/// Users can edit this list to control which directories are scanned and how
-/// deep the project search should traverse from each root.
 pub fn project_search_roots() -> Vec<ProjectSearchRoot> {
-    vec![
-        ProjectSearchRoot::new(r"P:\", 4),
-        ProjectSearchRoot::new(r"W:\", 4),
-        ProjectSearchRoot::new(r"C:\Users\sam\", 4),
-    ]
-    .into_iter()
-    .filter(|search_root| search_root.root().exists())
-    .collect()
+    crate::config::load().workspace.project_search_roots()
 }
 
 pub fn picker_items(context: &PickerProviderContext) -> Option<Vec<PickerItemSpec>> {
     match context.source {
         PickerSource::WorkspaceProjects => workspace_project_picker_items(context).ok(),
-        PickerSource::WorkspaceSwitch => Some(workspace_switch_picker_items(context)),
+        PickerSource::WorkspaceSwitch => {
+            Some(workspace_switch_picker_items(context).unwrap_or_else(|_| {
+                context
+                    .workspaces
+                    .iter()
+                    .map(workspace_picker_item)
+                    .collect()
+            }))
+        }
         PickerSource::WorkspaceDelete => Some(workspace_delete_picker_items(context)),
         PickerSource::WorkspaceFiles => Some(workspace_file_picker_items(context)),
         _ => None,
@@ -107,37 +108,100 @@ fn workspace_project_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
     let roots = project_search_roots();
-    let projects = discover_projects(&roots).map_err(|error| error.to_string())?;
+    let mut projects = discover_projects(&roots).map_err(|error| error.to_string())?;
+    projects.sort_by_key(|project| {
+        (
+            existing_workspace_for_project(context, project).is_none(),
+            project.display_name().to_ascii_lowercase(),
+        )
+    });
+
     Ok(projects
-        .into_iter()
-        .map(|project| {
-            let existing_workspace = context.workspaces.iter().find(|workspace| {
-                workspace
-                    .root
-                    .as_ref()
-                    .into_option()
-                    .is_some_and(|root| Path::new(root.as_str()) == project.root())
-            });
-            let workspace_name = project.display_name();
-            let detail = workspace_project_picker_detail(&project, existing_workspace.is_some());
-            let action = existing_workspace.map_or_else(
-                || {
-                    PickerActionSpec::create_workspace(
-                        workspace_name.clone(),
-                        project.root().display().to_string(),
-                    )
-                },
-                |workspace| PickerActionSpec::switch_workspace(workspace.id),
-            );
-            PickerItemSpec::new(
-                project.root().display().to_string(),
-                workspace_name,
-                detail,
-                action,
-            )
-            .with_preview(workspace_project_picker_preview(&project))
-        })
+        .iter()
+        .map(|project| project_picker_item(context, project))
         .collect())
+}
+
+fn workspace_switch_picker_items(
+    context: &PickerProviderContext,
+) -> Result<Vec<PickerItemSpec>, String> {
+    let roots = project_search_roots();
+    let mut projects = discover_projects(&roots)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|project| existing_workspace_for_project(context, project).is_none())
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.display_name().to_ascii_lowercase());
+
+    let mut items = context
+        .workspaces
+        .iter()
+        .map(workspace_picker_item)
+        .collect::<Vec<_>>();
+    if !items.is_empty() && !projects.is_empty() {
+        items.push(PickerItemSpec::divider());
+    }
+    items.extend(
+        projects
+            .iter()
+            .map(|project| project_picker_item(context, project)),
+    );
+    Ok(items)
+}
+
+fn project_picker_item(
+    context: &PickerProviderContext,
+    project: &ProjectCandidate,
+) -> PickerItemSpec {
+    let existing_workspace = existing_workspace_for_project(context, project);
+    let workspace_name = project.display_name();
+    let detail = workspace_project_picker_detail(project, existing_workspace.is_some());
+    let action = existing_workspace.map_or_else(
+        || {
+            PickerActionSpec::create_workspace(
+                workspace_name.clone(),
+                project.root().display().to_string(),
+            )
+        },
+        |workspace| PickerActionSpec::switch_workspace(workspace.id),
+    );
+    PickerItemSpec::new(
+        project.root().display().to_string(),
+        workspace_name,
+        detail,
+        action,
+    )
+    .with_preview(workspace_project_picker_preview(project))
+}
+
+fn existing_workspace_for_project<'a>(
+    context: &'a PickerProviderContext,
+    project: &ProjectCandidate,
+) -> Option<&'a PickerWorkspaceContext> {
+    context.workspaces.iter().find(|workspace| {
+        workspace
+            .root
+            .as_ref()
+            .into_option()
+            .is_some_and(|root| Path::new(root.as_str()) == project.root())
+    })
+}
+
+fn workspace_picker_item(workspace: &PickerWorkspaceContext) -> PickerItemSpec {
+    let location = workspace
+        .root
+        .as_ref()
+        .into_option()
+        .map(|root| root.to_string())
+        .unwrap_or_else(|| "default workspace".to_owned());
+    let detail = format!("open workspace | {location}");
+    PickerItemSpec::new(
+        workspace.id.to_string(),
+        workspace.name.clone(),
+        detail.clone(),
+        PickerActionSpec::switch_workspace(workspace.id),
+    )
+    .with_preview(detail)
 }
 
 fn workspace_project_picker_detail(project: &ProjectCandidate, is_open: bool) -> String {
@@ -163,28 +227,6 @@ fn workspace_project_picker_preview(project: &ProjectCandidate) -> String {
         );
     }
     project.root().display().to_string()
-}
-
-fn workspace_switch_picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
-    context
-        .workspaces
-        .iter()
-        .map(|workspace| {
-            let detail = workspace
-                .root
-                .as_ref()
-                .into_option()
-                .map(|root| root.to_string())
-                .unwrap_or_else(|| "default workspace".to_owned());
-            PickerItemSpec::new(
-                workspace.id.to_string(),
-                workspace.name.clone(),
-                detail.clone(),
-                PickerActionSpec::switch_workspace(workspace.id),
-            )
-            .with_preview(detail)
-        })
-        .collect()
 }
 
 fn workspace_delete_picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
@@ -241,26 +283,40 @@ fn workspace_file_picker_items(context: &PickerProviderContext) -> Vec<PickerIte
         .map(|relative_path| {
             let path = root.join(&relative_path);
             let search_text = relative_path.display().to_string();
-            let label = relative_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| search_text.clone());
-            let detail = relative_path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map(|parent| parent.display().to_string())
-                .unwrap_or_else(|| "workspace root".to_owned());
             PickerItemSpec::new(
                 path.display().to_string(),
-                label,
-                detail,
+                search_text.clone(),
+                "",
                 PickerActionSpec::open_file(path.display().to_string()),
             )
-            .with_preview(path.display().to_string())
+            .with_preview(file_picker_preview(&path))
             .with_search_text(search_text)
             .with_fringe(editor_icons::seti_file_icon(&path))
         })
         .collect()
+}
+
+fn file_picker_preview(path: &Path) -> String {
+    const MAX_BYTES: u64 = 16 * 1024;
+    const MAX_LINES: usize = 24;
+
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return path.display().to_string(),
+    };
+    let mut buffer = String::new();
+    if file.take(MAX_BYTES).read_to_string(&mut buffer).is_err() {
+        return path.display().to_string();
+    }
+    let mut lines = Vec::new();
+    lines.push(path.display().to_string());
+    lines.extend(
+        buffer
+            .lines()
+            .take(MAX_LINES)
+            .map(|line| line.trim_end().to_owned()),
+    );
+    lines.join("\n")
 }
 
 fn message_item(

@@ -4,7 +4,15 @@ use editor_plugin_api::{
 };
 
 pub const ACP_BUFFER_KIND: &str = "acp";
-pub const PI_ACP_LOCATION: &str = "P:/pi-acp/dist/index.js";
+
+#[cfg(target_os = "windows")]
+pub const PI_ACP_LOCATION: &str = "";
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+pub const PI_ACP_LOCATION: &str = "";
+
+#[cfg(target_os = "macos")]
+pub const PI_ACP_LOCATION: &str = "";
 
 #[derive(Debug, Clone)]
 pub struct AcpClientConfig {
@@ -36,17 +44,23 @@ impl AcpClientConfig {
 
 /// Returns ACP client configurations compiled into the user package.
 pub fn clients() -> Vec<AcpClientConfig> {
-    vec![
-        AcpClientConfig::new("codex", "Codex (ACP)", "codex-acp", &[]),
-        AcpClientConfig::new(
-            "copilot",
-            "GitHub Copilot (ACP)",
-            "copilot",
-            &["--acp", "--stdio", "--yolo"],
-        ),
-        AcpClientConfig::new("opencode", "OpenCode (ACP)", "opencode", &["acp"]),
-        AcpClientConfig::new("pi", "Pi (ACP)", "node", &[PI_ACP_LOCATION]),
-    ]
+    crate::config::load()
+        .acp
+        .clients
+        .into_iter()
+        .map(|client| AcpClientConfig {
+            id: client.id,
+            label: client.label,
+            command: client.command,
+            args: client.args,
+            env: client
+                .env
+                .into_iter()
+                .map(|pair| (pair.key, pair.value))
+                .collect(),
+            cwd: client.cwd,
+        })
+        .collect()
 }
 
 pub fn client_by_id(id: &str) -> Option<AcpClientConfig> {

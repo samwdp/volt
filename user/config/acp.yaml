@@ -1,0 +1,27 @@
+clients:
+  - id: agent
+    label: Cursor Agent(ACP)
+    command: agent
+    args:
+      - acp
+      - --yolo
+  - id: codex
+    label: Codex (ACP)
+    command: codex-acp
+  - id: copilot
+    label: GitHub Copilot (ACP)
+    command: copilot
+    args:
+      - --acp
+      - --stdio
+      - --yolo
+  - id: opencode
+    label: OpenCode (ACP)
+    command: opencode
+    args:
+      - acp
+  - id: pi
+    label: Pi (ACP)
+    command: node
+    args:
+      - ""

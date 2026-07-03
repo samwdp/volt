@@ -16,10 +16,11 @@ fn help_entry(chord: impl Into<String>, action: &str, description: &str) -> Cont
 
 /// Public oil feature contract used by first-party and third-party code.
 pub fn feature_spec() -> OilFeatureSpec {
-    let keybindings = OilKeybindings::default();
+    let config = crate::config::load().oil;
+    let keybindings = config.keybindings.oil_keybindings();
     let prefixed = |suffix: &str| format!("{}{}", keybindings.prefix, suffix);
     OilFeatureSpec {
-        defaults: OilDefaults::default(),
+        defaults: config.defaults.oil_defaults(),
         keybindings,
         help: ContextHelpSpec::new(
             "Oil",

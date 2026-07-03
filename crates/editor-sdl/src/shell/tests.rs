@@ -3910,6 +3910,23 @@ fn wrap_line_segments_keeps_unbroken_words_together() {
 }
 
 #[test]
+fn input_field_wrap_keeps_words_intact() {
+    let mut input = InputField::new("> ");
+    input.set_text("prefix text Please see the screenshot of this input");
+    let rows = input.wrapped_visual_rows(28);
+
+    assert!(
+        !rows.iter().any(|row| row == "Pl" || row == "ease"),
+        "rows: {rows:?}"
+    );
+    assert!(
+        rows.windows(2)
+            .all(|pair| { !(pair[0].ends_with("Pl") && pair[1].starts_with("ease")) }),
+        "rows: {rows:?}"
+    );
+}
+
+#[test]
 fn block_cursor_text_overlay_positions_multibyte_cursor_text() {
     let line = "aéz";
     let char_map = LineCharMap::new(line);
@@ -5156,6 +5173,87 @@ fn truncate_text_to_width_uses_cell_budget() {
     assert_eq!(truncate_text_to_width("abcdef", 24, 4), "abcdef");
     assert_eq!(truncate_text_to_width("abcdef", 20, 4), "ab...");
     assert_eq!(truncate_text_to_width("abcdef", 8, 4), "...");
+}
+
+#[test]
+fn truncate_picker_label_shrink_directories_preserves_filename() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    let path = "src/dir1/dir2/test.rs";
+    assert_eq!(
+        truncate_picker_label(path, 240, 4, PickerTruncateStrategy::ShrinkDirectories),
+        "s/d/d/test.rs"
+    );
+}
+
+#[test]
+fn truncate_picker_label_start_ellipsis_preserves_tail() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    assert_eq!(
+        truncate_picker_label(
+            "src/dir1/dir2/test.rs",
+            56,
+            4,
+            PickerTruncateStrategy::StartEllipsis
+        ),
+        "...ir2/test.rs"
+    );
+}
+
+#[test]
+fn truncate_picker_label_middle_ellipsis_preserves_both_ends() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    assert_eq!(
+        truncate_picker_label(
+            "src/dir1/dir2/test.rs",
+            56,
+            4,
+            PickerTruncateStrategy::MiddleEllipsis
+        ),
+        "src...test.rs"
+    );
+}
+
+#[test]
+fn truncate_picker_label_auto_falls_back_to_start_ellipsis() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    assert_eq!(
+        truncate_picker_label("src/dir1/dir2/test.rs", 56, 4, PickerTruncateStrategy::Auto),
+        "...ir2/test.rs"
+    );
+}
+
+#[test]
+fn truncate_picker_label_file_name_with_parent() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    assert_eq!(
+        truncate_picker_label(
+            "src/dir1/dir2/test.rs",
+            240,
+            4,
+            PickerTruncateStrategy::FileNameWithParent
+        ),
+        "dir2/test.rs"
+    );
+}
+
+#[test]
+fn truncate_picker_label_shrink_all_includes_stem() {
+    use editor_plugin_api::PickerTruncateStrategy;
+
+    assert_eq!(
+        truncate_picker_label(
+            "src/dir1/dir2/test.rs",
+            240,
+            4,
+            PickerTruncateStrategy::ShrinkAll
+        ),
+        "s/d/d/t.rs"
+    );
 }
 
 #[test]
@@ -7326,8 +7424,17 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
 
-    picker::render_picker_overlay(&mut target, &fonts, &picker, 320, 180, 16, Some(&registry))
-        .map_err(|error| error.to_string())?;
+    picker::render_picker_overlay(
+        &mut target,
+        &fonts,
+        &picker,
+        320,
+        180,
+        16,
+        Some(&registry),
+        editor_plugin_api::PickerTruncateStrategy::Auto,
+    )
+    .map_err(|error| error.to_string())?;
 
     let popup_rect = centered_rect(320, 180, 320 * 2 / 3, 180 * 3 / 5);
     assert!(scene.iter().any(|command| matches!(
@@ -7606,8 +7713,17 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
 
-    picker::render_picker_overlay(&mut target, &fonts, &picker, 640, 360, 16, Some(&registry))
-        .map_err(|error| error.to_string())?;
+    picker::render_picker_overlay(
+        &mut target,
+        &fonts,
+        &picker,
+        640,
+        360,
+        16,
+        Some(&registry),
+        editor_plugin_api::PickerTruncateStrategy::Auto,
+    )
+    .map_err(|error| error.to_string())?;
 
     let expected_unselected_label = blend_color(picker_foreground, Color::RGB(15, 16, 20), 0.12);
     let text_commands = scene
@@ -7712,6 +7828,46 @@ fn theme_source_fingerprint_from_dir_changes_when_global_toml_changes() -> Resul
 
     let after = theme_source_fingerprint_from_dir(&themes_dir)
         .ok_or_else(|| "missing updated theme fingerprint".to_owned())?;
+
+    assert_ne!(before, after);
+    Ok(())
+}
+
+#[test]
+fn user_config_source_fingerprint_changes_when_child_yaml_changes() -> Result<(), String> {
+    let temp = TempTestDir::new("user-config-source-fingerprint");
+    let user_dir = temp.path().join("user");
+    let config_dir = user_dir.join("config");
+    fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+    fs::write(
+        user_dir.join("config.yaml"),
+        "workspace: config/workspace.yaml\nui: config/ui.yaml\n",
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        config_dir.join("workspace.yaml"),
+        "project_search_roots:\n  - path: P:/\n    max_depth: 4\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let ui = config_dir.join("ui.yaml");
+    fs::write(&ui, "ligatures_enabled: true\n").map_err(|error| error.to_string())?;
+
+    let before = user_config_source_fingerprint_from_files(vec![
+        user_dir.join("config.yaml"),
+        config_dir.join("workspace.yaml"),
+        config_dir.join("ui.yaml"),
+    ])
+    .ok_or_else(|| "missing initial user config fingerprint".to_owned())?;
+
+    thread::sleep(Duration::from_millis(20));
+    fs::write(&ui, "ligatures_enabled: false\n").map_err(|error| error.to_string())?;
+
+    let after = user_config_source_fingerprint_from_files(vec![
+        user_dir.join("config.yaml"),
+        config_dir.join("workspace.yaml"),
+        config_dir.join("ui.yaml"),
+    ])
+    .ok_or_else(|| "missing updated user config fingerprint".to_owned())?;
 
     assert_ne!(before, after);
     Ok(())
@@ -8605,6 +8761,43 @@ fn acp_scroll_output_to_end_reaches_last_rendered_line() -> Result<(), String> {
     assert!(
         buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1)) + 1
             >= buffer.line_count()
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_output_scroll_reaches_wrapped_tail() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_push_system_message(
+        "alpha betagamma delta epsilon zeta longtailwordthatshouldwrap across rows",
+    );
+
+    buffer.sync_acp_viewport_metrics(800, 400, 8, 16, true);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        acp.output_pane.scroll_visual_row = acp.output_pane.max_scroll_row();
+    }
+
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    assert_eq!(
+        acp.output_pane.scroll_visual_row,
+        acp.output_pane.max_scroll_row()
+    );
+    assert!(
+        acp.output_pane.scroll_visual_row > 0,
+        "wrapped output should require scrolling past the first visual row"
     );
     Ok(())
 }
@@ -13671,6 +13864,63 @@ fn mouse_wheel_scrolls_the_buffer_under_the_pointer() -> Result<(), String> {
     let buffer = shell_buffer(&state.runtime, buffer_id)?;
     assert_eq!(buffer.scroll_row, MOUSE_WHEEL_SCROLL_LINES as usize);
     assert_eq!(buffer.cursor_row(), MOUSE_WHEEL_SCROLL_LINES as usize);
+    Ok(())
+}
+
+#[test]
+fn scroll_by_uses_wrapped_max_for_line_wrap() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*wrapped-scroll-max*",
+        (0..30).map(|index| format!("line {index}")).collect(),
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.line_wrap = true;
+        buffer.set_viewport_lines(8);
+        buffer.set_scroll_layout(8, 40, 4);
+        let expected = buffer.max_scroll_row_for_wrapped_rows(8, 40, 4);
+        assert_eq!(buffer.max_scroll_row(), expected);
+        assert!(buffer.max_scroll_row() < buffer.line_count().saturating_sub(1));
+        buffer.scroll_row = buffer.max_scroll_row();
+        assert_eq!(buffer.line_at_viewport_offset(7), 29);
+    }
+    Ok(())
+}
+
+#[test]
+fn scroll_by_uses_content_viewport_rows_after_layout_sync() -> Result<(), String> {
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*content-viewport-scroll*",
+        (0..80).map(|index| format!("line {index}")).collect(),
+    )?;
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    assert!(buffer.content_viewport_lines < buffer.viewport_lines);
+    assert_eq!(
+        buffer.max_scroll_row(),
+        buffer
+            .line_count()
+            .saturating_sub(buffer.content_viewport_lines)
+    );
+    buffer.scroll_row = buffer.max_scroll_row();
+    assert_eq!(
+        buffer.line_at_viewport_offset(buffer.content_viewport_lines.saturating_sub(1)),
+        79
+    );
     Ok(())
 }
 

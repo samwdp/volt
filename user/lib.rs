@@ -47,6 +47,8 @@ pub mod icon_font;
 pub mod image;
 /// Bundled icon-font symbol modules (re-exported from editor-icons).
 pub use editor_plugin_api::symbols as icon_font_symbols;
+/// Runtime-loaded user configuration.
+pub mod config;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
 /// Language-specific registrations.
@@ -99,9 +101,9 @@ use editor_plugin_api::{
         AbiGhostTextLine, AbiGitFeatureSpec, AbiGitStatusPrefix, AbiGitStatusSnapshot,
         AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
         AbiLigatureConfig, AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings,
-        AbiOilSortMode, AbiPaneConfig, AbiPdfOpenMode, AbiSectionTree, AbiStatuslineContext,
-        AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiWorkspaceRoot, UserLibraryModule,
-        UserLibraryModuleRef,
+        AbiOilSortMode, AbiPaneConfig, AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSectionTree,
+        AbiStatuslineContext, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
+        AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
     },
 };
 
@@ -262,6 +264,10 @@ impl UserLibrary for UserLibraryImpl {
         context: &PickerProviderContext,
     ) -> Option<Vec<PickerItemSpec>> {
         picker::provider_items(context)
+    }
+
+    fn picker_truncate_strategy(&self) -> editor_plugin_api::PickerTruncateStrategy {
+        picker::truncate_strategy()
     }
 
     fn acp_clients(&self) -> Vec<AcpClient> {
@@ -613,6 +619,10 @@ extern "C" fn exported_picker_provider_items(
         .picker_provider_items(&context)
         .map(Into::into)
         .into()
+}
+
+extern "C" fn exported_picker_truncate_strategy() -> AbiPickerTruncateStrategy {
+    UserLibraryImpl.picker_truncate_strategy().into()
 }
 
 extern "C" fn exported_acp_clients() -> RVec<AbiAcpClient> {
@@ -1028,6 +1038,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         headerline_lines: exported_headerline_lines,
         pdf_open_mode: exported_pdf_open_mode,
         pane_config_v1: exported_pane_config,
+        picker_truncate_strategy_v1: exported_picker_truncate_strategy,
         reserved_feature_contracts_v2: exported_reserved_feature_contracts_v2,
     }
     .leak_into_prefix()

@@ -28,10 +28,10 @@ pub use abi::{
     AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
     AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults,
     AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPdfOpenMode,
-    AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry,
-    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
-    AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot, UserLibraryModule,
-    UserLibraryModuleRef,
+    AbiPickerTruncateStrategy, AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree,
+    AbiStatusEntry, AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec,
+    AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot,
+    UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -522,6 +522,7 @@ pub struct PickerItemSpec {
     search_text: ROption<RString>,
     fringe: ROption<RString>,
     action: PickerActionSpec,
+    divider: bool,
 }
 
 impl PickerItemSpec {
@@ -539,7 +540,26 @@ impl PickerItemSpec {
             search_text: ROption::RNone,
             fringe: ROption::RNone,
             action,
+            divider: false,
         }
+    }
+
+    /// Creates a non-selectable horizontal divider row.
+    pub fn divider() -> Self {
+        Self {
+            id: "__picker-divider__".into(),
+            label: RString::from(""),
+            detail: RString::from(""),
+            preview: ROption::RNone,
+            search_text: ROption::RNone,
+            fringe: ROption::RNone,
+            action: PickerActionSpec::NoOp,
+            divider: true,
+        }
+    }
+
+    pub const fn is_divider(&self) -> bool {
+        self.divider
     }
 
     pub fn with_preview(mut self, preview: impl Into<RString>) -> Self {
@@ -584,6 +604,36 @@ impl PickerItemSpec {
     pub fn action(&self) -> &PickerActionSpec {
         &self.action
     }
+}
+/// Picker label truncation when a row is narrower than the label.
+///
+/// Examples use `src/dir1/dir2/test.rs` unless noted. Ellipsis variants also
+/// clip to the viewport width after any path transform.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum PickerTruncateStrategy {
+    /// Tail clip: `src/dir1/dir2/te...`
+    EndEllipsis = 0,
+    /// Head clip: `...ir2/test.rs`
+    StartEllipsis,
+    /// Both ends: `src/.../test.rs`
+    MiddleEllipsis,
+    /// First char per parent dir: `s/d/d/test.rs` (doom `truncate-with-project` relative)
+    ShrinkDirectories,
+    /// Shrink parent dirs and filename stem: `s/d/d/t.rs` (doom `truncate-all`)
+    ShrinkAll,
+    /// Filename only: `test.rs` (doom `file-name`)
+    FileName,
+    /// Parent + file: `dir2/test.rs` (doom `relative-to-project`)
+    FileNameWithParent,
+    /// Parent initial + file: `d/test.rs`
+    ParentInitialFileName,
+    /// Shrink leading dirs, keep last three segments full on long paths
+    ShrinkLeadingKeepTail,
+    /// Full path when it fits; otherwise head clip (doom `truncate-nil` display)
+    Full,
+    /// Full when it fits, else `ShrinkDirectories`, else head clip (doom `auto`)
+    Auto,
 }
 
 /// Declares a picker provider that can be opened with `ui.picker.open`.
@@ -652,7 +702,9 @@ pub struct PickerCommandContext {
 pub struct PickerBufferContext {
     pub id: u64,
     pub display_name: RString,
+    pub path: ROption<RString>,
     pub kind_label: RString,
+    pub preview: ROption<RString>,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub dirty: bool,
@@ -1245,6 +1297,9 @@ pub trait UserLibrary: Send + Sync {
                     && provider.source() == PickerSource::Static
             })
             .map(|provider| provider.items().to_vec())
+    }
+    fn picker_truncate_strategy(&self) -> PickerTruncateStrategy {
+        PickerTruncateStrategy::Auto
     }
     fn acp_clients(&self) -> Vec<AcpClient> {
         Vec::new()

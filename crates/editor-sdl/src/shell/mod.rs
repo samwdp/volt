@@ -85,8 +85,8 @@ use editor_db::{
 };
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
-    GitLogEntry, GitStatusSnapshot, detect_in_progress, parse_log_oneline, parse_stash_list,
-    parse_status,
+    GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
+    parse_stash_list, parse_status,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
@@ -102,10 +102,11 @@ use editor_plugin_api::{
     OilDefaults, OilKeyAction, PdfOpenMode, PickerAcpClientContext, PickerActionSpec,
     PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
     PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
-    PickerThemeContext, PickerUndoTreeContext, PickerWorkspaceContext, PluginBufferSectionUpdate,
-    PluginBufferSections, VimEditAction, autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks,
-    git_actions, git_hooks, git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks,
-    oil_hooks, oil_protocol, pdf_hooks, plugin_hooks, terminal_hooks,
+    PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
+    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction, autocomplete_hooks,
+    browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks, git_sections, hover_hooks,
+    image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
+    terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -541,6 +542,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const THEME_DIRECTORY_PARTS: [&str; 2] = ["user", "themes"];
 const THEME_FILE_EXTENSION: &str = "toml";
 const THEME_SOURCE_SEARCH_DEPTH: usize = 6;
+const USER_CONFIG_DIRECTORY_PARTS: [&str; 1] = ["user"];
+const USER_CONFIG_FILE_NAME: &str = "config.yaml";
 const THEME_SOURCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 enum DrawTarget<'a> {
@@ -572,8 +575,20 @@ struct ThemeSourceFingerprint {
     files: Vec<ThemeSourceFile>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserConfigSourceFingerprint {
+    files: Vec<UserConfigSourceFile>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ThemeSourceFile {
+    path: PathBuf,
+    size: u64,
+    modified_at: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct UserConfigSourceFile {
     path: PathBuf,
     size: u64,
     modified_at: Option<SystemTime>,
@@ -590,6 +605,21 @@ impl ThemeReloadState {
         Self {
             last_checked_at: Instant::now(),
             fingerprint: current_theme_source_fingerprint(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserConfigReloadState {
+    last_checked_at: Instant,
+    fingerprint: Option<UserConfigSourceFingerprint>,
+}
+
+impl UserConfigReloadState {
+    fn new() -> Self {
+        Self {
+            last_checked_at: Instant::now(),
+            fingerprint: current_user_config_source_fingerprint(),
         }
     }
 }
@@ -2447,21 +2477,28 @@ impl InputField {
         self.line_starts().len().max(1)
     }
 
-    fn wrapped_visual_rows(&self, available_cols: usize) -> Vec<String> {
+    fn input_wrap_cols(&self, available_cols: usize) -> (usize, usize) {
         let prompt_len = self.prompt.chars().count();
-        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let cols = available_cols.saturating_sub(prompt_len).max(1);
+        (cols, cols)
+    }
+
+    fn wrapped_visual_rows(&self, available_cols: usize) -> Vec<String> {
+        let (first_cols, continuation_cols) = self.input_wrap_cols(available_cols);
         let mut rows = Vec::new();
         for line in self.text.split('\n') {
-            let chars: Vec<char> = line.chars().collect();
-            if chars.is_empty() {
+            if line.is_empty() {
                 rows.push(String::new());
-            } else {
-                let mut start = 0;
-                while start < chars.len() {
-                    let end = (start + cols_per_row).min(chars.len());
-                    rows.push(chars[start..end].iter().collect());
-                    start = end;
-                }
+                continue;
+            }
+            let char_map = LineCharMap::new(line);
+            let segments = wrap_line_segments(&char_map, first_cols, continuation_cols);
+            for segment in segments {
+                rows.push(char_map.display_text_for_range(
+                    line,
+                    segment.start_col,
+                    segment.end_col,
+                ));
             }
         }
         if rows.is_empty() {
@@ -2502,25 +2539,36 @@ impl InputField {
         cursor_char: usize,
         available_cols: usize,
     ) -> (usize, usize) {
-        let prompt_len = self.prompt.chars().count();
-        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let (first_cols, continuation_cols) = self.input_wrap_cols(available_cols);
         let (logical_line, col_in_logical_line) = self.line_col_for_char(cursor_char);
         let mut visual_row = 0usize;
         for (idx, line) in self.text.split('\n').enumerate() {
             if idx == logical_line {
-                break;
+                if line.is_empty() {
+                    return (visual_row, 0);
+                }
+                let char_map = LineCharMap::new(line);
+                let segments = wrap_line_segments(&char_map, first_cols, continuation_cols);
+                let segment_index = segment_index_for_column(&segments, col_in_logical_line);
+                let segment = segments
+                    .get(segment_index)
+                    .unwrap_or_else(|| segments.first().expect("line has wrap segments"));
+                let col_in_wrap_row = char_map.display_cols_between(
+                    segment.start_col,
+                    col_in_logical_line.min(segment.end_col),
+                );
+                return (visual_row.saturating_add(segment_index), col_in_wrap_row);
             }
-            let char_count = line.chars().count();
-            visual_row += if char_count == 0 {
-                1
+            if line.is_empty() {
+                visual_row = visual_row.saturating_add(1);
             } else {
-                char_count.div_ceil(cols_per_row)
-            };
+                let char_map = LineCharMap::new(line);
+                visual_row = visual_row.saturating_add(
+                    wrap_line_segments(&char_map, first_cols, continuation_cols).len(),
+                );
+            }
         }
-        let wrap_row = col_in_logical_line / cols_per_row;
-        let col_in_wrap_row = col_in_logical_line % cols_per_row;
-        visual_row += wrap_row;
-        (visual_row, col_in_wrap_row)
+        (visual_row, 0)
     }
 
     fn line_col_for_char(&self, cursor_char: usize) -> (usize, usize) {
@@ -2904,20 +2952,21 @@ impl InputField {
         let Some((start, end)) = self.selected_char_range(kind) else {
             return Vec::new();
         };
-        let prompt_len = self.prompt.chars().count();
-        let cols_per_row = available_cols.saturating_sub(prompt_len).max(1);
+        let (first_cols, continuation_cols) = self.input_wrap_cols(available_cols);
         let starts = self.line_starts();
         let total = self.char_count();
         let mut visual_row_offsets = Vec::with_capacity(starts.len());
         let mut visual_row = 0usize;
-        for line_index in 0..starts.len() {
+        for line in self.text.split('\n') {
             visual_row_offsets.push(visual_row);
-            let line_len = Self::line_len_for(&starts, total, line_index);
-            visual_row += if line_len == 0 {
-                1
+            if line.is_empty() {
+                visual_row = visual_row.saturating_add(1);
             } else {
-                line_len.div_ceil(cols_per_row)
-            };
+                let char_map = LineCharMap::new(line);
+                visual_row = visual_row.saturating_add(
+                    wrap_line_segments(&char_map, first_cols, continuation_cols).len(),
+                );
+            }
         }
         let mut ranges = Vec::new();
         for (line_index, line_start) in starts.iter().copied().enumerate() {
@@ -2930,18 +2979,22 @@ impl InputField {
             }
             let start_col = line_selection_start - line_start;
             let end_col = line_selection_end - line_start;
-            let start_row = start_col / cols_per_row;
-            let end_row = end_col.saturating_sub(1) / cols_per_row;
-            for row in start_row..=end_row {
-                let row_start = row * cols_per_row;
-                let row_end = ((row + 1) * cols_per_row).min(line_len.max(1));
-                let selection_start = start_col.max(row_start);
-                let selection_end = end_col.min(row_end);
+            let line_text = self
+                .text
+                .chars()
+                .skip(line_start)
+                .take(line_len)
+                .collect::<String>();
+            let char_map = LineCharMap::new(&line_text);
+            let segments = wrap_line_segments(&char_map, first_cols, continuation_cols);
+            for (segment_index, segment) in segments.iter().enumerate() {
+                let selection_start = start_col.max(segment.start_col);
+                let selection_end = end_col.min(segment.end_col);
                 if selection_start < selection_end {
                     ranges.push((
-                        visual_row_offsets[line_index] + row,
-                        selection_start - row_start,
-                        selection_end - row_start,
+                        visual_row_offsets[line_index] + segment_index,
+                        char_map.display_cols_between(segment.start_col, selection_start),
+                        char_map.display_cols_between(segment.start_col, selection_end),
                     ));
                 }
             }
@@ -3071,6 +3124,9 @@ pub(crate) struct ShellBuffer {
     scroll_col: usize,
     line_wrap: bool,
     viewport_lines: usize,
+    content_viewport_lines: usize,
+    scroll_wrap_cols: usize,
+    scroll_indent_size: usize,
     wrap_cache: Option<WrapRowCache>,
     context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
     syntax_error: Option<String>,
@@ -3153,7 +3209,7 @@ struct AcpBufferState {
 struct AcpPaneState {
     text: TextBuffer,
     render_lines: Vec<AcpRenderedLine>,
-    scroll_row: usize,
+    scroll_visual_row: usize,
     viewport_rows: usize,
     wrap_cols: usize,
 }
@@ -3354,7 +3410,7 @@ impl Default for AcpPaneState {
         Self {
             text: TextBuffer::new(),
             render_lines: Vec::new(),
-            scroll_row: 0,
+            scroll_visual_row: 0,
             viewport_rows: 1,
             wrap_cols: 1,
         }
@@ -3383,6 +3439,55 @@ impl AcpBufferState {
     }
 }
 
+fn acp_pane_total_visual_rows(pane: &AcpPaneState) -> usize {
+    pane.render_lines
+        .iter()
+        .map(|line| acp_rendered_line_row_count(line, pane.wrap_cols()))
+        .sum()
+}
+
+fn acp_pane_max_scroll_visual_row(pane: &AcpPaneState) -> usize {
+    acp_pane_total_visual_rows(pane).saturating_sub(pane.visible_rows())
+}
+
+fn acp_pane_cursor_visual_row(pane: &AcpPaneState) -> usize {
+    if pane.render_lines.is_empty() {
+        return 0;
+    }
+    let cursor = pane.cursor();
+    let mut visual_row = 0usize;
+    for (line_index, rendered_line) in pane.render_lines.iter().enumerate() {
+        if line_index == cursor.line {
+            let extra = match rendered_line {
+                AcpRenderedLine::Text(line) => segment_index_for_column(
+                    &acp_rendered_text_segments(line, pane.wrap_cols()),
+                    cursor.column,
+                ),
+                _ => 0,
+            };
+            return visual_row.saturating_add(extra);
+        }
+        visual_row =
+            visual_row.saturating_add(acp_rendered_line_row_count(rendered_line, pane.wrap_cols()));
+    }
+    visual_row
+}
+
+fn acp_pane_line_index_for_visual_row(pane: &AcpPaneState, target_visual_row: usize) -> usize {
+    if pane.render_lines.is_empty() {
+        return 0;
+    }
+    let mut visual_row = 0usize;
+    for (line_index, rendered_line) in pane.render_lines.iter().enumerate() {
+        let row_count = acp_rendered_line_row_count(rendered_line, pane.wrap_cols());
+        if visual_row.saturating_add(row_count) > target_visual_row {
+            return line_index;
+        }
+        visual_row = visual_row.saturating_add(row_count);
+    }
+    pane.render_lines.len().saturating_sub(1)
+}
+
 impl AcpPaneState {
     fn line_count(&self) -> usize {
         self.text.line_count()
@@ -3408,42 +3513,28 @@ impl AcpPaneState {
         self.wrap_cols.max(1)
     }
 
+    fn viewport_scroll_top(&self) -> usize {
+        self.scroll_visual_row
+    }
+
     fn set_view_metrics(&mut self, visible_rows: usize, wrap_cols: usize) {
         self.viewport_rows = visible_rows.max(1);
         self.wrap_cols = wrap_cols.max(1);
-        self.scroll_row = self.scroll_row.min(self.max_scroll_row());
-    }
-
-    fn max_scroll_row_for(&self, visible_rows: usize) -> usize {
-        if self.render_lines.is_empty() {
-            return 0;
-        }
-        let visible_rows = visible_rows.max(1);
-        let mut rows = 0usize;
-        for line_index in (0..self.render_lines.len()).rev() {
-            let row_count =
-                acp_rendered_line_row_count(&self.render_lines[line_index], self.wrap_cols());
-            if rows.saturating_add(row_count) > visible_rows {
-                return if rows == 0 {
-                    line_index
-                } else {
-                    line_index.saturating_add(1)
-                };
-            }
-            rows = rows.saturating_add(row_count);
-        }
-        0
+        self.scroll_visual_row = self
+            .scroll_visual_row
+            .min(acp_pane_max_scroll_visual_row(self));
     }
 
     fn max_scroll_row(&self) -> usize {
-        self.max_scroll_row_for(self.visible_rows())
+        acp_pane_max_scroll_visual_row(self)
     }
 
     fn should_follow_output(&self, visible_rows: usize) -> bool {
         if self.render_lines.is_empty() {
             return true;
         }
-        self.scroll_row >= self.max_scroll_row_for(visible_rows)
+        let max_scroll = acp_pane_total_visual_rows(self).saturating_sub(visible_rows.max(1));
+        self.scroll_visual_row >= max_scroll
     }
 
     fn replace_render_lines(
@@ -3453,7 +3544,7 @@ impl AcpPaneState {
         visible_rows: usize,
     ) {
         let cursor = self.cursor();
-        let scroll_row = self.scroll_row;
+        let scroll_visual_row = self.scroll_visual_row;
         let lines = render_lines
             .iter()
             .map(AcpRenderedLine::plain_text)
@@ -3470,92 +3561,45 @@ impl AcpPaneState {
         let line_count = self.line_count();
         if line_count == 0 {
             self.text.set_cursor(TextPoint::default());
-            self.scroll_row = 0;
+            self.scroll_visual_row = 0;
             return;
         }
         let line = cursor.line.min(line_count.saturating_sub(1));
         let column = cursor.column.min(self.line_len_chars(line));
         self.text.set_cursor(TextPoint::new(line, column));
         if follow_output {
-            self.scroll_row = self.max_scroll_row();
+            self.scroll_visual_row = acp_pane_max_scroll_visual_row(self);
         } else {
-            self.scroll_row = scroll_row.min(self.max_scroll_row());
+            self.scroll_visual_row = scroll_visual_row.min(acp_pane_max_scroll_visual_row(self));
         }
     }
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
-        if self.render_lines.is_empty() {
-            return 0;
-        }
-        let mut line_index = self
-            .scroll_row
-            .min(self.render_lines.len().saturating_sub(1));
-        let mut remaining = offset;
-        while line_index + 1 < self.render_lines.len() {
-            let row_count =
-                acp_rendered_line_row_count(&self.render_lines[line_index], self.wrap_cols());
-            if remaining < row_count {
-                return line_index;
-            }
-            remaining = remaining.saturating_sub(row_count);
-            line_index = line_index.saturating_add(1);
-        }
-        line_index
+        acp_pane_line_index_for_visual_row(self, self.scroll_visual_row.saturating_add(offset))
     }
 
     fn cursor_viewport_offset(&self) -> usize {
-        if self.render_lines.is_empty() {
-            return 0;
-        }
-        let cursor = self.cursor();
-        if cursor.line < self.scroll_row {
-            return 0;
-        }
-        let mut offset = 0usize;
-        for line_index in self.scroll_row..cursor.line {
-            offset = offset.saturating_add(acp_rendered_line_row_count(
-                &self.render_lines[line_index],
-                self.wrap_cols(),
-            ));
-        }
-        let cursor_segment = self
-            .render_lines
-            .get(cursor.line)
-            .and_then(|line| match line {
-                AcpRenderedLine::Text(line) => Some(segment_index_for_column(
-                    &acp_rendered_text_segments(line, self.wrap_cols()),
-                    cursor.column,
-                )),
-                _ => None,
-            })
-            .unwrap_or(0);
-        offset.saturating_add(cursor_segment)
+        acp_pane_cursor_visual_row(self).saturating_sub(self.scroll_visual_row)
     }
 
     fn ensure_cursor_visible(&mut self) {
         if self.render_lines.is_empty() {
-            self.scroll_row = 0;
+            self.scroll_visual_row = 0;
             return;
         }
-        let cursor = self.cursor();
-        if cursor.line < self.scroll_row {
-            self.scroll_row = cursor.line;
-            return;
-        }
+        let cursor_visual = acp_pane_cursor_visual_row(self);
         let visible_rows = self.visible_rows();
-        let mut offset = self.cursor_viewport_offset();
-        if offset < visible_rows {
+        if cursor_visual < self.scroll_visual_row {
+            self.scroll_visual_row = cursor_visual;
             return;
         }
-        let mut new_scroll = self.scroll_row;
-        while offset >= visible_rows && new_scroll < cursor.line {
-            offset = offset.saturating_sub(acp_rendered_line_row_count(
-                &self.render_lines[new_scroll],
-                self.wrap_cols(),
-            ));
-            new_scroll = new_scroll.saturating_add(1);
+        if cursor_visual < self.scroll_visual_row.saturating_add(visible_rows) {
+            return;
         }
-        self.scroll_row = new_scroll.min(self.max_scroll_row());
+        self.scroll_visual_row = cursor_visual
+            .saturating_add(1)
+            .saturating_sub(visible_rows)
+            .min(acp_pane_max_scroll_visual_row(self));
     }
 }
 
@@ -3920,6 +3964,9 @@ impl ShellBuffer {
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
             viewport_lines: 1,
+            content_viewport_lines: 1,
+            scroll_wrap_cols: 1,
+            scroll_indent_size: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
@@ -3990,6 +4037,9 @@ impl ShellBuffer {
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
             viewport_lines: 1,
+            content_viewport_lines: 1,
+            scroll_wrap_cols: 1,
+            scroll_indent_size: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
@@ -4063,6 +4113,9 @@ impl ShellBuffer {
             scroll_col: 0,
             line_wrap,
             viewport_lines: 1,
+            content_viewport_lines: 1,
+            scroll_wrap_cols: 1,
+            scroll_indent_size: 1,
             wrap_cache: None,
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
@@ -4660,7 +4713,7 @@ impl ShellBuffer {
             return pane.scroll_row;
         }
         self.acp_active_pane_state()
-            .map(|pane| pane.scroll_row)
+            .map(|pane| pane.scroll_visual_row)
             .unwrap_or(self.scroll_row)
     }
 
@@ -5206,7 +5259,7 @@ impl ShellBuffer {
 
     fn scroll_output_to_end(&mut self) {
         if let Some(state) = self.acp_state.as_mut() {
-            state.output_pane.scroll_row = state.output_pane.max_scroll_row();
+            state.output_pane.scroll_visual_row = state.output_pane.max_scroll_row();
             return;
         }
         self.scroll_row = self.line_count().saturating_sub(self.viewport_lines());
@@ -6360,21 +6413,53 @@ impl ShellBuffer {
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
             let max_scroll = pane.max_scroll_row() as i32;
-            let next = (pane.scroll_row as i32 + delta).clamp(0, max_scroll);
-            pane.scroll_row = next as usize;
+            let next = (pane.scroll_visual_row as i32 + delta).clamp(0, max_scroll);
+            pane.scroll_visual_row = next as usize;
             return;
         }
-        let max_scroll = if self.line_wrap {
-            self.line_count().saturating_sub(1)
-        } else {
-            self.line_count().saturating_sub(self.viewport_lines())
-        } as i32;
+        let max_scroll = self.max_scroll_row() as i32;
         let next = (self.scroll_row as i32 + delta).clamp(0, max_scroll);
         self.scroll_row = next as usize;
     }
 
+    fn max_scroll_row(&self) -> usize {
+        let content_rows = self.content_viewport_lines.max(1);
+        if self.line_count() == 0 {
+            return 0;
+        }
+        if !self.line_wrap {
+            return self.line_count().saturating_sub(content_rows);
+        }
+        if let Some(cache) = self.wrap_cache.as_ref()
+            && cache.matches(
+                self.scroll_wrap_cols,
+                self.scroll_indent_size,
+                self.line_count(),
+            )
+        {
+            return cache.max_scroll_row(content_rows);
+        }
+        self.max_scroll_row_for_wrapped_rows(
+            content_rows,
+            self.scroll_wrap_cols,
+            self.scroll_indent_size,
+        )
+    }
+
+    fn set_scroll_layout(
+        &mut self,
+        content_viewport_lines: usize,
+        wrap_cols: usize,
+        indent_size: usize,
+    ) {
+        self.content_viewport_lines = content_viewport_lines.max(1);
+        self.scroll_wrap_cols = wrap_cols.max(1);
+        self.scroll_indent_size = indent_size.max(1);
+    }
+
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
+        self.content_viewport_lines = self.viewport_lines;
         if let Some(state) = self.plugin_section_state.as_mut() {
             for pane in &mut state.attached_sections {
                 let rows = pane.visible_rows();
@@ -7522,6 +7607,9 @@ pub(crate) struct PickerOverlay {
     actions: BTreeMap<String, PickerAction>,
     quickfix_entries: BTreeMap<String, QuickfixEntry>,
     submit_action: Option<PickerAction>,
+    show_preview: bool,
+    preview_syntax_key: Option<String>,
+    preview_syntax_lines: IndexedSyntaxLines,
     mode: PickerMode,
     kind: PickerKind,
 }
@@ -7543,10 +7631,13 @@ impl PickerOverlay {
             .collect();
 
         Self {
-            session: PickerSession::new(title, items).with_result_limit(48),
+            session: PickerSession::new(title, items),
             actions,
             quickfix_entries,
             submit_action: None,
+            show_preview: false,
+            preview_syntax_key: None,
+            preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::Static,
             kind: PickerKind::Generic,
         }
@@ -7588,6 +7679,9 @@ impl PickerOverlay {
             actions,
             quickfix_entries,
             submit_action: Some(PickerAction::VimSearch(direction)),
+            show_preview: false,
+            preview_syntax_key: None,
+            preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::VimSearch(direction),
             kind: PickerKind::Generic,
         }
@@ -7601,6 +7695,9 @@ impl PickerOverlay {
             actions: BTreeMap::new(),
             quickfix_entries: BTreeMap::new(),
             submit_action: Some(PickerAction::NoOp),
+            show_preview: true,
+            preview_syntax_key: None,
+            preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::WorkspaceSearch { root },
             kind: PickerKind::Generic,
         }
@@ -7617,6 +7714,28 @@ impl PickerOverlay {
     fn with_kind(mut self, kind: PickerKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    fn with_preview(mut self) -> Self {
+        self.show_preview = true;
+        self
+    }
+
+    fn show_preview(&self) -> bool {
+        self.show_preview
+    }
+
+    fn preview_syntax_lines(&self) -> &IndexedSyntaxLines {
+        &self.preview_syntax_lines
+    }
+
+    fn set_preview_syntax(&mut self, key: Option<String>, lines: IndexedSyntaxLines) {
+        self.preview_syntax_key = key;
+        self.preview_syntax_lines = lines;
+    }
+
+    fn preview_syntax_key(&self) -> Option<&str> {
+        self.preview_syntax_key.as_deref()
     }
 
     fn selected_action(&self) -> Option<PickerAction> {
@@ -7776,6 +7895,8 @@ pub(crate) struct ShellUiState {
     /// Per-workspace last-used build command.  Set when the user runs
     /// `workspace.compile`; reused by `workspace.recompile`.
     compile_commands: BTreeMap<WorkspaceId, String>,
+    pending_syntax_prewarm_roots: VecDeque<PathBuf>,
+    pending_workspace_readme_opens: VecDeque<PathBuf>,
 }
 
 impl ShellUiState {
@@ -7834,6 +7955,8 @@ impl ShellUiState {
             streamed_command_worker: StreamedCommandWorkerState::new(),
             indent_parse_sessions: BTreeMap::new(),
             compile_commands: BTreeMap::new(),
+            pending_syntax_prewarm_roots: VecDeque::new(),
+            pending_workspace_readme_opens: VecDeque::new(),
         }
     }
 
@@ -10687,6 +10810,45 @@ impl ShellState {
         Ok(())
     }
 
+    fn refresh_picker_preview_syntax(&mut self) {
+        let preview = self
+            .ui()
+            .ok()
+            .and_then(|ui| ui.picker())
+            .filter(|picker| picker.show_preview())
+            .and_then(|picker| picker.session().selected())
+            .and_then(|selected| {
+                let item = selected.item();
+                item.preview()
+                    .map(|preview| (item.id().to_owned(), preview.to_owned()))
+            });
+        let Some((item_id, preview)) = preview else {
+            if let Ok(ui) = self.ui_mut()
+                && let Some(picker) = ui.picker_mut()
+            {
+                picker.set_preview_syntax(None, IndexedSyntaxLines::new());
+            }
+            return;
+        };
+        let key = format!("{item_id}\n{preview}");
+        if self
+            .ui()
+            .ok()
+            .and_then(|ui| ui.picker())
+            .and_then(PickerOverlay::preview_syntax_key)
+            == Some(key.as_str())
+        {
+            return;
+        }
+        let syntax_lines =
+            picker_preview_syntax_lines(&mut self.runtime, &preview).unwrap_or_default();
+        if let Ok(ui) = self.ui_mut()
+            && let Some(picker) = ui.picker_mut()
+        {
+            picker.set_preview_syntax(Some(key), syntax_lines);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
@@ -10699,6 +10861,7 @@ impl ShellState {
         ascent: i32,
         fps_overlay: Option<&FpsOverlaySnapshot>,
     ) -> Result<(), ShellError> {
+        self.refresh_picker_preview_syntax();
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
         let acp_connected = acp::acp_connected(&self.runtime).unwrap_or(false);
@@ -12747,6 +12910,22 @@ impl ShellState {
             .map_err(ShellError::Runtime)
     }
 
+    #[cfg(test)]
+    pub(crate) fn flush_pending_syntax_prewarm_for_test(&mut self) -> Result<(), ShellError> {
+        while refresh_pending_syntax_prewarm(&mut self.runtime).map_err(ShellError::Runtime)? {}
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_pending_workspace_readme_opens_for_test(
+        &mut self,
+    ) -> Result<(), ShellError> {
+        while refresh_pending_workspace_readme_opens(&mut self.runtime)
+            .map_err(ShellError::Runtime)?
+        {}
+        Ok(())
+    }
+
     fn sync_active_buffer(&mut self) -> Result<(), String> {
         sync_active_buffer(&mut self.runtime)
     }
@@ -12955,6 +13134,8 @@ impl ShellState {
                 );
             } else {
                 buffer.set_viewport_lines(visible_rows);
+                let content_rows = visible_rows.saturating_sub(reserved_top_rows).max(1);
+                buffer.set_scroll_layout(content_rows, wrap_cols, indent_size);
             }
             buffer.ensure_visible(
                 visible_rows,
@@ -13220,6 +13401,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let theme_registry = state.runtime.services().get::<ThemeRegistry>();
     let window_effect_settings = current_window_effect_settings(theme_registry);
     let mut theme_reload_state = ThemeReloadState::new();
+    let mut user_config_reload_state = UserConfigReloadState::new();
     let mut window_builder = video.window(&config.title, config.width, config.height);
     window_builder
         .position_centered()
@@ -13302,6 +13484,8 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let user_config_reload_changed =
+                    refresh_user_config_if_needed(&mut user_config_reload_state, Instant::now());
                 let previous_window_effects = theme_settings.window_effects;
                 let fonts_changed = match update_theme_runtime(
                     &ttf,
@@ -13476,6 +13660,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let refresh_now = Instant::now();
                 let secondary_refresh_deferred =
                     state.secondary_refresh_deferred_for_typing(refresh_now);
+                if !secondary_refresh_deferred {
+                    if let Err(error) = refresh_pending_syntax_prewarm(&mut state.runtime) {
+                        state
+                            .record_shell_error("shell.syntax-prewarm", ShellError::Runtime(error));
+                    }
+                    if let Err(error) = refresh_pending_workspace_readme_opens(&mut state.runtime) {
+                        state.record_shell_error(
+                            "shell.workspace-readme-open",
+                            ShellError::Runtime(error),
+                        );
+                    }
+                }
                 let typing_refresh_budget_active = state.typing_refresh_budget_active(refresh_now);
                 let text_texture_cache_mode = if secondary_refresh_deferred {
                     TextTextureCacheMode::ReuseOnly
@@ -13637,6 +13833,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let should_render = last_scene.is_none()
                     || had_events
                     || theme_reload_changed
+                    || user_config_reload_changed
                     || fonts_changed
                     || file_reload_changed
                     || picker_changed
@@ -13891,6 +14088,23 @@ fn refresh_theme_registry_if_needed(
     Ok(true)
 }
 
+fn refresh_user_config_if_needed(reload_state: &mut UserConfigReloadState, now: Instant) -> bool {
+    if now
+        .checked_duration_since(reload_state.last_checked_at)
+        .unwrap_or_else(|| Duration::from_secs(0))
+        < THEME_SOURCE_POLL_INTERVAL
+    {
+        return false;
+    }
+    reload_state.last_checked_at = now;
+    let next_fingerprint = current_user_config_source_fingerprint();
+    if next_fingerprint == reload_state.fingerprint {
+        return false;
+    }
+    reload_state.fingerprint = next_fingerprint;
+    true
+}
+
 fn rebuild_theme_registry<I>(
     themes: I,
     active_theme_id: Option<&str>,
@@ -13915,11 +14129,36 @@ fn current_theme_source_fingerprint() -> Option<ThemeSourceFingerprint> {
     theme_source_fingerprint_from_dir(&themes_dir)
 }
 
+fn current_user_config_source_fingerprint() -> Option<UserConfigSourceFingerprint> {
+    let exe_path = env::current_exe().ok()?;
+    let exe_dir = exe_path.parent()?;
+    let config_root = user_config_root_dir_from_exe_dir(exe_dir)?;
+    user_config_source_fingerprint_from_root(&config_root)
+}
+
 fn theme_sources_dir_from_exe_dir(exe_dir: &Path) -> Option<PathBuf> {
     let mut fallback = None;
     for ancestor in exe_dir.ancestors().take(THEME_SOURCE_SEARCH_DEPTH) {
         let mut candidate = PathBuf::from(ancestor);
         for part in THEME_DIRECTORY_PARTS {
+            candidate = candidate.join(part);
+        }
+        if !candidate.is_dir() {
+            continue;
+        }
+        if ancestor.join("Cargo.toml").is_file() {
+            return Some(candidate);
+        }
+        fallback.get_or_insert(candidate);
+    }
+    fallback
+}
+
+fn user_config_root_dir_from_exe_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let mut fallback = None;
+    for ancestor in exe_dir.ancestors().take(THEME_SOURCE_SEARCH_DEPTH) {
+        let mut candidate = PathBuf::from(ancestor);
+        for part in USER_CONFIG_DIRECTORY_PARTS {
             candidate = candidate.join(part);
         }
         if !candidate.is_dir() {
@@ -13960,6 +14199,65 @@ fn theme_source_fingerprint_from_dir(themes_dir: &Path) -> Option<ThemeSourceFin
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Some(ThemeSourceFingerprint { files })
+}
+
+fn user_config_source_fingerprint_from_files<I>(files: I) -> Option<UserConfigSourceFingerprint>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let files = files
+        .into_iter()
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let metadata = fs::metadata(&path).ok();
+            UserConfigSourceFile {
+                path,
+                size: metadata.as_ref().map_or(0, |metadata| metadata.len()),
+                modified_at: metadata.and_then(|metadata| metadata.modified().ok()),
+            }
+        })
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return None;
+    }
+    let mut files = files;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Some(UserConfigSourceFingerprint { files })
+}
+
+fn user_config_source_fingerprint_from_root(
+    root_dir: &Path,
+) -> Option<UserConfigSourceFingerprint> {
+    let master_path = root_dir.join(USER_CONFIG_FILE_NAME);
+    let mut files = Vec::new();
+    if master_path.is_file() {
+        files.push(master_path.clone());
+    }
+    if let Ok(contents) = fs::read_to_string(&master_path) {
+        for relative in user_config_child_paths(&contents) {
+            let path = root_dir.join(relative);
+            if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    user_config_source_fingerprint_from_files(files)
+}
+
+fn user_config_child_paths(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let (key, value) = trimmed.split_once(':')?;
+            matches!(key.trim(), "workspace" | "acp" | "ui" | "oil")
+                .then(|| value.trim().trim_matches('"').trim_matches('\'').to_owned())
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn theme_runtime_settings(
@@ -17373,41 +17671,61 @@ fn execute_lsp_lifecycle_for_buffer(
 ) -> Result<(), String> {
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, manager, context)?;
-    let labels = match (lifecycle, preferred_server_id) {
-        (LspLifecycleAction::Start, Some(server_id)) => manager.start_buffer_server(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-            server_id,
-        ),
-        (LspLifecycleAction::Start, None) => manager.sync_buffer(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-        ),
-        (LspLifecycleAction::Restart, _) => manager.restart_buffer(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-            preferred_server_id,
-        ),
-    }
-    .map_err(|error| error.to_string())?;
-    let ui = shell_ui_mut(runtime)?;
-    if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
-        buffer.set_lsp_enabled(true);
-        if lifecycle == LspLifecycleAction::Restart {
-            buffer.set_lsp_diagnostics(Vec::new());
+    match lifecycle {
+        LspLifecycleAction::Start => {
+            {
+                let ui = shell_ui_mut(runtime)?;
+                if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+                    buffer.set_lsp_enabled(true);
+                }
+            }
+            schedule_immediate_lsp_sync(runtime, context, preferred_server_id)
+        }
+        LspLifecycleAction::Restart => {
+            let labels = manager
+                .restart_buffer(
+                    &context.path,
+                    &context.text,
+                    context.revision,
+                    context.root.as_deref(),
+                    preferred_server_id,
+                )
+                .map_err(|error| error.to_string())?;
+            let ui = shell_ui_mut(runtime)?;
+            if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+                buffer.set_lsp_enabled(true);
+                buffer.set_lsp_diagnostics(Vec::new());
+            }
+            ui.set_attached_lsp_server(
+                context.workspace_id,
+                (!labels.is_empty()).then(|| labels.join(", ")),
+            );
+            Ok(())
         }
     }
-    ui.set_attached_lsp_server(
-        context.workspace_id,
-        (!labels.is_empty()).then(|| labels.join(", ")),
-    );
-    Ok(())
+}
+
+fn schedule_immediate_lsp_sync(
+    runtime: &mut EditorRuntime,
+    context: &ActiveLspBufferContext,
+    preferred_server_id: Option<&str>,
+) -> Result<(), String> {
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let request = LspSyncWorkerRequest {
+        path: context.path.clone(),
+        revision: context.revision,
+        text: TextBuffer::from_text(&context.text).snapshot(),
+        root: context.root.clone(),
+        lsp_client,
+        preferred_server_id: preferred_server_id.map(str::to_owned),
+    };
+    let ui = shell_ui_mut(runtime)?;
+    ui.lsp_sync_worker.schedule(request, false);
+    ui.lsp_sync_worker.dispatch_due(Instant::now())
 }
 
 fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -19031,6 +19349,7 @@ struct LspSyncWorkerRequest {
     text: TextSnapshot,
     root: Option<PathBuf>,
     lsp_client: Arc<LspClientManager>,
+    preferred_server_id: Option<String>,
 }
 
 struct PendingLspSyncRequest {
@@ -19184,16 +19503,22 @@ impl LspSyncWorkerState {
                     latest_by_path.insert(newer_request.path.clone(), newer_request);
                 }
                 for request in latest_by_path.into_values() {
-                    let error = request
-                        .lsp_client
-                        .sync_buffer(
+                    let sync_result = match request.preferred_server_id.as_deref() {
+                        Some(server_id) => request.lsp_client.start_buffer_server(
                             &request.path,
                             request.text.text(),
                             request.revision,
                             request.root.as_deref(),
-                        )
-                        .err()
-                        .map(|error| error.to_string());
+                            server_id,
+                        ),
+                        None => request.lsp_client.sync_buffer(
+                            &request.path,
+                            request.text.text(),
+                            request.revision,
+                            request.root.as_deref(),
+                        ),
+                    };
+                    let error = sync_result.err().map(|error| error.to_string());
                     if let Ok(mut results) = worker_results.lock() {
                         results.push(LspSyncWorkerResult {
                             path: request.path,
@@ -28102,6 +28427,7 @@ fn schedule_pending_lsp_syncs(
                     text: buffer.text.snapshot(),
                     root,
                     lsp_client: lsp_client.clone(),
+                    preferred_server_id: None,
                 }))
             })
             .collect::<Result<Vec<_>, String>>()?
@@ -28611,8 +28937,10 @@ pub(crate) fn open_workspace_from_project(
         ui.switch_workspace(workspace_id);
     }
 
+    queue_workspace_syntax_prewarm(runtime, root);
+
     if let Some(readme_path) = initial_readme_path {
-        open_workspace_file(runtime, &readme_path)?;
+        queue_workspace_readme_open(runtime, readme_path);
     }
 
     runtime
@@ -28626,6 +28954,166 @@ pub(crate) fn open_workspace_from_project(
         .map_err(|error| error.to_string())?;
 
     Ok(workspace_id)
+}
+
+fn workspace_language_path_signature(path: &Path) -> String {
+    if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+        return extension.to_ascii_lowercase();
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn collect_workspace_language_ids(
+    registry: &SyntaxRegistry,
+    root: &Path,
+    files: &[PathBuf],
+) -> BTreeSet<String> {
+    let mut language_ids = BTreeSet::new();
+    let mut seen_signatures = BTreeSet::new();
+    for relative_path in files {
+        let path = root.join(relative_path);
+        let signature = workspace_language_path_signature(&path);
+        if !seen_signatures.insert(signature) {
+            continue;
+        }
+        if let Some(language_id) = registry
+            .language_for_path(&path)
+            .map(|language| language.id().to_owned())
+        {
+            language_ids.insert(language_id);
+        }
+    }
+    if let Ok(Some(readme_path)) = workspace_root_readme_path(root) {
+        let signature = workspace_language_path_signature(&readme_path);
+        if seen_signatures.insert(signature)
+            && let Some(language_id) = registry
+                .language_for_path(&readme_path)
+                .map(|language| language.id().to_owned())
+        {
+            language_ids.insert(language_id);
+        }
+    }
+    language_ids
+}
+
+fn queue_workspace_syntax_prewarm(runtime: &mut EditorRuntime, root: &Path) {
+    let Ok(ui) = shell_ui_mut(runtime) else {
+        return;
+    };
+    let root = root.to_path_buf();
+    if ui
+        .pending_syntax_prewarm_roots
+        .iter()
+        .any(|pending| pending == &root)
+    {
+        return;
+    }
+    ui.pending_syntax_prewarm_roots.push_back(root);
+}
+
+fn queue_workspace_readme_open(runtime: &mut EditorRuntime, path: PathBuf) {
+    let Ok(ui) = shell_ui_mut(runtime) else {
+        return;
+    };
+    if ui
+        .pending_workspace_readme_opens
+        .iter()
+        .any(|pending| pending == &path)
+    {
+        return;
+    }
+    ui.pending_workspace_readme_opens.push_back(path);
+}
+
+fn refresh_pending_workspace_readme_opens(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let path = shell_ui_mut(runtime)?
+        .pending_workspace_readme_opens
+        .pop_front();
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    open_workspace_file(runtime, &path)?;
+    Ok(true)
+}
+
+fn refresh_pending_syntax_prewarm(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let root = shell_ui_mut(runtime)?
+        .pending_syntax_prewarm_roots
+        .pop_front();
+    let Some(root) = root else {
+        return Ok(false);
+    };
+    prewarm_workspace_syntax_languages(runtime, &root);
+    Ok(true)
+}
+
+fn prewarm_workspace_syntax_languages(runtime: &mut EditorRuntime, root: &Path) {
+    let language_ids = {
+        let Some(registry) = runtime.services().get::<SyntaxRegistry>() else {
+            return;
+        };
+        if let Ok(files) = list_repository_files(root) {
+            collect_workspace_language_ids(registry, root, &files)
+        } else if let Ok(Some(readme_path)) = workspace_root_readme_path(root) {
+            let mut language_ids = BTreeSet::new();
+            if let Some(language_id) = registry
+                .language_for_path(&readme_path)
+                .map(|language| language.id().to_owned())
+            {
+                language_ids.insert(language_id);
+            }
+            language_ids
+        } else {
+            BTreeSet::new()
+        }
+    };
+    let Some(registry) = runtime.services_mut().get_mut::<SyntaxRegistry>() else {
+        return;
+    };
+    for language_id in language_ids {
+        match registry.is_installed(&language_id) {
+            Ok(true) => {
+                if let Err(error) = registry.preload_language(&language_id) {
+                    eprintln!("tree-sitter prewarm failed for `{language_id}`: {error}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}"),
+        }
+    }
+}
+
+fn picker_preview_syntax_lines(
+    runtime: &mut EditorRuntime,
+    preview: &str,
+) -> Option<IndexedSyntaxLines> {
+    let mut lines = preview.lines();
+    let path = PathBuf::from(lines.next()?);
+    if !path.is_absolute() {
+        return None;
+    }
+    let source_lines = lines.collect::<Vec<_>>();
+    if source_lines.is_empty()
+        || source_lines.iter().any(|line| {
+            line.strip_prefix('>')
+                .or_else(|| line.strip_prefix(' '))
+                .is_some_and(|rest| {
+                    rest.trim_start()
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_digit())
+                })
+        })
+    {
+        return None;
+    }
+    let text = TextBuffer::from_text(source_lines.join("\n"));
+    let registry = runtime.services_mut().get_mut::<SyntaxRegistry>()?;
+    let snapshot = registry.highlight_buffer_for_path(&path, &text).ok()?;
+    Some(index_syntax_lines(snapshot, &text))
 }
 
 pub(crate) fn delete_runtime_workspace(
@@ -29066,17 +29554,12 @@ fn queue_buffer_syntax_refresh(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    {
-        let ui = shell_ui_mut(runtime)?;
-        let Some(buffer) = ui.buffer_mut(buffer_id) else {
-            return Ok(());
-        };
-        buffer.force_syntax_refresh();
-    }
-    if runtime.services().get::<SyntaxRegistry>().is_none() {
+    let ui = shell_ui_mut(runtime)?;
+    let Some(buffer) = ui.buffer_mut(buffer_id) else {
         return Ok(());
-    }
-    refresh_pending_syntax(runtime).map(|_| ())
+    };
+    buffer.force_syntax_refresh();
+    Ok(())
 }
 
 fn install_optional_runtime_services(

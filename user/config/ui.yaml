@@ -1,0 +1,5 @@
+picker_truncate_strategy: auto
+ligatures_enabled: true
+
+pane:
+  golden_ratio: true

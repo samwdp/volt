@@ -37,6 +37,7 @@
       overflow-x: hidden;
       min-height: 100vh;
       position: relative;
+      max-width: 100vw;
     }
 
     body::before {
@@ -55,11 +56,13 @@
     }
 
     .container {
+      width: 100%;
       max-width: 1800px;
       margin: 0 auto;
       padding: 60px 40px;
       position: relative;
       z-index: 1;
+      overflow-x: hidden;
     }
 
     .docs-link {
@@ -141,6 +144,8 @@
       text-transform: uppercase;
       font-weight: 400;
       margin-top: 30px;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
     }
 
     .subtitle span {
@@ -153,6 +158,7 @@
       flex-direction: column;
       gap: 32px;
       animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+      min-width: 0;
     }
 
     @keyframes fadeIn {
@@ -175,6 +181,8 @@
       position: relative;
       overflow: hidden;
       transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      max-width: 100%;
+      min-width: 0;
     }
 
     .layer::before {
@@ -242,6 +250,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 16px;
       margin-bottom: 24px;
       padding-bottom: 16px;
       border-bottom: 1px solid var(--border);
@@ -253,6 +262,7 @@
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      overflow-wrap: anywhere;
     }
 
     .layer-ui .layer-title {
@@ -289,7 +299,7 @@
 
     .components {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
       gap: 16px;
     }
 
@@ -301,6 +311,7 @@
       transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       position: relative;
       overflow: hidden;
+      min-width: 0;
     }
 
     .component::before {
@@ -331,12 +342,14 @@
       margin-bottom: 8px;
       color: var(--text-primary);
       font-size: 0.95rem;
+      overflow-wrap: anywhere;
     }
 
     .component-desc {
       font-size: 0.8rem;
       color: var(--text-dim);
       line-height: 1.5;
+      overflow-wrap: anywhere;
     }
 
     .flow-indicator {
@@ -493,6 +506,7 @@
 
     @media (max-width: 768px) {
       .container {
+        max-width: 100%;
         padding: 40px 20px;
       }
 
@@ -500,12 +514,40 @@
         font-size: 3rem;
       }
 
+      .layer {
+        padding: 24px 16px;
+      }
+
+      .layer-header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .layer-title {
+        font-size: 1.55rem;
+        line-height: 1.25;
+        max-width: 100%;
+        word-break: break-word;
+      }
+
+      .layer-badge {
+        max-width: 100%;
+        white-space: normal;
+      }
+
       .components {
+        max-width: 100%;
         grid-template-columns: 1fr;
       }
 
       .integration-grid {
         grid-template-columns: 1fr;
+      }
+
+      .component,
+      .integration-card,
+      .tech-stack {
+        max-width: 100%;
       }
     }
 
@@ -534,40 +576,40 @@
     <a class="docs-link" href="index.html">← Docs Home</a>
     <header>
       <h1>VOLT</h1>
-      <p class="subtitle">Modal Text Editor Architecture • <span>Rust-Powered</span></p>
+      <p class="subtitle">Runtime Architecture • <span>Compiled User Layer</span></p>
     </header>
 
     <div class="architecture">
-      <!-- UI Layer -->
+      <!-- Shell Layer -->
       <div class="layer layer-ui">
         <div class="layer-header">
-          <h2 class="layer-title">User Interface Layer</h2>
-          <span class="layer-badge">Presentation</span>
+          <h2 class="layer-title">Launch & Shell Layer</h2>
+          <span class="layer-badge">Entry + UI Runtime</span>
         </div>
         <div class="components">
           <div class="component">
-            <div class="component-name">Statusline</div>
-            <div class="component-desc">Real-time editor status display</div>
+            <div class="component-name">crates/volt</div>
+            <div class="component-desc">Executable entry point, launch modes, process supervisor, dynamic user-library loading</div>
           </div>
           <div class="component">
-            <div class="component-name">Picker UI</div>
-            <div class="component-desc">Fuzzy finder interface</div>
+            <div class="component-name">editor-sdl::run_demo_shell</div>
+            <div class="component-desc">Default SDL shell path plus hidden one-frame runtime smoke mode</div>
           </div>
           <div class="component">
-            <div class="component-name">Oil File Browser</div>
-            <div class="component-desc">Directory navigation</div>
+            <div class="component-name">ShellState</div>
+            <div class="component-desc">Owns EditorRuntime, shell buffers, browser host, deferred startup, UI services</div>
           </div>
           <div class="component">
-            <div class="component-name">Terminal Buffer</div>
-            <div class="component-desc">Integrated shell interface</div>
+            <div class="component-name">ShellUiState</div>
+            <div class="component-desc">Panes, popups, active buffers, picker state, overlays, diagnostics, shell-local UI state</div>
           </div>
           <div class="component">
-            <div class="component-name">Undotree UI</div>
-            <div class="component-desc">Visual undo history</div>
+            <div class="component-name">Shell Hooks</div>
+            <div class="component-desc">Cursor, Vim edit, picker, workspace, terminal, ACP, Git, browser, PDF, DB flows</div>
           </div>
           <div class="component">
-            <div class="component-name">Hover Info</div>
-            <div class="component-desc">Contextual information display</div>
+            <div class="component-name">Renderer + Input</div>
+            <div class="component-desc">SDL3 rendering, font shaping, statusline, command line, hover, completion, mouse/key input</div>
           </div>
         </div>
       </div>
@@ -576,60 +618,44 @@
         <div class="flow-arrow">↓</div>
       </div>
 
-      <!-- Plugin Layer -->
+      <!-- User Layer -->
       <div class="layer layer-plugins">
         <div class="layer-header">
-          <h2 class="layer-title">Plugin Packages</h2>
-          <span class="layer-badge">Extensibility</span>
+          <h2 class="layer-title">Compiled User Layer</h2>
+          <span class="layer-badge">ABI + Packages</span>
         </div>
         <div class="components">
           <div class="component">
-            <div class="component-name">Buffer</div>
-            <div class="component-desc">Buffer management & save operations</div>
+            <div class="component-name">user/sdk</div>
+            <div class="component-desc">Only stable plugin ABI crate; abi_stable types shared across host/user boundary</div>
           </div>
           <div class="component">
-            <div class="component-name">Workspace</div>
-            <div class="component-desc">Project & workspace control</div>
+            <div class="component-name">user crate</div>
+            <div class="component-desc">Compiled customization library, linked in dev and loadable as user.dll/libuser.so</div>
           </div>
           <div class="component">
-            <div class="component-name">Vim</div>
-            <div class="component-desc">Modal editing keybindings</div>
+            <div class="component-name">Plugin Packages</div>
+            <div class="component-desc">Buffer, workspace, Vim, picker, pane, terminal, compile, LSP, DAP, Git, Oil</div>
           </div>
           <div class="component">
-            <div class="component-name">LSP</div>
-            <div class="component-desc">Language server lifecycle</div>
+            <div class="component-name">Feature Packages</div>
+            <div class="component-desc">ACP, autocomplete, hover, browser, DB explorer, PDF, image, multicursor, undotree</div>
           </div>
           <div class="component">
-            <div class="component-name">DAP</div>
-            <div class="component-desc">Debug adapter protocol</div>
+            <div class="component-name">Registries</div>
+            <div class="component-desc">Syntax languages, themes, language servers, debug adapters, providers, workspace roots</div>
           </div>
           <div class="component">
-            <div class="component-name">Git</div>
-            <div class="component-desc">Version control integration</div>
+            <div class="component-name">Declarative Metadata</div>
+            <div class="component-desc">Commands, hook declarations, hook bindings, scoped/Vim-mode keybindings, feature specs</div>
           </div>
           <div class="component">
-            <div class="component-name">Terminal</div>
-            <div class="component-desc">Shell integration</div>
+            <div class="component-name">Statusline + UI Policy</div>
+            <div class="component-desc">User-defined statusline, icons, ligatures, Oil layout, Git sections, browser prompts</div>
           </div>
           <div class="component">
-            <div class="component-name">Autocomplete</div>
-            <div class="component-desc">Completion providers</div>
-          </div>
-          <div class="component">
-            <div class="component-name">TreeSitter</div>
-            <div class="component-desc">Grammar installer</div>
-          </div>
-          <div class="component">
-            <div class="component-name">Multicursor</div>
-            <div class="component-desc">Multi-cursor editing</div>
-          </div>
-          <div class="component">
-            <div class="component-name">Theme</div>
-            <div class="component-desc">Color scheme management</div>
-          </div>
-          <div class="component">
-            <div class="component-name">Lang Support</div>
-            <div class="component-desc">Rust, TS, JS, C#, YAML, TOML, MD</div>
+            <div class="component-name">Language Modules</div>
+            <div class="component-desc">Rust, TS/JS, C#, Python, Go, SQL, Markdown, web, config, shell, and many more</div>
           </div>
         </div>
       </div>
@@ -641,57 +667,41 @@
       <!-- Core Layer -->
       <div class="layer layer-core">
         <div class="layer-header">
-          <h2 class="layer-title">Editor Core Crates</h2>
-          <span class="layer-badge">Engine</span>
+          <h2 class="layer-title">Editor Runtime Core</h2>
+          <span class="layer-badge">Model + Registries</span>
         </div>
         <div class="components">
           <div class="component">
-            <div class="component-name">editor-buffer</div>
-            <div class="component-desc">Text buffer & undo/redo</div>
+            <div class="component-name">EditorRuntime</div>
+            <div class="component-desc">Bundles EditorModel, ServiceRegistry, CommandRegistry, HookBus, KeymapRegistry</div>
           </div>
           <div class="component">
             <div class="component-name">editor-core</div>
-            <div class="component-desc">Cursor & selection ops</div>
+            <div class="component-desc">Window → Workspace → Pane/Popup → Buffer model plus commands, hooks, keymaps</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-syntax</div>
-            <div class="component-desc">Tree-sitter highlighting</div>
+            <div class="component-name">editor-plugin-host</div>
+            <div class="component-desc">Activates PluginPackage metadata into runtime commands, hooks, subscriptions, keybindings</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-theme</div>
-            <div class="component-desc">Theme system & tokens</div>
+            <div class="component-name">ServiceRegistry</div>
+            <div class="component-desc">Stores shell state, registries, job managers, quickfix, terminal, theme, user library service</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-render</div>
-            <div class="component-desc">Rendering pipeline</div>
+            <div class="component-name">CommandRegistry</div>
+            <div class="component-desc">Core and package commands, command palette entries, keybinding targets</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-fs</div>
-            <div class="component-desc">File system operations</div>
+            <div class="component-name">HookBus</div>
+            <div class="component-desc">Startup, file open, workspace, cursor, Vim edit, LSP, DAP, compile, terminal, UI events</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-lsp</div>
-            <div class="component-desc">LSP client integration</div>
+            <div class="component-name">KeymapRegistry</div>
+            <div class="component-desc">Global, workspace, popup scopes with Any/Normal/Insert/Visual Vim modes</div>
           </div>
           <div class="component">
-            <div class="component-name">editor-dap</div>
-            <div class="component-desc">Debug adapter client</div>
-          </div>
-          <div class="component">
-            <div class="component-name">editor-git</div>
-            <div class="component-desc">Git repository ops</div>
-          </div>
-          <div class="component">
-            <div class="component-name">editor-terminal</div>
-            <div class="component-desc">Terminal emulation</div>
-          </div>
-          <div class="component">
-            <div class="component-name">editor-picker</div>
-            <div class="component-desc">Fuzzy search backend</div>
-          </div>
-          <div class="component">
-            <div class="component-name">user/sdk</div>
-            <div class="component-desc">Plugin architecture</div>
+            <div class="component-name">Bootstrap Demo</div>
+            <div class="component-desc">Non-UI path builds runtime, loads packages, registries, hooks, LSP/DAP/syntax/theme summary</div>
           </div>
         </div>
       </div>
@@ -700,28 +710,60 @@
         <div class="flow-arrow">↓</div>
       </div>
 
-      <!-- Runtime Layer -->
+      <!-- Domain Crates Layer -->
       <div class="layer layer-runtime">
         <div class="layer-header">
-          <h2 class="layer-title">Runtime & Systems</h2>
-          <span class="layer-badge">Infrastructure</span>
+          <h2 class="layer-title">Domain Crates</h2>
+          <span class="layer-badge">Subsystems</span>
         </div>
         <div class="components">
           <div class="component">
-            <div class="component-name">Tokio Runtime</div>
-            <div class="component-desc">Async I/O & concurrency</div>
+            <div class="component-name">editor-buffer</div>
+            <div class="component-desc">Rope-backed text buffers, edits, undo/redo, text objects, line endings</div>
           </div>
           <div class="component">
-            <div class="component-name">Terminal Emulation</div>
-            <div class="component-desc">PTY & VT100 parsing</div>
+            <div class="component-name">editor-fs</div>
+            <div class="component-desc">Workspace discovery, directory buffers, filesystem entries and edits</div>
           </div>
           <div class="component">
-            <div class="component-name">Plugin Host</div>
-            <div class="component-desc">ABI-stable FFI loader</div>
+            <div class="component-name">editor-syntax</div>
+            <div class="component-desc">Tree-sitter language registration, grammar loading, highlighting, contexts</div>
           </div>
           <div class="component">
-            <div class="component-name">Message Passing</div>
-            <div class="component-desc">Crossbeam channels</div>
+            <div class="component-name">editor-theme</div>
+            <div class="component-desc">Theme registry, token resolution, styles shared with syntax and UI</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-render</div>
+            <div class="component-desc">Draw commands, text layout support, colors and rectangles for shell renderer</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-lsp / editor-dap</div>
+            <div class="component-desc">Language-server specs, sessions, diagnostics, debug-adapter plans</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-jobs / terminal</div>
+            <div class="component-desc">External command execution, compilation jobs, live terminal sessions</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-git</div>
+            <div class="component-desc">Status snapshots, log/stash parsing, repository state for Git views and fringe</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-picker</div>
+            <div class="component-desc">Fuzzy matching, picker sessions, ranked item selection</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-db</div>
+            <div class="component-desc">Database connection descriptors, query execution helpers, schema browsing support</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-icons</div>
+            <div class="component-desc">Bundled Nerd Font symbol metadata used by user icon exports and shell rendering</div>
+          </div>
+          <div class="component">
+            <div class="component-name">editor-path</div>
+            <div class="component-desc">Path pattern matching for package hook detail filters and file-open behavior</div>
           </div>
         </div>
       </div>
@@ -733,25 +775,33 @@
       <!-- Platform Layer -->
       <div class="layer layer-platform">
         <div class="layer-header">
-          <h2 class="layer-title">Graphics & Platform</h2>
+          <h2 class="layer-title">Platform & Assets</h2>
           <span class="layer-badge">Foundation</span>
         </div>
         <div class="components">
           <div class="component">
-            <div class="component-name">SDL3</div>
-            <div class="component-desc">Graphics rendering & input</div>
+            <div class="component-name">SDL3 + SDL_ttf</div>
+            <div class="component-desc">Native window, input loop, font rendering, Windows SDL_ttf build config</div>
           </div>
           <div class="component">
-            <div class="component-name">WebView2</div>
-            <div class="component-desc">Complex UI rendering</div>
+            <div class="component-name">Browser Host</div>
+            <div class="component-desc">WebView/browser IPC groundwork for browser buffers and host events</div>
           </div>
           <div class="component">
-            <div class="component-name">Windows API</div>
-            <div class="component-desc">Platform integration</div>
+            <div class="component-name">Bundled Assets</div>
+            <div class="component-desc">Logos, icon fonts, grammar queries, app resources copied into crate/docs assets</div>
           </div>
           <div class="component">
-            <div class="component-name">Cross-platform</div>
-            <div class="component-desc">Windows, macOS, Linux support</div>
+            <div class="component-name">Runtime Environment</div>
+            <div class="component-desc">Shell command environment, Windows PATH handling, user data/log/grammar directories</div>
+          </div>
+          <div class="component">
+            <div class="component-name">Cross-Platform Targets</div>
+            <div class="component-desc">Windows-first development with macOS/Linux paths for data dirs and shell support</div>
+          </div>
+          <div class="component">
+            <div class="component-name">xtask</div>
+            <div class="component-desc">Workspace automation for fmt, check, clippy, test, CI validation</div>
           </div>
         </div>
       </div>
@@ -762,13 +812,13 @@
       <h2 class="integrations-title">External Integrations</h2>
       <div class="integration-grid">
         <div class="integration-card">
-          <h3>Language Servers</h3>
+          <h3>Language Services</h3>
           <div class="integration-items">
             <div class="integration-item">rust-analyzer (Rust)</div>
             <div class="integration-item">typescript-language-server</div>
             <div class="integration-item">csharp-ls (C#)</div>
             <div class="integration-item">yaml-language-server</div>
-            <div class="integration-item">taplo (TOML)</div>
+            <div class="integration-item">taplo, Lua, Python, Go, Java and more through user/lsp.rs</div>
           </div>
         </div>
         <div class="integration-card">
@@ -776,16 +826,16 @@
           <div class="integration-items">
             <div class="integration-item">CodeLLDB (Rust/C++)</div>
             <div class="integration-item">Node Debug Adapter</div>
-            <div class="integration-item">Custom DAP clients</div>
+            <div class="integration-item">User-defined DAP specs exported by compiled library</div>
           </div>
         </div>
         <div class="integration-card">
-          <h3>Version Control</h3>
+          <h3>External Tools</h3>
           <div class="integration-items">
-            <div class="integration-item">Git2 (libgit2 bindings)</div>
-            <div class="integration-item">Staging & commit UI</div>
-            <div class="integration-item">Diff visualization</div>
-            <div class="integration-item">Branch management</div>
+            <div class="integration-item">Git CLI/status data for status, diff, commit, fringe views</div>
+            <div class="integration-item">Shell commands and build jobs through editor-jobs</div>
+            <div class="integration-item">Database engines through editor-db descriptors</div>
+            <div class="integration-item">Tree-sitter grammars under VOLT_GRAMMAR_DIR or user data dir</div>
           </div>
         </div>
       </div>
@@ -796,8 +846,9 @@
       <h3 class="tech-title">Core Technologies</h3>
       <div class="tech-tags">
         <span class="tech-tag">Rust</span>
+        <span class="tech-tag">Cargo Workspace</span>
         <span class="tech-tag">SDL3</span>
-        <span class="tech-tag">WebView2</span>
+        <span class="tech-tag">SDL_ttf</span>
         <span class="tech-tag">Tree-sitter</span>
         <span class="tech-tag">LSP</span>
         <span class="tech-tag">DAP</span>
@@ -806,12 +857,14 @@
         <span class="tech-tag">Ropey</span>
         <span class="tech-tag">ABI Stable</span>
         <span class="tech-tag">Crossbeam</span>
-        <span class="tech-tag">Alacritty Terminal</span>
+        <span class="tech-tag">Portable PTY</span>
+        <span class="tech-tag">Nerd Fonts</span>
+        <span class="tech-tag">xtask</span>
       </div>
     </div>
 
     <footer>
-      <strong>Volt</strong> — A production-grade modal text editor bridging Vim keybindings with modern IDE capabilities
+      <strong>Volt</strong> — SDL shell plus EditorRuntime core, driven by compiled user packages and domain crates
     </footer>
   </div>
 

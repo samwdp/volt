@@ -1,2 +1,6 @@
 [alias]
 xtask = "run -p xtask --"
+
+[env]
+# Vendored freetype in sdl3-ttf-src 3.2.2 fails on CMake 4+ without this policy floor.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

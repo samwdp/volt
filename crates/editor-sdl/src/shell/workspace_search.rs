@@ -10,6 +10,7 @@ use url::Url;
 use super::*;
 
 const WORKSPACE_SEARCH_OUTPUT_LIMIT: usize = 48;
+const PICKER_PREVIEW_CONTEXT_RADIUS: usize = 4;
 const LSP_CODE_ACTION_KIND_ORDER: [&str; 8] = [
     "quickfix",
     "refactor",
@@ -275,25 +276,26 @@ pub(super) fn workspace_search_match_entry(
     let path = root.join(relative_path);
     let column = workspace_search_char_column(line_text, byte_column.saturating_sub(1));
     let target = TextPoint::new(line_number.saturating_sub(1), column);
-    let preview = line_text.trim();
-    let label = if preview.is_empty() {
+    let preview_line = line_text.trim();
+    let label = if preview_line.is_empty() {
         format!("{relative_path}:{}", line_number)
     } else {
-        preview.to_owned()
+        preview_line.to_owned()
     };
     let detail = format!("{} | Ln {}, Col {}", relative_path, line_number, column + 1);
     let quickfix = QuickfixEntry::new(
         format!("quickfix:{}:{}:{}", path.display(), line_number, column + 1),
         path.clone(),
         target,
-        preview,
+        preview_line,
     );
+    let preview = file_context_preview(&path, target).or_else(|| Some(path.display().to_string()));
     PickerEntry {
         item: PickerItem::new(
             format!("{}:{}:{}", path.display(), line_number, column + 1),
             label,
             detail,
-            Some(path.display().to_string()),
+            preview,
         ),
         action: PickerAction::OpenFileLocation { path, target },
         quickfix: Some(quickfix),
@@ -329,7 +331,7 @@ pub(super) fn lsp_locations_picker_overlay(
         .take(SEARCH_PICKER_ITEM_LIMIT)
         .map(|location| lsp_location_picker_entry(workspace_root.as_deref(), location))
         .collect();
-    PickerOverlay::from_entries(title, entries)
+    PickerOverlay::from_entries(title, entries).with_preview()
 }
 
 pub(super) fn lsp_location_picker_entry(
@@ -341,19 +343,20 @@ pub(super) fn lsp_location_picker_entry(
     let column = target.column + 1;
     let (label, detail, preview, quickfix) = if let Some(path) = location.file_path() {
         let relative_path = workspace_relative_path(workspace_root, path);
-        let preview = TextBuffer::load_from_path(path)
+        let line_preview = TextBuffer::load_from_path(path)
             .ok()
             .and_then(|buffer| buffer.line(target.line))
             .map(|line| line.trim().to_owned())
             .filter(|line| !line.is_empty());
-        let label = preview
+        let label = line_preview
             .clone()
             .unwrap_or_else(|| format!("{relative_path}:{line_number}"));
         let detail = format!(
             "{relative_path} | Ln {line_number}, Col {column} | {}",
             location.server_id()
         );
-        let preview = preview.or_else(|| Some(path.display().to_string()));
+        let preview =
+            file_context_preview(path, target).or_else(|| Some(path.display().to_string()));
         let quickfix = QuickfixEntry::new(
             format!("quickfix:{}:{}:{}", path.display(), line_number, column),
             path.to_path_buf(),
@@ -483,6 +486,7 @@ fn lsp_diagnostics_picker_entries(
 
 fn lsp_diagnostics_picker_overlay_from_entries(entries: Vec<PickerEntry>) -> PickerOverlay {
     PickerOverlay::from_entries("LSP Diagnostics", entries)
+        .with_preview()
         .with_result_order(PickerResultOrder::Source)
 }
 
@@ -521,11 +525,7 @@ fn lsp_diagnostic_picker_entry(
     {
         detail_parts.push(source.to_owned());
     }
-    let preview = TextBuffer::load_from_path(workspace_diagnostic.path())
-        .ok()
-        .and_then(|buffer| buffer.line(target.line))
-        .map(|line| line.trim().to_owned())
-        .filter(|line| !line.is_empty())
+    let preview = file_context_preview(workspace_diagnostic.path(), target)
         .or_else(|| Some(workspace_diagnostic.path().display().to_string()));
     PickerEntry {
         item: PickerItem::new(
@@ -553,6 +553,32 @@ fn lsp_diagnostic_picker_entry(
             lsp_diagnostic_label(diagnostic),
         )),
     }
+}
+
+fn file_context_preview(path: &Path, target: TextPoint) -> Option<String> {
+    let buffer = TextBuffer::load_from_path(path).ok()?;
+    let line_count = buffer.line_count();
+    if line_count == 0 {
+        return Some(path.display().to_string());
+    }
+
+    let start = target.line.saturating_sub(PICKER_PREVIEW_CONTEXT_RADIUS);
+    let end = target
+        .line
+        .saturating_add(PICKER_PREVIEW_CONTEXT_RADIUS + 1)
+        .min(line_count);
+    let mut lines = Vec::with_capacity(end.saturating_sub(start).saturating_add(1));
+    lines.push(path.display().to_string());
+    for line_index in start..end {
+        let marker = if line_index == target.line { ">" } else { " " };
+        let text = buffer
+            .line(line_index)
+            .unwrap_or_default()
+            .trim_end()
+            .to_owned();
+        lines.push(format!("{marker} {:>4} {text}", line_index + 1));
+    }
+    Some(lines.join("\n"))
 }
 
 fn lsp_diagnostic_label(diagnostic: &editor_lsp::Diagnostic) -> String {
@@ -910,6 +936,25 @@ mod tests {
                 if path == root.join("src\\main.rs")
                     && target == TextPoint::new(6, 4)
         ));
+    }
+
+    #[test]
+    fn file_context_preview_marks_target_line() -> Result<(), Box<dyn std::error::Error>> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("volt-picker-preview-{unique}"));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("main.rs");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n")?;
+
+        let preview = file_context_preview(&path, TextPoint::new(2, 0))
+            .ok_or("missing file context preview")?;
+
+        assert!(preview.contains(">    3 three"));
+        assert!(preview.contains("     2 two"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

@@ -2310,17 +2310,25 @@ fn load_persisted_state(path: &Path) -> Result<PersistedDbState, String> {
 }
 
 fn initialize_native_keyring() -> Result<(), String> {
+    use keyring_core::set_default_store;
+
     #[cfg(target_os = "windows")]
     {
-        keyring::use_named_store("windows").map_err(|error| error.to_string())?;
+        let store =
+            windows_native_keyring_store::Store::new().map_err(|error| error.to_string())?;
+        set_default_store(store);
     }
     #[cfg(target_os = "macos")]
     {
-        keyring::use_named_store("keychain").map_err(|error| error.to_string())?;
+        let store = apple_native_keyring_store::keychain::Store::new()
+            .map_err(|error| error.to_string())?;
+        set_default_store(store);
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
     {
-        keyring::use_named_store("secret-service").map_err(|error| error.to_string())?;
+        let store =
+            zbus_secret_service_keyring_store::Store::new().map_err(|error| error.to_string())?;
+        set_default_store(store);
     }
     Ok(())
 }

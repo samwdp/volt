@@ -1,11 +1,7 @@
 use editor_plugin_api::{PaneConfig, PluginAction, PluginCommand, PluginPackage};
 
-pub const GOLDEN_RATIO: bool = true;
-
-pub const fn config() -> PaneConfig {
-    PaneConfig {
-        golden_ratio: GOLDEN_RATIO,
-    }
+pub fn config() -> PaneConfig {
+    crate::config::load().ui.pane.pane_config()
 }
 
 /// Returns the metadata for the pane management package.
@@ -44,7 +40,7 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
 
 #[cfg(test)]
 mod tests {
-    use super::{GOLDEN_RATIO, config, package};
+    use super::{config, package};
 
     #[test]
     fn package_exports_split_close_and_switch_commands() {
@@ -77,6 +73,6 @@ mod tests {
 
     #[test]
     fn config_exposes_current_golden_ratio_setting() {
-        assert_eq!(config().golden_ratio, GOLDEN_RATIO);
+        assert!(config().golden_ratio);
     }
 }

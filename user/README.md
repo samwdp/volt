@@ -5,8 +5,10 @@ This directory is Volt's compiled customization layer. The `volt-user` crate bui
 ## What this package contains
 
 - `lib.rs` wires the user library together and exports the compiled packages, themes, language servers, and debug adapters.
+- `config.rs` loads runtime YAML configuration from `user\config.yaml` and the referenced child files under `user\config\`.
 - `workspace.rs` controls workspace commands and the directories Volt scans when it looks for projects.
 - `theme.rs` loads `user\themes\*.toml`, merges in `user\themes\global.toml`, and sets the default theme order.
+- `config.yaml` is the master user config file; it points at child config files for workspace, ACP, UI, and oil settings.
 - `themes\global.toml` contains shared editor options and language defaults.
 - `themes\*.toml` contains the bundled named themes and their palette/token colors.
 
@@ -15,9 +17,25 @@ This directory is Volt's compiled customization layer. The `volt-user` crate bui
 Most user-facing changes happen in this folder:
 
 - edit a Rust module such as `workspace.rs`, `picker.rs`, `vim.rs`, or `statusline.rs` when you want to change behavior
+- edit `config.yaml` or a file under `config\` when you want to change runtime-loaded settings without recompiling
 - edit `themes\global.toml` when you want to change shared options such as font, font size, scrolloff, or language defaults
 - edit a named theme file under `themes\` when you want to change colors and token mappings
 - rebuild `volt-user` so Volt picks up the new shared library
+
+Volt now supports a phase-1 runtime config layer for selected user-library settings. Changes in these YAML files are picked up while Volt is running, so values like project search roots, ACP clients, picker truncation, terminal defaults, ligatures, pane layout, and oil defaults/keybindings no longer require a rebuild.
+
+## Runtime config: `config.yaml`
+
+The master config file lives at `user\config.yaml` and points at child files:
+
+```yaml
+workspace: config/workspace.yaml
+acp: config/acp.yaml
+ui: config/ui.yaml
+oil: config/oil.yaml
+```
+
+This is a reference file, not a YAML include. Volt reads the master file, then loads each child file at runtime.
 
 The crate name is `volt-user`, but the built library is named `user`:
 
@@ -27,25 +45,23 @@ The crate name is `volt-user`, but the built library is named `user`:
 
 ## Project discovery: `workspace.rs`
 
-Volt's project picker reads its search locations from `project_search_roots()` in `user\workspace.rs`:
+Volt's project picker now reads its search locations from `user\config\workspace.yaml`:
 
-```rust
-pub fn project_search_roots() -> Vec<ProjectSearchRoot> {
-    vec![
-        ProjectSearchRoot::new(r"P:\", 4),
-        ProjectSearchRoot::new(r"W:\", 4),
-        ProjectSearchRoot::new(r"C:\Users\sam\", 4),
-    ]
-    .into_iter()
-    .filter(|search_root| search_root.root().exists())
-    .collect()
-}
+```yaml
+project_search_roots:
+  - path: P:\
+    max_depth: 4
+  - path: W:\
+    max_depth: 4
+  - path: C:\Users\sam\
+    max_depth: 4
 ```
 
 To add another place for Volt to search, add another `ProjectSearchRoot::new(...)` entry:
 
-```rust
-ProjectSearchRoot::new(r"D:\code\", 4),
+```yaml
+  - path: D:\code\
+    max_depth: 4
 ```
 
 Each entry takes:
@@ -53,7 +69,13 @@ Each entry takes:
 - a root directory
 - a max search depth
 
-If the path does not exist on the current machine, it is filtered out automatically. On Windows, prefer raw strings such as `r"D:\code\"` so backslashes stay readable.
+If the path does not exist on the current machine, it is filtered out automatically.
+
+## Other runtime-backed config files
+
+- `config\acp.yaml`: ACP client list
+- `config\ui.yaml`: picker truncation, ligatures, pane layout, terminal defaults
+- `config\oil.yaml`: default hidden/sort/trash settings plus oil keybindings
 
 ## Changing the theme and font
 

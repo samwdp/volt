@@ -1,0 +1,7 @@
+project_search_roots:
+  - path: P:\
+    max_depth: 4
+  - path: W:\
+    max_depth: 4
+  - path: C:\Users\sam\
+    max_depth: 4

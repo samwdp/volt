@@ -1,0 +1,24 @@
+defaults:
+  show_hidden: false
+  sort_mode: type-then-name
+  trash_enabled: false
+
+keybindings:
+  open_entry: Enter
+  open_vertical_split: Ctrl+\\
+  open_horizontal_split: Ctrl+|
+  open_new_pane: Ctrl+t
+  preview_entry: Ctrl+p
+  refresh: Ctrl+l
+  close: Ctrl+c
+  prefix: g
+  open_parent: "-"
+  open_workspace_root: _
+  set_root: "`"
+  show_help: "?"
+  cycle_sort: s
+  toggle_hidden: "."
+  toggle_trash: "\\"
+  open_external: x
+  set_tab_local_root: "~"
+  create_git_worktree: wn

@@ -19,6 +19,7 @@ pub struct PickerItem {
     search_text: String,
     preview: Option<String>,
     fringe: Option<String>,
+    divider: bool,
 }
 
 impl PickerItem {
@@ -37,7 +38,26 @@ impl PickerItem {
             detail: detail.into(),
             preview: preview.map(Into::into),
             fringe: None,
+            divider: false,
         }
+    }
+
+    /// Creates a non-selectable horizontal divider row.
+    pub fn divider(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: String::new(),
+            detail: String::new(),
+            search_text: String::new(),
+            preview: None,
+            fringe: None,
+            divider: true,
+        }
+    }
+
+    /// Returns whether this row is a non-selectable section divider.
+    pub const fn is_divider(&self) -> bool {
+        self.divider
     }
 
     /// Returns the stable item identifier.
@@ -232,7 +252,7 @@ impl PickerSession {
             return;
         }
 
-        self.selected_index = (self.selected_index + 1) % self.matches.len();
+        self.selected_index = self.selectable_index(self.selected_index, 1);
     }
 
     /// Moves the selection up by one entry.
@@ -242,13 +262,46 @@ impl PickerSession {
             return;
         }
 
-        self.selected_index = self
-            .selected_index
-            .checked_sub(1)
-            .unwrap_or(self.matches.len() - 1);
+        self.selected_index = self.selectable_index(self.selected_index, -1);
+    }
+
+    fn selectable_index(&self, start: usize, direction: i32) -> usize {
+        let len = self.matches.len();
+        if len == 0 {
+            return 0;
+        }
+        let mut index = start;
+        for _ in 0..len {
+            if direction > 0 {
+                index = (index + 1) % len;
+            } else {
+                index = index.checked_sub(1).unwrap_or(len - 1);
+            }
+            if !self.matches[index].item().is_divider() {
+                return index;
+            }
+        }
+        start
+    }
+
+    fn ensure_selectable_selection(&mut self) {
+        if self.matches.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+        if self.matches[self.selected_index].item().is_divider() {
+            self.selected_index = self.selectable_index(self.selected_index, 1);
+        }
     }
 
     fn recompute_matches(&mut self) {
+        let selected_id = self.matches.get(self.selected_index).and_then(|matched| {
+            if matched.item().is_divider() {
+                None
+            } else {
+                Some(matched.item().id().to_owned())
+            }
+        });
         self.matches = self
             .items
             .iter()
@@ -268,13 +321,32 @@ impl PickerSession {
 
         if self.matches.is_empty() {
             self.selected_index = 0;
+        } else if let Some(selected_id) = selected_id
+            && let Some(index) = self
+                .matches
+                .iter()
+                .position(|matched| matched.item().id() == selected_id)
+        {
+            self.selected_index = index;
         } else {
             self.selected_index = self.selected_index.min(self.matches.len() - 1);
+            self.ensure_selectable_selection();
         }
     }
 }
 
 fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
+    if item.is_divider() {
+        if query.split_whitespace().any(|term| !term.is_empty()) {
+            return None;
+        }
+        return Some(PickerMatch {
+            item: item.clone(),
+            score: 0,
+            matched_positions: Vec::new(),
+        });
+    }
+
     let query_terms = query
         .split_whitespace()
         .filter(|term| !term.is_empty())
@@ -608,6 +680,64 @@ mod tests {
                 .selected()
                 .and_then(|selected| selected.item().fringe()),
             Some("icon")
+        );
+    }
+
+    #[test]
+    fn divider_visible_with_empty_query_and_hidden_when_filtering() {
+        let mut session = PickerSession::new(
+            "Workspaces",
+            vec![
+                item("open", "default"),
+                PickerItem::divider("divider"),
+                item("project", "volt"),
+            ],
+        )
+        .with_result_order(PickerResultOrder::Source);
+
+        assert_eq!(session.match_count(), 3);
+        assert!(
+            session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().is_divider())
+        );
+
+        session.set_query("volt");
+        assert_eq!(session.match_count(), 1);
+        assert!(
+            session
+                .matches()
+                .iter()
+                .all(|matched| !matched.item().is_divider())
+        );
+    }
+
+    #[test]
+    fn selection_skips_divider_rows() {
+        let mut session = PickerSession::new(
+            "Workspaces",
+            vec![
+                item("open", "default"),
+                PickerItem::divider("divider"),
+                item("project", "volt"),
+            ],
+        )
+        .with_result_order(PickerResultOrder::Source);
+
+        assert_eq!(
+            session.selected().map(|item| item.item().id()),
+            Some("open")
+        );
+        session.select_next();
+        assert_eq!(
+            session.selected().map(|item| item.item().id()),
+            Some("project")
+        );
+        session.select_previous();
+        assert_eq!(
+            session.selected().map(|item| item.item().id()),
+            Some("open")
         );
     }
 

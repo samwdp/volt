@@ -1301,6 +1301,16 @@ impl SyntaxRegistry {
             .collect()
     }
 
+    /// Reports whether a language's grammar and highlight query are already loaded.
+    pub fn is_loaded(&self, language_id: &str) -> bool {
+        self.loaded.contains_key(language_id)
+    }
+
+    /// Loads a language's grammar and highlight query without parsing a buffer.
+    pub fn preload_language(&mut self, language_id: &str) -> Result<(), SyntaxError> {
+        self.ensure_loaded_language(language_id)
+    }
+
     /// Builds a reusable install plan for one grammar-backed language.
     pub fn prepare_language_install(
         &self,
@@ -3925,6 +3935,16 @@ mod tests {
                 .map(|language| language.id()),
             Some("rust")
         );
+    }
+
+    #[test]
+    fn preload_language_loads_static_language_without_parsing() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        assert!(!registry.is_loaded("rust"));
+        must(registry.preload_language("rust"));
+        assert!(registry.is_loaded("rust"));
     }
 
     #[test]

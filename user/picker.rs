@@ -1,8 +1,45 @@
+//! Picker providers, commands, and label truncation configuration.
+//!
+//! Long path labels are clipped at render time using [`truncate_strategy`]. Change
+//! that function to pick a [`PickerTruncateStrategy`]; the shell applies it to
+//! every picker row label.
+//!
+//! Examples use `src/dir1/dir2/test.rs` unless noted. Ellipsis variants clip to
+//! the viewport width after any path transform.
+//!
+//! | Strategy | Example output |
+//! |---|---|
+//! | [`PickerTruncateStrategy::Auto`] | full path, else `s/d/d/test.rs`, else `...ir2/test.rs` |
+//! | [`PickerTruncateStrategy::StartEllipsis`] | `...ir2/test.rs` |
+//! | [`PickerTruncateStrategy::MiddleEllipsis`] | `src...test.rs` |
+//! | [`PickerTruncateStrategy::EndEllipsis`] | `src/dir1/dir2/te...` |
+//! | [`PickerTruncateStrategy::ShrinkDirectories`] | `s/d/d/test.rs` |
+//! | [`PickerTruncateStrategy::ShrinkAll`] | `s/d/d/t.rs` |
+//! | [`PickerTruncateStrategy::FileName`] | `test.rs` |
+//! | [`PickerTruncateStrategy::FileNameWithParent`] | `dir2/test.rs` |
+//! | [`PickerTruncateStrategy::ParentInitialFileName`] | `d/test.rs` |
+//! | [`PickerTruncateStrategy::ShrinkLeadingKeepTail`] | shrink leading dirs, keep last 3 segments |
+//! | [`PickerTruncateStrategy::Full`] | full path when it fits, else head clip |
+
+use std::path::Path;
+
+pub use editor_plugin_api::PickerTruncateStrategy;
+
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerProviderSpec, PickerSource,
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
     picker_hooks,
 };
+
+/// Picker label truncation when a row is narrower than the label.
+///
+/// Default is [`PickerTruncateStrategy::Auto`]: show the full label when it fits,
+/// shrink parent directories fish-shell style, then clip from the start so the
+/// filename stays visible. For doom-modeline `truncate-all`, use
+/// [`PickerTruncateStrategy::ShrinkAll`].
+pub fn truncate_strategy() -> PickerTruncateStrategy {
+    crate::config::load().ui.picker_truncate_strategy.into()
+}
 
 /// Returns the metadata for the generic picker UI package.
 pub fn package() -> PluginPackage {
@@ -165,7 +202,7 @@ pub fn providers() -> Vec<PickerProviderSpec> {
         ),
         PickerProviderSpec::new(
             "workspace.switch",
-            "Workspaces",
+            "Workspaces and Projects",
             PickerSource::WorkspaceSwitch,
         ),
         PickerProviderSpec::new(
@@ -240,18 +277,29 @@ fn buffer_picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
         .buffers
         .iter()
         .map(|buffer| {
+            let label = buffer_picker_label(buffer);
+            let detail = buffer_picker_detail(buffer);
+            let preview = buffer
+                .preview
+                .as_ref()
+                .into_option()
+                .map(|preview| preview.to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} | row {}, col {}",
+                        buffer.kind_label,
+                        buffer.cursor_row + 1,
+                        buffer.cursor_col + 1
+                    )
+                });
             PickerItemSpec::new(
                 buffer.id.to_string(),
-                buffer.display_name.clone(),
-                buffer.kind_label.clone(),
+                label,
+                detail,
                 PickerActionSpec::focus_buffer(buffer.id),
             )
-            .with_preview(format!(
-                "{} | row {}, col {}",
-                buffer.kind_label,
-                buffer.cursor_row + 1,
-                buffer.cursor_col + 1
-            ))
+            .with_preview(preview)
+            .with_search_text(buffer.display_name.clone())
         })
         .collect()
 }
@@ -262,20 +310,62 @@ fn buffer_close_picker_items(context: &PickerProviderContext) -> Vec<PickerItemS
         .iter()
         .map(|buffer| {
             let dirty = if buffer.dirty { "modified" } else { "clean" };
+            let label = buffer_picker_label(buffer);
+            let detail = format!("{} | {dirty}", buffer_picker_detail(buffer));
+            let preview = buffer
+                .preview
+                .as_ref()
+                .into_option()
+                .map(|preview| preview.to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} | row {}, col {}",
+                        buffer.kind_label,
+                        buffer.cursor_row + 1,
+                        buffer.cursor_col + 1
+                    )
+                });
             PickerItemSpec::new(
                 buffer.id.to_string(),
-                buffer.display_name.clone(),
-                format!("{} | {dirty}", buffer.kind_label),
+                label,
+                detail,
                 PickerActionSpec::close_buffer(buffer.id),
             )
-            .with_preview(format!(
-                "{} | row {}, col {}",
-                buffer.kind_label,
-                buffer.cursor_row + 1,
-                buffer.cursor_col + 1
-            ))
+            .with_preview(preview)
+            .with_search_text(buffer.display_name.clone())
         })
         .collect()
+}
+
+fn buffer_picker_label(buffer: &editor_plugin_api::PickerBufferContext) -> String {
+    buffer
+        .path
+        .as_ref()
+        .into_option()
+        .and_then(|path| {
+            Path::new(path.as_str())
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| buffer.display_name.to_string())
+}
+
+fn buffer_picker_detail(buffer: &editor_plugin_api::PickerBufferContext) -> String {
+    let mut parts = vec![buffer.kind_label.to_string()];
+    if let Some(path) = buffer.path.as_ref().into_option() {
+        let parent = Path::new(path.as_str())
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_else(|| path.to_string());
+        parts.push(parent);
+    }
+    parts.push(format!(
+        "row {}, col {}",
+        buffer.cursor_row + 1,
+        buffer.cursor_col + 1
+    ));
+    parts.join(" | ")
 }
 
 fn keybinding_picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
@@ -381,5 +471,37 @@ mod tests {
                 && binding.scope() == PluginKeymapScope::Popup
                 && binding.vim_mode() == PluginVimMode::Any
         }));
+    }
+
+    #[test]
+    fn truncate_strategy_defaults_to_auto() {
+        assert_eq!(truncate_strategy(), PickerTruncateStrategy::Auto);
+    }
+
+    #[test]
+    fn buffer_picker_shows_file_name_first_and_keeps_path_search() {
+        let mut context = PickerProviderContext::new("buffers", "Buffers", PickerSource::Buffers);
+        context.buffers = vec![editor_plugin_api::PickerBufferContext {
+            id: 42,
+            display_name: r"P:\volt\src\main.rs".into(),
+            path: Some(r"P:\volt\src\main.rs".into()).into(),
+            kind_label: "file".into(),
+            preview: Some("P:\\volt\\src\\main.rs\nfn main() {}".into()).into(),
+            cursor_row: 3,
+            cursor_col: 4,
+            dirty: false,
+        }]
+        .into();
+
+        let items = buffer_picker_items(&context);
+        assert_eq!(items[0].label(), "main.rs");
+        assert!(items[0].detail().contains("file"));
+        assert!(items[0].detail().contains(r"P:\volt\src"));
+        assert_eq!(items[0].search_text(), Some(r"P:\volt\src\main.rs"));
+        assert!(
+            items[0]
+                .preview()
+                .is_some_and(|preview| preview.contains("fn main()"))
+        );
     }
 }

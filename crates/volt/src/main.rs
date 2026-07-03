@@ -217,6 +217,10 @@ impl UserLibrary for DynamicUserLibrary {
             .map(|items| items.into_iter().collect())
     }
 
+    fn picker_truncate_strategy(&self) -> editor_plugin_api::PickerTruncateStrategy {
+        self.module.picker_truncate_strategy_v1()().into()
+    }
+
     fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
         self.module.acp_clients()()
             .into_iter()

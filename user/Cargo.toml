@@ -23,6 +23,8 @@ editor-icons = { path = "../crates/editor-icons" }
 editor-plugin-api = { path = "sdk" }
 editor-syntax = { path = "../crates/editor-syntax" }
 editor-theme = { path = "../crates/editor-theme" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9"
 toml = "0.8.23"
 
 [dev-dependencies]

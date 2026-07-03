@@ -71,12 +71,24 @@ fn user_picker_overlay(
         .map(|item| static_picker_entry(runtime, item))
         .collect::<Result<Vec<_>, String>>()?;
     let mut overlay = PickerOverlay::from_entries(spec.title(), entries).with_title(spec.title());
+    if matches!(
+        spec.source(),
+        PickerSource::Buffers | PickerSource::BufferClose | PickerSource::WorkspaceFiles
+    ) {
+        overlay = overlay.with_preview();
+    }
     if spec.source() == PickerSource::WorkspaceFiles
         && let Some(root) = context.workspace_root.as_ref().into_option()
     {
         overlay.submit_action = Some(PickerAction::CreateWorkspaceFile {
             root: PathBuf::from(root.as_str()),
         });
+    }
+    if matches!(
+        spec.source(),
+        PickerSource::WorkspaceProjects | PickerSource::WorkspaceSwitch
+    ) {
+        overlay = overlay.with_result_order(PickerResultOrder::Source);
     }
     if spec.source() == PickerSource::UndoTree {
         overlay = overlay.with_result_order(PickerResultOrder::Source);
@@ -135,7 +147,12 @@ fn picker_provider_context(
                 .map(|buffer| PickerBufferContext {
                     id: buffer.id().get(),
                     display_name: buffer.display_name().into(),
+                    path: buffer
+                        .path()
+                        .map(|path| path.display().to_string().into())
+                        .into(),
                     kind_label: buffer.kind_label().into(),
+                    preview: Some(buffer_picker_preview(buffer).into()).into(),
                     cursor_row: buffer.cursor_row(),
                     cursor_col: buffer.cursor_col(),
                     dirty: buffer.is_dirty(),
@@ -314,22 +331,49 @@ fn workspace_contexts(
         .collect())
 }
 
+fn buffer_picker_preview(buffer: &ShellBuffer) -> String {
+    const MAX_LINES: usize = 24;
+
+    let mut lines = Vec::new();
+    if let Some(path) = buffer.path() {
+        lines.push(path.display().to_string());
+    } else {
+        lines.push(format!(
+            "{} | row {}, col {}",
+            buffer.kind_label(),
+            buffer.cursor_row() + 1,
+            buffer.cursor_col() + 1
+        ));
+    }
+    lines.extend(
+        (0..buffer.text.line_count().min(MAX_LINES))
+            .filter_map(|line_index| buffer.text.line(line_index))
+            .map(|line| line.trim_end().to_owned()),
+    );
+    lines.join("\n")
+}
+
 fn static_picker_entry(
     runtime: &EditorRuntime,
     item: &editor_plugin_api::PickerItemSpec,
 ) -> Result<PickerEntry, String> {
-    let mut picker_item = PickerItem::new(
-        item.id(),
-        item.label(),
-        item.detail(),
-        item.preview().map(str::to_owned),
-    );
-    if let Some(search_text) = item.search_text() {
-        picker_item = picker_item.with_search_text(search_text);
-    }
-    if let Some(fringe) = item.fringe() {
-        picker_item = picker_item.with_fringe(fringe);
-    }
+    let picker_item = if item.is_divider() {
+        PickerItem::divider(item.id())
+    } else {
+        let mut picker_item = PickerItem::new(
+            item.id(),
+            item.label(),
+            item.detail(),
+            item.preview().map(str::to_owned),
+        );
+        if let Some(search_text) = item.search_text() {
+            picker_item = picker_item.with_search_text(search_text);
+        }
+        if let Some(fringe) = item.fringe() {
+            picker_item = picker_item.with_fringe(fringe);
+        }
+        picker_item
+    };
 
     Ok(PickerEntry {
         item: picker_item,
@@ -487,6 +531,7 @@ pub(super) fn buffer_close_confirm_overlay(
     PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_picker_overlay(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
@@ -495,6 +540,7 @@ pub(super) fn render_picker_overlay(
     height: u32,
     line_height: i32,
     theme_registry: Option<&ThemeRegistry>,
+    truncate_strategy: PickerTruncateStrategy,
 ) -> Result<(), ShellError> {
     let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
     let window_effects = current_window_effect_settings(theme_registry);
@@ -593,6 +639,15 @@ pub(super) fn render_picker_overlay(
         subtle,
     )?;
 
+    let preview_text = picker
+        .show_preview()
+        .then(|| {
+            picker
+                .session()
+                .selected()
+                .and_then(|selected| selected.item().preview())
+        })
+        .flatten();
     let row_height = (line_height + 8).max(24);
     let list_top = popup_rect.y + (line_height * 3) + 42;
     let list_height = popup_rect.height as i32 - ((line_height * 4) + 62).max(0);
@@ -621,6 +676,20 @@ pub(super) fn render_picker_overlay(
             .saturating_mul(cell_width.max(1) as usize)
             .saturating_add(12) as u32
     };
+    let content_left = popup_rect.x + 18;
+    let content_width = popup_rect.width.saturating_sub(36);
+    let preview_layout = picker_preview_layout(
+        preview_text,
+        content_left,
+        content_width,
+        list_top,
+        list_height,
+        line_height,
+    );
+    let list_content_width = preview_layout
+        .as_ref()
+        .map(|layout| layout.list_width)
+        .unwrap_or(content_width);
 
     if picker.session().matches().is_empty() {
         draw_text(target, popup_rect.x + 16, list_top, "No matches.", subtle)?;
@@ -636,21 +705,30 @@ pub(super) fn render_picker_overlay(
         .enumerate()
     {
         let row_y = list_top + index as i32 * row_height;
+        if matched.item().is_divider() {
+            fill_overlay_surface_rect(
+                target,
+                PixelRectToRect::rect(
+                    popup_rect.x + 12,
+                    row_y + row_height / 2,
+                    list_content_width.saturating_add(12),
+                    1,
+                ),
+                subtle,
+                window_effects,
+            )?;
+            continue;
+        }
         let selected = selected_id.as_deref() == Some(matched.item().id());
-        let content_left = popup_rect.x + 18;
-        let content_width = popup_rect.width.saturating_sub(36);
         let label_x = content_left + fringe_width as i32;
-        let text_width = content_width.saturating_sub(fringe_width);
-        let label_width = (text_width * 2 / 5).max(160);
-        let detail_x = label_x + label_width as i32 + 16;
-        let detail_width = text_width.saturating_sub(label_width + 16);
+        let text_width = list_content_width.saturating_sub(fringe_width);
         if selected {
             fill_overlay_surface_rect(
                 target,
                 PixelRectToRect::rect(
                     popup_rect.x + 12,
                     row_y - 2,
-                    popup_rect.width.saturating_sub(24),
+                    list_content_width.saturating_add(12),
                     row_height as u32,
                 ),
                 highlight_background,
@@ -671,8 +749,12 @@ pub(super) fn render_picker_overlay(
                 },
             )?;
         }
-        let label = truncate_text_to_width(matched.item().label(), label_width, cell_width);
-        let detail = truncate_text_to_width(matched.item().detail(), detail_width, cell_width);
+        let label = truncate_picker_label(
+            matched.item().label(),
+            text_width,
+            cell_width,
+            truncate_strategy,
+        );
         draw_text(
             target,
             label_x,
@@ -684,24 +766,107 @@ pub(super) fn render_picker_overlay(
                 list_foreground
             },
         )?;
-        draw_text(target, detail_x, row_y, &detail, muted)?;
     }
 
-    if let Some(preview) = picker
-        .session()
-        .selected()
-        .and_then(|selected| selected.item().preview())
-    {
-        draw_text(
+    if let Some(layout) = preview_layout {
+        fill_overlay_surface_rect(
             target,
-            popup_rect.x + 16,
-            popup_rect.y + popup_rect.height as i32 - line_height - 18,
-            &truncate_text_to_width(preview, popup_rect.width.saturating_sub(32), cell_width),
+            PixelRectToRect::rect(
+                layout.separator_x,
+                layout.y.saturating_sub(4),
+                1,
+                layout.height.saturating_add(8),
+            ),
             subtle,
+            window_effects,
         )?;
+        for (index, line) in layout.lines.iter().enumerate() {
+            let char_map = LineCharMap::new(line);
+            let max_cols = (layout.width / cell_width.max(1) as u32) as usize;
+            let end_col = char_map
+                .char_col_for_display_col(max_cols)
+                .min(char_map.len());
+            let syntax_spans = index
+                .checked_sub(1)
+                .and_then(|line_index| picker.preview_syntax_lines().get(&line_index))
+                .map(Vec::as_slice);
+            draw_buffer_text(
+                target,
+                layout.x,
+                layout.y + index as i32 * line_height,
+                line,
+                LineWrapSegment {
+                    start_col: 0,
+                    end_col,
+                },
+                &char_map,
+                syntax_spans,
+                theme_registry,
+                subtle,
+                cell_width,
+            )?;
+        }
     }
 
     Ok(())
+}
+
+struct PickerPreviewLayout {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    separator_x: i32,
+    list_width: u32,
+    lines: Vec<String>,
+}
+
+fn picker_preview_layout(
+    preview: Option<&str>,
+    content_left: i32,
+    content_width: u32,
+    list_top: i32,
+    list_height: i32,
+    line_height: i32,
+) -> Option<PickerPreviewLayout> {
+    let preview = preview?;
+    if content_width < 560 || list_height <= line_height {
+        return None;
+    }
+    let preview_width = (content_width * 2 / 5)
+        .max(240)
+        .min(content_width.saturating_sub(280));
+    if preview_width == 0 {
+        return None;
+    }
+    let gap = 18;
+    let list_width = content_width
+        .saturating_sub(preview_width)
+        .saturating_sub(gap);
+    let preview_x = content_left + list_width as i32 + gap as i32;
+    let preview_rows = (list_height / line_height.max(1)).max(1) as usize;
+    let lines = picker_preview_lines(preview, preview_rows);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(PickerPreviewLayout {
+        x: preview_x,
+        y: list_top,
+        width: preview_width,
+        height: list_height.max(0) as u32,
+        separator_x: preview_x - (gap as i32 / 2),
+        list_width,
+        lines,
+    })
+}
+
+fn picker_preview_lines(preview: &str, max_lines: usize) -> Vec<String> {
+    preview
+        .lines()
+        .take(max_lines)
+        .map(|line| line.trim_end().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 fn picker_scroll_top(match_count: usize, selected_index: usize, visible_rows: usize) -> usize {
@@ -764,5 +929,49 @@ mod tests {
             Some(PickerAction::ExecuteCommand(command)) if command == "picker.open-commands"
         ));
         Ok(())
+    }
+
+    #[test]
+    fn static_picker_keeps_all_matches_for_large_lists() -> Result<(), String> {
+        let items = (0..80)
+            .map(|index| {
+                PickerItemSpec::new(
+                    format!("file-{index:03}"),
+                    format!("file-{index:03}.rs"),
+                    "src",
+                    PickerActionSpec::no_op(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let provider = PickerProviderSpec::static_items("files", "Files", items);
+
+        let mut runtime = EditorRuntime::new();
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::new(NullUserLibrary)));
+        let context = picker_provider_context(&runtime, &provider)?;
+        let picker = user_picker_overlay(&runtime, &provider, context)?;
+
+        assert_eq!(picker.session().item_count(), 80);
+        assert_eq!(picker.session().match_count(), 80);
+        Ok(())
+    }
+
+    #[test]
+    fn picker_preview_is_opt_in() {
+        let picker = PickerOverlay::from_entries("Files", Vec::new());
+        assert!(!picker.show_preview());
+        assert!(picker.with_preview().show_preview());
+    }
+
+    #[test]
+    fn picker_preview_layout_splits_preview_to_the_right() {
+        let layout = picker_preview_layout(Some("path\nline 1\nline 2"), 20, 900, 120, 300, 20)
+            .expect("preview layout should exist on wide pickers");
+
+        assert_eq!(layout.y, 120);
+        assert!(layout.x > 20);
+        assert!(layout.list_width < 900);
+        assert_eq!(layout.lines, vec!["path", "line 1", "line 2"]);
     }
 }

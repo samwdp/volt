@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
 use editor_buffer::{TextBuffer, TextPoint};
 use editor_core::{BufferKind, HookEvent};
 use editor_render::RenderBackend;
+use editor_syntax::SyntaxRegistry;
 use sdl3::keyboard::{Keycode, Mod};
 
 fn temp_workspace_root(name: &str) -> PathBuf {
@@ -1364,6 +1365,7 @@ fn workspace_open_prefers_root_readme_as_first_buffer() -> Result<(), Box<dyn st
     fs::write(root.join("README.md"), "# Demo\n")?;
 
     open_workspace_from_project(&mut state.runtime, "readme-first", &root)?;
+    state.flush_pending_workspace_readme_opens_for_test()?;
 
     let active = state.active_buffer_mut()?;
     assert_eq!(active.kind, BufferKind::File);
@@ -1413,6 +1415,23 @@ fn workspace_delete_picker_hides_default_workspace() -> Result<(), Box<dyn std::
             .iter()
             .any(|matched| matched.item().label() == "picker")
     );
+    let has_open_workspace = switch_picker
+        .session()
+        .matches()
+        .iter()
+        .any(|matched| matched.item().detail().contains("open workspace"));
+    let has_discoverable_project = switch_picker.session().matches().iter().any(|matched| {
+        !matched.item().is_divider() && !matched.item().detail().contains("open workspace")
+    });
+    if has_open_workspace && has_discoverable_project {
+        assert!(
+            switch_picker
+                .session()
+                .matches()
+                .iter()
+                .any(|matched| matched.item().is_divider())
+        );
+    }
 
     let delete_picker = workspace_delete_picker_overlay(&state.runtime)?;
     assert!(
@@ -1466,8 +1485,8 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     assert_eq!(picker.session().title(), "Workspace Files");
     let main_path = root.join("src").join("main.rs");
     assert!(picker.session().matches().iter().any(|matched| {
-        matched.item().label() == "main.rs"
-            && matched.item().detail() == "src"
+        matched.item().label() == "src/main.rs"
+            && matched.item().detail().is_empty()
             && matched.item().fringe() == Some(editor_icons::seti_file_icon(&main_path))
     }));
     assert!(
@@ -1492,7 +1511,43 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
 }
 
 #[test]
-fn workspace_file_picker_searches_full_path_but_shows_file_name_first()
+fn workspace_open_prewarms_installed_tree_sitter_languages()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !git_available() {
+        return Ok(());
+    }
+
+    let mut state = user_shell_state()?;
+    let root = temp_workspace_root("syntax-prewarm");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n")?;
+    run_git(&root, &["init", "-q"])?;
+    run_git(&root, &["add", "."])?;
+
+    let registry = state
+        .runtime
+        .services()
+        .get::<SyntaxRegistry>()
+        .ok_or("missing syntax registry")?;
+    assert!(!registry.is_loaded("rust"));
+
+    open_workspace_from_project(&mut state.runtime, "syntax-prewarm", &root)?;
+    state.flush_pending_syntax_prewarm_for_test()?;
+
+    let registry = state
+        .runtime
+        .services()
+        .get::<SyntaxRegistry>()
+        .ok_or("missing syntax registry")?;
+    assert!(registry.is_loaded("rust"));
+
+    drop(state);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_file_picker_searches_and_shows_full_relative_path()
 -> Result<(), Box<dyn std::error::Error>> {
     if !git_available() {
         return Ok(());
@@ -1523,8 +1578,8 @@ fn workspace_file_picker_searches_full_path_but_shows_file_name_first()
         .selected()
         .map(|matched| matched.item())
         .ok_or("missing selected workspace file")?;
-    assert_eq!(item.label(), "really-long-name.rs");
-    assert_eq!(item.detail(), "src/deep/nested");
+    assert_eq!(item.label(), "src/deep/nested/really-long-name.rs");
+    assert!(item.detail().is_empty());
 
     drop(state);
     fs::remove_dir_all(root)?;
@@ -1698,5 +1753,25 @@ fn file_buffer_reload_waits_for_dirty_buffers_to_become_clean()
     );
 
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "manual workspace-open timing probe"]
+fn workspace_open_volt_project_timing_probe() -> Result<(), Box<dyn std::error::Error>> {
+    let volt_root = Path::new("P:\\volt");
+    if !volt_root.is_dir() {
+        return Ok(());
+    }
+
+    let mut state = user_shell_state()?;
+    let started = Instant::now();
+    open_workspace_from_project(&mut state.runtime, "volt", volt_root)?;
+    let open_elapsed = started.elapsed();
+    eprintln!("open_workspace_from_project: {open_elapsed:?}");
+    assert!(
+        open_elapsed < Duration::from_millis(250),
+        "workspace open took {open_elapsed:?}, expected under 250ms"
+    );
     Ok(())
 }

@@ -23,8 +23,8 @@ use crate::{
     GhostTextLine, GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix,
     HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults,
     OilFeatureSpec, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode,
-    PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
-    TerminalFeatureSpec, WorkspaceRoot,
+    PickerProviderContext, PickerProviderSpec, PickerTruncateStrategy, StatuslineContext,
+    TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -777,6 +777,58 @@ impl From<AbiPdfOpenMode> for PdfOpenMode {
             AbiPdfOpenMode::Rendered => Self::Rendered,
             AbiPdfOpenMode::Markdown => Self::Markdown,
             AbiPdfOpenMode::Latex => Self::Latex,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AbiPickerTruncateStrategy {
+    EndEllipsis,
+    StartEllipsis,
+    MiddleEllipsis,
+    ShrinkDirectories,
+    ShrinkAll,
+    FileName,
+    FileNameWithParent,
+    ParentInitialFileName,
+    ShrinkLeadingKeepTail,
+    Full,
+    Auto,
+}
+
+impl From<PickerTruncateStrategy> for AbiPickerTruncateStrategy {
+    fn from(value: PickerTruncateStrategy) -> Self {
+        match value {
+            PickerTruncateStrategy::EndEllipsis => Self::EndEllipsis,
+            PickerTruncateStrategy::StartEllipsis => Self::StartEllipsis,
+            PickerTruncateStrategy::MiddleEllipsis => Self::MiddleEllipsis,
+            PickerTruncateStrategy::ShrinkDirectories => Self::ShrinkDirectories,
+            PickerTruncateStrategy::ShrinkAll => Self::ShrinkAll,
+            PickerTruncateStrategy::FileName => Self::FileName,
+            PickerTruncateStrategy::FileNameWithParent => Self::FileNameWithParent,
+            PickerTruncateStrategy::ParentInitialFileName => Self::ParentInitialFileName,
+            PickerTruncateStrategy::ShrinkLeadingKeepTail => Self::ShrinkLeadingKeepTail,
+            PickerTruncateStrategy::Full => Self::Full,
+            PickerTruncateStrategy::Auto => Self::Auto,
+        }
+    }
+}
+
+impl From<AbiPickerTruncateStrategy> for PickerTruncateStrategy {
+    fn from(value: AbiPickerTruncateStrategy) -> Self {
+        match value {
+            AbiPickerTruncateStrategy::EndEllipsis => Self::EndEllipsis,
+            AbiPickerTruncateStrategy::StartEllipsis => Self::StartEllipsis,
+            AbiPickerTruncateStrategy::MiddleEllipsis => Self::MiddleEllipsis,
+            AbiPickerTruncateStrategy::ShrinkDirectories => Self::ShrinkDirectories,
+            AbiPickerTruncateStrategy::ShrinkAll => Self::ShrinkAll,
+            AbiPickerTruncateStrategy::FileName => Self::FileName,
+            AbiPickerTruncateStrategy::FileNameWithParent => Self::FileNameWithParent,
+            AbiPickerTruncateStrategy::ParentInitialFileName => Self::ParentInitialFileName,
+            AbiPickerTruncateStrategy::ShrinkLeadingKeepTail => Self::ShrinkLeadingKeepTail,
+            AbiPickerTruncateStrategy::Full => Self::Full,
+            AbiPickerTruncateStrategy::Auto => Self::Auto,
         }
     }
 }
@@ -2298,6 +2350,7 @@ pub struct UserLibraryModule {
     pub pdf_open_mode: extern "C" fn() -> AbiPdfOpenMode,
     pub pane_config_v1: extern "C" fn() -> AbiPaneConfig,
     pub db_browser_items: extern "C" fn(crate::DbBrowserContext) -> RVec<crate::DbBrowserItemSpec>,
+    pub picker_truncate_strategy_v1: extern "C" fn() -> AbiPickerTruncateStrategy,
     #[sabi(last_prefix_field)]
     pub reserved_feature_contracts_v2: extern "C" fn() -> bool,
 }
