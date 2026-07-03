@@ -451,13 +451,13 @@ impl LanguageInstallPlan {
             }
             args.push(format!("/Fe:{}", output_path.display()));
             args.extend(["/link".to_owned(), "/NOIMPLIB".to_owned()]);
-            return Ok(InstallCommandSpec::new(
+            Ok(InstallCommandSpec::new(
                 format!("{} {}", program, args.join(" ")),
                 program,
                 args,
                 self.grammar_dir(),
             )
-            .with_env(env));
+            .with_env(env))
         }
         #[cfg(not(windows))]
         {
