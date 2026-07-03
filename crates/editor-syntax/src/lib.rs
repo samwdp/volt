@@ -3936,7 +3936,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .language_for_path("src\\main.rs")
+                .language_for_path("src/main.rs")
                 .map(|language| language.id()),
             Some("rust")
         );
@@ -3967,19 +3967,19 @@ mod tests {
 
         assert_eq!(
             registry
-                .language_for_path("project\\CMakeLists.txt")
+                .language_for_path("project/CMakeLists.txt")
                 .map(LanguageConfiguration::id),
             Some("cmake")
         );
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(LanguageConfiguration::id),
             Some("dockerfile")
         );
         assert_eq!(
             registry
-                .language_for_path("notes\\guide.txt")
+                .language_for_path("notes/guide.txt")
                 .map(LanguageConfiguration::id),
             Some("plaintext")
         );
@@ -3998,7 +3998,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(|language| language.id()),
             Some("dockerfile")
         );
@@ -4012,7 +4012,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .language_for_path("containers\\Dockerfile.dev")
+                .language_for_path("containers/Dockerfile.dev")
                 .map(|language| language.id()),
             Some("dockerfile")
         );
