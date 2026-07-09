@@ -1030,25 +1030,25 @@ dependencies = [
 
 [[package]]
 name = "editor-buffer"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ropey",
 ]
 
 [[package]]
 name = "editor-core"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-dap"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "editor-jobs",
 ]
 
 [[package]]
 name = "editor-db"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "apple-native-keyring-store",
  "editor-plugin-api",
@@ -1066,23 +1066,23 @@ dependencies = [
 
 [[package]]
 name = "editor-fs"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-git"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-icons"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-jobs"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-lsp"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "editor-buffer",
  "editor-jobs",
@@ -1094,15 +1094,15 @@ dependencies = [
 
 [[package]]
 name = "editor-path"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-picker"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "editor-plugin-api"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "abi_stable",
  "editor-buffer",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "editor-plugin-host"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "editor-core",
  "editor-path",
@@ -1128,14 +1128,14 @@ dependencies = [
 
 [[package]]
 name = "editor-render"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ttf-parser 0.21.1",
 ]
 
 [[package]]
 name = "editor-sdl"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "editor-syntax"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "editor-buffer",
  "editor-path",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "editor-terminal"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "editor-jobs",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "editor-theme"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "either"
@@ -5121,7 +5121,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volt"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "abi_stable",
  "editor-buffer",
@@ -5148,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "volt-user"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "abi_stable",
  "editor-buffer",
@@ -6037,7 +6037,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "yoke"

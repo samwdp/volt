@@ -1,12 +1,22 @@
 [package]
 name = "xtask"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 publish = false
 
-[lints]
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
 workspace = true
 
 [dependencies]
+
+[[bin]]
+path = "src/main.rs"
+name = "xtask"
+required-features = []

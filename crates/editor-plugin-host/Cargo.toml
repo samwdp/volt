@@ -1,14 +1,29 @@
 [package]
 name = "editor-plugin-host"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lints]
+[package.edition]
 workspace = true
 
-[dependencies]
-editor-core = { path = "../editor-core" }
-editor-path = { path = "../editor-path" }
-editor-plugin-api = { path = "../../user/sdk" }
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies.editor-core]
+path = "../editor-core"
+
+[dependencies.editor-path]
+path = "../editor-path"
+
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
+[lib]
+path = "src/lib.rs"
+name = "editor_plugin_host"
+required-features = []
+crate-type = ["lib"]

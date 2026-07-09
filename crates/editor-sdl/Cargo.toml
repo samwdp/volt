@@ -1,58 +1,135 @@
 [package]
 name = "editor-sdl"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lib]
-doctest = false
-test = false
+[package.edition]
+workspace = true
 
-[lints]
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
 workspace = true
 
 [dependencies]
-editor-buffer = { path = "../editor-buffer" }
-editor-core = { path = "../editor-core" }
-editor-db = { path = "../editor-db" }
-editor-fs = { path = "../editor-fs" }
-editor-git = { path = "../editor-git" }
-editor-icons = { path = "../editor-icons" }
-editor-jobs = { path = "../editor-jobs" }
-editor-lsp = { path = "../editor-lsp" }
-editor-picker = { path = "../editor-picker" }
-editor-plugin-api = { path = "../../user/sdk" }
-editor-plugin-host = { path = "../editor-plugin-host" }
-editor-render = { path = "../editor-render" }
-editor-syntax = { path = "../editor-syntax" }
-editor-terminal = { path = "../editor-terminal" }
-editor-theme = { path = "../editor-theme" }
-sdl3 = { version = "0.17.3", features = ["build-from-source-static", "build-from-source-unix-console", "ttf", "raw-window-handle"] }
-image = { version = "0.25.1", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
+async-trait = "0.1.89"
 base64 = "0.22.1"
 fontdue = "0.9.3"
-rustybuzz = "0.20.1"
-sdl3-ttf-sys = { version = "0.6.0", features = ["no-sdlttf-harfbuzz"] }
-agent-client-protocol = { version = "0.10.2", features = ["unstable_auth_methods", "unstable_session_model"] }
-tokio = { version = "1.50.0", features = ["rt", "sync", "process", "io-util"] }
-tokio-util = { version = "0.7.18", features = ["compat"] }
-async-trait = "0.1.89"
+lopdf = "0.40.0"
 notify = "8.2.0"
 resvg = "0.47.0"
-lopdf = "0.40.0"
+rustybuzz = "0.20.1"
 url = "2.5.7"
 
-[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-wry = { version = "0.53", features = ["devtools"] }
+[dependencies.agent-client-protocol]
+version = "0.10.2"
+features = ["unstable_auth_methods", "unstable_session_model"]
 
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+[dependencies.editor-buffer]
+path = "../editor-buffer"
+
+[dependencies.editor-core]
+path = "../editor-core"
+
+[dependencies.editor-db]
+path = "../editor-db"
+
+[dependencies.editor-fs]
+path = "../editor-fs"
+
+[dependencies.editor-git]
+path = "../editor-git"
+
+[dependencies.editor-icons]
+path = "../editor-icons"
+
+[dependencies.editor-jobs]
+path = "../editor-jobs"
+
+[dependencies.editor-lsp]
+path = "../editor-lsp"
+
+[dependencies.editor-picker]
+path = "../editor-picker"
+
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
+[dependencies.editor-plugin-host]
+path = "../editor-plugin-host"
+
+[dependencies.editor-render]
+path = "../editor-render"
+
+[dependencies.editor-syntax]
+path = "../editor-syntax"
+
+[dependencies.editor-terminal]
+path = "../editor-terminal"
+
+[dependencies.editor-theme]
+path = "../editor-theme"
+
+[dependencies.image]
+version = "0.25.1"
+features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"]
+default-features = false
+
+[dependencies.sdl3]
+version = "0.17.3"
+features = ["build-from-source-static", "build-from-source-unix-console", "ttf", "raw-window-handle"]
+
+[dependencies.sdl3-ttf-sys]
+version = "0.6.0"
+features = ["no-sdlttf-harfbuzz"]
+
+[dependencies.tokio]
+version = "1.50.0"
+features = ["rt", "sync", "process", "io-util"]
+
+[dependencies.tokio-util]
+version = "0.7.18"
+features = ["compat"]
+
+[dev-dependencies]
+tree-sitter-rust = "0.24.1"
+
+[dev-dependencies.sdl3]
+version = "0.17.3"
+features = ["test-mode"]
+
+[dev-dependencies.user]
+path = "../../user"
+package = "volt-user"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 window-vibrancy = "0.7.1"
 
-[dev-dependencies]
-sdl3 = { version = "0.17.3", features = ["test-mode"] }
-user = { package = "volt-user", path = "../../user" }
-tree-sitter-rust = "0.24.1"
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dev-dependencies]
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.build-dependencies]
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies.wry]
+version = "0.53"
+features = ["devtools"]
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dev-dependencies]
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.build-dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+
+[lib]
+path = "src/lib.rs"
+name = "editor_sdl"
+test = false
+doctest = false
+required-features = []
+crate-type = ["lib"]

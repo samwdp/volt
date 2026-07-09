@@ -1,29 +1,72 @@
 [package]
 name = "editor-db"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lints]
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
 workspace = true
 
 [dependencies]
-editor-plugin-api = { path = "../../user/sdk" }
 keyring-core = "1.0.0"
 postgres = "0.19.13"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-tiberius = { version = "0.12.3", default-features = false, features = ["rustls", "tds73", "tokio", "tokio-util"] }
-tokio = { version = "1.50.0", features = ["net", "rt-multi-thread"] }
-tokio-util = { version = "0.7.18", features = ["compat"] }
+
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
+[dependencies.rusqlite]
+version = "0.39.0"
+features = ["bundled"]
+
+[dependencies.serde]
+version = "1.0.228"
+features = ["derive"]
+
+[dependencies.tiberius]
+version = "0.12.3"
+features = ["rustls", "tds73", "tokio", "tokio-util"]
+default-features = false
+
+[dependencies.tokio]
+version = "1.50.0"
+features = ["net", "rt-multi-thread"]
+
+[dependencies.tokio-util]
+version = "0.7.18"
+features = ["compat"]
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies.zbus-secret-service-keyring-store]
+version = "1.0.0"
+features = ["crypto-rust"]
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dev-dependencies]
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.build-dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies.apple-native-keyring-store]
+version = "1.0.0"
+features = ["keychain"]
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1.1.0"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
+[target.'cfg(target_os = "windows")'.dev-dependencies]
 
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
-zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
+[target.'cfg(target_os = "windows")'.build-dependencies]
+
+[lib]
+path = "src/lib.rs"
+name = "editor_db"
+required-features = []
+crate-type = ["lib"]

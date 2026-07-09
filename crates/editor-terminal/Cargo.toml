@@ -1,13 +1,28 @@
 [package]
 name = "editor-terminal"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lints]
+[package.edition]
 workspace = true
 
-[dependencies]
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4", version = "0.25.1" }
-editor-jobs = { path = "../editor-jobs" }
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies.alacritty_terminal]
+version = "0.25.1"
+git = "https://github.com/zed-industries/alacritty"
+rev = "9d9640d4"
+
+[dependencies.editor-jobs]
+path = "../editor-jobs"
+
+[lib]
+path = "src/lib.rs"
+name = "editor_terminal"
+required-features = []
+crate-type = ["lib"]

@@ -1,13 +1,23 @@
 [package]
 name = "editor-buffer"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lints]
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
 workspace = true
 
 [dependencies]
 ropey = "1.6"
 
+[lib]
+path = "src/lib.rs"
+name = "editor_buffer"
+required-features = []
+crate-type = ["lib"]

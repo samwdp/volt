@@ -1,12 +1,23 @@
 [package]
 name = "editor-icons"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 build = "build.rs"
 
-[lints]
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
 workspace = true
 
 [build-dependencies]
+
+[lib]
+path = "src/lib.rs"
+name = "editor_icons"
+required-features = []
+crate-type = ["lib"]

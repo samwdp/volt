@@ -1,9 +1,20 @@
 [package]
 name = "editor-path"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
 
-[lints]
+[package.edition]
 workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "editor_path"
+required-features = []
+crate-type = ["lib"]
