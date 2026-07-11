@@ -25,6 +25,8 @@ use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, plugin_hooks,
 };
 
+pub const RELOAD_USER_LIBRARY_HOOK: &str = "plugin.reload-user-library";
+
 // ─── Package ─────────────────────────────────────────────────────────────────
 
 /// Returns the plugin package for the compile/build integration.
@@ -44,6 +46,14 @@ pub fn package() -> PluginPackage {
                 "Re-run the last build command for the active workspace.",
                 vec![PluginAction::emit_hook(
                     plugin_hooks::RERUN_COMMAND,
+                    None::<&str>,
+                )],
+            ),
+            PluginCommand::new(
+                "workspace.reload-user-library",
+                "Reload the running user library state after rebuilding `volt-user`.",
+                vec![PluginAction::emit_hook(
+                    RELOAD_USER_LIBRARY_HOOK,
                     None::<&str>,
                 )],
             ),
@@ -149,6 +159,11 @@ mod tests {
                 .iter()
                 .any(|c| c.name() == "workspace.recompile")
         );
+        assert!(
+            pkg.commands()
+                .iter()
+                .any(|c| c.name() == "workspace.reload-user-library")
+        );
     }
 
     #[test]
@@ -180,6 +195,22 @@ mod tests {
                 .hook()
                 .is_some_and(|h| h.hook_name() == plugin_hooks::RERUN_COMMAND)),
             "workspace.recompile must emit plugin.rerun-command"
+        );
+    }
+
+    #[test]
+    fn reload_user_library_command_emits_reload_hook() {
+        let pkg = package();
+        let cmd = pkg
+            .commands()
+            .iter()
+            .find(|c| c.name() == "workspace.reload-user-library")
+            .expect("workspace.reload-user-library must exist");
+        assert!(
+            cmd.actions().iter().any(|a| a
+                .hook()
+                .is_some_and(|h| h.hook_name() == RELOAD_USER_LIBRARY_HOOK)),
+            "workspace.reload-user-library must emit plugin.reload-user-library"
         );
     }
 

@@ -276,6 +276,33 @@ impl HookBus {
         Ok(())
     }
 
+    /// Removes a subscriber from a hook when present.
+    pub fn unsubscribe(&mut self, hook_name: &str, subscriber: &str) -> bool {
+        let Some(subscriptions) = self.subscriptions.get_mut(hook_name) else {
+            return false;
+        };
+
+        let before = subscriptions.len();
+        subscriptions.retain(|existing| existing.subscriber != subscriber);
+        before != subscriptions.len()
+    }
+
+    /// Removes a custom hook declaration and its subscriptions.
+    ///
+    /// Built-in hooks are left unchanged.
+    pub fn remove_custom_hook(&mut self, hook_name: &str) -> Result<bool, HookError> {
+        let Some(definition) = self.definitions.get(hook_name) else {
+            return Ok(false);
+        };
+        if definition.is_built_in() {
+            return Ok(false);
+        }
+
+        self.definitions.remove(hook_name);
+        self.subscriptions.remove(hook_name);
+        Ok(true)
+    }
+
     pub(crate) fn subscriptions_for(
         &self,
         hook_name: &str,

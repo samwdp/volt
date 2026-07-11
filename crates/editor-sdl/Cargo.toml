@@ -14,6 +14,7 @@ workspace = true
 workspace = true
 
 [dependencies]
+abi_stable = "0.11"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 fontdue = "0.9.3"
@@ -35,6 +36,9 @@ path = "../editor-core"
 
 [dependencies.editor-db]
 path = "../editor-db"
+
+[dependencies.editor-dap]
+path = "../editor-dap"
 
 [dependencies.editor-fs]
 path = "../editor-fs"

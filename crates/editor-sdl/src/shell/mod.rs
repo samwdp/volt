@@ -34,6 +34,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, fs,
     io::{self, Write},
+    panic::{self, AssertUnwindSafe},
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{
@@ -44,6 +45,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use abi_stable::library::RootModule;
 use agent_client_protocol::{
     ContentBlock, MaybeUndefined, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
     SessionInfoUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -103,14 +105,18 @@ use editor_plugin_api::{
     PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
     PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
     PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
-    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction, autocomplete_hooks,
-    browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks, git_sections, hover_hooks,
-    image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks, plugin_hooks,
-    terminal_hooks,
+    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction,
+    abi::{
+        AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
+        UserLibraryModuleRef,
+    },
+    autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks,
+    git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
+    pdf_hooks, plugin_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
-    load_auto_loaded_packages,
+    load_auto_loaded_packages, reload_user_packages,
 };
 use editor_render::{
     DrawCommand, PixelRect, RenderBackend, RenderColor, TextStyle, centered_rect,
@@ -347,6 +353,7 @@ const HOOK_PLUGIN_EVALUATE: &str = plugin_hooks::EVALUATE;
 const PLUGIN_EVALUATE_SEPARATOR_PREFIX: &str = plugin_hooks::EVALUATE_SEPARATOR_PREFIX;
 const HOOK_PLUGIN_RUN_COMMAND: &str = plugin_hooks::RUN_COMMAND;
 const HOOK_PLUGIN_RERUN_COMMAND: &str = plugin_hooks::RERUN_COMMAND;
+const HOOK_PLUGIN_RELOAD_USER_LIBRARY: &str = "plugin.reload-user-library";
 const HOOK_PLUGIN_SWITCH_PANE: &str = plugin_hooks::SWITCH_PANE;
 const HOOK_TREESITTER_RECOMPILE_INSTALLED: &str = "treesitter.recompile-installed";
 const HOOK_GIT_STATUS_OPEN_POPUP: &str = git_hooks::STATUS_OPEN_POPUP;
@@ -528,6 +535,11 @@ const HOVER_PREVIOUS_CHORD: &str = "Ctrl+p";
 /// type-erased service map.
 struct UserLibraryService(Arc<dyn UserLibrary>);
 
+#[derive(Debug, Default)]
+struct UserLibraryReloadState {
+    last_staged_path: Option<PathBuf>,
+}
+
 /// Returns a clone of the user library stored in the runtime service map.
 fn shell_user_library(runtime: &EditorRuntime) -> Arc<dyn UserLibrary> {
     runtime
@@ -536,6 +548,394 @@ fn shell_user_library(runtime: &EditorRuntime) -> Arc<dyn UserLibrary> {
         .expect("UserLibraryService not registered in runtime")
         .0
         .clone()
+}
+
+struct DynamicUserLibrary {
+    module: UserLibraryModuleRef,
+    icon_symbols: &'static [editor_icons::IconFontSymbol],
+}
+
+impl DynamicUserLibrary {
+    fn load_from_file(path: &Path) -> Result<Arc<dyn UserLibrary>, String> {
+        let module =
+            UserLibraryModuleRef::load_from_file(path).map_err(|error| error.to_string())?;
+        let icon_symbols = module.icon_symbols()()
+            .into_iter()
+            .map(editor_icons::IconFontSymbol::from)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(Arc::new(Self {
+            module,
+            icon_symbols: Box::leak(icon_symbols),
+        }))
+    }
+}
+
+impl UserLibrary for DynamicUserLibrary {
+    fn packages(&self) -> Vec<editor_plugin_api::PluginPackage> {
+        self.module.packages()().into_iter().collect()
+    }
+
+    fn themes(&self) -> Vec<editor_theme::Theme> {
+        self.module.themes()().into_iter().map(Into::into).collect()
+    }
+
+    fn syntax_languages(&self) -> Vec<editor_syntax::LanguageConfiguration> {
+        self.module.syntax_languages()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn language_servers(&self) -> Vec<editor_lsp::LanguageServerSpec> {
+        self.module.language_servers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn debug_adapters(&self) -> Vec<editor_dap::DebugAdapterSpec> {
+        self.module.debug_adapters()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn autocomplete_providers(&self) -> Vec<editor_plugin_api::AutocompleteProvider> {
+        self.module.autocomplete_providers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn autocomplete_result_limit(&self) -> usize {
+        self.module.autocomplete_result_limit()()
+    }
+
+    fn autocomplete_token_icon(&self) -> &'static str {
+        self.module.autocomplete_token_icon()().as_str()
+    }
+
+    fn hover_providers(&self) -> Vec<editor_plugin_api::HoverProvider> {
+        self.module.hover_providers()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn hover_line_limit(&self) -> usize {
+        self.module.hover_line_limit()()
+    }
+
+    fn hover_token_icon(&self) -> &'static str {
+        self.module.hover_token_icon()().as_str()
+    }
+
+    fn hover_signature_icon(&self) -> &'static str {
+        self.module.hover_signature_icon()().as_str()
+    }
+
+    fn picker_providers(&self) -> Vec<editor_plugin_api::PickerProviderSpec> {
+        self.module.picker_providers()().into_iter().collect()
+    }
+
+    fn picker_provider_items(
+        &self,
+        context: &editor_plugin_api::PickerProviderContext,
+    ) -> Option<Vec<editor_plugin_api::PickerItemSpec>> {
+        self.module.picker_provider_items()(context.clone())
+            .into_option()
+            .map(|items| items.into_iter().collect())
+    }
+
+    fn picker_truncate_strategy(&self) -> editor_plugin_api::PickerTruncateStrategy {
+        self.module.picker_truncate_strategy_v1()().into()
+    }
+
+    fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
+        self.module.acp_clients()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn acp_client_by_id(&self, id: &str) -> Option<editor_plugin_api::AcpClient> {
+        self.module.acp_client_by_id()(id.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn acp_picker_items(
+        &self,
+        context: &editor_plugin_api::AcpPickerContext,
+    ) -> Vec<editor_plugin_api::AcpPickerItemSpec> {
+        self.module.acp_picker_items()(context.clone())
+            .into_iter()
+            .collect()
+    }
+
+    fn db_browser_items(
+        &self,
+        context: &editor_plugin_api::DbBrowserContext,
+    ) -> Vec<editor_plugin_api::DbBrowserItemSpec> {
+        self.module.db_browser_items()(context.clone())
+            .into_iter()
+            .collect()
+    }
+
+    fn workspace_roots(&self) -> Vec<editor_plugin_api::WorkspaceRoot> {
+        self.module.workspace_roots()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn terminal_config(&self) -> editor_plugin_api::TerminalConfig {
+        self.module.terminal_config()().into()
+    }
+
+    fn commandline_enabled(&self) -> bool {
+        self.module.commandline_enabled()()
+    }
+
+    fn pane_config(&self) -> editor_plugin_api::PaneConfig {
+        self.module.pane_config_v1()().into()
+    }
+
+    fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
+        self.module.ligature_config_v1()().into()
+    }
+
+    fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
+        self.module.oil_defaults()().into()
+    }
+
+    fn oil_keybindings(&self) -> editor_plugin_api::OilKeybindings {
+        self.module.oil_keybindings()().into()
+    }
+
+    fn oil_keydown_action(&self, chord: &str) -> Option<editor_plugin_api::OilKeyAction> {
+        self.module.oil_keydown_action()(chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn oil_chord_action(
+        &self,
+        had_prefix: bool,
+        chord: &str,
+    ) -> Option<editor_plugin_api::OilKeyAction> {
+        self.module.oil_chord_action()(had_prefix, chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn oil_help_lines(&self) -> Vec<String> {
+        self.module.oil_help_lines()()
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn oil_directory_sections(
+        &self,
+        root: &Path,
+        entries: &[editor_fs::DirectoryEntry],
+        show_hidden: bool,
+        sort_mode: editor_plugin_api::OilSortMode,
+        trash_enabled: bool,
+    ) -> editor_core::SectionTree {
+        let entries = entries
+            .iter()
+            .cloned()
+            .map(AbiDirectoryEntry::from)
+            .collect::<Vec<_>>();
+        self.module.oil_directory_sections()(
+            root.to_string_lossy().into_owned().into(),
+            entries.into(),
+            show_hidden,
+            sort_mode.into(),
+            trash_enabled,
+        )
+        .into()
+    }
+
+    fn oil_strip_entry_icon_prefix<'a>(&self, label: &'a str) -> &'a str {
+        let stripped = self.module.oil_strip_entry_icon_prefix()(label.to_owned().into());
+        if stripped.as_str() == label {
+            label
+        } else {
+            label
+                .find(stripped.as_str())
+                .map(|start| &label[start..start + stripped.len()])
+                .unwrap_or(label)
+        }
+    }
+
+    fn git_status_sections(
+        &self,
+        snapshot: &editor_git::GitStatusSnapshot,
+    ) -> editor_core::SectionTree {
+        self.module.git_status_sections()(snapshot.clone().into()).into()
+    }
+
+    fn git_commit_template(&self, snapshot: &editor_git::GitStatusSnapshot) -> Vec<String> {
+        self.module.git_commit_template()(snapshot.clone().into())
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn git_prefix_for_chord(&self, chord: &str) -> Option<editor_plugin_api::GitStatusPrefix> {
+        self.module.git_prefix_for_chord()(chord.to_owned().into())
+            .into_option()
+            .map(Into::into)
+    }
+
+    fn git_command_for_chord(
+        &self,
+        prefix: Option<editor_plugin_api::GitStatusPrefix>,
+        chord: &str,
+    ) -> Option<&'static str> {
+        let command = self.module.git_command_for_chord()(
+            prefix.map(AbiGitStatusPrefix::from).into(),
+            chord.to_owned().into(),
+        );
+        command.into_option().map(|command| command.as_str())
+    }
+
+    fn browser_buffer_lines(&self, url: Option<&str>) -> Vec<String> {
+        let url = url.map(|value| value.to_owned().into());
+        self.module.browser_buffer_lines()(url.into())
+            .into_iter()
+            .map(|line| line.into_string())
+            .collect()
+    }
+
+    fn browser_input_hint(&self, url: Option<&str>) -> String {
+        let url = url.map(|value| value.to_owned().into());
+        self.module.browser_input_hint()(url.into()).into()
+    }
+
+    fn browser_url_prompt(&self) -> String {
+        self.module.browser_url_prompt()().into()
+    }
+
+    fn browser_url_placeholder(&self) -> String {
+        self.module.browser_url_placeholder()().into()
+    }
+
+    fn git_feature_spec(&self) -> editor_plugin_api::GitFeatureSpec {
+        self.module.git_feature_spec()().into()
+    }
+
+    fn oil_feature_spec(&self) -> editor_plugin_api::OilFeatureSpec {
+        self.module.oil_feature_spec()().into()
+    }
+
+    fn browser_feature_spec(&self) -> editor_plugin_api::BrowserFeatureSpec {
+        self.module.browser_feature_spec()().into()
+    }
+
+    fn db_feature_spec(&self) -> editor_plugin_api::DbFeatureSpec {
+        self.module.db_feature_spec()().into()
+    }
+
+    fn terminal_feature_spec(&self) -> editor_plugin_api::TerminalFeatureSpec {
+        self.module.terminal_feature_spec()().into()
+    }
+
+    fn context_help_specs(&self) -> Vec<editor_plugin_api::ContextHelpSpec> {
+        self.module.context_help_specs()()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn pdf_open_mode(&self) -> editor_plugin_api::PdfOpenMode {
+        self.module.pdf_open_mode()().into()
+    }
+
+    fn ghost_text_lines(
+        &self,
+        context: &editor_plugin_api::GhostTextContext<'_>,
+    ) -> Vec<editor_plugin_api::GhostTextLine> {
+        self.module.ghost_text_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn headerline_lines(&self, context: &editor_plugin_api::GhostTextContext<'_>) -> Vec<String> {
+        self.module.headerline_lines()(AbiGhostTextContext::from(*context))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
+        self.module.statusline_render()(AbiStatuslineContext::from(*context)).into()
+    }
+
+    fn statusline_lsp_connected_icon(&self) -> &'static str {
+        self.module.statusline_lsp_connected_icon()().as_str()
+    }
+
+    fn statusline_lsp_error_icon(&self) -> &'static str {
+        self.module.statusline_lsp_error_icon()().as_str()
+    }
+
+    fn statusline_lsp_warning_icon(&self) -> &'static str {
+        self.module.statusline_lsp_warning_icon()().as_str()
+    }
+
+    fn lsp_diagnostic_icon(&self) -> &'static str {
+        self.module.lsp_diagnostic_icon()().as_str()
+    }
+
+    fn lsp_diagnostic_line_limit(&self) -> usize {
+        self.module.lsp_diagnostic_line_limit()()
+    }
+
+    fn lsp_show_buffer_diagnostics(&self) -> bool {
+        self.module.lsp_show_buffer_diagnostics()()
+    }
+
+    fn gitfringe_token_added(&self) -> &'static str {
+        self.module.gitfringe_token_added()().as_str()
+    }
+
+    fn gitfringe_token_modified(&self) -> &'static str {
+        self.module.gitfringe_token_modified()().as_str()
+    }
+
+    fn gitfringe_token_removed(&self) -> &'static str {
+        self.module.gitfringe_token_removed()().as_str()
+    }
+
+    fn gitfringe_symbol(&self) -> &'static str {
+        self.module.gitfringe_symbol()().as_str()
+    }
+
+    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
+        self.icon_symbols
+    }
+
+    fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
+        self.module.run_plugin_buffer_evaluator()(
+            handler.to_owned().into(),
+            input.to_owned().into(),
+        )
+        .into_iter()
+        .map(|line| line.into_string())
+        .collect()
+    }
+
+    fn default_build_command(&self, language: &str) -> Option<String> {
+        self.module.default_build_command()(language.to_owned().into())
+            .into_option()
+            .map(|command| command.into_string())
+    }
 }
 
 #[cfg(windows)]
@@ -9530,6 +9930,7 @@ impl FpsOverlayState {
 
 pub(crate) struct ShellState {
     pub(crate) runtime: EditorRuntime,
+    #[cfg(test)]
     pub(crate) user_library: Arc<dyn UserLibrary>,
     deferred_startup_pending: bool,
     typing_profiler: Option<TypingProfiler>,
@@ -9743,6 +10144,9 @@ impl ShellState {
         runtime
             .services_mut()
             .insert(UserLibraryService(Arc::clone(&user_library)));
+        runtime
+            .services_mut()
+            .insert(UserLibraryReloadState::default());
         load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
@@ -9758,6 +10162,7 @@ impl ShellState {
 
         Ok(Self {
             runtime,
+            #[cfg(test)]
             user_library,
             deferred_startup_pending: defer_optional_services,
             typing_profiler: profile_input_latency
@@ -9778,7 +10183,8 @@ impl ShellState {
         if !self.deferred_startup_pending {
             return Ok(());
         }
-        install_optional_runtime_services(&mut self.runtime, &*self.user_library)?;
+        let user_library = shell_user_library(&self.runtime);
+        install_optional_runtime_services(&mut self.runtime, &*user_library)?;
         self.deferred_startup_pending = false;
         Ok(())
     }
@@ -10882,7 +11288,7 @@ impl ShellState {
             fonts,
             ui,
             runtime_popup.as_ref(),
-            &*self.user_library,
+            &*shell_user_library(&self.runtime),
             &workspace_name,
             ui.attached_lsp_server(),
             lsp_workspace_loaded,
@@ -14043,7 +14449,7 @@ fn update_theme_runtime<'ttf>(
         let (next_fonts, next_font_path) = load_font_set_with_mode(
             ttf,
             &updated,
-            &*state.user_library,
+            &*shell_user_library(&state.runtime),
             OptionalFontLoadMode::Eager,
         )?;
         *font_path = next_font_path;
@@ -15415,6 +15821,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_PLUGIN_RELOAD_USER_LIBRARY,
+        "Reloads user-library derived runtime state after rebuilding `volt-user`.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PLUGIN_SWITCH_PANE,
         "Switches focus between the active plugin buffer's split panes.",
     )?;
@@ -15453,6 +15864,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_PLUGIN_RERUN_COMMAND,
             "shell.plugin-rerun-command",
             |_, runtime| rerun_compile_command(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_RELOAD_USER_LIBRARY,
+            "shell.plugin-reload-user-library",
+            |_, runtime| reload_user_library(runtime).map(|_| ()),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -27901,10 +28319,288 @@ fn run_compile_command_in_buffer(
             result.exit_code().unwrap_or(-1)
         )
     };
-    let buf = shell_buffer_mut(runtime, buffer_id)?;
-    buf.append_output_lines(&output_lines);
-    buf.append_output_lines(&[status_line]);
+    {
+        let buf = shell_buffer_mut(runtime, buffer_id)?;
+        buf.append_output_lines(&output_lines);
+        buf.append_output_lines(&[status_line]);
+    }
+
+    if result.succeeded() && command_builds_user_library(&command) {
+        let reload_lines = match built_user_library_path_for_command(runtime, &command) {
+            Some(built_path) => match stage_user_library_for_reload(&built_path) {
+                Ok(staged_path) => {
+                    let library = DynamicUserLibrary::load_from_file(&staged_path)
+                        .and_then(|library| {
+                            validate_runtime_user_library(library.as_ref())?;
+                            Ok(library)
+                        })
+                        .and_then(|library| {
+                            if let Some(state) =
+                                runtime.services_mut().get_mut::<UserLibraryReloadState>()
+                            {
+                                state.last_staged_path = Some(staged_path.clone());
+                            }
+                            let mut lines = replace_runtime_user_library(runtime, library)?;
+                            lines.push(format!(
+                                "Loaded runtime library from staged copy `{}`.",
+                                staged_path.display()
+                            ));
+                            Ok(lines)
+                        });
+                    library.unwrap_or_else(|error| {
+                        vec![format!("── ✗ User library reload failed: {error}")]
+                    })
+                }
+                Err(error) => vec![format!("── ✗ User library staging failed: {error}")],
+            },
+            None => vec![
+                "── ✗ User library reload failed: could not resolve build output path".to_owned(),
+            ],
+        };
+        let buf = shell_buffer_mut(runtime, buffer_id)?;
+        buf.append_output_lines(&reload_lines);
+    }
     Ok(())
+}
+
+fn command_builds_user_library(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    if !lower.contains("cargo") || !lower.contains("volt-user") {
+        return false;
+    }
+    lower.contains("build")
+        || lower.contains("check")
+        || lower.contains("clippy")
+        || lower.contains("test")
+        || lower.contains("run")
+}
+
+fn current_runtime_user_library_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Ok(env_path) = std::env::var("VOLT_USER_LIBRARY") {
+        let path = PathBuf::from(env_path);
+        if seen.insert(path.clone()) {
+            candidates.push(path);
+        }
+    }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(exe_dir) = current_exe.parent()
+    {
+        let path = UserLibraryModuleRef::get_library_path(exe_dir);
+        if seen.insert(path.clone()) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn user_library_filename() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "user.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libuser.dylib"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "libuser.so"
+    }
+}
+
+fn built_user_library_path_for_command(runtime: &EditorRuntime, command: &str) -> Option<PathBuf> {
+    let cwd = active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .or_else(|| std::env::current_dir().ok())?;
+    let profile = if command.contains("--release") {
+        "release"
+    } else {
+        "debug"
+    };
+    Some(
+        cwd.join("target")
+            .join(profile)
+            .join(user_library_filename()),
+    )
+}
+
+fn stage_user_library_for_reload(built_path: &Path) -> Result<PathBuf, String> {
+    if !built_path.is_file() {
+        return Err(format!(
+            "built user library `{}` does not exist",
+            built_path.display()
+        ));
+    }
+    let parent = built_path.parent().ok_or_else(|| {
+        format!(
+            "built user library `{}` has no parent directory",
+            built_path.display()
+        )
+    })?;
+    let stage_dir = parent.join("volt-user-hot");
+    fs::create_dir_all(&stage_dir)
+        .map_err(|error| format!("failed to create `{}`: {error}", stage_dir.display()))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time error: {error}"))?
+        .as_millis();
+    let staged_path = stage_dir.join(format!(
+        "user-{}-{}-{}",
+        std::process::id(),
+        stamp,
+        user_library_filename()
+    ));
+    fs::copy(built_path, &staged_path).map_err(|error| {
+        format!(
+            "failed to stage user library from `{}` to `{}`: {error}",
+            built_path.display(),
+            staged_path.display()
+        )
+    })?;
+    Ok(staged_path)
+}
+
+fn catch_unwind_silently<F, T>(operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> T,
+{
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(operation));
+    panic::set_hook(hook);
+    result.map_err(|payload| match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "panic without message".to_owned(),
+        },
+    })
+}
+
+fn validate_runtime_user_library(library: &dyn UserLibrary) -> Result<(), String> {
+    catch_unwind_silently(|| {
+        let _ = library.syntax_languages();
+    })
+    .map(|_| ())
+    .map_err(|message| format!("syntax language export panicked: {message}"))
+}
+
+fn replace_runtime_user_library(
+    runtime: &mut EditorRuntime,
+    user_library: Arc<dyn UserLibrary>,
+) -> Result<Vec<String>, String> {
+    let previous_packages = shell_user_library(runtime).packages();
+    let next_packages = user_library.packages();
+
+    runtime
+        .services_mut()
+        .insert(UserLibraryService(Arc::clone(&user_library)));
+
+    let active_theme_id = runtime
+        .services()
+        .get::<ThemeRegistry>()
+        .and_then(|registry| registry.active_theme().map(|theme| theme.id().to_owned()));
+    let theme_registry = rebuild_theme_registry(user_library.themes(), active_theme_id.as_deref())?;
+    runtime.services_mut().insert(theme_registry);
+    runtime
+        .services_mut()
+        .insert(AutocompleteRegistry::from_user_config(&*user_library));
+    runtime
+        .services_mut()
+        .insert(HoverRegistry::from_user_config(&*user_library));
+
+    let mut lsp_registry = LanguageServerRegistry::new();
+    lsp_registry
+        .register_all(user_library.language_servers())
+        .map_err(|error| error.to_string())?;
+    runtime
+        .services_mut()
+        .insert(Arc::new(LspClientManager::new(lsp_registry)));
+
+    let mut syntax_registry = SyntaxRegistry::new();
+    syntax_registry
+        .register_all(user_library.syntax_languages())
+        .map_err(|error| error.to_string())?;
+    runtime.services_mut().insert(syntax_registry);
+    configure_syntax_refresh_worker(runtime)?;
+
+    let refresh_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .filter(|buffer| {
+                buffer.path().is_some()
+                    || buffer
+                        .language_id()
+                        .is_some_and(|language_id| !language_id.is_empty())
+            })
+            .map(ShellBuffer::id)
+            .collect::<Vec<_>>()
+    };
+    for buffer_id in refresh_ids {
+        let _ = refresh_buffer_syntax(runtime, buffer_id);
+    }
+
+    let loaded_packages = reload_user_packages(runtime, &previous_packages, &next_packages)
+        .map_err(|error| error.to_string())?;
+    picker::ensure_picker_keybindings(runtime).map_err(|error| error.to_string())?;
+
+    Ok(vec![
+        "── ✓ User library reload requested ───────────────────────────────────".to_owned(),
+        "Refreshed theme, autocomplete, hover, LSP, and syntax registries.".to_owned(),
+        format!("Re-registered {loaded_packages} auto-loaded user packages."),
+    ])
+}
+
+#[cfg(test)]
+mod compile_reload_tests {
+    use super::command_builds_user_library;
+
+    #[test]
+    fn detects_explicit_volt_user_build_commands() {
+        assert!(command_builds_user_library("cargo build -p volt-user"));
+        assert!(command_builds_user_library(
+            "cargo build -p volt -p volt-user"
+        ));
+        assert!(command_builds_user_library("cargo test -p volt-user"));
+    }
+
+    #[test]
+    fn ignores_non_user_or_non_cargo_commands() {
+        assert!(!command_builds_user_library("cargo build -p volt"));
+        assert!(!command_builds_user_library("cargo xtask ci"));
+        assert!(!command_builds_user_library("dotnet build volt-user"));
+    }
+}
+
+fn reload_user_library(runtime: &mut EditorRuntime) -> Result<Vec<String>, String> {
+    let last_staged = runtime
+        .services()
+        .get::<UserLibraryReloadState>()
+        .and_then(|state| state.last_staged_path.clone());
+    let candidate_paths = last_staged
+        .into_iter()
+        .chain(current_runtime_user_library_candidates())
+        .collect::<Vec<_>>();
+    let mut last_error = None;
+    for path in candidate_paths {
+        if !path.is_file() {
+            continue;
+        }
+        match DynamicUserLibrary::load_from_file(&path) {
+            Ok(user_library) => {
+                validate_runtime_user_library(user_library.as_ref())?;
+                let mut lines = replace_runtime_user_library(runtime, user_library)?;
+                lines.push(format!("Loaded runtime library from `{}`.", path.display()));
+                return Ok(lines);
+            }
+            Err(error) => last_error = Some(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "no runtime user library candidate found".to_owned()))
 }
 
 /// In a compilation buffer, jump to the file location on the current line

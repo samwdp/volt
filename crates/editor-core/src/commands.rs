@@ -134,6 +134,18 @@ impl CommandRegistry {
         self.commands.keys().map(String::as_str).collect()
     }
 
+    /// Removes commands registered by the given user package.
+    pub fn remove_by_package(&mut self, package_name: &str) -> usize {
+        let before = self.commands.len();
+        self.commands.retain(|_, registered| {
+            !matches!(
+                registered.definition().source(),
+                CommandSource::UserPackage(name) if name == package_name
+            )
+        });
+        before.saturating_sub(self.commands.len())
+    }
+
     pub(crate) fn resolve(&self, name: &str) -> Result<RegisteredCommand, CommandError> {
         self.commands
             .get(name)

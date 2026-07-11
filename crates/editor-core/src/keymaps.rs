@@ -441,6 +441,18 @@ impl KeymapRegistry {
         self.bindings.values().collect()
     }
 
+    /// Removes keybindings registered by the given user package.
+    pub fn remove_by_package(&mut self, package_name: &str) -> usize {
+        let before = self.bindings.len();
+        self.bindings.retain(|_, binding| {
+            !matches!(
+                binding.source(),
+                CommandSource::UserPackage(name) if name == package_name
+            )
+        });
+        before.saturating_sub(self.bindings.len())
+    }
+
     pub(crate) fn resolve_for_mode(
         &self,
         scope: &KeymapScope,
