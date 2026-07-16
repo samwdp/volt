@@ -2635,14 +2635,38 @@ impl UndoSnapshot {
         }
     }
 
-    fn preview_line(&self) -> Option<String> {
-        let line = self.text.line(0).unwrap_or_default();
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
+    fn diff_preview(&self, parent: Option<&Self>) -> Option<String> {
+        let Some(parent) = parent else {
+            let cursor_line = self
+                .text
+                .line(self.cursor.line)
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned();
+            return Some(format!(
+                "(root snapshot)\nline {}, col {}\n{}",
+                self.cursor.line + 1,
+                self.cursor.column + 1,
+                cursor_line
+            ));
+        };
+        let before_lines = snapshot_lines(&parent.text);
+        let after_lines = snapshot_lines(&self.text);
+        if before_lines == after_lines {
+            let cursor_line = self
+                .text
+                .line(self.cursor.line)
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned();
+            return Some(format!(
+                "cursor → line {}, col {}\n{}",
+                self.cursor.line + 1,
+                self.cursor.column + 1,
+                cursor_line
+            ));
         }
+        Some(format_undo_snapshot_diff(&before_lines, &after_lines))
     }
 
     const fn cursor(&self) -> TextPoint {
@@ -2652,6 +2676,79 @@ impl UndoSnapshot {
     fn set_cursor(&mut self, cursor: TextPoint) {
         self.cursor = cursor;
     }
+}
+
+const UNDO_TREE_DIFF_PREVIEW_LINES: usize = 48;
+const UNDO_TREE_DIFF_CONTEXT_LINES: usize = 2;
+
+fn snapshot_lines(snapshot: &TextSnapshot) -> Vec<String> {
+    (0..snapshot.line_count())
+        .map(|index| snapshot.line(index).unwrap_or_default())
+        .collect()
+}
+
+fn format_undo_snapshot_diff(before: &[String], after: &[String]) -> String {
+    let prefix = before
+        .iter()
+        .zip(after.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = before
+        .iter()
+        .skip(prefix)
+        .rev()
+        .zip(after.iter().skip(prefix).rev())
+        .take_while(|(left, right)| left == right)
+        .count()
+        .min(before.len().saturating_sub(prefix))
+        .min(after.len().saturating_sub(prefix));
+    let before_end = before.len().saturating_sub(suffix);
+    let after_end = after.len().saturating_sub(suffix);
+    let context_start = prefix.saturating_sub(UNDO_TREE_DIFF_CONTEXT_LINES);
+    let context_end = (before_end + UNDO_TREE_DIFF_CONTEXT_LINES)
+        .max(after_end + UNDO_TREE_DIFF_CONTEXT_LINES)
+        .min(before.len().max(after.len()));
+
+    let old_count = before_end.saturating_sub(prefix);
+    let new_count = after_end.saturating_sub(prefix);
+    let mut lines = vec![format!(
+        "@@ -{},{} +{},{} @@",
+        prefix + 1,
+        old_count.max(1),
+        prefix + 1,
+        new_count.max(1)
+    )];
+    for line in &before[context_start..prefix] {
+        lines.push(format!(" {line}"));
+    }
+    for line in &before[prefix..before_end] {
+        lines.push(format!("-{line}"));
+    }
+    for line in &after[prefix..after_end] {
+        lines.push(format!("+{line}"));
+    }
+    let trailing_end = context_end.min(after.len()).max(after_end);
+    for line in &after[after_end..trailing_end] {
+        lines.push(format!(" {line}"));
+    }
+    if lines.len() > UNDO_TREE_DIFF_PREVIEW_LINES {
+        lines.truncate(UNDO_TREE_DIFF_PREVIEW_LINES);
+        lines.push("…".to_owned());
+    }
+    lines.join("\n")
+}
+
+fn undo_tree_fringe(depth: usize, is_last: bool, is_current: bool, continues: &[bool]) -> String {
+    let mut fringe = String::new();
+    for &cont in continues {
+        fringe.push_str(if cont { "│ " } else { "  " });
+    }
+    if depth > 0 {
+        fringe.push_str(if is_last { "└─" } else { "├─" });
+    }
+    fringe.push(if is_current { '*' } else { '○' });
+    fringe.push(' ');
+    fringe
 }
 
 #[derive(Debug, Clone)]
@@ -2674,6 +2771,7 @@ struct UndoTree {
 #[derive(Debug, Clone)]
 struct UndoTreeEntry {
     node_id: usize,
+    fringe: String,
     label: String,
     detail: String,
     preview: Option<String>,
@@ -2777,7 +2875,7 @@ impl UndoTree {
         let mut entries = Vec::new();
         let mut selected_index = None;
         if !self.nodes.is_empty() {
-            self.collect_entries(0, 0, &mut entries, &mut selected_index);
+            self.collect_entries(0, 0, true, &[], &mut entries, &mut selected_index);
         }
         (entries, selected_index.unwrap_or(0))
     }
@@ -2786,6 +2884,8 @@ impl UndoTree {
         &self,
         node_id: usize,
         depth: usize,
+        is_last: bool,
+        continues: &[bool],
         entries: &mut Vec<UndoTreeEntry>,
         selected_index: &mut Option<usize>,
     ) {
@@ -2796,18 +2896,13 @@ impl UndoTree {
         if is_current {
             *selected_index = Some(entries.len());
         }
-        let indent = "  ".repeat(depth);
-        let prefix = if is_current { "* " } else { "  " };
+        let fringe = undo_tree_fringe(depth, is_last, is_current, continues);
         let cursor = node.snapshot.cursor();
         let label = if node.parent.is_none() {
-            format!(
-                "{indent}{prefix}root line {}, col {}",
-                cursor.line + 1,
-                cursor.column + 1
-            )
+            format!("root  line {}, col {}", cursor.line + 1, cursor.column + 1)
         } else {
             format!(
-                "{indent}{prefix}{} line {}, col {}",
+                "{}  line {}, col {}",
                 node.sequence,
                 cursor.line + 1,
                 cursor.column + 1
@@ -2820,14 +2915,32 @@ impl UndoTree {
         } else {
             format!("children: {}", node.children.len())
         };
+        let parent_snapshot = node
+            .parent
+            .and_then(|parent_id| self.nodes.get(parent_id))
+            .map(|parent| &parent.snapshot);
         entries.push(UndoTreeEntry {
             node_id,
+            fringe,
             label,
             detail,
-            preview: node.snapshot.preview_line(),
+            preview: node.snapshot.diff_preview(parent_snapshot),
         });
-        for child in &node.children {
-            self.collect_entries(*child, depth + 1, entries, selected_index);
+        let child_count = node.children.len();
+        for (index, child) in node.children.iter().enumerate() {
+            let child_is_last = index + 1 == child_count;
+            let mut child_continues = continues.to_vec();
+            if depth > 0 {
+                child_continues.push(!is_last);
+            }
+            self.collect_entries(
+                *child,
+                depth + 1,
+                child_is_last,
+                &child_continues,
+                entries,
+                selected_index,
+            );
         }
     }
 }
@@ -7800,6 +7913,9 @@ enum PickerAction {
         remote_branch: String,
         local_branch: String,
     },
+    GitWorktreeOilNewBranch {
+        buffer_id: BufferId,
+    },
     GitWorktreeDashboardCreate {
         base_dir: PathBuf,
     },
@@ -9046,6 +9162,11 @@ impl ShellUiState {
     ) {
         self.syntax_refresh_worker
             .configure(configs, install_root, query_asset_root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn syntax_refresh_worker_is_live(&self) -> bool {
+        self.syntax_refresh_worker.has_live_worker()
     }
 
     fn set_yank_flash(&mut self, buffer_id: BufferId, selection: VisualSelection) {
@@ -13317,6 +13438,7 @@ impl ShellState {
             .map_err(ShellError::Runtime)
     }
 
+    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn flush_pending_syntax_prewarm_for_test(&mut self) -> Result<(), ShellError> {
         while refresh_pending_syntax_prewarm(&mut self.runtime).map_err(ShellError::Runtime)? {}
@@ -17602,8 +17724,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                         buffer_id,
                         &remote_branch,
                         &local_branch,
+                        false,
                     )?;
                     sync_active_buffer(runtime)?;
+                }
+                PickerAction::GitWorktreeOilNewBranch { buffer_id } => {
+                    open_git_worktree_new_branch_prompt(runtime, buffer_id)?;
                 }
                 PickerAction::GitWorktreeDashboardCreate { base_dir } => {
                     open_git_worktree_dashboard_create(runtime, &base_dir)?;
@@ -18942,7 +19068,10 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         ui.close_autocomplete();
         return Ok(());
     };
-    buffer.replace_range(query.replace_range, &selected.replacement);
+    let replace_range = selected.replace_range.unwrap_or(query.replace_range);
+    let replacement =
+        normalize_completion_replacement(&snapshot, replace_range, &selected.replacement);
+    buffer.replace_range(replace_range, &replacement);
     buffer.mark_syntax_dirty();
     ui.close_autocomplete();
     Ok(())
@@ -20265,6 +20394,7 @@ fn buffer_autocomplete_entries(
                     item_icon: provider.item_icon.clone(),
                     label: token.clone(),
                     replacement: token,
+                    replace_range: None,
                     detail: None,
                     documentation: None,
                 },
@@ -20350,6 +20480,7 @@ fn lsp_autocomplete_entries(
                     item_icon: lsp_kind_icon(item.kind()).to_owned(),
                     label: candidate.clone(),
                     replacement,
+                    replace_range: item.edit_range(),
                     detail: item.detail().map(str::to_owned),
                     documentation: item.documentation().map(str::to_owned),
                 },
@@ -20391,6 +20522,7 @@ fn manual_autocomplete_entries(
                     item_icon: provider.item_icon.clone(),
                     label: item.label.clone(),
                     replacement: item.replacement.clone(),
+                    replace_range: None,
                     detail: item.detail.clone(),
                     documentation: item.documentation.clone(),
                 },
@@ -20432,6 +20564,7 @@ fn db_autocomplete_entries(
                     item_icon: provider.item_icon.clone(),
                     label: candidate.label.clone(),
                     replacement: candidate.replacement.clone(),
+                    replace_range: None,
                     detail: candidate.detail.clone(),
                     documentation: candidate.documentation.clone(),
                 },
@@ -20498,6 +20631,54 @@ fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<Auto
             TextPoint::new(cursor.line, end),
         ),
     })
+}
+
+fn normalize_completion_replacement(
+    snapshot: &TextSnapshot,
+    replace_range: TextRange,
+    replacement: &str,
+) -> String {
+    // Servers sometimes include the already-typed trigger in insertText without a
+    // textEdit range. Strip it when that trigger sits immediately before the edit.
+    if let Some(stripped) = replacement.strip_prefix('.')
+        && char_immediately_before(snapshot, replace_range.start()) == Some('.')
+    {
+        return stripped.to_owned();
+    }
+    if let Some(stripped) = replacement.strip_prefix("->")
+        && chars_immediately_before(snapshot, replace_range.start(), 2).as_deref() == Some("->")
+    {
+        return stripped.to_owned();
+    }
+    replacement.to_owned()
+}
+
+fn char_immediately_before(snapshot: &TextSnapshot, point: TextPoint) -> Option<char> {
+    if point.column == 0 {
+        return None;
+    }
+    let line = snapshot.line(point.line)?;
+    line.chars().nth(point.column - 1)
+}
+
+fn chars_immediately_before(
+    snapshot: &TextSnapshot,
+    point: TextPoint,
+    count: usize,
+) -> Option<String> {
+    if point.column < count {
+        return None;
+    }
+    let line = snapshot.line(point.line)?;
+    let characters = line.chars().collect::<Vec<_>>();
+    if point.column > characters.len() {
+        return None;
+    }
+    Some(
+        characters[point.column - count..point.column]
+            .iter()
+            .collect(),
+    )
 }
 
 fn is_member_access_completion_point(characters: &[char], cursor_col: usize) -> bool {
@@ -21706,6 +21887,14 @@ struct SyntaxRefreshWorkerRequest {
     text: TextBuffer,
 }
 
+enum SyntaxWorkerMessage {
+    Refresh(Box<SyntaxRefreshWorkerRequest>),
+    PreloadBatch {
+        language_ids: Vec<String>,
+        done: Sender<()>,
+    },
+}
+
 struct SyntaxRefreshWorkerResult {
     buffer_id: BufferId,
     buffer_revision: u64,
@@ -21730,7 +21919,7 @@ const SYNTAX_REFRESH_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const SYNTAX_REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct SyntaxRefreshWorkerState {
-    workers: BTreeMap<BufferId, Sender<SyntaxRefreshWorkerRequest>>,
+    request_tx: Option<Sender<SyntaxWorkerMessage>>,
     results: Arc<Mutex<Vec<SyntaxRefreshWorkerResult>>>,
     configs: Vec<LanguageConfiguration>,
     install_root: Option<PathBuf>,
@@ -21740,7 +21929,7 @@ struct SyntaxRefreshWorkerState {
 impl SyntaxRefreshWorkerState {
     fn disabled() -> Self {
         Self {
-            workers: BTreeMap::new(),
+            request_tx: None,
             results: Arc::new(Mutex::new(Vec::new())),
             configs: Vec::new(),
             install_root: None,
@@ -21757,21 +21946,25 @@ impl SyntaxRefreshWorkerState {
         self.configs = configs;
         self.install_root = Some(install_root);
         self.query_asset_root = query_asset_root;
-        self.workers.clear();
+        // Drop the sender so the existing worker exits; the next send/preload restarts it
+        // with the updated language configs.
+        self.request_tx = None;
         self.results = Arc::new(Mutex::new(Vec::new()));
     }
 
-    fn start_worker(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
+    fn ensure_worker(&mut self) -> bool {
+        if self.request_tx.is_some() {
+            return true;
+        }
         let Some(install_root) = self.install_root.clone() else {
             return false;
         };
         let query_asset_root = self.query_asset_root.clone();
         let configs = self.configs.clone();
-        let buffer_id = request.buffer_id;
-        let (request_tx, request_rx) = mpsc::channel::<SyntaxRefreshWorkerRequest>();
+        let (request_tx, request_rx) = mpsc::channel::<SyntaxWorkerMessage>();
         let worker_results = Arc::clone(&self.results);
         let spawn_result = std::thread::Builder::new()
-            .name(format!("volt-syntax-refresh-{}", buffer_id.get()))
+            .name("volt-syntax-refresh".to_owned())
             .stack_size(SYNTAX_REFRESH_WORKER_STACK_SIZE)
             .spawn(move || {
                 let mut registry = SyntaxRegistry::with_install_root(install_root);
@@ -21782,27 +21975,56 @@ impl SyntaxRefreshWorkerState {
                     }
                 }
                 let mut parse_sessions = BTreeMap::<BufferId, SyntaxParseSession>::new();
-                let mut request = request;
-                loop {
-                    while let Ok(newer_request) = request_rx.try_recv() {
-                        request = newer_request;
+                while let Ok(first) = request_rx.recv() {
+                    let mut refreshes = BTreeMap::<BufferId, SyntaxRefreshWorkerRequest>::new();
+                    let mut preload_batches = Vec::<(Vec<String>, Sender<()>)>::new();
+                    match first {
+                        SyntaxWorkerMessage::Refresh(request) => {
+                            refreshes.insert(request.buffer_id, *request);
+                        }
+                        SyntaxWorkerMessage::PreloadBatch { language_ids, done } => {
+                            preload_batches.push((language_ids, done));
+                        }
                     }
-                    let result =
-                        process_syntax_refresh_request(&mut registry, &mut parse_sessions, request);
-                    if let Ok(mut results) = worker_results.lock() {
-                        results.push(result);
-                    } else {
-                        return;
+                    while let Ok(message) = request_rx.try_recv() {
+                        match message {
+                            SyntaxWorkerMessage::Refresh(request) => {
+                                refreshes.insert(request.buffer_id, *request);
+                            }
+                            SyntaxWorkerMessage::PreloadBatch { language_ids, done } => {
+                                preload_batches.push((language_ids, done));
+                            }
+                        }
                     }
-                    let Ok(next_request) = request_rx.recv() else {
-                        return;
-                    };
-                    request = next_request;
+                    // Finish all preloads before any refresh so the first open of a
+                    // workspace language never pays the cold DLL load on the highlight path.
+                    for (language_ids, done) in preload_batches {
+                        for language_id in language_ids {
+                            if let Err(error) = registry.preload_language(&language_id) {
+                                eprintln!(
+                                    "tree-sitter worker prewarm failed for `{language_id}`: {error}"
+                                );
+                            }
+                        }
+                        let _ = done.send(());
+                    }
+                    for request in refreshes.into_values() {
+                        let result = process_syntax_refresh_request(
+                            &mut registry,
+                            &mut parse_sessions,
+                            request,
+                        );
+                        if let Ok(mut results) = worker_results.lock() {
+                            results.push(result);
+                        } else {
+                            return;
+                        }
+                    }
                 }
             });
         match spawn_result {
             Ok(_) => {
-                self.workers.insert(buffer_id, request_tx);
+                self.request_tx = Some(request_tx);
                 true
             }
             Err(error) => {
@@ -21816,15 +22038,68 @@ impl SyntaxRefreshWorkerState {
         self.install_root.is_some()
     }
 
-    fn send(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
-        let buffer_id = request.buffer_id;
-        if let Some(request_tx) = self.workers.get(&buffer_id) {
-            if request_tx.send(request.clone()).is_ok() {
-                return true;
-            }
-            self.workers.remove(&buffer_id);
+    #[cfg(test)]
+    fn has_live_worker(&self) -> bool {
+        self.request_tx.is_some()
+    }
+
+    fn preload_languages<I, S>(&mut self, language_ids: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let language_ids = language_ids.into_iter().map(Into::into).collect::<Vec<_>>();
+        if language_ids.is_empty() {
+            return true;
         }
-        self.start_worker(request)
+        if !self.ensure_worker() {
+            return false;
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+        let message = SyntaxWorkerMessage::PreloadBatch {
+            language_ids,
+            done: done_tx,
+        };
+        let sent = self
+            .request_tx
+            .as_ref()
+            .cloned()
+            .and_then(|tx| tx.send(message).ok());
+        if sent.is_none() {
+            self.request_tx = None;
+            return false;
+        }
+        // Block until the shared worker finishes loading so the first file open of a
+        // prewarmed language never races a cold grammar load.
+        done_rx.recv().is_ok()
+    }
+
+    fn send(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
+        if !self.ensure_worker() {
+            return false;
+        }
+        let message = SyntaxWorkerMessage::Refresh(Box::new(request.clone()));
+        if self
+            .request_tx
+            .as_ref()
+            .cloned()
+            .and_then(|tx| tx.send(message).ok())
+            .is_some()
+        {
+            return true;
+        }
+        self.request_tx = None;
+        if !self.ensure_worker() {
+            return false;
+        }
+        self.request_tx
+            .as_ref()
+            .cloned()
+            .and_then(|tx| {
+                tx.send(SyntaxWorkerMessage::Refresh(Box::new(request)))
+                    .ok()
+            })
+            .is_some()
     }
 
     fn take_results(&self) -> Vec<SyntaxRefreshWorkerResult> {
@@ -25117,9 +25392,10 @@ fn close_lsp_buffers_for_workspace(
     let Some(lsp_client) = lsp_client else {
         return Ok(());
     };
-    let paths = {
+    let (paths, workspace_root) = {
         let ui = shell_ui(runtime)?;
-        ui.workspace_views
+        let paths = ui
+            .workspace_views
             .get(&workspace_id)
             .map(|view| {
                 view.buffer_ids
@@ -25130,7 +25406,13 @@ fn close_lsp_buffers_for_workspace(
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let workspace_root = runtime
+            .model()
+            .workspace(workspace_id)
+            .ok()
+            .and_then(|workspace| workspace.root().map(Path::to_path_buf));
+        (paths, workspace_root)
     };
     for path in paths {
         cancel_lsp_sync_for_path(runtime, &path)?;
@@ -25138,6 +25420,9 @@ fn close_lsp_buffers_for_workspace(
             .close_buffer(&path)
             .map_err(|error| error.to_string())?;
     }
+    lsp_client
+        .stop_sessions_for_root(workspace_root.as_deref())
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -26405,10 +26690,18 @@ fn cycle_vim_command_line_completion(
     runtime: &mut EditorRuntime,
     reverse: bool,
 ) -> Result<(), String> {
-    let seed = shell_ui(runtime)?
-        .command_line()
-        .map(|command_line| command_line.text().to_owned())
-        .unwrap_or_default();
+    let (seed, is_vim_command) = {
+        let Some(command_line) = shell_ui(runtime)?.command_line() else {
+            return Ok(());
+        };
+        (
+            command_line.text().to_owned(),
+            matches!(command_line.purpose(), CommandLinePurpose::VimCommand),
+        )
+    };
+    if !is_vim_command {
+        return Ok(());
+    }
     let matches = vim_command_line_completion_matches(runtime, &seed);
     if matches.is_empty() {
         return Ok(());
@@ -26442,12 +26735,22 @@ fn vim_command_line_completion_matches(runtime: &EditorRuntime, seed: &str) -> V
 }
 
 fn submit_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let text = shell_ui(runtime)?
-        .command_line()
-        .map(|command_line| command_line.text().trim().to_owned())
-        .unwrap_or_default();
+    let (text, purpose) = {
+        let command_line = shell_ui(runtime)?
+            .command_line()
+            .ok_or_else(|| "command line is not open".to_owned())?;
+        (
+            command_line.text().trim().to_owned(),
+            command_line.purpose().clone(),
+        )
+    };
     shell_ui_mut(runtime)?.close_command_line();
-    execute_vim_command_line(runtime, &text)
+    match purpose {
+        CommandLinePurpose::VimCommand => execute_vim_command_line(runtime, &text),
+        CommandLinePurpose::GitWorktreeNewBranch { buffer_id } => {
+            submit_git_worktree_new_branch_name(runtime, buffer_id, &text)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29652,6 +29955,9 @@ pub(crate) fn open_workspace_from_project(
     }
 
     queue_workspace_syntax_prewarm(runtime, root);
+    // Flush immediately so the shared highlight worker has grammars loaded before any
+    // file open (readme / picker) can race a cold DLL load.
+    while refresh_pending_syntax_prewarm(runtime).unwrap_or(false) {}
 
     if let Some(readme_path) = initial_readme_path {
         queue_workspace_readme_open(runtime, readme_path);
@@ -29769,7 +30075,7 @@ fn prewarm_workspace_syntax_languages(runtime: &mut EditorRuntime, root: &Path) 
         let Some(registry) = runtime.services().get::<SyntaxRegistry>() else {
             return;
         };
-        if let Ok(files) = list_repository_files(root) {
+        let candidates = if let Ok(files) = list_repository_files(root) {
             collect_workspace_language_ids(registry, root, &files)
         } else if let Ok(Some(readme_path)) = workspace_root_readme_path(root) {
             let mut language_ids = BTreeSet::new();
@@ -29782,21 +30088,24 @@ fn prewarm_workspace_syntax_languages(runtime: &mut EditorRuntime, root: &Path) 
             language_ids
         } else {
             BTreeSet::new()
-        }
-    };
-    let Some(registry) = runtime.services_mut().get_mut::<SyntaxRegistry>() else {
-        return;
-    };
-    for language_id in language_ids {
-        match registry.is_installed(&language_id) {
-            Ok(true) => {
-                if let Err(error) = registry.preload_language(&language_id) {
-                    eprintln!("tree-sitter prewarm failed for `{language_id}`: {error}");
-                }
+        };
+        let mut preloadable = Vec::new();
+        for language_id in candidates {
+            match registry.is_installed(&language_id) {
+                Ok(true) => preloadable.push(language_id),
+                Ok(false) => {}
+                Err(error) => eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}"),
             }
-            Ok(false) => {}
-            Err(error) => eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}"),
         }
+        preloadable
+    };
+    if language_ids.is_empty() {
+        return;
+    }
+    // Only the shared highlight worker paints buffers. Block until it finishes loading so
+    // the first open of a workspace language never races a cold DLL load.
+    if let Ok(ui) = shell_ui_mut(runtime) {
+        ui.syntax_refresh_worker.preload_languages(language_ids);
     }
 }
 

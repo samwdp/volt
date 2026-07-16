@@ -7,10 +7,17 @@ struct CommandLineCompletionState {
     index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CommandLinePurpose {
+    VimCommand,
+    GitWorktreeNewBranch { buffer_id: BufferId },
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CommandLineOverlay {
     input: InputField,
     completion: Option<CommandLineCompletionState>,
+    purpose: CommandLinePurpose,
 }
 
 impl CommandLineOverlay {
@@ -22,7 +29,22 @@ impl CommandLineOverlay {
         Self {
             input,
             completion: None,
+            purpose: CommandLinePurpose::VimCommand,
         }
+    }
+
+    pub(super) fn for_worktree_new_branch(buffer_id: BufferId) -> Self {
+        let mut input = InputField::new("New branch: ");
+        input.set_placeholder(Some("branch name".to_owned()));
+        Self {
+            input,
+            completion: None,
+            purpose: CommandLinePurpose::GitWorktreeNewBranch { buffer_id },
+        }
+    }
+
+    pub(super) fn purpose(&self) -> &CommandLinePurpose {
+        &self.purpose
     }
 
     pub(super) fn input(&self) -> &InputField {

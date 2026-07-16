@@ -35,6 +35,7 @@ pub(super) struct PendingWorktreeRequest {
     pub(super) line: usize,
     pub(super) remote_branch: String,
     pub(super) local_branch: String,
+    pub(super) create_new_branch: bool,
 }
 
 impl DirectoryViewState {
@@ -773,6 +774,7 @@ pub(super) fn apply_directory_edit_queue(
             &request.remote_branch,
             &request.local_branch,
             &root.join(line),
+            request.create_new_branch,
         )?;
         return Ok(());
     }
@@ -788,7 +790,7 @@ pub(super) fn apply_directory_edit_queue(
             path,
         } = action
         {
-            create_git_worktree(runtime, remote_branch, local_branch, path)?;
+            create_git_worktree(runtime, remote_branch, local_branch, path, false)?;
         }
     }
     apply_directory_edit_actions(&actions)?;

@@ -73,7 +73,10 @@ fn user_picker_overlay(
     let mut overlay = PickerOverlay::from_entries(spec.title(), entries).with_title(spec.title());
     if matches!(
         spec.source(),
-        PickerSource::Buffers | PickerSource::BufferClose | PickerSource::WorkspaceFiles
+        PickerSource::Buffers
+            | PickerSource::BufferClose
+            | PickerSource::WorkspaceFiles
+            | PickerSource::UndoTree
     ) {
         overlay = overlay.with_preview();
     }
@@ -296,6 +299,7 @@ fn picker_provider_context(
                 .map(|(index, entry)| PickerUndoTreeContext {
                     buffer_id: buffer_id.get(),
                     node_id: entry.node_id,
+                    fringe: entry.fringe.into(),
                     label: entry.label.into(),
                     detail: entry.detail.into(),
                     preview: entry.preview.map(Into::into).into(),
@@ -865,7 +869,6 @@ fn picker_preview_lines(preview: &str, max_lines: usize) -> Vec<String> {
         .lines()
         .take(max_lines)
         .map(|line| line.trim_end().to_owned())
-        .filter(|line| !line.is_empty())
         .collect()
 }
 

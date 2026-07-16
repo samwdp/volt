@@ -64,6 +64,7 @@ pub(super) struct AutocompleteEntry {
     pub(super) item_icon: String,
     pub(super) label: String,
     pub(super) replacement: String,
+    pub(super) replace_range: Option<TextRange>,
     pub(super) detail: Option<String>,
     pub(super) documentation: Option<String>,
 }

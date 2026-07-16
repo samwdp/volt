@@ -82,3 +82,17 @@ non-obvious runtime caveats, not one-off setup steps.
   compile/clippy-check them, cross-check against the Windows target, which needs mingw for the
   C-backed crates: `rustup target add x86_64-pc-windows-gnu` (+ `gcc-mingw-w64-x86-64`), then
   e.g. `cargo clippy -p editor-syntax --all-targets --target x86_64-pc-windows-gnu -- -D warnings`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as local markdown under `.scratch/<feature>/` (PRDs + numbered issue files; triage via `Status:` lines). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical role names used as-is (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.

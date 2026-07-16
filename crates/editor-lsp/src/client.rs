@@ -71,6 +71,7 @@ pub struct LspCompletionItem {
     kind: Option<LspCompletionKind>,
     label: String,
     insert_text: String,
+    edit_range: Option<TextRange>,
     detail: Option<String>,
     documentation: Option<String>,
 }
@@ -120,6 +121,7 @@ impl LspCompletionItem {
         kind: Option<LspCompletionKind>,
         label: impl Into<String>,
         insert_text: impl Into<String>,
+        edit_range: Option<TextRange>,
         detail: Option<String>,
         documentation: Option<String>,
     ) -> Self {
@@ -128,6 +130,7 @@ impl LspCompletionItem {
             kind,
             label: label.into(),
             insert_text: insert_text.into(),
+            edit_range,
             detail,
             documentation,
         }
@@ -147,6 +150,10 @@ impl LspCompletionItem {
 
     pub fn insert_text(&self) -> &str {
         &self.insert_text
+    }
+
+    pub const fn edit_range(&self) -> Option<TextRange> {
+        self.edit_range
     }
 
     pub fn detail(&self) -> Option<&str> {
@@ -868,6 +875,28 @@ struct SessionKey {
     root: Option<PathBuf>,
 }
 
+impl SessionKey {
+    fn new(server_id: impl Into<String>, root: Option<&Path>) -> Self {
+        Self {
+            server_id: server_id.into(),
+            root: normalize_session_root(root),
+        }
+    }
+}
+
+fn normalize_session_root(root: Option<&Path>) -> Option<PathBuf> {
+    root.map(|root| {
+        #[cfg(windows)]
+        {
+            PathBuf::from(root.to_string_lossy().as_ref().to_ascii_lowercase())
+        }
+        #[cfg(not(windows))]
+        {
+            root.to_path_buf()
+        }
+    })
+}
+
 #[derive(Debug, Default, Clone)]
 struct TrackedBufferState {
     revision: u64,
@@ -1164,10 +1193,7 @@ impl LspClientManager {
     where
         F: FnOnce(Option<Value>) -> Option<Value>,
     {
-        let key = SessionKey {
-            server_id: server_id.to_owned(),
-            root: root.map(Path::to_path_buf),
-        };
+        let key = SessionKey::new(server_id, root);
         let (session, updated_override) = {
             let mut state = self
                 .state
@@ -1205,10 +1231,7 @@ impl LspClientManager {
     where
         F: FnOnce(Option<Value>) -> Option<Value>,
     {
-        let key = SessionKey {
-            server_id: server_id.to_owned(),
-            root: root.map(Path::to_path_buf),
-        };
+        let key = SessionKey::new(server_id, root);
         let mut state = self
             .state
             .lock()
@@ -1238,10 +1261,7 @@ impl LspClientManager {
         section: Option<&str>,
         key: &str,
     ) -> Result<bool, LspClientError> {
-        let session_key = SessionKey {
-            server_id: server_id.to_owned(),
-            root: root.map(Path::to_path_buf),
-        };
+        let session_key = SessionKey::new(server_id, root);
         let settings = self
             .state
             .lock()
@@ -1265,10 +1285,7 @@ impl LspClientManager {
             .lock()
             .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
         if let Some(root) = root {
-            let key = SessionKey {
-                server_id: server_id.to_owned(),
-                root: Some(root.to_path_buf()),
-            };
+            let key = SessionKey::new(server_id, Some(root));
             let disconnected = state
                 .sessions
                 .get(&key)
@@ -1346,13 +1363,11 @@ impl LspClientManager {
             let Some(tracked) = state.tracked_buffers.remove(path) else {
                 return Ok(());
             };
-            let session_keys = tracked.sessions;
-            let sessions = session_keys
+            tracked
+                .sessions
                 .iter()
                 .filter_map(|key| state.sessions.get(key).cloned())
-                .collect::<Vec<_>>();
-            cleanup_unused_sessions(&mut state, &session_keys);
-            sessions
+                .collect::<Vec<_>>()
         };
         for session in sessions {
             session.did_close(path)?;
@@ -1361,7 +1376,56 @@ impl LspClientManager {
     }
 
     pub fn stop_buffer(&self, path: &Path) -> Result<(), LspClientError> {
-        self.close_buffer(path)
+        let session_keys = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state
+                .tracked_buffers
+                .get(path)
+                .map(|tracked| tracked.sessions.clone())
+                .unwrap_or_default()
+        };
+        self.close_buffer(path)?;
+        self.shutdown_sessions(&session_keys)
+    }
+
+    pub fn stop_sessions_for_root(&self, root: Option<&Path>) -> Result<(), LspClientError> {
+        let root = normalize_session_root(root);
+        let session_keys = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state
+                .sessions
+                .keys()
+                .filter(|key| key.root == root)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        self.shutdown_sessions(&session_keys)
+    }
+
+    fn shutdown_sessions(&self, session_keys: &BTreeSet<SessionKey>) -> Result<(), LspClientError> {
+        if session_keys.is_empty() {
+            return Ok(());
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        for key in session_keys {
+            state.sessions.remove(key);
+            state.start_failures.remove(key);
+        }
+        for tracked in state.tracked_buffers.values_mut() {
+            for key in session_keys {
+                tracked.sessions.remove(key);
+            }
+        }
+        Ok(())
     }
 
     pub fn restart_buffer(
@@ -1373,7 +1437,7 @@ impl LspClientManager {
         preferred_server_id: Option<&str>,
     ) -> Result<Vec<String>, LspClientError> {
         let text = text.into();
-        self.close_buffer(path)?;
+        self.stop_buffer(path)?;
         if let Some(server_id) = preferred_server_id {
             return self.start_buffer_server(path, text, revision, root, server_id);
         }
@@ -1858,10 +1922,7 @@ impl LspClientManager {
         };
 
         for session in session_plans {
-            let key = SessionKey {
-                server_id: session.server_id().to_owned(),
-                root: session.root().cloned(),
-            };
+            let key = SessionKey::new(session.server_id(), session.root().map(PathBuf::as_path));
             if handled_keys.contains(&key) {
                 continue;
             }
@@ -1988,10 +2049,7 @@ impl LspSessionHandle {
             ))
         })?;
 
-        let key = SessionKey {
-            server_id: session.server_id().to_owned(),
-            root: session.root().cloned(),
-        };
+        let key = SessionKey::new(session.server_id(), session.root().map(PathBuf::as_path));
         let writer = Arc::new(Mutex::new(stdin));
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
         let diagnostics = Arc::new(Mutex::new(BTreeMap::new()));
@@ -2626,19 +2684,6 @@ impl LspSessionHandle {
     }
 }
 
-fn cleanup_unused_sessions(state: &mut LspClientState, removed_keys: &BTreeSet<SessionKey>) {
-    let still_referenced = state
-        .tracked_buffers
-        .values()
-        .flat_map(|tracked| tracked.sessions.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    for key in removed_keys {
-        if !still_referenced.contains(key) {
-            state.sessions.remove(key);
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     server_id: String,
@@ -2753,18 +2798,14 @@ fn spawn_reader_thread(
                     record_notification(&notifications, notification);
                     continue;
                 }
-                if method == "window/showMessage"
+                if matches!(method, "window/showMessage" | "window/logMessage")
                     && let Some(params) = object.get("params")
-                    && let Some(notification) =
-                        parse_show_message_notification(&server_id, root.as_deref(), params)
-                {
-                    record_notification(&notifications, notification);
-                    continue;
-                }
-                if method == "window/logMessage"
-                    && let Some(params) = object.get("params")
-                    && let Some(notification) =
-                        parse_log_message_notification(&server_id, root.as_deref(), params)
+                    && let Some(notification) = parse_window_message_notification(
+                        method,
+                        &server_id,
+                        root.as_deref(),
+                        params,
+                    )
                 {
                     record_notification(&notifications, notification);
                     continue;
@@ -3863,6 +3904,21 @@ fn parse_progress_notification(
     }
 }
 
+fn parse_window_message_notification(
+    method: &str,
+    server_id: &str,
+    root: Option<&Path>,
+    params: &Value,
+) -> Option<LspNotification> {
+    // window/logMessage is output-channel traffic only (already in the transport log).
+    // Do not promote it to UI toasts — servers such as ols misuse MessageType::Error
+    // for benign startup lines like "Starting Odin Language Server …".
+    if method != "window/showMessage" {
+        return None;
+    }
+    parse_show_message_notification(server_id, root, params)
+}
+
 fn parse_show_message_notification(
     server_id: &str,
     root: Option<&Path>,
@@ -3901,14 +3957,6 @@ fn parse_show_message_notification(
         false,
         None,
     ))
-}
-
-fn parse_log_message_notification(
-    server_id: &str,
-    root: Option<&Path>,
-    params: &Value,
-) -> Option<LspNotification> {
-    parse_show_message_notification(server_id, root, params)
 }
 
 fn status_notification_key(server_id: &str, root: Option<&Path>) -> String {
@@ -4712,17 +4760,31 @@ fn parse_completion_item(server_id: &str, value: &Value) -> Option<LspCompletion
         .get("kind")
         .and_then(Value::as_u64)
         .and_then(parse_completion_kind);
-    let insert_text = value
-        .get("insertText")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("textEdit")
-                .and_then(|text_edit| text_edit.get("newText"))
+    // LSP: when textEdit is present, it owns the inserted text and range.
+    // Prefer it over insertText so trigger characters (e.g. '.') are not doubled.
+    let (insert_text, edit_range) = match value.get("textEdit") {
+        Some(text_edit) => {
+            let new_text = text_edit
+                .get("newText")
                 .and_then(Value::as_str)
-        })
-        .unwrap_or(&label)
-        .to_owned();
+                .or_else(|| value.get("insertText").and_then(Value::as_str))
+                .unwrap_or(&label)
+                .to_owned();
+            let range = text_edit
+                .get("replace")
+                .or_else(|| text_edit.get("range"))
+                .and_then(parse_inline_text_range);
+            (new_text, range)
+        }
+        None => {
+            let insert_text = value
+                .get("insertText")
+                .and_then(Value::as_str)
+                .unwrap_or(&label)
+                .to_owned();
+            (insert_text, None)
+        }
+    };
     let detail = value
         .get("detail")
         .and_then(Value::as_str)
@@ -4736,6 +4798,7 @@ fn parse_completion_item(server_id: &str, value: &Value) -> Option<LspCompletion
         kind,
         label,
         insert_text,
+        edit_range,
         detail,
         documentation,
     ))
@@ -4906,6 +4969,62 @@ mod tests {
         assert_eq!(items[0].label(), "println!");
         assert_eq!(items[0].kind(), Some(LspCompletionKind::Function));
         assert_eq!(items[0].documentation(), Some("Prints to stdout."));
+        assert_eq!(items[0].edit_range(), None);
+    }
+
+    #[test]
+    fn completion_parser_prefers_text_edit_over_insert_text_and_keeps_range() {
+        // csharp-ls / Roslyn style: typed "foo." then item replaces the "." with ".bar()".
+        let response = json!([
+            {
+                "label": "bar",
+                "kind": 2,
+                "insertText": "bar",
+                "textEdit": {
+                    "range": {
+                        "start": { "line": 0, "character": 3 },
+                        "end": { "line": 0, "character": 4 }
+                    },
+                    "newText": ".bar()"
+                }
+            }
+        ]);
+        let items = parse_completion_response("csharp-ls", &response);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "bar");
+        assert_eq!(items[0].insert_text(), ".bar()");
+        assert_eq!(
+            items[0].edit_range(),
+            Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4)))
+        );
+    }
+
+    #[test]
+    fn completion_parser_reads_insert_replace_edit_replace_range() {
+        let response = json!([
+            {
+                "label": "bar",
+                "kind": 2,
+                "textEdit": {
+                    "newText": "bar()",
+                    "insert": {
+                        "start": { "line": 0, "character": 4 },
+                        "end": { "line": 0, "character": 4 }
+                    },
+                    "replace": {
+                        "start": { "line": 0, "character": 3 },
+                        "end": { "line": 0, "character": 4 }
+                    }
+                }
+            }
+        ]);
+        let items = parse_completion_response("csharp-ls", &response);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].insert_text(), "bar()");
+        assert_eq!(
+            items[0].edit_range(),
+            Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4)))
+        );
     }
 
     #[test]
@@ -5917,10 +6036,9 @@ mod tests {
             version: 1,
             ..TrackedBufferState::default()
         };
-        tracked.sessions.insert(SessionKey {
-            server_id: "rust-analyzer".to_owned(),
-            root: None,
-        });
+        tracked
+            .sessions
+            .insert(SessionKey::new("rust-analyzer", None));
         manager
             .state
             .lock()
@@ -6023,6 +6141,15 @@ mod tests {
         path: &Path,
         diagnostics_by_path: BTreeMap<PathBuf, Vec<Diagnostic>>,
     ) -> Arc<LspSessionHandle> {
+        test_session_handle_in_workspace(server_id, path, None, diagnostics_by_path)
+    }
+
+    fn test_session_handle_in_workspace(
+        server_id: &str,
+        path: &Path,
+        workspace_root: Option<&Path>,
+        diagnostics_by_path: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    ) -> Arc<LspSessionHandle> {
         let mut registry = LanguageServerRegistry::new();
         registry
             .register(crate::LanguageServerSpec::new(
@@ -6034,17 +6161,14 @@ mod tests {
             ))
             .expect("register test server");
         let session = registry
-            .prepare_session_for_path(server_id, path, None)
+            .prepare_session_for_path(server_id, path, workspace_root)
             .expect("prepare test session");
         let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
             &session, None,
         )));
         let (child, writer) = spawn_inert_child();
         Arc::new(LspSessionHandle {
-            key: SessionKey {
-                server_id: server_id.to_owned(),
-                root: None,
-            },
+            key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
             session,
             child: Mutex::new(child),
             writer: Arc::new(Mutex::new(writer)),
@@ -6174,6 +6298,149 @@ mod tests {
             .expect("sync buffer");
 
         assert!(new_session.has_open_document(&path));
+    }
+
+    #[test]
+    fn sync_buffer_reuses_one_session_across_files_in_same_workspace() {
+        let root = PathBuf::from("P:\\workspace");
+        let first = root.join("src").join("a.rs");
+        let second = root.join("src").join("b.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+        let manager = LspClientManager::new(registry);
+        let session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &first,
+            Some(root.as_path()),
+            BTreeMap::new(),
+        );
+        let session_key = session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state
+                .sessions
+                .insert(session_key.clone(), Arc::clone(&session));
+        }
+
+        manager
+            .sync_buffer(&first, "fn a() {}".to_owned(), 1, Some(root.as_path()))
+            .expect("sync first");
+        manager
+            .sync_buffer(&second, "fn b() {}".to_owned(), 1, Some(root.as_path()))
+            .expect("sync second");
+
+        let state = manager.state.lock().expect("state lock");
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions.contains_key(&session_key));
+        assert!(state.tracked_buffers.contains_key(&first));
+        assert!(state.tracked_buffers.contains_key(&second));
+    }
+
+    #[test]
+    fn close_buffer_keeps_session_alive_for_next_file() {
+        let root = PathBuf::from("P:\\workspace");
+        let first = root.join("src").join("a.rs");
+        let second = root.join("src").join("b.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+        let manager = LspClientManager::new(registry);
+        let session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &first,
+            Some(root.as_path()),
+            BTreeMap::new(),
+        );
+        let session_key = session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state
+                .sessions
+                .insert(session_key.clone(), Arc::clone(&session));
+        }
+
+        manager
+            .sync_buffer(&first, "fn a() {}".to_owned(), 1, Some(root.as_path()))
+            .expect("sync first");
+        manager.close_buffer(&first).expect("close first");
+        assert_eq!(
+            manager.state.lock().expect("state lock").sessions.len(),
+            1,
+            "document close must not kill the language server"
+        );
+
+        manager
+            .sync_buffer(&second, "fn b() {}".to_owned(), 1, Some(root.as_path()))
+            .expect("sync second");
+        let state = manager.state.lock().expect("state lock");
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions.contains_key(&session_key));
+        assert!(!state.tracked_buffers.contains_key(&first));
+        assert!(state.tracked_buffers.contains_key(&second));
+    }
+
+    #[test]
+    fn stop_buffer_shuts_down_session() {
+        let root = PathBuf::from("P:\\workspace");
+        let path = root.join("src").join("a.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+        let manager = LspClientManager::new(registry);
+        let session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &path,
+            Some(root.as_path()),
+            BTreeMap::new(),
+        );
+        let session_key = session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state.sessions.insert(session_key, Arc::clone(&session));
+        }
+
+        manager
+            .sync_buffer(&path, "fn a() {}".to_owned(), 1, Some(root.as_path()))
+            .expect("sync");
+        manager.stop_buffer(&path).expect("stop");
+        assert!(
+            manager
+                .state
+                .lock()
+                .expect("state lock")
+                .sessions
+                .is_empty()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_key_normalizes_windows_root_casing() {
+        let upper = SessionKey::new("ols", Some(Path::new(r"P:\odinpong")));
+        let lower = SessionKey::new("ols", Some(Path::new(r"p:\odinpong")));
+        assert_eq!(upper, lower);
     }
 
     #[test]
@@ -6425,6 +6692,27 @@ mod tests {
                 }),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn log_message_error_from_ols_does_not_become_ui_notification() {
+        let params = json!({
+            "type": 1,
+            "message": "Starting Odin Language Server dev-2026-05"
+        });
+        let root = Path::new(r"P:\odinpong");
+        assert!(
+            parse_window_message_notification("window/logMessage", "ols", Some(root), &params)
+                .is_none()
+        );
+        let toast =
+            parse_window_message_notification("window/showMessage", "ols", Some(root), &params)
+                .expect("showMessage Error still becomes a toast");
+        assert_eq!(toast.level(), LspNotificationLevel::Error);
+        assert_eq!(
+            toast.body_lines(),
+            ["Starting Odin Language Server dev-2026-05", r"P:\odinpong"]
         );
     }
 }

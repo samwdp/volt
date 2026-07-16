@@ -778,6 +778,7 @@ pub struct PickerAcpClientContext {
 pub struct PickerUndoTreeContext {
     pub buffer_id: u64,
     pub node_id: usize,
+    pub fringe: RString,
     pub label: RString,
     pub detail: RString,
     pub preview: ROption<RString>,

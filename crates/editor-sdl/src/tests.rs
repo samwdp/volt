@@ -1532,14 +1532,12 @@ fn workspace_open_prewarms_installed_tree_sitter_languages()
     assert!(!registry.is_loaded("rust"));
 
     open_workspace_from_project(&mut state.runtime, "syntax-prewarm", &root)?;
+    // Already flushed during open; second flush should be a no-op.
     state.flush_pending_syntax_prewarm_for_test()?;
-
-    let registry = state
-        .runtime
-        .services()
-        .get::<SyntaxRegistry>()
-        .ok_or("missing syntax registry")?;
-    assert!(registry.is_loaded("rust"));
+    assert!(
+        state.ui()?.syntax_refresh_worker_is_live(),
+        "workspace prewarm should start and finish on the shared syntax worker"
+    );
 
     drop(state);
     fs::remove_dir_all(root)?;

@@ -140,8 +140,7 @@ fn disconnected_syntax_worker_restarts_without_stranding_buffers() -> Result<(),
     drop(request_rx);
     shell_ui_mut(&mut state.runtime)?
         .syntax_refresh_worker
-        .workers
-        .insert(buffer_id, request_tx);
+        .request_tx = Some(request_tx);
 
     refresh_pending_syntax(&mut state.runtime)?;
     assert!(
@@ -152,8 +151,42 @@ fn disconnected_syntax_worker_restarts_without_stranding_buffers() -> Result<(),
     assert!(
         shell_ui(&state.runtime)?
             .syntax_refresh_worker
-            .workers
-            .contains_key(&buffer_id)
+            .has_live_worker()
+    );
+    Ok(())
+}
+
+#[test]
+fn syntax_refresh_reuses_shared_worker_across_buffers() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first = install_text_test_buffer(
+        &mut state,
+        "*shared-syntax-worker-a*",
+        vec!["fn main() {}".to_owned()],
+    )?;
+    let second = install_text_test_buffer(
+        &mut state,
+        "*shared-syntax-worker-b*",
+        vec!["fn other() {}".to_owned()],
+    )?;
+    for buffer_id in [first, second] {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("rust".to_owned()));
+        buffer.force_syntax_refresh();
+    }
+
+    refresh_pending_syntax(&mut state.runtime)?;
+    assert!(
+        shell_ui(&state.runtime)?
+            .syntax_refresh_worker
+            .has_live_worker()
+    );
+    refresh_pending_syntax(&mut state.runtime)?;
+    assert!(
+        shell_ui(&state.runtime)?
+            .syntax_refresh_worker
+            .has_live_worker(),
+        "second buffer must reuse the same shared worker"
     );
     Ok(())
 }
@@ -1822,8 +1855,93 @@ fn oil_git_worktree_command_opens_branch_picker() -> Result<(), String> {
             .session()
             .matches()
             .iter()
+            .any(|entry| entry.item().label() == "New Branch")
+    );
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
             .any(|entry| entry.item().label() == "origin/feature/oil-worktree")
     );
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&remote);
+    Ok(())
+}
+
+#[test]
+fn oil_git_worktree_new_branch_prompts_for_name_then_directory() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let remote = unique_temp_dir("oil-worktree-new-remote");
+    let repo = init_git_repo_with_commit("oil-worktree-new-repo")?;
+
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap_or("")],
+    )?;
+    run_git_in_dir(&repo, &["push", "-u", "origin", "HEAD:master"])?;
+
+    let workspace_root = repo
+        .parent()
+        .ok_or_else(|| "repo parent missing".to_owned())?
+        .to_path_buf();
+    open_workspace_from_project(&mut state.runtime, "oil-worktree-new", &workspace_root)?;
+    open_oil_directory(&mut state.runtime, repo.clone())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    state
+        .runtime
+        .execute_command("oil.git-worktree")
+        .map_err(|error| error.to_string())?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "oil.git-worktree did not open picker".to_owned())?;
+    assert_eq!(
+        picker
+            .session()
+            .selected()
+            .map(|entry| entry.item().label()),
+        Some("New Branch")
+    );
+
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+
+    assert!(
+        shell_ui(&state.runtime)?
+            .command_line()
+            .is_some_and(|command_line| {
+                matches!(
+                    command_line.purpose(),
+                    CommandLinePurpose::GitWorktreeNewBranch { .. }
+                )
+            }),
+        "New Branch should open the branch-name command line"
+    );
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+
+    state
+        .handle_text_input("feature/new-oil-branch")
+        .map_err(|error| error.to_string())?;
+    state
+        .try_runtime_keybinding(Keycode::Return, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+
+    assert!(shell_ui(&state.runtime)?.command_line().is_none());
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    let pending = shell_buffer(&state.runtime, buffer_id)?
+        .directory_state()
+        .ok_or_else(|| "directory state missing".to_owned())?
+        .pending_worktree
+        .clone()
+        .ok_or_else(|| "pending worktree request missing".to_owned())?;
+    assert_eq!(pending.local_branch, "feature/new-oil-branch");
+    assert_eq!(pending.remote_branch, "feature/new-oil-branch");
+    assert!(pending.create_new_branch);
 
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&remote);
@@ -7486,6 +7604,7 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
             item_icon: "•".to_owned(),
             label: "alpha".to_owned(),
             replacement: "alpha".to_owned(),
+            replace_range: None,
             detail: Some("detail".to_owned()),
             documentation: Some("documentation".to_owned()),
         }],
@@ -9649,6 +9768,116 @@ fn autocomplete_query_allows_empty_member_access_after_dot_and_arrow() {
     assert_eq!(arrow_query.prefix, "");
     assert_eq!(arrow_query.replace_range.start(), TextPoint::new(0, 8));
     assert_eq!(arrow_query.replace_range.end(), TextPoint::new(0, 8));
+}
+
+#[test]
+fn normalize_completion_replacement_strips_duplicate_member_access_trigger() {
+    let mut buffer = TextBuffer::from_text("foo.");
+    buffer.set_cursor(TextPoint::new(0, 4));
+    let snapshot = buffer.snapshot();
+    let empty_after_dot = TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 4));
+    assert_eq!(
+        normalize_completion_replacement(&snapshot, empty_after_dot, ".bar()"),
+        "bar()"
+    );
+
+    // textEdit that already covers the typed '.' must keep the leading '.' in newText.
+    let cover_dot = TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4));
+    assert_eq!(
+        normalize_completion_replacement(&snapshot, cover_dot, ".bar()"),
+        ".bar()"
+    );
+
+    let mut arrow = TextBuffer::from_text("ptr->");
+    arrow.set_cursor(TextPoint::new(0, 5));
+    let arrow_snapshot = arrow.snapshot();
+    let empty_after_arrow = TextRange::new(TextPoint::new(0, 5), TextPoint::new(0, 5));
+    assert_eq!(
+        normalize_completion_replacement(&arrow_snapshot, empty_after_arrow, "->method"),
+        "method"
+    );
+}
+
+#[test]
+fn accept_autocomplete_avoids_double_dot_when_lsp_insert_includes_trigger() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.text = TextBuffer::from_text("foo.");
+        buffer.set_cursor(TextPoint::new(0, 4));
+    }
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: String::new(),
+            replace_range: TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 4)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: "lsp".to_owned(),
+            provider_label: "LSP".to_owned(),
+            provider_icon: "L".to_owned(),
+            item_icon: "ƒ".to_owned(),
+            label: "bar".to_owned(),
+            replacement: ".bar()".to_owned(),
+            replace_range: None,
+            detail: None,
+            documentation: None,
+        }],
+        selected_index: 0,
+        loading: false,
+    };
+    shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
+    accept_autocomplete(&mut state.runtime)?;
+    assert_eq!(
+        active_shell_buffer_mut(&mut state.runtime)?.text.text(),
+        "foo.bar()"
+    );
+    Ok(())
+}
+
+#[test]
+fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.text = TextBuffer::from_text("foo.");
+        buffer.set_cursor(TextPoint::new(0, 4));
+    }
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: String::new(),
+            replace_range: TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 4)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: "lsp".to_owned(),
+            provider_label: "LSP".to_owned(),
+            provider_icon: "L".to_owned(),
+            item_icon: "ƒ".to_owned(),
+            label: "bar".to_owned(),
+            replacement: ".bar()".to_owned(),
+            replace_range: Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4))),
+            detail: None,
+            documentation: None,
+        }],
+        selected_index: 0,
+        loading: false,
+    };
+    shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
+    accept_autocomplete(&mut state.runtime)?;
+    assert_eq!(
+        active_shell_buffer_mut(&mut state.runtime)?.text.text(),
+        "foo.bar()"
+    );
+    Ok(())
 }
 
 #[test]
@@ -13899,6 +14128,35 @@ fn undo_tree_select_restores_latest_root_cursor_without_changing_child_cursor() 
     assert!(buffer.undo_tree_select(0));
     assert_eq!(buffer.text.line(0).as_deref(), Some("alpha"));
     assert_eq!(buffer.cursor_point(), TextPoint::new(0, 3));
+    Ok(())
+}
+
+#[test]
+fn undo_tree_picker_entries_use_fringe_indent_and_diff_preview() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*undo-tree-picker*", vec!["alpha".to_owned()])?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+
+    buffer.set_cursor(TextPoint::new(0, 5));
+    buffer.insert_text("!");
+    buffer.record_undo_snapshot();
+
+    let (entries, selected_index) = buffer.undo_tree_entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(selected_index, 1);
+    assert!(!entries[0].label.starts_with(' '));
+    assert!(!entries[1].label.starts_with(' '));
+    assert!(entries[0].fringe.contains('*') || entries[0].fringe.contains('○'));
+    assert!(entries[1].fringe.contains('├') || entries[1].fringe.contains('└'));
+    let preview = entries[1]
+        .preview
+        .as_deref()
+        .ok_or_else(|| "child preview missing".to_owned())?;
+    assert!(
+        preview.contains("-alpha") && preview.contains("+alpha!"),
+        "preview should show parent→node diff, got {preview}"
+    );
     Ok(())
 }
 

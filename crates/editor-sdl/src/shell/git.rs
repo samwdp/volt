@@ -2686,10 +2686,7 @@ pub(super) fn begin_oil_worktree_request(
     let root = git_root(runtime)?;
     trace_oil_worktree(runtime, format!("resolved git root `{}`", root.display()));
     let branches = git_remote_worktree_branch_list(runtime, &root)?;
-    if branches.is_empty() {
-        return Err("no remote branches found".to_owned());
-    }
-    let entries = branches
+    let mut entries = branches
         .into_iter()
         .map(|(remote_branch, local_branch)| {
             let item_id = format!("git-worktree-oil-branch:{remote_branch}");
@@ -2710,13 +2707,53 @@ pub(super) fn begin_oil_worktree_request(
             }
         })
         .collect::<Vec<_>>();
+    entries.insert(
+        0,
+        PickerEntry {
+            item: PickerItem::new(
+                "git-worktree-oil-branch:new",
+                "New Branch",
+                "create a new local branch and worktree",
+                Some("Enter a branch name, then choose the worktree directory in oil.".to_owned()),
+            ),
+            action: PickerAction::GitWorktreeOilNewBranch { buffer_id },
+            quickfix: None,
+        },
+    );
     let entry_count = entries.len();
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Git Worktree Branch", entries));
+    shell_ui_mut(runtime)?.set_picker(
+        PickerOverlay::from_entries("Git Worktree Branch", entries)
+            .with_result_order(PickerResultOrder::Source),
+    );
     trace_oil_worktree(
         runtime,
         format!("set git worktree picker with {entry_count} entries"),
     );
     Ok(())
+}
+
+pub(super) fn open_git_worktree_new_branch_prompt(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    shell_ui_mut(runtime)?.set_command_line(CommandLineOverlay::for_worktree_new_branch(buffer_id));
+    Ok(())
+}
+
+pub(super) fn submit_git_worktree_new_branch_name(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    branch: &str,
+) -> Result<(), String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("branch name is required".to_owned());
+    }
+    if branch.chars().any(char::is_whitespace) {
+        return Err("branch name must not contain whitespace".to_owned());
+    }
+    finish_oil_worktree_branch_selection(runtime, buffer_id, branch, branch, true)?;
+    sync_active_buffer(runtime)
 }
 
 pub(super) fn open_git_worktree_path_picker(
@@ -2754,7 +2791,7 @@ pub(super) fn create_git_worktree_from_query(
         return Err("worktree directory name is required".to_owned());
     }
     let worktree_path = worktree_path_from_name(base_dir, name)?;
-    create_git_worktree(runtime, remote_branch, local_branch, &worktree_path)
+    create_git_worktree(runtime, remote_branch, local_branch, &worktree_path, false)
 }
 
 pub(super) fn finish_oil_worktree_branch_selection(
@@ -2762,6 +2799,7 @@ pub(super) fn finish_oil_worktree_branch_selection(
     buffer_id: BufferId,
     remote_branch: &str,
     local_branch: &str,
+    create_new_branch: bool,
 ) -> Result<(), String> {
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     buffer.move_line_end();
@@ -2775,6 +2813,7 @@ pub(super) fn finish_oil_worktree_branch_selection(
         line,
         remote_branch: remote_branch.to_owned(),
         local_branch: local_branch.to_owned(),
+        create_new_branch,
     });
     shell_ui_mut(runtime)?.enter_insert_mode();
     Ok(())
@@ -2785,6 +2824,7 @@ pub(super) fn create_git_worktree(
     remote_branch: &str,
     local_branch: &str,
     worktree_path: &Path,
+    create_new_branch: bool,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
     if worktree_path.exists() {
@@ -2794,7 +2834,9 @@ pub(super) fn create_git_worktree(
         ));
     }
     let path_arg = worktree_path.display().to_string();
-    let args = if remote_branch == local_branch {
+    let args = if create_new_branch {
+        vec!["worktree", "add", "-b", local_branch, &path_arg]
+    } else if remote_branch == local_branch {
         vec!["worktree", "add", &path_arg, local_branch]
     } else {
         vec![

@@ -35,7 +35,8 @@ pub fn picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
                 entry.label.clone(),
                 entry.detail.clone(),
                 PickerActionSpec::undo_tree_node(entry.buffer_id, entry.node_id),
-            );
+            )
+            .with_fringe(entry.fringe.clone());
             if let Some(preview) = entry.preview.as_ref().into_option() {
                 item = item.with_preview(preview.clone());
             }
