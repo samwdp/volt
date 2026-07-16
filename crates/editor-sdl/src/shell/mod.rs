@@ -6,6 +6,7 @@ mod command_stream;
 mod diagnostics;
 mod directory;
 mod git;
+mod issues;
 mod pdf;
 mod picker;
 mod render;
@@ -20,6 +21,7 @@ use command_stream::*;
 use diagnostics::*;
 use directory::*;
 use git::*;
+use issues::*;
 use pdf::*;
 use render::*;
 use terminal::*;
@@ -8408,6 +8410,7 @@ pub(crate) struct ShellUiState {
     syntax_refresh_worker: SyntaxRefreshWorkerState,
     lsp_sync_worker: LspSyncWorkerState,
     streamed_command_worker: StreamedCommandWorkerState,
+    issues_worker: IssuesWorkerState,
     indent_parse_sessions: BTreeMap<BufferId, SyntaxParseSession>,
     /// Per-workspace last-used build command.  Set when the user runs
     /// `workspace.compile`; reused by `workspace.recompile`.
@@ -8470,6 +8473,7 @@ impl ShellUiState {
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
             lsp_sync_worker: LspSyncWorkerState::new(),
             streamed_command_worker: StreamedCommandWorkerState::new(),
+            issues_worker: IssuesWorkerState::new(),
             indent_parse_sessions: BTreeMap::new(),
             compile_commands: BTreeMap::new(),
             pending_syntax_prewarm_roots: VecDeque::new(),
@@ -14214,6 +14218,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let issues_changed = match refresh_pending_issues(&mut state.runtime) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state
+                            .record_shell_error("shell.issues-refresh", ShellError::Runtime(error));
+                        false
+                    }
+                };
                 let picker_refresh_started = Instant::now();
                 let picker_changed = match state.refresh_pending_picker_searches() {
                     Ok(changed) => changed,
@@ -14376,6 +14388,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || user_config_reload_changed
                     || fonts_changed
                     || file_reload_changed
+                    || issues_changed
                     || picker_changed
                     || lsp_changed
                     || notification_changed
@@ -15861,6 +15874,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_OIL_GIT_WORKTREE,
         "Starts git worktree creation from the active oil buffer.",
     )?;
+    register_issues_hooks(runtime)?;
     register_hook(
         runtime,
         HOOK_INPUT_SUBMIT,
@@ -17243,6 +17257,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             },
         )
         .map_err(|error| error.to_string())?;
+    subscribe_issues_hooks(runtime)?;
     runtime
         .subscribe_hook(builtins::PANE_SWITCH, "shell.pane-switch", |_, runtime| {
             shell_ui_mut(runtime)?.close_autocomplete();
@@ -26750,6 +26765,7 @@ fn submit_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
         CommandLinePurpose::GitWorktreeNewBranch { buffer_id } => {
             submit_git_worktree_new_branch_name(runtime, buffer_id, &text)
         }
+        CommandLinePurpose::IssuesCreate => submit_issues_create(runtime, &text),
     }
 }
 
@@ -31854,6 +31870,7 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
+        BufferKind::Plugin(plugin_kind) if is_issues_board_kind(plugin_kind) => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),
         BufferKind::Terminal => (true, None),

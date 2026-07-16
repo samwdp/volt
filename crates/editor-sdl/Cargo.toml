@@ -49,6 +49,9 @@ path = "../editor-git"
 [dependencies.editor-icons]
 path = "../editor-icons"
 
+[dependencies.editor-issues]
+path = "../editor-issues"
+
 [dependencies.editor-jobs]
 path = "../editor-jobs"
 

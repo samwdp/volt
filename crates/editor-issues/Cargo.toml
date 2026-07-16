@@ -1,0 +1,22 @@
+[package]
+name = "editor-issues"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
+name = "editor_issues"
+required-features = []
+crate-type = ["lib"]

@@ -45,6 +45,8 @@ pub mod hover;
 pub mod icon_font;
 /// Native image-viewer commands and keybindings.
 pub mod image;
+/// Workspace Issues plugin (Issue Store, Board, Capture, Place, Scan).
+pub mod issues;
 /// Bundled icon-font symbol modules (re-exported from editor-icons).
 pub use editor_plugin_api::symbols as icon_font_symbols;
 /// Runtime-loaded user configuration.
@@ -118,6 +120,7 @@ pub fn packages() -> Vec<PluginPackage> {
         compile::package(),
         image::package(),
         interactive::package(),
+        issues::package(),
         pane::package(),
         pdf::package(),
         hover::package(),

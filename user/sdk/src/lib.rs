@@ -142,6 +142,20 @@ pub mod image_hooks {
     pub const TOGGLE_MODE: &str = "ui.image.toggle-mode";
 }
 
+/// Hook name constants for the workspace Issues plugin.
+pub mod issues_hooks {
+    pub const BOARD_OPEN: &str = "ui.issues.board-open";
+    pub const CREATE: &str = "ui.issues.create";
+    pub const SCAN: &str = "ui.issues.scan";
+    pub const CAPTURE_FOCUSED: &str = "ui.issues.capture-focused";
+    pub const ACTIVATE_LINE: &str = "issues.activate-line";
+    pub const SET_STATUS: &str = "issues.set-status";
+    pub const PLACE: &str = "issues.place";
+    pub const OPEN_FROM_REF: &str = "issues.open-from-ref";
+    pub const JUMP_REFS: &str = "issues.jump-refs";
+    pub const TOGGLE_CLOSED: &str = "issues.board-toggle-closed";
+}
+
 /// Hook name constants for the native PDF buffer.
 pub mod pdf_hooks {
     pub const NEXT_PAGE: &str = "ui.pdf.next-page";
@@ -170,6 +184,7 @@ pub mod buffer_kinds {
     pub const DB_SNIPPETS: &str = "db-snippets";
     pub const DB_RESULTS: &str = "db-results";
     pub const PDF: &str = "pdf";
+    pub const ISSUES_BOARD: &str = "issues-board";
 }
 
 /// Controls how a plugin section is updated when plugin evaluation writes to it.

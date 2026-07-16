@@ -1,6 +1,6 @@
 # Issue Scan
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 03, 04
 
 ## Parent

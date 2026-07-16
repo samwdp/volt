@@ -11,6 +11,7 @@ struct CommandLineCompletionState {
 pub(super) enum CommandLinePurpose {
     VimCommand,
     GitWorktreeNewBranch { buffer_id: BufferId },
+    IssuesCreate,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,16 @@ impl CommandLineOverlay {
             input,
             completion: None,
             purpose: CommandLinePurpose::GitWorktreeNewBranch { buffer_id },
+        }
+    }
+
+    pub(super) fn for_issues_create() -> Self {
+        let mut input = InputField::new("Issue title: ");
+        input.set_placeholder(Some("short title for the new Issue".to_owned()));
+        Self {
+            input,
+            completion: None,
+            purpose: CommandLinePurpose::IssuesCreate,
         }
     }
 

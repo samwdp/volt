@@ -1077,6 +1077,10 @@ name = "editor-icons"
 version = "0.1.0"
 
 [[package]]
+name = "editor-issues"
+version = "0.1.0"
+
+[[package]]
 name = "editor-jobs"
 version = "0.1.0"
 
@@ -1148,6 +1152,7 @@ dependencies = [
  "editor-fs",
  "editor-git",
  "editor-icons",
+ "editor-issues",
  "editor-jobs",
  "editor-lsp",
  "editor-picker",

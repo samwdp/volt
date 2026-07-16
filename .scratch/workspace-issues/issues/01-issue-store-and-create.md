@@ -1,6 +1,6 @@
 # Issue Store and Create
 
-Status: ready-for-agent
+Status: resolved
 Blocked by:
 
 ## Parent

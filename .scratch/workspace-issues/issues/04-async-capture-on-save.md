@@ -1,6 +1,6 @@
 # Async Capture on save
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 03
 
 ## Parent
