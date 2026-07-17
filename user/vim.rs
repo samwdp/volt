@@ -1011,6 +1011,9 @@ pub fn package() -> PluginPackage {
         leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
         leader_binding("w n", "workspace.next", PluginKeymapScope::Workspace),
         leader_binding("w p", "workspace.previous", PluginKeymapScope::Workspace),
+        leader_binding("w +", "workspace.mark", PluginKeymapScope::Workspace),
+        leader_binding("w -", "workspace.unmark", PluginKeymapScope::Workspace),
+        leader_binding("w m", "workspace.marks", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
         // acp
         leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
@@ -1210,6 +1213,23 @@ mod tests {
                 && binding.scope() == PluginKeymapScope::Workspace
                 && binding.vim_mode() == PluginVimMode::Normal
         }));
+    }
+
+    #[test]
+    fn package_exports_mark_list_bindings() {
+        let package = package();
+        for (chord, command) in [
+            ("Space w +", "workspace.mark"),
+            ("Space w -", "workspace.unmark"),
+            ("Space w m", "workspace.marks"),
+        ] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command
+                    && binding.scope() == PluginKeymapScope::Workspace
+                    && binding.vim_mode() == PluginVimMode::Normal
+            }));
+        }
     }
 
     #[test]

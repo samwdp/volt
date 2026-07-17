@@ -64,6 +64,21 @@ pub fn package() -> PluginPackage {
             "Switches to the previous open Project Workspace in open order.",
             "workspace.previous",
         ),
+        hook_command(
+            "workspace.mark",
+            "Adds the active Project Workspace root to the Mark List.",
+            "workspace.mark",
+        ),
+        hook_command(
+            "workspace.unmark",
+            "Removes the active Project Workspace root from the Mark List.",
+            "workspace.unmark",
+        ),
+        hook_command(
+            "workspace.marks",
+            "Opens the app-wide Mark List as an editable buffer.",
+            "workspace.marks",
+        ),
         PluginCommand::new(
             "workspace.format",
             "Formats the active file buffer, preferring LSP formatting when available.",
@@ -381,5 +396,19 @@ mod tests {
         let names: Vec<_> = package.commands().iter().map(|c| c.name()).collect();
         assert!(names.contains(&"workspace.next"));
         assert!(names.contains(&"workspace.previous"));
+    }
+
+    #[test]
+    fn package_exports_mark_list_commands() {
+        let package = package();
+        let names: Vec<_> = package
+            .commands()
+            .iter()
+            .map(|command| command.name())
+            .collect();
+
+        assert!(names.contains(&"workspace.mark"));
+        assert!(names.contains(&"workspace.unmark"));
+        assert!(names.contains(&"workspace.marks"));
     }
 }

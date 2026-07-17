@@ -2157,6 +2157,153 @@ fn buffer_save_command_writes_edited_file_buffer_to_disk() -> Result<(), String>
 }
 
 #[test]
+fn workspace_mark_and_unmark_commands_persist_active_project_root() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("workspace-mark-state");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+    let project_root = unique_temp_dir("workspace-mark-project");
+    open_workspace_from_project(&mut state.runtime, "marked-project", &project_root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.mark")
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .execute_command("workspace.mark")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
+        format!("{}\n", project_root.display())
+    );
+
+    state
+        .runtime
+        .execute_command("workspace.unmark")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
+        ""
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&project_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_mark_refreshes_clean_open_mark_list_buffer() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("workspace-mark-open-list");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+    let project_root = unique_temp_dir("workspace-mark-open-project");
+    open_workspace_from_project(&mut state.runtime, "marked-project", &project_root)?;
+    state
+        .runtime
+        .execute_command("workspace.marks")
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    state
+        .runtime
+        .execute_command("workspace.mark")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.text.text(),
+        format!("{}\n", project_root.display())
+    );
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
+        format!("{}\n", project_root.display())
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&project_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_mark_on_default_workspace_notifies_without_mutating_list() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("workspace-mark-default");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+
+    state
+        .runtime
+        .execute_command("workspace.mark")
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .execute_command("workspace.unmark")
+        .map_err(|error| error.to_string())?;
+
+    assert!(!mark_list_path.exists());
+    assert!(mark_list_state(&state.runtime)?.list.roots().is_empty());
+    let notifications = shell_ui(&state.runtime)?.visible_notifications(Instant::now());
+    assert!(
+        notifications
+            .iter()
+            .any(|notification| notification.title == "Default Workspace has no project root")
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_marks_opens_real_file_and_save_reloads_normalized_list() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("workspace-marks-open");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    std::fs::write(&mark_list_path, "P:\\alpha\n").map_err(|error| error.to_string())?;
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+
+    state
+        .runtime
+        .execute_command("workspace.marks")
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.path(),
+        Some(mark_list_path.as_path())
+    );
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let end = buffer.text.point_from_char_index(buffer.text.char_count());
+        buffer.replace_range(
+            TextRange::new(TextPoint::default(), end),
+            "P:\\beta\n\n  \nP:\\gamma\n",
+        );
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
+        "P:\\beta\nP:\\gamma\n"
+    );
+    assert_eq!(
+        mark_list_state(&state.runtime)?.list.roots(),
+        &[PathBuf::from(r"P:\beta"), PathBuf::from(r"P:\gamma")]
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_save_command_writes_all_dirty_workspace_files() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let root = unique_temp_dir("workspace-save-command");

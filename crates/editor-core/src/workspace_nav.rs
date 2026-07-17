@@ -1,7 +1,64 @@
-//! Workspace navigation domain seam (cycle among Project Workspaces).
+//! Workspace navigation and Mark List domain seam.
 //!
-//! Pure inputs/outputs — no SDL. Callers supply Project Workspaces already in open
-//! order (Default Workspace excluded). Fewer than two → [`None`] (silent no-op).
+//! Pure inputs/outputs — no SDL. Cycling callers supply Project Workspaces already
+//! in open order (Default Workspace excluded). Mark List operations preserve path order.
+
+use std::path::{Path, PathBuf};
+
+/// Ordered app-wide project roots recorded as Marked Workspaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkList {
+    roots: Vec<PathBuf>,
+}
+
+impl MarkList {
+    /// Parses one project root per non-blank line, preserving order.
+    pub fn parse(text: &str) -> Self {
+        Self {
+            roots: text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        }
+    }
+
+    /// Serializes one project root per line with a trailing newline when non-empty.
+    pub fn serialize(&self) -> String {
+        let mut text = self
+            .roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text
+    }
+
+    /// Returns Marked Workspace roots in Mark List order.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// Appends a root when absent, returning whether the Mark List changed.
+    pub fn mark(&mut self, root: &Path) -> bool {
+        if self.roots.iter().any(|marked| marked == root) {
+            return false;
+        }
+        self.roots.push(root.to_path_buf());
+        true
+    }
+
+    /// Removes all occurrences of a root, returning whether the Mark List changed.
+    pub fn unmark(&mut self, root: &Path) -> bool {
+        let original_len = self.roots.len();
+        self.roots.retain(|marked| marked != root);
+        self.roots.len() != original_len
+    }
+}
 
 /// Direction to move when cycling Project Workspaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +105,7 @@ pub fn cycle_project_workspace<T: PartialEq + Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn next_moves_forward_in_open_order() {
@@ -111,6 +169,51 @@ mod tests {
         assert_eq!(
             cycle_project_workspace(&open, &"default", CycleDirection::Previous),
             Some("b")
+        );
+    }
+
+    #[test]
+    fn mark_list_parse_and_serialize_strip_blank_lines_and_preserve_order() {
+        let marks =
+            MarkList::parse(" P:\\alpha \n\nP:\\beta\n  \nP:\\gamma\nP:\\delta\nP:\\extra\n");
+
+        assert_eq!(
+            marks.roots(),
+            &[
+                PathBuf::from(r"P:\alpha"),
+                PathBuf::from(r"P:\beta"),
+                PathBuf::from(r"P:\gamma"),
+                PathBuf::from(r"P:\delta"),
+                PathBuf::from(r"P:\extra"),
+            ]
+        );
+        assert_eq!(
+            marks.serialize(),
+            "P:\\alpha\nP:\\beta\nP:\\gamma\nP:\\delta\nP:\\extra\n"
+        );
+    }
+
+    #[test]
+    fn mark_appends_absent_root_and_duplicate_is_no_op() {
+        let mut marks = MarkList::parse("P:\\alpha\n");
+
+        assert!(marks.mark(Path::new(r"P:\beta")));
+        assert!(!marks.mark(Path::new(r"P:\alpha")));
+        assert_eq!(
+            marks.roots(),
+            &[PathBuf::from(r"P:\alpha"), PathBuf::from(r"P:\beta")]
+        );
+    }
+
+    #[test]
+    fn unmark_removes_root_without_reordering_remaining_marks() {
+        let mut marks = MarkList::parse("P:\\alpha\nP:\\beta\nP:\\gamma\n");
+
+        assert!(marks.unmark(Path::new(r"P:\beta")));
+        assert!(!marks.unmark(Path::new(r"P:\missing")));
+        assert_eq!(
+            marks.roots(),
+            &[PathBuf::from(r"P:\alpha"), PathBuf::from(r"P:\gamma")]
         );
     }
 }

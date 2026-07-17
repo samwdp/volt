@@ -80,8 +80,8 @@ use crate::window_effects::{
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, CycleDirection, EditorRuntime, HookEvent,
-    KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, PaneId,
-    PendingKeySequence, SectionAction, SectionCollapseState, SectionRenderLine,
+    KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
+    PaneId, PendingKeySequence, SectionAction, SectionCollapseState, SectionRenderLine,
     SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace, push_key_sequence,
     tick_key_sequence,
 };
@@ -250,6 +250,9 @@ const HOOK_BUFFER_TOGGLE_LINE_WRAP: &str = "buffer.toggle_line_wrap";
 const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
 const HOOK_WORKSPACE_NEXT: &str = "workspace.next";
 const HOOK_WORKSPACE_PREVIOUS: &str = "workspace.previous";
+const HOOK_WORKSPACE_MARK: &str = "workspace.mark";
+const HOOK_WORKSPACE_UNMARK: &str = "workspace.unmark";
+const HOOK_WORKSPACE_MARKS: &str = "workspace.marks";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";
@@ -505,6 +508,7 @@ const WINDOW_ICON_BYTES: &[u8] = include_bytes!(concat!(
 const ERROR_LOG_MAX_ENTRIES: usize = 200;
 const ERROR_LOG_FILE_NAME: &str = "errors.log";
 const ACTIVE_THEME_STATE_FILE_NAME: &str = "active-theme.txt";
+const MARK_LIST_FILE_NAME: &str = "marked-workspaces.txt";
 const TYPING_PROFILE_LOG_FILE_NAME: &str = "typing-profile.log";
 const TYPING_PROFILE_MAX_FRAMES: usize = 10_000;
 const TYPING_PROFILE_SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(8);
@@ -8386,6 +8390,38 @@ struct KeySequenceState {
     ambiguous_short: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct MarkListState {
+    path: PathBuf,
+    list: MarkList,
+}
+
+impl MarkListState {
+    fn load(path: PathBuf) -> Result<Self, String> {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(format!(
+                    "failed to read Mark List `{}`: {error}",
+                    path.display()
+                ));
+            }
+        };
+        Ok(Self {
+            path,
+            list: MarkList::parse(&text),
+        })
+    }
+
+    fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            list: MarkList::default(),
+        }
+    }
+}
+
 pub(crate) struct ShellUiState {
     buffers: Vec<ShellBuffer>,
     workspace_views: BTreeMap<WorkspaceId, ShellWorkspaceView>,
@@ -10241,6 +10277,12 @@ impl ShellState {
             )
             .replace_with_lines(initial_errors_lines(Some(&log_file_path)));
         runtime.services_mut().insert(ui_state);
+        let mark_list_path = default_mark_list_path();
+        let (mark_list_state, mark_list_error) = match MarkListState::load(mark_list_path.clone()) {
+            Ok(state) => (state, None),
+            Err(error) => (MarkListState::empty(mark_list_path), Some(error)),
+        };
+        runtime.services_mut().insert(mark_list_state);
         if let Some(trace) = startup_trace.as_mut() {
             trace.mark("shell.bootstrap-buffers");
         }
@@ -10253,6 +10295,9 @@ impl ShellState {
         ));
         if let Some(error) = log_dir_error {
             record_runtime_error(&mut runtime, "error-log", error);
+        }
+        if let Some(error) = mark_list_error {
+            record_runtime_error(&mut runtime, "workspace.mark-list", error);
         }
         runtime.services_mut().insert(LspLogBufferState::default());
         runtime.services_mut().insert(QuickfixState::default());
@@ -15579,6 +15624,21 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_MARK,
+        "Adds the active Project Workspace root to the Mark List.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_UNMARK,
+        "Removes the active Project Workspace root from the Mark List.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_MARKS,
+        "Opens the app-wide Mark List as an editable buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -16946,6 +17006,25 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_WORKSPACE_PREVIOUS,
             "shell.workspace-previous",
             |_, runtime| cycle_runtime_project_workspace(runtime, CycleDirection::Previous),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_WORKSPACE_MARK, "shell.workspace-mark", |_, runtime| {
+            mark_active_project_workspace(runtime)
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_UNMARK,
+            "shell.workspace-unmark",
+            |_, runtime| unmark_active_project_workspace(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_MARKS,
+            "shell.workspace-marks",
+            |_, runtime| open_mark_list(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -25267,6 +25346,39 @@ fn focus_acp_input_section(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_mark_list_buffer_before_save(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    path: &Path,
+) -> Result<(), String> {
+    if mark_list_state(runtime)?.path != path {
+        return Ok(());
+    }
+    let (current, cursor) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        (buffer.text.text(), buffer.cursor_point())
+    };
+    let normalized = MarkList::parse(&current).serialize();
+    if current == normalized {
+        return Ok(());
+    }
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let end = buffer.text.point_from_char_index(buffer.text.char_count());
+    buffer.replace_range(TextRange::new(TextPoint::default(), end), &normalized);
+    buffer.set_cursor(cursor);
+    Ok(())
+}
+
+fn reload_mark_list_after_save(runtime: &mut EditorRuntime, path: &Path) -> Result<(), String> {
+    if mark_list_state(runtime)?.path != path {
+        return Ok(());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to reload Mark List `{}`: {error}", path.display()))?;
+    mark_list_state_mut(runtime)?.list = MarkList::parse(&text);
+    Ok(())
+}
+
 fn save_buffer(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
@@ -25308,7 +25420,9 @@ fn save_buffer(
             ),
         );
     }
-    save_buffer_inner(runtime, workspace_id, buffer_id, &path)
+    normalize_mark_list_buffer_before_save(runtime, buffer_id, &path)?;
+    save_buffer_inner(runtime, workspace_id, buffer_id, &path)?;
+    reload_mark_list_after_save(runtime, &path)
 }
 
 fn save_buffer_inner(
@@ -29979,6 +30093,132 @@ fn cycle_runtime_project_workspace(
     switch_runtime_workspace(runtime, target)
 }
 
+fn mark_list_state(runtime: &EditorRuntime) -> Result<&MarkListState, String> {
+    runtime
+        .services()
+        .get::<MarkListState>()
+        .ok_or_else(|| "Mark List state service missing".to_owned())
+}
+
+fn mark_list_state_mut(runtime: &mut EditorRuntime) -> Result<&mut MarkListState, String> {
+    runtime
+        .services_mut()
+        .get_mut::<MarkListState>()
+        .ok_or_else(|| "Mark List state service missing".to_owned())
+}
+
+#[cfg(test)]
+fn install_mark_list_state_for_test(
+    runtime: &mut EditorRuntime,
+    path: PathBuf,
+) -> Result<(), String> {
+    runtime.services_mut().insert(MarkListState::load(path)?);
+    Ok(())
+}
+
+fn active_project_workspace_root(runtime: &EditorRuntime) -> Result<Option<PathBuf>, String> {
+    let ui = shell_ui(runtime)?;
+    let workspace_id = ui.active_workspace();
+    if workspace_id == ui.default_workspace() {
+        return Ok(None);
+    }
+    runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())
+        .map(|workspace| workspace.root().map(Path::to_path_buf))
+}
+
+fn persist_mark_list(state: &MarkListState) -> Result<(), String> {
+    let parent = state.path.parent().ok_or_else(|| {
+        format!(
+            "Mark List path `{}` does not have a parent directory",
+            state.path.display()
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create Mark List state directory `{}`: {error}",
+            parent.display()
+        )
+    })?;
+    fs::write(&state.path, state.list.serialize()).map_err(|error| {
+        format!(
+            "failed to write Mark List `{}`: {error}",
+            state.path.display()
+        )
+    })
+}
+
+fn persist_mark_list_and_refresh_open_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let path = {
+        let state = mark_list_state(runtime)?;
+        persist_mark_list(state)?;
+        state.path.clone()
+    };
+    let buffer_ids = shell_ui(runtime)?
+        .buffers
+        .iter()
+        .filter(|buffer| buffer.path() == Some(path.as_path()) && !buffer.is_dirty())
+        .map(ShellBuffer::id)
+        .collect::<Vec<_>>();
+    for buffer_id in buffer_ids {
+        let text = TextBuffer::load_from_path(&path)
+            .map_err(|error| format!("failed to reload Mark List `{}`: {error}", path.display()))?;
+        let fingerprint = BackingFileFingerprint::read(&path)
+            .map_err(|error| format!("failed to stat Mark List `{}`: {error}", path.display()))?;
+        shell_buffer_mut(runtime, buffer_id)?.apply_reloaded_file_buffer(fingerprint, text);
+    }
+    Ok(())
+}
+
+fn notify_default_workspace_has_no_project_root(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "workspace.mark.no-project-root".to_owned(),
+            severity: NotificationSeverity::Warning,
+            title: "Default Workspace has no project root".to_owned(),
+            body_lines: vec![
+                "Switch to a Project Workspace before changing the Mark List.".to_owned(),
+            ],
+            progress: None,
+            active: false,
+            action: None,
+        },
+        Instant::now(),
+    );
+    Ok(())
+}
+
+fn mark_active_project_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(root) = active_project_workspace_root(runtime)? else {
+        return notify_default_workspace_has_no_project_root(runtime);
+    };
+    if mark_list_state_mut(runtime)?.list.mark(&root) {
+        persist_mark_list_and_refresh_open_buffers(runtime)?;
+    }
+    Ok(())
+}
+
+fn unmark_active_project_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(root) = active_project_workspace_root(runtime)? else {
+        return notify_default_workspace_has_no_project_root(runtime);
+    };
+    if mark_list_state_mut(runtime)?.list.unmark(&root) {
+        persist_mark_list_and_refresh_open_buffers(runtime)?;
+    }
+    Ok(())
+}
+
+fn open_mark_list(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let path = mark_list_state(runtime)?.path.clone();
+    if !path.exists() {
+        persist_mark_list(mark_list_state(runtime)?)?;
+    }
+    open_workspace_file(runtime, &path)?;
+    Ok(())
+}
+
 pub(crate) fn open_workspace_from_project(
     runtime: &mut EditorRuntime,
     name: &str,
@@ -31437,6 +31677,10 @@ fn default_error_log_path() -> PathBuf {
 
 fn active_theme_state_path() -> PathBuf {
     default_volt_state_dir().join(ACTIVE_THEME_STATE_FILE_NAME)
+}
+
+fn default_mark_list_path() -> PathBuf {
+    default_volt_state_dir().join(MARK_LIST_FILE_NAME)
 }
 
 fn default_typing_profile_log_path() -> PathBuf {
