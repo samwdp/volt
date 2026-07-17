@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 ## Parent
 
@@ -12,9 +12,9 @@
 
 ## Acceptance criteria
 
-- [ ] Active Minor Mode bindings override Global bindings for the same chord
-- [ ] Global bindings remain the fallback when no active Minor Mode claims the chord
-- [ ] Workspace is treated as a Minor Mode for precedence
-- [ ] Popup, autocomplete, and hover override Workspace/Global while active
-- [ ] Overlay `Ctrl+n` (picker/autocomplete/hover) still works while those Minor Modes are active
-- [ ] Spoken language matches `CONTEXT.md` (Minor Mode, Global fallback)
+- [x] Active Minor Mode bindings override Global bindings for the same chord
+- [x] Global bindings remain the fallback when no active Minor Mode claims the chord
+- [x] Workspace is treated as a Minor Mode for precedence
+- [x] Popup, autocomplete, and hover override Workspace/Global while active
+- [x] Overlay `Ctrl+n` (picker/autocomplete/hover) still works while those Minor Modes are active
+- [x] Spoken language matches `CONTEXT.md` (Minor Mode, Global fallback)

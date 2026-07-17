@@ -178,18 +178,22 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Global,
         )
         .with_vim_mode(PluginVimMode::Insert),
-        PluginKeyBinding::new(NEXT_CHORD, "autocomplete.next", PluginKeymapScope::Global)
-            .with_vim_mode(PluginVimMode::Insert),
+        PluginKeyBinding::new(
+            NEXT_CHORD,
+            "autocomplete.next",
+            PluginKeymapScope::Autocomplete,
+        )
+        .with_vim_mode(PluginVimMode::Insert),
         PluginKeyBinding::new(
             PREVIOUS_CHORD,
             "autocomplete.previous",
-            PluginKeymapScope::Global,
+            PluginKeymapScope::Autocomplete,
         )
         .with_vim_mode(PluginVimMode::Insert),
         PluginKeyBinding::new(
             ACCEPT_CHORD,
             "autocomplete.accept",
-            PluginKeymapScope::Global,
+            PluginKeymapScope::Autocomplete,
         )
         .with_vim_mode(PluginVimMode::Insert),
     ])

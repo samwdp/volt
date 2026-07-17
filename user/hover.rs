@@ -101,14 +101,10 @@ pub fn package() -> PluginPackage {
         ),
     ])
     .with_key_bindings(vec![
-        PluginKeyBinding::new(NEXT_CHORD, "hover.next", PluginKeymapScope::Workspace)
+        PluginKeyBinding::new(NEXT_CHORD, "hover.next", PluginKeymapScope::Hover)
             .with_vim_mode(PluginVimMode::Normal),
-        PluginKeyBinding::new(
-            PREVIOUS_CHORD,
-            "hover.previous",
-            PluginKeymapScope::Workspace,
-        )
-        .with_vim_mode(PluginVimMode::Normal),
+        PluginKeyBinding::new(PREVIOUS_CHORD, "hover.previous", PluginKeymapScope::Hover)
+            .with_vim_mode(PluginVimMode::Normal),
     ])
 }
 

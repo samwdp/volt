@@ -531,8 +531,6 @@ const IMAGE_ZOOM_MAX: f32 = 8.0;
 const BROWSER_BUFFER_NAME: &str = "*browser*";
 const AUTOCOMPLETE_NEXT_CHORD: &str = "Ctrl+n";
 const AUTOCOMPLETE_PREVIOUS_CHORD: &str = "Ctrl+p";
-const HOVER_NEXT_CHORD: &str = "Ctrl+n";
-const HOVER_PREVIOUS_CHORD: &str = "Ctrl+p";
 
 /// Newtype wrapper so `Arc<dyn UserLibrary>` can be stored in the runtime's
 /// type-erased service map.
@@ -11861,16 +11859,12 @@ impl ShellState {
         let vim_mode = keymap_vim_mode(self.input_mode()?);
         let runtime_surface_before =
             active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-
-        if self.picker_visible()?
-            && self
-                .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Popup, vim_mode, chord)
+        let overlay_modes = self.overlay_minor_modes()?;
+        if self
+            .runtime
+            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?
         {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Popup, vim_mode, chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
             return Ok(());
         }
 
@@ -11878,32 +11872,45 @@ impl ShellState {
             return Ok(());
         }
 
+        let editing_modes = self.editing_minor_modes()?;
         if self
             .runtime
-            .keymaps()
-            .contains_for_mode(&KeymapScope::Global, vim_mode, chord)
+            .execute_key_binding_with_minor_modes(&editing_modes, vim_mode, chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?
         {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
-            return Ok(());
-        }
-
-        if !self.picker_visible()?
-            && !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-            && self
-                .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Workspace, vim_mode, chord)
-        {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
             self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
             self.clear_stale_vim_count()?;
         }
 
         Ok(())
+    }
+
+    fn overlay_minor_modes(&self) -> Result<Vec<KeymapScope>, ShellError> {
+        let ui = self.ui()?;
+        let mut modes = Vec::new();
+        if ui.picker_visible() {
+            modes.push(KeymapScope::Popup);
+        }
+        if ui
+            .autocomplete()
+            .is_some_and(AutocompleteOverlay::is_visible)
+        {
+            modes.push(KeymapScope::Autocomplete);
+        } else if ui.hover().is_some() {
+            modes.push(KeymapScope::Hover);
+        }
+        Ok(modes)
+    }
+
+    fn editing_minor_modes(&self) -> Result<Vec<KeymapScope>, ShellError> {
+        let ui = self.ui()?;
+        let mut modes = Vec::new();
+        if !ui.picker_visible()
+            && !matches!(ui.input_mode(), InputMode::Insert | InputMode::Replace)
+        {
+            modes.push(KeymapScope::Workspace);
+        }
+        Ok(modes)
     }
 
     fn handle_pending_g_sequence(
@@ -12391,16 +12398,14 @@ impl ShellState {
                 return Ok(());
             }
 
+            let overlay_modes = self.overlay_minor_modes()?;
             if self
                 .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Global, vim_mode, &token)
+                .execute_key_binding_in_scopes(&overlay_modes, vim_mode, &token)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?
             {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-                self.runtime
-                    .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, &token)
-                    .map_err(|error| ShellError::Runtime(error.to_string()))?;
                 self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                 self.clear_stale_vim_count()?;
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
@@ -12427,16 +12432,14 @@ impl ShellState {
                 return Ok(());
             }
 
+            let editing_modes = self.editing_minor_modes()?;
             if self
                 .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &token)
+                .execute_key_binding_with_minor_modes(&editing_modes, vim_mode, &token)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?
             {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-                self.runtime
-                    .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &token)
-                    .map_err(|error| ShellError::Runtime(error.to_string()))?;
                 self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                 self.clear_stale_vim_count()?;
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
@@ -13293,47 +13296,12 @@ impl ShellState {
             return Ok(true);
         }
 
-        if !picker_visible
-            && !in_text_insert_mode
-            && hover_visible
-            && matches!(chord.as_str(), HOVER_NEXT_CHORD | HOVER_PREVIOUS_CHORD)
-            && self
-                .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
-        {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
-            self.queue_suppressed_text_input_for_chord(&chord);
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
-        }
-
-        if picker_visible
-            && self
-                .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Popup, vim_mode, &chord)
-        {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Popup, vim_mode, &chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
-            self.queue_suppressed_text_input_for_chord(&chord);
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
-        }
-
+        let overlay_modes = self.overlay_minor_modes()?;
         if self
             .runtime
-            .keymaps()
-            .contains_for_mode(&KeymapScope::Global, vim_mode, &chord)
+            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, &chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?
         {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Global, vim_mode, &chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
             self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
@@ -13347,16 +13315,12 @@ impl ShellState {
             return Ok(true);
         }
 
-        if !picker_visible
-            && !in_text_insert_mode
-            && self
-                .runtime
-                .keymaps()
-                .contains_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
+        let editing_modes = self.editing_minor_modes()?;
+        if self
+            .runtime
+            .execute_key_binding_with_minor_modes(&editing_modes, vim_mode, &chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?
         {
-            self.runtime
-                .execute_key_binding_for_mode(&KeymapScope::Workspace, vim_mode, &chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
             self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;

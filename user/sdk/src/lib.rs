@@ -2479,15 +2479,21 @@ pub struct LspDiagnosticsInfo {
 }
 
 /// Stable keymap scopes shared across the host and the compiled user library.
+///
+/// Spoken product term for non-Global scopes is Minor Mode.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub enum PluginKeymapScope {
-    /// Binding is active globally.
+    /// Binding is active globally (fallback when no Minor Mode claims the chord).
     Global,
-    /// Binding is active in workspace-focused contexts.
+    /// Workspace editing Minor Mode.
     Workspace,
-    /// Binding is active while a popup is focused.
+    /// Popup Minor Mode (picker / popup focus).
     Popup,
+    /// Autocomplete overlay Minor Mode.
+    Autocomplete,
+    /// Hover overlay Minor Mode.
+    Hover,
 }
 
 /// Modal Vim state that can activate a keybinding.

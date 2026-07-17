@@ -200,17 +200,62 @@ impl EditorRuntime {
         chord: &str,
     ) -> Result<(), KeymapError> {
         let binding = self.keymaps.resolve_for_mode(scope, vim_mode, chord)?;
-        let command_names = binding.command_names().to_vec();
+        self.execute_resolved_key_binding(chord, &binding)
+    }
 
-        for command_name in command_names {
-            self.execute_command(&command_name)
+    /// Resolves via active Minor Modes (then Global fallback) and executes when found.
+    ///
+    /// Returns `true` when a binding ran.
+    pub fn execute_key_binding_with_minor_modes(
+        &mut self,
+        active_minor_modes: &[KeymapScope],
+        vim_mode: KeymapVimMode,
+        chord: &str,
+    ) -> Result<bool, KeymapError> {
+        let Some(binding) = self
+            .keymaps
+            .resolve_with_minor_modes(active_minor_modes, vim_mode, chord)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        self.execute_resolved_key_binding(chord, &binding)?;
+        Ok(true)
+    }
+
+    /// Executes a binding found only in the given Minor Mode scopes (no Global fallback).
+    ///
+    /// Returns `true` when a binding ran.
+    pub fn execute_key_binding_in_scopes(
+        &mut self,
+        scopes: &[KeymapScope],
+        vim_mode: KeymapVimMode,
+        chord: &str,
+    ) -> Result<bool, KeymapError> {
+        let Some(binding) = self
+            .keymaps
+            .find_in_scopes(scopes, vim_mode, chord)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        self.execute_resolved_key_binding(chord, &binding)?;
+        Ok(true)
+    }
+
+    fn execute_resolved_key_binding(
+        &mut self,
+        chord: &str,
+        binding: &KeyBinding,
+    ) -> Result<(), KeymapError> {
+        for command_name in binding.command_names() {
+            self.execute_command(command_name)
                 .map_err(|error| KeymapError::CommandExecution {
                     chord: chord.to_owned(),
                     command: command_name.clone(),
                     message: error.to_string(),
                 })?;
         }
-
         Ok(())
     }
 

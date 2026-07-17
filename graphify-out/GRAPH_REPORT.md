@@ -1,12 +1,12 @@
 # Graph Report - volt  (2026-07-17)
 
 ## Corpus Check
-- 172 files · ~585,363 words
+- 172 files · ~585,905 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7206 nodes · 20208 edges · 75 communities detected
-- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 2872 edges (avg confidence: 0.8)
+- 7220 nodes · 20253 edges · 75 communities detected
+- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 2874 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -96,7 +96,7 @@
 7. `active_shell_buffer_id()` - 123 edges
 8. `ShellUiState` - 105 edges
 9. `TextBuffer` - 103 edges
-10. `ShellState` - 98 edges
+10. `ShellState` - 101 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `overlay_window_surface_opacity()` --calls--> `overlay_window_surface_color()`  [INFERRED]
@@ -105,176 +105,176 @@
   crates\editor-sdl\src\shell\acp.rs → crates\editor-sdl\src\shell\mod.rs
 - `directory_entry_label()` --calls--> `directory_yank_for_range()`  [INFERRED]
   crates\editor-sdl\src\shell\directory.rs → crates\editor-sdl\src\shell\mod.rs
-- `normalized_raster_pixel_size()` --calls--> `normalized_raster_pixel_size_matches_target_line_height()`  [INFERRED]
-  crates\editor-sdl\src\shell\mod.rs → crates\editor-sdl\src\shell\tests.rs
-- `acp_rendered_text_segments()` --calls--> `acp_wrapped_text_uses_full_width_on_continuation_rows()`  [INFERRED]
-  crates\editor-sdl\src\shell\mod.rs → crates\editor-sdl\src\shell\tests.rs
+- `active_shell_buffer_mut()` --calls--> `pdf_previous_page()`  [INFERRED]
+  crates\editor-sdl\src\shell\mod.rs → crates\editor-sdl\src\shell\pdf.rs
+- `apply_motion_command()` --calls--> `terminal_scroll_for_motion()`  [INFERRED]
+  crates\editor-sdl\src\shell\mod.rs → crates\editor-sdl\src\shell\terminal.rs
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (722): acp_complete_slash(), acp_pick_session(), acp_switch_pane(), browser_state_for_kind(), focus_active_browser_popup(), focus_browser_input_section(), submit_browser_input(), yank_to_clipboard_text() (+714 more)
+Nodes (791): acp_complete_slash(), acp_disconnect(), acp_pick_session(), acp_switch_pane(), init_acp_manager(), install_acp_test_buffer(), maybe_open_slash_completion(), pending_slash_completion_trigger_rejects_multiline_input() (+783 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (441): apply_browser_page_load_state(), browser_buffer_display_name(), browser_display_url(), browser_display_url_prefers_requested_navigation(), browser_host_viewport_rect(), browser_surface_buffer_at_point(), browser_sync_plan(), browser_url_candidates() (+433 more)
+Nodes (462): package(), syntax_language(), diff_syntax_language_metadata(), diff_syntax_language_preserves_diff_capture_theme_tokens(), syntax_language(), syntax_language(), capture_mappings(), jsx_syntax_language() (+454 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (335): package(), syntax_language(), diff_syntax_language_metadata(), diff_syntax_language_preserves_diff_capture_theme_tokens(), syntax_language(), syntax_language(), capture_mappings(), jsx_syntax_language() (+327 more)
+Nodes (256): update_directory_state(), AbiWorkspaceConfigurationValue, GitStatusSnapshot, WorkspaceConfigurationValue, active_parameter_label(), apply_command_environment(), apply_windows_runtime_environment(), build_lsp_command() (+248 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (218): update_directory_state(), GitStatusSnapshot, active_parameter_label(), apply_command_environment(), apply_windows_runtime_environment(), build_lsp_command(), char_to_byte_offset(), client_capabilities() (+210 more)
+Nodes (367): acp_insert_slash_command(), acp_pick_mode(), acp_pick_model(), acp_picker_entries(), refresh_acp_input_hint(), session_finished_marks_plan_entries_completed(), submit_acp_prompt(), update_acp_input_hint() (+359 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.02
-Nodes (97): maybe_open_slash_completion(), apply_browser_location_updates(), ensure_browser_popup_buffer(), open_browser_buffer_in_popup(), set_browser_buffer_location(), ClipboardContext, read_system_clipboard(), register_clipboard_context() (+89 more)
+Nodes (188): picker_preview_syntax_lines(), index_syntax_lines(), relative_byte_column_to_char_column(), index_syntax_lines_converts_byte_columns_after_variation_selector(), index_syntax_lines_preserves_capture_names(), vim_search_entries_trim_whitespace_from_labels(), LanguageConfiguration, additional_highlight_languages_merge_spans() (+180 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.02
-Nodes (186): vim_search_entries_trim_whitespace_from_labels(), LanguageConfiguration, additional_highlight_languages_merge_spans(), aligned_indent_column(), ancestor_contexts_include_named_nodes_up_to_the_root(), ancestor_contexts_parse_session_matches_cold_query_after_edits(), append_query_source(), apply_text_edits_to_span() (+178 more)
+Nodes (304): oil_directory_line_spans(), active_git_status_command_context(), ActiveBufferEventContext, ActiveLspBufferContext, apply_git_fringe_hunk(), apply_git_status_snapshot(), apply_git_view(), begin_oil_worktree_request() (+296 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.02
-Nodes (303): oil_directory_line_spans(), active_git_status_command_context(), ActiveBufferEventContext, ActiveLspBufferContext, apply_git_fringe_hunk(), apply_git_status_snapshot(), apply_git_view(), begin_oil_worktree_request() (+295 more)
+Nodes (263): browser_buffer_layout(), browser_host_viewport_rect(), browser_viewport_rect(), render_browser_buffer_body(), covering_syntax_span_for_range(), diagnostic_color(), diagnostic_columns_for_line(), diagnostic_underlines_for_segment() (+255 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.01
-Nodes (190): packages(), syntax_languages(), AcpActionSpec, all_symbols(), find_symbol(), IconFontCategory, IconFontSymbol, seti_directory_icon() (+182 more)
+Nodes (130): main(), apply_directory_edit_actions(), apply_directory_edit_queue(), copy_directory_recursive(), copy_directory_yank_entries(), copy_directory_yank_entries_copies_files_and_directories(), create_dir_action_creates_empty_directory(), diff_directory_lines() (+122 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.02
-Nodes (219): browser_buffer_layout(), render_browser_buffer_body(), covering_syntax_span_for_range(), diagnostic_color(), diagnostic_columns_for_line(), diagnostic_severity_rank(), diagnostic_underlines_for_segment(), DiagnosticLineSpan (+211 more)
+Nodes (92): abi_language_server_spec_round_trips_workspace_configuration(), CopilotDeviceCodePrompt, codelldb(), compact_project_path(), contains_wildcards(), csharp_language_server(), DapError, DebugAdapterRegistry (+84 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.01
-Nodes (122): main(), apply_directory_edit_actions(), apply_directory_edit_queue(), copy_directory_recursive(), copy_directory_yank_entries(), copy_directory_yank_entries_copies_files_and_directories(), create_dir_action_creates_empty_directory(), diff_directory_lines() (+114 more)
+Cohesion: 0.02
+Nodes (143): acp_connected(), acp_cycle_mode(), acp_load_session(), acp_new_session(), acp_open_permission_request(), acp_permission_approve(), acp_permission_deny(), acp_permission_picker_closed() (+135 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.02
-Nodes (90): text_chunk_event(), abi_language_server_spec_round_trips_workspace_configuration(), AbiThemeOption, AbiWorkspaceConfigurationNumber, AbiWorkspaceConfigurationValue, ThemeOption, WorkspaceConfigurationValue, sanitize_transport_message() (+82 more)
+Nodes (164): bash_package_auto_attaches_all_extensions(), bash_package_metadata(), bash_package_registers_formatter(), bash_syntax_language_metadata(), package(), syntax_language(), package(), syntax_language() (+156 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.02
-Nodes (153): acp_connected(), acp_cycle_mode(), acp_disconnect(), acp_insert_slash_command(), acp_load_session(), acp_new_session(), acp_open_permission_request(), acp_permission_approve() (+145 more)
+Cohesion: 0.03
+Nodes (57): create_workspace_file_from_query(), advance_point_by_text(), around_word_ranges_at_line_end_exclude_newline(), big_word_backward_end_and_match_pair_cover_quickref_motion_slice(), BufferStats, delimited_and_tag_ranges_cover_quickref_objects(), delimited_ranges_cover_quotes_and_brackets(), delimiter_partner() (+49 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.02
-Nodes (164): bash_package_auto_attaches_all_extensions(), bash_package_metadata(), bash_package_registers_formatter(), bash_syntax_language_metadata(), package(), syntax_language(), package(), syntax_language() (+156 more)
+Cohesion: 0.03
+Nodes (138): activate_issues_board_line(), apply_capture_report(), apply_rewrite_intent(), apply_scan_report(), begin_issues_create(), board_issue_id_at_row(), collect_scan_files(), enqueue_capture_after_save() (+130 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.03
-Nodes (55): advance_point_by_text(), around_word_ranges_at_line_end_exclude_newline(), big_word_backward_end_and_match_pair_cover_quickref_motion_slice(), BufferStats, delimited_and_tag_ranges_cover_quickref_objects(), delimited_ranges_cover_quotes_and_brackets(), delimiter_partner(), detect_preferred_line_ending() (+47 more)
+Nodes (83): build_tokio_runtime(), connect_sql_server(), connection_descriptor_detects_all_supported_engines(), ConnectionDescriptor, current_statement(), db_browser_action_from_spec(), db_browser_renderer_customizes_rows_and_preserves_actions(), db_browser_renderer_rejects_row_count_mismatch() (+75 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.01
-Nodes (73): AcpClient, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption, AutocompleteProvider, AutocompleteProviderItem, BrowserFeatureSpec (+65 more)
+Nodes (72): AcpClient, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption, AutocompleteProvider, AutocompleteProviderItem, BrowserFeatureSpec (+64 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.03
-Nodes (84): build_tokio_runtime(), connect_sql_server(), connection_descriptor_detects_all_supported_engines(), ConnectionDescriptor, current_statement(), db_browser_action_from_spec(), db_browser_renderer_customizes_rows_and_preserves_actions(), db_browser_renderer_rejects_row_count_mismatch() (+76 more)
-
-### Community 16 - "Community 16"
 Cohesion: 0.02
 Nodes (65): apply_command_environment(), apply_windows_runtime_environment(), build_job_command(), build_job_command_keeps_fnm_path_ahead_of_explicit_path(), build_job_command_keeps_nvm_path_ahead_of_explicit_path(), command_candidate_names(), compilation_runner_marks_jobs_as_compilation(), CompilationResult (+57 more)
 
+### Community 16 - "Community 16"
+Cohesion: 0.02
+Nodes (45): CommandLineCompletionState, CommandLineOverlay, CommandLinePurpose, InlineCompletionWorkerState, append_lines(), cube_color_component(), default_terminal_index_color(), default_terminal_named_color() (+37 more)
+
 ### Community 17 - "Community 17"
-Cohesion: 0.03
-Nodes (89): search_is_case_sensitive(), workspace_relative_path(), pdf_preview_page_from_url(), parse_grep_workspace_search_line_finds_case_insensitive_column(), parse_rg_workspace_search_line_extracts_location(), collect_search_output(), file_context_preview(), file_context_preview_marks_target_line() (+81 more)
-
-### Community 18 - "Community 18"
-Cohesion: 0.04
-Nodes (88): activate_issues_board_line(), apply_capture_report(), apply_rewrite_intent(), apply_scan_report(), begin_issues_create(), board_issue_id_at_row(), collect_scan_files(), enqueue_capture_after_save() (+80 more)
-
-### Community 19 - "Community 19"
 Cohesion: 0.02
 Nodes (47): bootstrap(), builtin_user_library_validation_accepts_grammar_backed_syntax_languages(), cargo(), catch_unwind_silently(), command_palette_items(), CommandPaletteState, CompilationState, DapState (+39 more)
 
-### Community 20 - "Community 20"
-Cohesion: 0.03
-Nodes (43): CommandLineCompletionState, CommandLineOverlay, CommandLinePurpose, append_lines(), cube_color_component(), default_terminal_index_color(), default_terminal_named_color(), live_terminal_session_spawns_and_terminates() (+35 more)
+### Community 18 - "Community 18"
+Cohesion: 0.04
+Nodes (25): CommandDefinition, CommandError, CommandRegistry, CommandSource, RegisteredCommand, HookBus, HookDefinition, HookError (+17 more)
 
-### Community 21 - "Community 21"
-Cohesion: 0.03
-Nodes (26): CommandDefinition, CommandError, CommandRegistry, CommandSource, RegisteredCommand, HookBus, HookDefinition, HookError (+18 more)
-
-### Community 22 - "Community 22"
+### Community 19 - "Community 19"
 Cohesion: 0.04
 Nodes (8): Buffer, BufferKind, EditorModel, ModelError, Pane, Popup, Window, Workspace
 
-### Community 23 - "Community 23"
+### Community 20 - "Community 20"
 Cohesion: 0.04
 Nodes (64): AcpClientConfig, AcpSection, config_root_dir(), config_root_dir_from_exe_dir(), config_root_prefers_workspace_user_directory(), config_source_files(), config_source_files_from_root(), config_source_files_include_master_and_children() (+56 more)
 
-### Community 24 - "Community 24"
+### Community 21 - "Community 21"
 Cohesion: 0.05
-Nodes (34): peek_key_sequence_tick(), take_key_sequence(), ambiguous_prefix_timeout_is_configurable(), ambiguous_short_waits_then_fires_on_timeout(), exact_chord_without_longer_prefix_fires_immediately(), incompatible_input_clears_pending_short_without_firing(), KeySequenceOptions, KeySequencePush (+26 more)
+Nodes (41): AbiStringPair, autocomplete_items(), autocomplete_provider(), buffer_sections(), calculator_autocomplete_provider_scopes_manual_items_to_calculator_buffers(), calculator_buffer_sections_start_with_single_output_row(), calculator_evaluate_command_emits_generic_plugin_evaluate_hook(), calculator_hover_provider_exports_function_and_constant_topics() (+33 more)
 
-### Community 25 - "Community 25"
+### Community 22 - "Community 22"
+Cohesion: 0.05
+Nodes (39): peek_key_sequence_tick(), take_key_sequence(), ambiguous_prefix_timeout_is_configurable(), ambiguous_short_waits_then_fires_on_timeout(), exact_chord_without_longer_prefix_fires_immediately(), incompatible_input_clears_pending_short_without_firing(), KeySequenceOptions, KeySequencePush (+31 more)
+
+### Community 23 - "Community 23"
 Cohesion: 0.07
 Nodes (25): best_contiguous_substring_bonus(), contiguous_substring_beats_split_path_match(), contiguous_substring_bonus(), custom_search_text_matches_hidden_path_segments(), divider_visible_with_empty_query_and_hidden_when_filtering(), empty_query_returns_all_items_in_sorted_order(), fringe_metadata_survives_matching(), fuzzy_query_prefers_prefix_and_contiguous_matches() (+17 more)
 
-### Community 26 - "Community 26"
-Cohesion: 0.1
-Nodes (39): hidden_window_startup_smoke_supports_window_effects(), apply_blur(), apply_window_blur(), apply_window_effects(), apply_window_effects_ignores_native_window_opacity_to_keep_text_opaque(), apply_window_effects_still_calls_native_blur_backend_when_requested(), apply_window_effects_to_target(), clear_blur() (+31 more)
+### Community 24 - "Community 24"
+Cohesion: 0.07
+Nodes (6): apply_input_operator_motion(), input_charwise_motion_range(), InputField, motion_is_inclusive(), PluginSectionBufferState, trim_word_forward_input_operator_range()
 
-### Community 27 - "Community 27"
+### Community 25 - "Community 25"
 Cohesion: 0.07
 Nodes (22): browser_additional_args(), browser_additional_args_from_env(), browser_additional_args_from_env_appends_custom_args(), browser_additional_args_from_env_appends_web_security_bypass(), browser_host_event_for_ipc(), browser_host_ipc_event_ignores_unknown_messages(), browser_host_ipc_event_routes_focus_parent_requests(), browser_host_ipc_event_routes_open_devtools_requests() (+14 more)
 
-### Community 28 - "Community 28"
+### Community 26 - "Community 26"
 Cohesion: 0.1
-Nodes (38): append_streamed_command_error(), append_streamed_command_header(), append_streamed_command_lines(), continue_streamed_command_popup(), drain_completed_output_lines(), open_streamed_command_popup(), push_streamed_command_update(), refresh_pending_streamed_commands() (+30 more)
+Nodes (38): hidden_window_startup_smoke_supports_window_effects(), apply_blur(), apply_window_blur(), apply_window_effects(), apply_window_effects_ignores_native_window_opacity_to_keep_text_opaque(), apply_window_effects_still_calls_native_blur_backend_when_requested(), apply_window_effects_to_target(), clear_blur() (+30 more)
+
+### Community 27 - "Community 27"
+Cohesion: 0.1
+Nodes (38): append_streamed_command_error(), append_streamed_command_lines(), continue_streamed_command_popup(), drain_completed_output_lines(), open_streamed_command_popup(), push_streamed_command_update(), refresh_pending_streamed_commands(), run_streamed_command() (+30 more)
+
+### Community 28 - "Community 28"
+Cohesion: 0.08
+Nodes (11): amber(), registry_resolves_option_values(), registry_resolves_token_styles(), registry_resolves_tokens_from_active_theme(), Theme, ThemeError, ThemeOption, ThemeRegistry (+3 more)
 
 ### Community 29 - "Community 29"
+Cohesion: 0.07
+Nodes (33): ancestor_contexts_for_cursor(), AncestorContextBufferKey, AncestorContextCache, AncestorContextQuery, buffer_line_text(), context_queries_enabled(), ensure_cached_buffer(), exported_ghost_text_lines() (+25 more)
+
+### Community 30 - "Community 30"
+Cohesion: 0.06
+Nodes (24): apply_browser_page_load_state(), browser_buffer_display_name(), browser_display_url(), browser_display_url_prefers_requested_navigation(), browser_surface_buffer_at_point(), browser_sync_plan(), browser_url_candidates(), browser_url_prefix_len() (+16 more)
+
+### Community 31 - "Community 31"
 Cohesion: 0.08
 Nodes (34): centered_rect(), default_font_candidates(), DrawCommand, find_font_by_name(), find_system_monospace_font(), font_data_matches_name(), font_match_sort_key(), font_match_sort_key_prefers_regular_faces_for_family_requests() (+26 more)
 
-### Community 30 - "Community 30"
-Cohesion: 0.09
-Nodes (11): amber(), Color, registry_resolves_option_values(), registry_resolves_token_styles(), registry_resolves_tokens_from_active_theme(), Theme, ThemeError, ThemeRegistry (+3 more)
-
-### Community 31 - "Community 31"
+### Community 32 - "Community 32"
 Cohesion: 0.06
 Nodes (18): hover_registry_includes_signature_help_provider(), AutocompleteEntry, AutocompleteProviderSpec, AutocompleteQuery, AutocompleteRegistry, HoverOverlay, HoverProviderContent, HoverProviderKind (+10 more)
-
-### Community 32 - "Community 32"
-Cohesion: 0.07
-Nodes (10): CopilotDeviceCodePrompt, codelldb(), DapError, DebugAdapterRegistry, DebugAdapterSpec, DebugConfiguration, DebugRequestKind, DebugSessionPlan (+2 more)
 
 ### Community 33 - "Community 33"
 Cohesion: 0.05
 Nodes (26): BlockInsertState, BlockSelection, DirectoryYankEntry, FormatterRegistry, FormatterSpec, InputMode, LastFind, LastSearch (+18 more)
 
 ### Community 34 - "Community 34"
+Cohesion: 0.12
+Nodes (28): active_terminal_dimensions(), box_drawing_segments(), BoxDrawingSegments, buffer_is_terminal(), close_terminal_buffer(), close_terminal_buffers_for_workspace(), CursorTextOverlay, draw_box_drawing_cell() (+20 more)
+
+### Community 35 - "Community 35"
+Cohesion: 0.12
+Nodes (27): file_open_detail(), is_pdf_path(), latex_escape_text(), load_pdf_buffer_state(), open_pdf_workspace_file(), pdf_buffer_lines(), pdf_header_lines(), pdf_inherited_page_value() (+19 more)
+
+### Community 36 - "Community 36"
 Cohesion: 0.09
 Nodes (9): render_lines_respects_collapsed_state(), render_section(), Section, SectionAction, SectionCollapseState, SectionItem, SectionRenderLine, SectionRenderLineKind (+1 more)
 
-### Community 35 - "Community 35"
-Cohesion: 0.14
-Nodes (25): is_pdf_path(), latex_escape_text(), load_pdf_buffer_state(), open_pdf_workspace_file(), pdf_buffer_lines(), pdf_header_lines(), pdf_inherited_page_value(), pdf_language_id() (+17 more)
-
-### Community 36 - "Community 36"
+### Community 37 - "Community 37"
 Cohesion: 0.21
 Nodes (7): AutocompleteProviderConfig, backends(), hook_command(), package(), package_exports_commands_and_insert_keybindings(), providers(), providers_have_unique_ids_and_keep_calculator_scoping()
 
-### Community 37 - "Community 37"
+### Community 38 - "Community 38"
 Cohesion: 0.26
 Nodes (10): compile_command_emits_run_command_hook(), compile_package_exports_compile_and_recompile_commands(), compile_package_exports_global_keybindings(), package(), parse_error_location(), parse_error_location_handles_path_line_col(), parse_error_location_handles_path_line_only(), parse_error_location_handles_rust_arrow_prefix() (+2 more)
 
-### Community 38 - "Community 38"
+### Community 39 - "Community 39"
 Cohesion: 0.31
 Nodes (6): hook_command(), HoverProviderConfig, package(), package_exports_hover_commands_and_keybindings(), providers(), providers_have_unique_ids_and_keep_calculator_scoping()
 
-### Community 39 - "Community 39"
+### Community 40 - "Community 40"
 Cohesion: 0.22
 Nodes (4): ShellConfig, ShellError, ShellSummary, TypingProfileSummary
-
-### Community 40 - "Community 40"
-Cohesion: 0.38
-Nodes (4): keydown_chord_token(), KeydownChordToken, normalize_named_key_token(), shifted_printable_character()
 
 ### Community 43 - "Community 43"
 Cohesion: 1.0
@@ -413,7 +413,7 @@ Cohesion: 1.0
 Nodes (1): UserLibraryModuleRef
 
 ## Knowledge Gaps
-- **416 isolated node(s):** `WordKind`, `BufferStats`, `TextEdit`, `TextByteChunkSource`, `TextByteChunks` (+411 more)
+- **417 isolated node(s):** `WordKind`, `BufferStats`, `TextEdit`, `TextByteChunkSource`, `TextByteChunks` (+412 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 43`** (2 nodes): `PickerTruncateStrategy`, `.from()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -487,10 +487,10 @@ Nodes (1): UserLibraryModuleRef
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `temp_dir()` connect `Community 6` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 35`, `Community 5`, `Community 9`, `Community 10`, `Community 11`, `Community 13`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 23`?**
-  _High betweenness centrality (0.049) - this node is a cross-community bridge._
-- **Why does `syntax_language()` connect `Community 12` to `Community 2`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `temp_dir()` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 35`, `Community 3`, `Community 4`, `Community 7`, `Community 8`, `Community 9`, `Community 11`, `Community 12`, `Community 13`, `Community 15`, `Community 20`?**
+  _High betweenness centrality (0.057) - this node is a cross-community bridge._
+- **Why does `syntax_language()` connect `Community 10` to `Community 1`?**
+  _High betweenness centrality (0.043) - this node is a cross-community bridge._
 - **Are the 162 inferred relationships involving `shell_ui_mut()` (e.g. with `create_acp_buffer()` and `focus_acp_buffer()`) actually correct?**
   _`shell_ui_mut()` has 162 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 60 inferred relationships involving `register_shell_hooks()` (e.g. with `register_issues_hooks()` and `terminal_buffer_cursor_point_for_normal_mode()`) actually correct?**
@@ -500,4 +500,4 @@ _Questions this graph is uniquely positioned to answer:_
 - **Are the 118 inferred relationships involving `shell_buffer()` (e.g. with `acp_complete_slash()` and `maybe_open_slash_completion()`) actually correct?**
   _`shell_buffer()` has 118 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `WordKind`, `BufferStats`, `TextEdit` to the rest of the system?**
-  _416 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _417 weakly-connected nodes found - possible documentation gaps or missing edges._

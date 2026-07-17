@@ -358,6 +358,8 @@ fn map_scope(scope: PluginKeymapScope) -> KeymapScope {
         PluginKeymapScope::Global => KeymapScope::Global,
         PluginKeymapScope::Workspace => KeymapScope::Workspace,
         PluginKeymapScope::Popup => KeymapScope::Popup,
+        PluginKeymapScope::Autocomplete => KeymapScope::Autocomplete,
+        PluginKeymapScope::Hover => KeymapScope::Hover,
     }
 }
 

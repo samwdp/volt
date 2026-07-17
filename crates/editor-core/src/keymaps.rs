@@ -157,14 +157,21 @@ struct BindingKey {
 }
 
 /// Scope in which a keybinding is active.
+///
+/// Spoken product term for non-Global scopes is Minor Mode (`CONTEXT.md`).
+/// Global is the fallback layer, not a Minor Mode.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeymapScope {
-    /// Binding is active globally.
+    /// Binding is active globally (fallback when no Minor Mode claims the chord).
     Global,
-    /// Binding is active while a workspace is focused.
+    /// Workspace editing Minor Mode.
     Workspace,
-    /// Binding is active while a popup is focused.
+    /// Popup Minor Mode (picker / popup focus).
     Popup,
+    /// Autocomplete overlay Minor Mode.
+    Autocomplete,
+    /// Hover overlay Minor Mode.
+    Hover,
 }
 
 impl fmt::Display for KeymapScope {
@@ -173,6 +180,8 @@ impl fmt::Display for KeymapScope {
             Self::Global => formatter.write_str("global"),
             Self::Workspace => formatter.write_str("workspace"),
             Self::Popup => formatter.write_str("popup"),
+            Self::Autocomplete => formatter.write_str("autocomplete"),
+            Self::Hover => formatter.write_str("hover"),
         }
     }
 }
@@ -468,6 +477,39 @@ impl KeymapRegistry {
                 chord,
             })
     }
+
+    /// Resolves a chord against active Minor Modes, then Global fallback.
+    ///
+    /// `active_minor_modes` is highest-precedence first. Do not include
+    /// [`KeymapScope::Global`]. Autocomplete and Hover must not both appear
+    /// (they are never co-active; mutual precedence is undefined).
+    pub fn resolve_with_minor_modes(
+        &self,
+        active_minor_modes: &[KeymapScope],
+        vim_mode: KeymapVimMode,
+        chord: &str,
+    ) -> Option<&KeyBinding> {
+        self.find_in_scopes(active_minor_modes, vim_mode, chord)
+            .or_else(|| self.get_for_mode(&KeymapScope::Global, vim_mode, chord))
+    }
+
+    /// Finds a binding in the given scopes only (no Global fallback).
+    pub fn find_in_scopes(
+        &self,
+        scopes: &[KeymapScope],
+        vim_mode: KeymapVimMode,
+        chord: &str,
+    ) -> Option<&KeyBinding> {
+        for scope in scopes {
+            if matches!(scope, KeymapScope::Global) {
+                continue;
+            }
+            if let Some(binding) = self.get_for_mode(scope, vim_mode, chord) {
+                return Some(binding);
+            }
+        }
+        None
+    }
 }
 
 /// Errors raised by keymap registration or execution.
@@ -635,6 +677,148 @@ mod tests {
             }
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_minor_mode_overrides_global_for_same_chord() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register(
+            "Ctrl+n",
+            "global.fallback",
+            KeymapScope::Global,
+            CommandSource::Core,
+        )?;
+        registry.register(
+            "Ctrl+n",
+            "workspace.marked-1",
+            KeymapScope::Workspace,
+            CommandSource::Core,
+        )?;
+
+        let binding = registry
+            .resolve_with_minor_modes(&[KeymapScope::Workspace], KeymapVimMode::Any, "Ctrl+n")
+            .expect("Workspace Minor Mode should claim chord");
+
+        assert_eq!(binding.command_name(), "workspace.marked-1");
+        Ok(())
+    }
+
+    #[test]
+    fn global_is_fallback_when_no_minor_mode_claims_chord() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register(
+            "Ctrl+n",
+            "global.fallback",
+            KeymapScope::Global,
+            CommandSource::Core,
+        )?;
+        registry.register(
+            "Ctrl+e",
+            "workspace.marked-2",
+            KeymapScope::Workspace,
+            CommandSource::Core,
+        )?;
+
+        let binding = registry
+            .resolve_with_minor_modes(&[KeymapScope::Workspace], KeymapVimMode::Any, "Ctrl+n")
+            .expect("Global fallback should claim unclaimed chord");
+
+        assert_eq!(binding.command_name(), "global.fallback");
+        Ok(())
+    }
+
+    #[test]
+    fn popup_overrides_workspace_and_global_while_active() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register(
+            "Ctrl+n",
+            "global.fallback",
+            KeymapScope::Global,
+            CommandSource::Core,
+        )?;
+        registry.register(
+            "Ctrl+n",
+            "workspace.marked-1",
+            KeymapScope::Workspace,
+            CommandSource::Core,
+        )?;
+        registry.register(
+            "Ctrl+n",
+            "picker.select-next",
+            KeymapScope::Popup,
+            CommandSource::Core,
+        )?;
+
+        let binding = registry
+            .resolve_with_minor_modes(
+                &[KeymapScope::Popup, KeymapScope::Workspace],
+                KeymapVimMode::Any,
+                "Ctrl+n",
+            )
+            .expect("Popup Minor Mode should win");
+
+        assert_eq!(binding.command_name(), "picker.select-next");
+        Ok(())
+    }
+
+    #[test]
+    fn autocomplete_overrides_workspace_while_active() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register_for_mode(
+            "Ctrl+n",
+            "workspace.marked-1",
+            KeymapScope::Workspace,
+            KeymapVimMode::Insert,
+            CommandSource::Core,
+        )?;
+        registry.register_for_mode(
+            "Ctrl+n",
+            "autocomplete.next",
+            KeymapScope::Autocomplete,
+            KeymapVimMode::Insert,
+            CommandSource::Core,
+        )?;
+
+        let binding = registry
+            .resolve_with_minor_modes(
+                &[KeymapScope::Autocomplete, KeymapScope::Workspace],
+                KeymapVimMode::Insert,
+                "Ctrl+n",
+            )
+            .expect("Autocomplete Minor Mode should win");
+
+        assert_eq!(binding.command_name(), "autocomplete.next");
+        Ok(())
+    }
+
+    #[test]
+    fn hover_overrides_workspace_while_active() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register_for_mode(
+            "Ctrl+n",
+            "workspace.marked-1",
+            KeymapScope::Workspace,
+            KeymapVimMode::Normal,
+            CommandSource::Core,
+        )?;
+        registry.register_for_mode(
+            "Ctrl+n",
+            "hover.next",
+            KeymapScope::Hover,
+            KeymapVimMode::Normal,
+            CommandSource::Core,
+        )?;
+
+        let binding = registry
+            .resolve_with_minor_modes(
+                &[KeymapScope::Hover, KeymapScope::Workspace],
+                KeymapVimMode::Normal,
+                "Ctrl+n",
+            )
+            .expect("Hover Minor Mode should win");
+
+        assert_eq!(binding.command_name(), "hover.next");
         Ok(())
     }
 }
