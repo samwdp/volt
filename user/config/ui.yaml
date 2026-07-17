@@ -3,3 +3,6 @@ ligatures_enabled: true
 
 pane:
   golden_ratio: true
+
+keymap:
+  ambiguous_prefix_timeout_ms: 250

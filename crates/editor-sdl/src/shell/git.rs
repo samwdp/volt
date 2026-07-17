@@ -3821,37 +3821,65 @@ pub(super) fn set_directory_prefix(runtime: &mut EditorRuntime, chord: &str) -> 
     Ok(())
 }
 
+pub(super) enum TakeKeySequence {
+    /// Live pending tokens for this scope.
+    Live(PendingKeySequence),
+    /// Ambiguous short already timed out — fire it before handling the new token.
+    FireShort {
+        chord: String,
+        vim_mode: KeymapVimMode,
+    },
+    /// No pending sequence for this scope.
+    None,
+}
+
 pub(super) fn take_key_sequence(
     runtime: &mut EditorRuntime,
     scope: &KeymapScope,
-) -> Result<Option<Vec<String>>, String> {
-    const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1200);
+    options: &KeySequenceOptions,
+) -> Result<TakeKeySequence, String> {
     let now = Instant::now();
     let ui = shell_ui_mut(runtime)?;
-    let state = match ui.pending_key_sequence.take() {
-        Some(state) if now.duration_since(state.started_at) <= SEQUENCE_TIMEOUT => Some(state),
-        _ => None,
-    };
+    let state = ui.pending_key_sequence.take();
     match state {
-        Some(state) if &state.scope == scope => Ok(Some(state.tokens)),
+        Some(state) if &state.scope == scope => {
+            let elapsed_ms =
+                u64::try_from(now.duration_since(state.started_at).as_millis()).unwrap_or(u64::MAX);
+            let pending = PendingKeySequence {
+                tokens: state.tokens,
+                started_at_ms: 0,
+                ambiguous_short: state.ambiguous_short,
+            };
+            match tick_key_sequence(&pending, elapsed_ms, options) {
+                KeySequenceTick::Pending => Ok(TakeKeySequence::Live(pending)),
+                KeySequenceTick::Execute { chord } => Ok(TakeKeySequence::FireShort {
+                    chord,
+                    vim_mode: state.vim_mode,
+                }),
+                KeySequenceTick::Expired => Ok(TakeKeySequence::None),
+            }
+        }
         Some(state) => {
             ui.pending_key_sequence = Some(state);
-            Ok(None)
+            Ok(TakeKeySequence::None)
         }
-        None => Ok(None),
+        None => Ok(TakeKeySequence::None),
     }
 }
 
 pub(super) fn set_key_sequence(
     runtime: &mut EditorRuntime,
     scope: KeymapScope,
-    tokens: Vec<String>,
+    vim_mode: KeymapVimMode,
+    pending: PendingKeySequence,
 ) -> Result<(), String> {
     let ui = shell_ui_mut(runtime)?;
     ui.pending_key_sequence = Some(KeySequenceState {
         scope,
-        tokens,
+        vim_mode,
+        tokens: pending.tokens,
         started_at: Instant::now(),
+        ambiguous_short: pending.ambiguous_short,
     });
     Ok(())
 }
@@ -3859,6 +3887,29 @@ pub(super) fn set_key_sequence(
 pub(super) fn clear_key_sequence(runtime: &mut EditorRuntime) -> Result<(), String> {
     shell_ui_mut(runtime)?.pending_key_sequence = None;
     Ok(())
+}
+
+pub(super) fn peek_key_sequence_tick(
+    runtime: &EditorRuntime,
+    options: &KeySequenceOptions,
+) -> Result<Option<(KeymapScope, KeymapVimMode, KeySequenceTick)>, String> {
+    let ui = shell_ui(runtime)?;
+    let Some(state) = ui.pending_key_sequence.as_ref() else {
+        return Ok(None);
+    };
+    let now = Instant::now();
+    let elapsed_ms =
+        u64::try_from(now.duration_since(state.started_at).as_millis()).unwrap_or(u64::MAX);
+    let pending = PendingKeySequence {
+        tokens: state.tokens.clone(),
+        started_at_ms: 0,
+        ambiguous_short: state.ambiguous_short.clone(),
+    };
+    Ok(Some((
+        state.scope.clone(),
+        state.vim_mode,
+        tick_key_sequence(&pending, elapsed_ms, options),
+    )))
 }
 
 pub(super) fn move_git_section(runtime: &mut EditorRuntime, forward: bool) -> Result<bool, String> {

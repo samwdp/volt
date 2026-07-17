@@ -21,10 +21,10 @@ use crate::{
     AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, AutocompleteProviderItem,
     BrowserFeatureSpec, ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, GhostTextContext,
     GhostTextLine, GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix,
-    HoverProvider, HoverProviderTopic, LigatureConfig, LspDiagnosticsInfo, OilDefaults,
-    OilFeatureSpec, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode,
-    PickerProviderContext, PickerProviderSpec, PickerTruncateStrategy, StatuslineContext,
-    TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
+    HoverProvider, HoverProviderTopic, KeymapConfig, LigatureConfig, LspDiagnosticsInfo,
+    OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig,
+    PdfOpenMode, PickerProviderContext, PickerProviderSpec, PickerTruncateStrategy,
+    StatuslineContext, TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -1579,6 +1579,28 @@ impl From<AbiPaneConfig> for PaneConfig {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub struct AbiKeymapConfig {
+    pub ambiguous_prefix_timeout_ms: u64,
+}
+
+impl From<KeymapConfig> for AbiKeymapConfig {
+    fn from(value: KeymapConfig) -> Self {
+        Self {
+            ambiguous_prefix_timeout_ms: value.ambiguous_prefix_timeout_ms,
+        }
+    }
+}
+
+impl From<AbiKeymapConfig> for KeymapConfig {
+    fn from(value: AbiKeymapConfig) -> Self {
+        Self {
+            ambiguous_prefix_timeout_ms: value.ambiguous_prefix_timeout_ms,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub struct AbiLspDiagnosticsInfo {
     pub errors: usize,
     pub warnings: usize,
@@ -2352,7 +2374,7 @@ pub struct UserLibraryModule {
     pub db_browser_items: extern "C" fn(crate::DbBrowserContext) -> RVec<crate::DbBrowserItemSpec>,
     pub picker_truncate_strategy_v1: extern "C" fn() -> AbiPickerTruncateStrategy,
     #[sabi(last_prefix_field)]
-    pub reserved_feature_contracts_v2: extern "C" fn() -> bool,
+    pub keymap_config_v1: extern "C" fn() -> AbiKeymapConfig,
 }
 
 impl RootModule for UserLibraryModuleRef {

@@ -32,7 +32,7 @@ fn normalize_chord(chord: &str) -> String {
         .join(" ")
 }
 
-fn normalize_chord_token(token: &str) -> String {
+pub(crate) fn normalize_chord_token(token: &str) -> String {
     normalize_delimited_token(token, '+')
         .or_else(|| normalize_delimited_token(token, '-'))
         .unwrap_or_else(|| normalize_key_name(token))

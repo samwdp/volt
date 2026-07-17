@@ -312,6 +312,8 @@ pub struct UiSection {
     pub pane: PaneSection,
     #[serde(default)]
     pub terminal: TerminalSection,
+    #[serde(default)]
+    pub keymap: KeymapSection,
 }
 
 impl Default for UiSection {
@@ -321,8 +323,29 @@ impl Default for UiSection {
             ligatures_enabled: default_ligatures_enabled(),
             pane: PaneSection::default(),
             terminal: TerminalSection::default(),
+            keymap: KeymapSection::default(),
         }
     }
+}
+
+/// UI keymap tunables (`ui.keymap.*`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KeymapSection {
+    /// Ambiguous-prefix timeout in milliseconds.
+    #[serde(default = "default_ambiguous_prefix_timeout_ms")]
+    pub ambiguous_prefix_timeout_ms: u64,
+}
+
+impl Default for KeymapSection {
+    fn default() -> Self {
+        Self {
+            ambiguous_prefix_timeout_ms: default_ambiguous_prefix_timeout_ms(),
+        }
+    }
+}
+
+const fn default_ambiguous_prefix_timeout_ms() -> u64 {
+    editor_core::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS
 }
 
 fn default_picker_truncate_strategy() -> ConfigPickerTruncateStrategy {
@@ -653,6 +676,7 @@ mod tests {
             PickerTruncateStrategy::from(config.ui.picker_truncate_strategy.clone()),
             PickerTruncateStrategy::Auto
         );
+        assert_eq!(config.ui.keymap.ambiguous_prefix_timeout_ms, 250);
         assert_eq!(
             config.oil.defaults.oil_defaults().sort_mode,
             OilSortMode::TypeThenName
@@ -682,7 +706,7 @@ mod tests {
         .expect("write acp config");
         fs::write(
             config_dir.join("ui.yaml"),
-            "picker_truncate_strategy: file-name\nligatures_enabled: false\npane:\n  golden_ratio: false\nterminal:\n  program: bash\n  args: ['-i']\n",
+            "picker_truncate_strategy: file-name\nligatures_enabled: false\npane:\n  golden_ratio: false\nkeymap:\n  ambiguous_prefix_timeout_ms: 100\nterminal:\n  program: bash\n  args: ['-i']\n",
         )
         .expect("write ui config");
         fs::write(
@@ -701,6 +725,7 @@ mod tests {
         );
         assert!(!config.ui.ligatures_enabled);
         assert!(!config.ui.pane.golden_ratio);
+        assert_eq!(config.ui.keymap.ambiguous_prefix_timeout_ms, 100);
         assert_eq!(config.ui.terminal.program, "bash");
         assert_eq!(config.ui.terminal.args, vec!["-i".to_owned()]);
         assert!(config.oil.defaults.show_hidden);

@@ -53,6 +53,8 @@ pub use editor_plugin_api::symbols as icon_font_symbols;
 pub mod config;
 /// Interactive read-only buffer workflows.
 pub mod interactive;
+/// Keymap tunables (`ui.keymap.*`).
+pub mod keymap;
 /// Language-specific registrations.
 pub mod lang;
 /// Text ligature configuration surfaced to the shell renderer.
@@ -101,11 +103,12 @@ use editor_plugin_api::{
         AbiAcpClient, AbiAutocompleteProvider, AbiBrowserFeatureSpec, AbiContextHelpSpec,
         AbiDbFeatureSpec, AbiDebugAdapterSpec, AbiDirectoryEntry, AbiGhostTextContext,
         AbiGhostTextLine, AbiGitFeatureSpec, AbiGitStatusPrefix, AbiGitStatusSnapshot,
-        AbiHoverProvider, AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerSpec,
-        AbiLigatureConfig, AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings,
-        AbiOilSortMode, AbiPaneConfig, AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSectionTree,
-        AbiStatuslineContext, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
-        AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+        AbiHoverProvider, AbiIconFontSymbol, AbiKeymapConfig, AbiLanguageConfiguration,
+        AbiLanguageServerSpec, AbiLigatureConfig, AbiOilDefaults, AbiOilFeatureSpec,
+        AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPaneConfig, AbiPdfOpenMode,
+        AbiPickerTruncateStrategy, AbiSectionTree, AbiStatuslineContext, AbiTerminalConfig,
+        AbiTerminalFeatureSpec, AbiTheme, AbiWorkspaceRoot, UserLibraryModule,
+        UserLibraryModuleRef,
     },
 };
 
@@ -182,8 +185,8 @@ pub struct UserLibraryImpl;
 use editor_plugin_api::{
     AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, BrowserFeatureSpec,
     ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec, GhostTextContext,
-    GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, LigatureConfig, OilDefaults,
-    OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig, PickerItemSpec,
+    GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
+    OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig, PickerItemSpec,
     PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
     TerminalFeatureSpec, UserLibrary, WorkspaceRoot,
 };
@@ -329,6 +332,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn pane_config(&self) -> PaneConfig {
         pane::config()
+    }
+
+    fn keymap_config(&self) -> KeymapConfig {
+        keymap::config()
     }
 
     fn ligature_config(&self) -> LigatureConfig {
@@ -673,6 +680,10 @@ extern "C" fn exported_pane_config() -> AbiPaneConfig {
     UserLibraryImpl.pane_config().into()
 }
 
+extern "C" fn exported_keymap_config() -> AbiKeymapConfig {
+    UserLibraryImpl.keymap_config().into()
+}
+
 extern "C" fn exported_ligature_config() -> AbiLigatureConfig {
     UserLibraryImpl.ligature_config().into()
 }
@@ -973,10 +984,6 @@ extern "C" fn exported_default_build_command(language: RString) -> ROption<RStri
         .into()
 }
 
-extern "C" fn exported_reserved_feature_contracts_v2() -> bool {
-    true
-}
-
 pub fn user_library_module() -> UserLibraryModuleRef {
     UserLibraryModule {
         packages: exported_packages,
@@ -1042,7 +1049,7 @@ pub fn user_library_module() -> UserLibraryModuleRef {
         pdf_open_mode: exported_pdf_open_mode,
         pane_config_v1: exported_pane_config,
         picker_truncate_strategy_v1: exported_picker_truncate_strategy,
-        reserved_feature_contracts_v2: exported_reserved_feature_contracts_v2,
+        keymap_config_v1: exported_keymap_config,
     }
     .leak_into_prefix()
 }

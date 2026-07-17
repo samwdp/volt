@@ -25,13 +25,13 @@ pub use abi::{
     AbiDirectoryEntry, AbiDirectoryEntryKind, AbiGhostTextContext, AbiGhostTextLine,
     AbiGitCommandBinding, AbiGitFeatureSpec, AbiGitLogEntry, AbiGitPrefixBinding, AbiGitStashEntry,
     AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory,
-    AbiIconFontSymbol, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
+    AbiIconFontSymbol, AbiKeymapConfig, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
     AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults,
-    AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPdfOpenMode,
-    AbiPickerTruncateStrategy, AbiSection, AbiSectionAction, AbiSectionItem, AbiSectionTree,
-    AbiStatusEntry, AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec,
-    AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceRoot,
-    UserLibraryModule, UserLibraryModuleRef,
+    AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPaneConfig,
+    AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSection, AbiSectionAction, AbiSectionItem,
+    AbiSectionTree, AbiStatusEntry, AbiStatuslineContext, AbiStringPair, AbiTerminalConfig,
+    AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
+    AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -1381,6 +1381,9 @@ pub trait UserLibrary: Send + Sync {
             golden_ratio: false,
         }
     }
+    fn keymap_config(&self) -> KeymapConfig {
+        KeymapConfig::default()
+    }
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
     }
@@ -2451,6 +2454,21 @@ pub struct LigatureConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneConfig {
     pub golden_ratio: bool,
+}
+
+/// Keymap tunables exported by the user library (`ui.keymap.*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeymapConfig {
+    /// Ambiguous-prefix timeout in milliseconds.
+    pub ambiguous_prefix_timeout_ms: u64,
+}
+
+impl Default for KeymapConfig {
+    fn default() -> Self {
+        Self {
+            ambiguous_prefix_timeout_ms: editor_core::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS,
+        }
+    }
 }
 
 /// LSP diagnostic counts surfaced to the statusline.

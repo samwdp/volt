@@ -79,9 +79,10 @@ use crate::window_effects::{
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
-    Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeymapScope,
-    KeymapVimMode, PaneId, SectionAction, SectionCollapseState, SectionRenderLine,
-    SectionRenderLineKind, WorkspaceId, builtins,
+    Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeySequenceOptions,
+    KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, PaneId, PendingKeySequence,
+    SectionAction, SectionCollapseState, SectionRenderLine, SectionRenderLineKind, WorkspaceId,
+    builtins, push_key_sequence, tick_key_sequence,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -702,6 +703,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn pane_config(&self) -> editor_plugin_api::PaneConfig {
         self.module.pane_config_v1()().into()
+    }
+
+    fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {
+        self.module.keymap_config_v1()().into()
     }
 
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
@@ -8374,8 +8379,10 @@ struct DirectoryPrefixState {
 #[derive(Debug, Clone)]
 struct KeySequenceState {
     scope: KeymapScope,
+    vim_mode: KeymapVimMode,
     tokens: Vec<String>,
     started_at: Instant,
+    ambiguous_short: Option<String>,
 }
 
 pub(crate) struct ShellUiState {
@@ -11959,40 +11966,85 @@ impl ShellState {
         scope: KeymapScope,
         vim_mode: KeymapVimMode,
     ) -> Result<bool, ShellError> {
-        let mut tokens = take_key_sequence(&mut self.runtime, &scope)
-            .map_err(ShellError::Runtime)?
-            .unwrap_or_default();
-        tokens.push(token.to_owned());
-        let chord = tokens.join(" ");
+        let options = key_sequence_options(&*shell_user_library(&self.runtime));
+        let taken =
+            take_key_sequence(&mut self.runtime, &scope, &options).map_err(ShellError::Runtime)?;
+        let pending = match taken {
+            TakeKeySequence::Live(pending) => Some(pending),
+            TakeKeySequence::None => None,
+            TakeKeySequence::FireShort {
+                chord,
+                vim_mode: pending_mode,
+            } => {
+                self.execute_sequence_chord(&scope, pending_mode, &chord)?;
+                None
+            }
+        };
+        let result = push_key_sequence(
+            self.runtime.keymaps(),
+            &scope,
+            vim_mode,
+            pending,
+            token,
+            0,
+            &options,
+        );
 
-        if self
-            .runtime
-            .keymaps()
-            .contains_for_mode(&scope, vim_mode, &chord)
-        {
-            let runtime_surface_before =
-                active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-            self.runtime
-                .execute_key_binding_for_mode(&scope, vim_mode, &chord)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?;
-            clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
-            self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
-            self.clear_stale_vim_count()?;
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
+        match result {
+            KeySequencePush::Wait(pending) => {
+                set_key_sequence(&mut self.runtime, scope, vim_mode, pending)
+                    .map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            KeySequencePush::Execute { chord } => {
+                self.execute_sequence_chord(&scope, vim_mode, &chord)?;
+                Ok(true)
+            }
+            KeySequencePush::Cancel => {
+                clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            KeySequencePush::Miss => Ok(false),
         }
+    }
 
-        if self
-            .runtime
-            .keymaps()
-            .has_sequence_prefix_for_mode(&scope, vim_mode, &tokens)
-        {
-            set_key_sequence(&mut self.runtime, scope, tokens).map_err(ShellError::Runtime)?;
-            return Ok(true);
+    fn execute_sequence_chord(
+        &mut self,
+        scope: &KeymapScope,
+        vim_mode: KeymapVimMode,
+        chord: &str,
+    ) -> Result<(), ShellError> {
+        let runtime_surface_before =
+            active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
+        clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+        self.runtime
+            .execute_key_binding_for_mode(scope, vim_mode, chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
+        self.clear_stale_vim_count()?;
+        self.record_vim_input(VimRecordedInput::Chord(chord.to_owned()))?;
+        self.maybe_finish_change_after_input()?;
+        Ok(())
+    }
+
+    fn fire_pending_ambiguous_prefix_timeout(&mut self) -> Result<bool, ShellError> {
+        let options = key_sequence_options(&*shell_user_library(&self.runtime));
+        let Some((scope, vim_mode, tick)) =
+            peek_key_sequence_tick(&self.runtime, &options).map_err(ShellError::Runtime)?
+        else {
+            return Ok(false);
+        };
+        match tick {
+            KeySequenceTick::Pending => Ok(false),
+            KeySequenceTick::Expired => {
+                clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+                Ok(true)
+            }
+            KeySequenceTick::Execute { chord } => {
+                self.execute_sequence_chord(&scope, vim_mode, &chord)?;
+                Ok(true)
+            }
         }
-
-        Ok(false)
     }
 
     fn replay_recorded_inputs(&mut self, inputs: &[VimRecordedInput]) -> Result<(), ShellError> {
@@ -14146,6 +14198,9 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     if let Some(frame) = typing_frame.as_mut() {
                         frame.layout_sync += layout_sync_started.elapsed();
                     }
+                }
+                if let Err(error) = state.fire_pending_ambiguous_prefix_timeout() {
+                    state.record_shell_error("shell.ambiguous-prefix-timeout", error);
                 }
                 if frames_rendered > 0
                     && !had_events
@@ -31233,6 +31288,13 @@ fn text_chord(text: &str) -> Option<String> {
         return None;
     }
     Some(character.to_string())
+}
+
+fn key_sequence_options(user_library: &dyn UserLibrary) -> KeySequenceOptions {
+    KeySequenceOptions {
+        ambiguous_prefix_timeout_ms: user_library.keymap_config().ambiguous_prefix_timeout_ms,
+        ..KeySequenceOptions::default()
+    }
 }
 
 fn normalize_text_token(chord: &str) -> String {

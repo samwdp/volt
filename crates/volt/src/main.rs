@@ -271,6 +271,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.pane_config_v1()().into()
     }
 
+    fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {
+        self.module.keymap_config_v1()().into()
+    }
+
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
         self.module.ligature_config_v1()().into()
     }
