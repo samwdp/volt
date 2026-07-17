@@ -7,6 +7,7 @@ mod keymaps;
 mod model;
 mod sections;
 mod services;
+mod workspace_nav;
 
 pub use commands::{CommandDefinition, CommandError, CommandRegistry, CommandSource};
 pub use hooks::{HookBus, HookDefinition, HookError, HookEvent, builtins};
@@ -24,6 +25,7 @@ pub use sections::{
     SectionRenderLineKind, SectionTree,
 };
 pub use services::ServiceRegistry;
+pub use workspace_nav::{CycleDirection, cycle_project_workspace};
 
 /// Describes the high-level runtime identity of the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

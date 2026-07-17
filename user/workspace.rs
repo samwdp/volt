@@ -54,6 +54,16 @@ pub fn package() -> PluginPackage {
             "Saves all modified file buffers in the active workspace.",
             vec![PluginAction::emit_hook("workspace.save", None::<&str>)],
         ),
+        hook_command(
+            "workspace.next",
+            "Switches to the next open Project Workspace in open order.",
+            "workspace.next",
+        ),
+        hook_command(
+            "workspace.previous",
+            "Switches to the previous open Project Workspace in open order.",
+            "workspace.previous",
+        ),
         PluginCommand::new(
             "workspace.format",
             "Formats the active file buffer, preferring LSP formatting when available.",
@@ -363,5 +373,13 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "workspace.format")
         );
+    }
+
+    #[test]
+    fn package_exports_cycle_project_workspace_commands() {
+        let package = package();
+        let names: Vec<_> = package.commands().iter().map(|c| c.name()).collect();
+        assert!(names.contains(&"workspace.next"));
+        assert!(names.contains(&"workspace.previous"));
     }
 }

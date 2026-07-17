@@ -1009,6 +1009,8 @@ pub fn package() -> PluginPackage {
         ),
         // Leader bindings
         leader_binding("w", "buffer.save", PluginKeymapScope::Workspace),
+        leader_binding("w n", "workspace.next", PluginKeymapScope::Workspace),
+        leader_binding("w p", "workspace.previous", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
         // acp
         leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
@@ -1189,6 +1191,23 @@ mod tests {
             binding.chord() == "Space q m"
                 && binding.command_name() == "quickfix.toggle-mark"
                 && binding.scope() == PluginKeymapScope::Popup
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+    }
+
+    #[test]
+    fn package_exports_workspace_cycle_bindings() {
+        let package = package();
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Space w n"
+                && binding.command_name() == "workspace.next"
+                && binding.scope() == PluginKeymapScope::Workspace
+                && binding.vim_mode() == PluginVimMode::Normal
+        }));
+        assert!(package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Space w p"
+                && binding.command_name() == "workspace.previous"
+                && binding.scope() == PluginKeymapScope::Workspace
                 && binding.vim_mode() == PluginVimMode::Normal
         }));
     }

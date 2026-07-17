@@ -79,10 +79,11 @@ use crate::window_effects::{
 };
 use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
-    Buffer, BufferId, BufferKind, CommandSource, EditorRuntime, HookEvent, KeySequenceOptions,
-    KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, PaneId, PendingKeySequence,
-    SectionAction, SectionCollapseState, SectionRenderLine, SectionRenderLineKind, WorkspaceId,
-    builtins, push_key_sequence, tick_key_sequence,
+    Buffer, BufferId, BufferKind, CommandSource, CycleDirection, EditorRuntime, HookEvent,
+    KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, PaneId,
+    PendingKeySequence, SectionAction, SectionCollapseState, SectionRenderLine,
+    SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace, push_key_sequence,
+    tick_key_sequence,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -247,6 +248,8 @@ const HOOK_BUFFER_SAVE: &str = "buffer.save";
 const HOOK_BUFFER_CLOSE: &str = "buffer.close";
 const HOOK_BUFFER_TOGGLE_LINE_WRAP: &str = "buffer.toggle_line_wrap";
 const HOOK_WORKSPACE_SAVE: &str = "workspace.save";
+const HOOK_WORKSPACE_NEXT: &str = "workspace.next";
+const HOOK_WORKSPACE_PREVIOUS: &str = "workspace.previous";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";
@@ -15566,6 +15569,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_NEXT,
+        "Switches to the next open Project Workspace in open order.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_PREVIOUS,
+        "Switches to the previous open Project Workspace in open order.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -16921,6 +16934,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 save_workspace(runtime, workspace_id)?;
                 Ok(())
             },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_WORKSPACE_NEXT, "shell.workspace-next", |_, runtime| {
+            cycle_runtime_project_workspace(runtime, CycleDirection::Next)
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_PREVIOUS,
+            "shell.workspace-previous",
+            |_, runtime| cycle_runtime_project_workspace(runtime, CycleDirection::Previous),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -29927,6 +29952,31 @@ pub(crate) fn switch_runtime_workspace(
         )
         .map_err(|error| error.to_string())?;
     sync_active_buffer(runtime)
+}
+
+fn open_project_workspace_ids(runtime: &EditorRuntime) -> Result<Vec<WorkspaceId>, String> {
+    let default_workspace = shell_ui(runtime)?.default_workspace();
+    let window = runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?;
+    Ok(window
+        .workspaces()
+        .map(|workspace| workspace.id())
+        .filter(|workspace_id| *workspace_id != default_workspace)
+        .collect())
+}
+
+fn cycle_runtime_project_workspace(
+    runtime: &mut EditorRuntime,
+    direction: CycleDirection,
+) -> Result<(), String> {
+    let project_workspaces = open_project_workspace_ids(runtime)?;
+    let active = shell_ui(runtime)?.active_workspace();
+    let Some(target) = cycle_project_workspace(&project_workspaces, &active, direction) else {
+        return Ok(());
+    };
+    switch_runtime_workspace(runtime, target)
 }
 
 pub(crate) fn open_workspace_from_project(
