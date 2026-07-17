@@ -4,6 +4,34 @@ Editor/runtime for a plugin-driven workspace shell. This context covers product 
 
 ## Language
 
+### Workspace
+
+**Workspace**:
+An open editing context in a Window: a name, optional project root, and its panes/buffers. Users switch among Workspaces in the same Window.
+_Avoid_: project (when meaning the open editor context), tab (as the Workspace itself), session
+
+**Default Workspace**:
+The scratch Workspace with no project root, present for boot/scratch editing. It is not part of project Workspace cycling and cannot be Marked.
+_Avoid_: unnamed workspace, empty workspace (as the spoken term)
+
+**Project Workspace**:
+A Workspace that has a project root path. Next/previous cycling and Marks apply only to these.
+_Avoid_: rooted workspace (as the spoken term)
+
+**Mark List**:
+The ordered, app-wide list of project root paths used as Marked Workspaces. Canonical store is a plain-text file of one path per line; editing and saving that file manages order and membership beyond Mark/Unmark commands.
+_Avoid_: favorites file, bookmark list, pin list, `.volt` marks (as product store)
+
+**Marked Workspace**:
+A project root path recorded in the Mark List for quick jump. List order matters; only the first four entries have dedicated key bindings.
+_Avoid_: favorite, bookmark, pin, starred workspace
+
+**Minor Mode**:
+A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, autocomplete, and hover are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
+_Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
+
+### Issues
+
 **Issue**:
 A tracked unit of work whose canonical record is a markdown file in the Issue Store. Deleting a Code Reference does not delete the Issue. Opening an Issue opens that markdown file as a normal buffer; Status (and Closed at) change via commands, while title and body may be edited as text.
 _Avoid_: Task, ticket, TODO (when meaning the stored record)
