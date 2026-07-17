@@ -22,7 +22,7 @@
   "+"
   "*"
   "?"
-  ; TODO: inaccessible node
+  ; TODO(ISS-012): inaccessible node
   ; =>
   "=>@L"
   "=>@R"

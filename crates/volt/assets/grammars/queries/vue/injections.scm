@@ -11,7 +11,7 @@
   (#eq? @_lang "lang")
   (#any-of? @injection.language "css" "scss"))
 
-; TODO: When nvim-treesitter has postcss and less parsers, use @injection.language and @injection.content instead
+; TODO(ISS-006): When nvim-treesitter has postcss and less parsers, use @injection.language and @injection.content instead
 ; <script lang="scss">
 (style_element
   (start_tag

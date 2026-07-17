@@ -89574,8 +89574,8 @@
       "source_file": "crates\\editor-sdl\\src\\shell\\issues.rs",
       "source_location": "L950",
       "weight": 1.0,
-      "_src": "shell_issues_apply_scan_report",
-      "_tgt": "src_lib_confirm_rewrite_skipped",
+      "_src": "src_lib_confirm_rewrite_skipped",
+      "_tgt": "shell_issues_apply_scan_report",
       "source": "src_lib_confirm_rewrite_skipped",
       "target": "shell_issues_apply_scan_report"
     },

@@ -10,7 +10,7 @@
 ; -----------------------------------------------------------------------------
 ; shakespeare library
 ; NOTE: doesn't support templating
-; TODO: add once CoffeeScript parser is added
+; TODO(ISS-016): add once CoffeeScript parser is added
 ; ; CoffeeScript: Text.Coffee
 ; (quasiquote
 ;  (quoter) @_name

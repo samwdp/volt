@@ -212,7 +212,7 @@ pub(super) fn subscribe_issues_hooks(runtime: &mut EditorRuntime) -> Result<(), 
                 let detail = event
                     .detail
                     .as_deref()
-                    .ok_or_else(|| "issues.set-status missing Status detail".to_owned())?;
+                    .ok_or_else(|| "ui.issues.set-status missing Status detail".to_owned())?;
                 set_selected_issue_status(runtime, detail)
             },
         )

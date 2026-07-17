@@ -7,7 +7,7 @@
   ","
 ] @punctuation.delimiter
 
-; TODO: context blocks for "[" "]"?
+; TODO(ISS-007): context blocks for "[" "]"?
 [
   "("
   ")"

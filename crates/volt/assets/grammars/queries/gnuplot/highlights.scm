@@ -147,7 +147,7 @@
 (terminal
   "name" @variable.member)
 
-; TODO: complete terminals in grammar and then simplify its options here
+; TODO(ISS-019): complete terminals in grammar and then simplify its options here
 (t_cairolatex
   [
     "eps"

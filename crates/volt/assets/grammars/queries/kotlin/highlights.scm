@@ -2,13 +2,13 @@
 (simple_identifier) @variable
 
 ; `it` keyword inside lambdas
-; FIXME: This will highlight the keyword outside of lambdas since tree-sitter
+; FIXME(ISS-013): This will highlight the keyword outside of lambdas since tree-sitter
 ;        does not allow us to check for arbitrary nestation
 ((simple_identifier) @variable.builtin
   (#eq? @variable.builtin "it"))
 
 ; `field` keyword inside property getter/setter
-; FIXME: This will highlight the keyword outside of getters and setters
+; FIXME(ISS-014): This will highlight the keyword outside of getters and setters
 ;        since tree-sitter does not allow us to check for arbitrary nestation
 ((simple_identifier) @variable.builtin
   (#eq? @variable.builtin "field"))

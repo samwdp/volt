@@ -135,7 +135,7 @@
     namespace: (sym_ns) @_namespace
     (#lua-match? @_namespace "^%u")) @function.method)
 
-; TODO: Special casing for the `.` macro
+; TODO(ISS-029): Special casing for the `.` macro
 ; Operators
 ((sym_lit) @operator
   (#any-of? @operator "*" "*'" "+" "+'" "-" "-'" "/" "<" "<=" ">" ">=" "=" "=="))
@@ -188,7 +188,7 @@
   (#any-of? @keyword.import "ns" "import" "require" "use"))
 
 ; Builtin macros
-; TODO: Do all these items belong here?
+; TODO(ISS-030): Do all these items belong here?
 ((sym_lit
   name: (sym_name) @function.macro)
   (#any-of? @function.macro
@@ -298,7 +298,7 @@
 ;.
 ;(sym_lit)
 ;.
-; TODO: Add @comment highlight
+; TODO(ISS-031): Add @comment highlight
 ;(str_lit)?
 ;.
 ;(_))
@@ -311,12 +311,12 @@
   .
   (sym_lit)? @function
   .
-  ; TODO: Add @comment highlight
+  ; TODO(ISS-032): Add @comment highlight
   (str_lit)?)
 
-; TODO: Fix parameter highlighting
+; TODO(ISS-033): Fix parameter highlighting
 ;       I think there's a bug here in nvim-treesitter
-; TODO: Reproduce bug and file ticket
+; TODO(ISS-034): Reproduce bug and file ticket
 ;.
 ;[(vec_lit
 ;  (sym_lit)* @variable.parameter)

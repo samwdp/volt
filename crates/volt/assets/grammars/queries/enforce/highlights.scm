@@ -92,7 +92,7 @@
   "}"
 ] @punctuation.bracket
 
-; TODO: <> in decl_class
+; TODO(ISS-021): <> in decl_class
 (types
   [
     "<"

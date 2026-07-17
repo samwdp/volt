@@ -148,12 +148,12 @@ pub mod issues_hooks {
     pub const CREATE: &str = "ui.issues.create";
     pub const SCAN: &str = "ui.issues.scan";
     pub const CAPTURE_FOCUSED: &str = "ui.issues.capture-focused";
-    pub const ACTIVATE_LINE: &str = "issues.activate-line";
-    pub const SET_STATUS: &str = "issues.set-status";
-    pub const PLACE: &str = "issues.place";
-    pub const OPEN_FROM_REF: &str = "issues.open-from-ref";
-    pub const JUMP_REFS: &str = "issues.jump-refs";
-    pub const TOGGLE_CLOSED: &str = "issues.board-toggle-closed";
+    pub const ACTIVATE_LINE: &str = "ui.issues.activate-line";
+    pub const SET_STATUS: &str = "ui.issues.set-status";
+    pub const PLACE: &str = "ui.issues.place";
+    pub const OPEN_FROM_REF: &str = "ui.issues.open-from-ref";
+    pub const JUMP_REFS: &str = "ui.issues.jump-refs";
+    pub const TOGGLE_CLOSED: &str = "ui.issues.board-toggle-closed";
 }
 
 /// Hook name constants for the native PDF buffer.

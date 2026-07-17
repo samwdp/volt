@@ -121,7 +121,7 @@
   (#any-of? @_function "mvwprintw" "mvwscanw")
   (#set! injection.language "printf"))
 
-; TODO: add when asm is added
+; TODO(ISS-035): add when asm is added
 ; (gnu_asm_expression assembly_code: (string_literal) @injection.content
 ; (#set! injection.language "asm"))
 ; (gnu_asm_expression assembly_code: (concatenated_string (string_literal) @injection.content)

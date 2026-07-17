@@ -164,7 +164,7 @@
   "interface"
 ] @keyword.type
 
-; FIXME: update grammar
+; FIXME(ISS-009): update grammar
 ; (block_statement "unchecked" @keyword)
 (event_parameter
   "indexed" @keyword)
@@ -256,7 +256,7 @@
   "."
   ","
   ":"
-  ; FIXME: update grammar
+  ; FIXME(ISS-010): update grammar
   ; (semicolon)
   "->"
   "=>"

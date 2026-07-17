@@ -4,7 +4,7 @@
 
 ; Methods
 ; --------------------
-; TODO: add method/call_expression to grammar and
+; TODO(ISS-024): add method/call_expression to grammar and
 ; distinguish method call from variable access
 (function_expression_body
   (identifier) @function.call)
@@ -173,7 +173,7 @@
   (hex_integer_literal)
   (decimal_integer_literal)
   (decimal_floating_point_literal)
-  ; TODO: inaccessible nodes
+  ; TODO(ISS-025): inaccessible nodes
   ; (octal_integer_literal)
   ; (hex_floating_point_literal)
 ] @number
@@ -205,9 +205,9 @@
 
 ; Reserved words (cannot be used as identifiers)
 [
-  ; TODO:
+  ; TODO(ISS-026): 
   ; "rethrow" cannot be targeted at all and seems to be an invisible node
-  ; TODO:
+  ; TODO(ISS-027): 
   ; the assert keyword cannot be specifically targeted
   ; because the grammar selects the whole node or the content
   ; of the assertion not just the keyword

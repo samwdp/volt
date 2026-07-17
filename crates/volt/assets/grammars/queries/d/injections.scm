@@ -13,7 +13,7 @@
   (#offset! @injection.content 0 1 0 -1)
   (#set! injection.language "printf"))
 
-; TODO: uncomment when asm is added
+; TODO(ISS-028): uncomment when asm is added
 ; ((asm_inline) @injection.content
 ;   (#set! injection.language "asm")
 ;   (#set! injection.combined))

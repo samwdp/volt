@@ -30,7 +30,7 @@
     (#eq? @variable.builtin "workspace")))
 
 ; Terraform specific keywords
-; FIXME: ideally only for identifiers under a `variable` block to minimize false positives
+; FIXME(ISS-008): ideally only for identifiers under a `variable` block to minimize false positives
 ((identifier) @type.builtin
   (#any-of? @type.builtin "bool" "string" "number" "object" "tuple" "list" "map" "set" "any"))
 

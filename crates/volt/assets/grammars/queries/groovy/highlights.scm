@@ -204,7 +204,7 @@
     ">"
   ] @punctuation.bracket)
 
-; TODO: Class literals with PascalCase
+; TODO(ISS-017): Class literals with PascalCase
 (declaration
   "=" @operator)
 

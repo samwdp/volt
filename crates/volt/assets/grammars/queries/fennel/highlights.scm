@@ -166,7 +166,7 @@
     (table_binding_pair
       value: (symbol_binding) @function.macro)))
 
-; TODO: Highlight builtin methods (`table.unpack`, etc) as @function.builtin
+; TODO(ISS-020): Highlight builtin methods (`table.unpack`, etc) as @function.builtin
 ([
   (symbol) @module.builtin
   (multi_symbol
