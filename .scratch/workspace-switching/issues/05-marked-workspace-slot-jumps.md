@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Minor Mode Keybinding Precedence; 04 — Mark List Management
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 ## Parent
 
@@ -12,11 +12,11 @@
 
 ## Acceptance criteria
 
-- [ ] First four Mark List entries bind to `Ctrl+n`, `Ctrl+e`, `Ctrl+o`, `Ctrl+i` in Workspace Minor Mode
-- [ ] Jump to an open Marked Workspace switches to it
-- [ ] Jump to a closed Marked Workspace opens/creates then switches
-- [ ] Empty slot → silent no-op; missing path → notify, Mark List unchanged
-- [ ] Popup/autocomplete/hover still override those chords while active
-- [ ] Vim `Ctrl+e` scroll-line-down no longer claims Workspace `Ctrl+e`
-- [ ] Domain seam tests cover slot empty/filled/missing and open-or-switch intents without SDL
-- [ ] Spoken language matches `CONTEXT.md` (Marked Workspace, Mark List, Minor Mode)
+- [x] First four Mark List entries bind to `Ctrl+n`, `Ctrl+e`, `Ctrl+o`, `Ctrl+i` in Workspace Minor Mode
+- [x] Jump to an open Marked Workspace switches to it
+- [x] Jump to a closed Marked Workspace opens/creates then switches
+- [x] Empty slot → silent no-op; missing path → notify, Mark List unchanged
+- [x] Popup/autocomplete/hover still override those chords while active
+- [x] Vim `Ctrl+e` scroll-line-down no longer claims Workspace `Ctrl+e`
+- [x] Domain seam tests cover slot empty/filled/missing and open-or-switch intents without SDL
+- [x] Spoken language matches `CONTEXT.md` (Marked Workspace, Mark List, Minor Mode)

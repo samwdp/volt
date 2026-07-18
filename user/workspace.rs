@@ -79,6 +79,26 @@ pub fn package() -> PluginPackage {
             "Opens the app-wide Mark List as an editable buffer.",
             "workspace.marks",
         ),
+        hook_command(
+            "workspace.marked-1",
+            "Jumps to Mark List slot 1 (first Marked Workspace).",
+            "workspace.marked-1",
+        ),
+        hook_command(
+            "workspace.marked-2",
+            "Jumps to Mark List slot 2 (second Marked Workspace).",
+            "workspace.marked-2",
+        ),
+        hook_command(
+            "workspace.marked-3",
+            "Jumps to Mark List slot 3 (third Marked Workspace).",
+            "workspace.marked-3",
+        ),
+        hook_command(
+            "workspace.marked-4",
+            "Jumps to Mark List slot 4 (fourth Marked Workspace).",
+            "workspace.marked-4",
+        ),
         PluginCommand::new(
             "workspace.format",
             "Formats the active file buffer, preferring LSP formatting when available.",
@@ -410,5 +430,20 @@ mod tests {
         assert!(names.contains(&"workspace.mark"));
         assert!(names.contains(&"workspace.unmark"));
         assert!(names.contains(&"workspace.marks"));
+    }
+
+    #[test]
+    fn package_exports_marked_workspace_slot_jump_commands() {
+        let package = package();
+        let names: Vec<_> = package
+            .commands()
+            .iter()
+            .map(|command| command.name())
+            .collect();
+
+        assert!(names.contains(&"workspace.marked-1"));
+        assert!(names.contains(&"workspace.marked-2"));
+        assert!(names.contains(&"workspace.marked-3"));
+        assert!(names.contains(&"workspace.marked-4"));
     }
 }

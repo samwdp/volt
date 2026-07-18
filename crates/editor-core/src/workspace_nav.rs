@@ -12,6 +12,9 @@ pub struct MarkList {
 }
 
 impl MarkList {
+    /// Number of Mark List entries with dedicated jump bindings.
+    pub const SLOT_COUNT: usize = 4;
+
     /// Parses one project root per non-blank line, preserving order.
     pub fn parse(text: &str) -> Self {
         Self {
@@ -57,6 +60,47 @@ impl MarkList {
         let original_len = self.roots.len();
         self.roots.retain(|marked| marked != root);
         self.roots.len() != original_len
+    }
+
+    /// Returns the Marked Workspace root for a dedicated jump slot.
+    ///
+    /// `index` is 0-based among the first [`Self::SLOT_COUNT`] entries. Empty
+    /// slots and indexes outside the dedicated set yield [`None`] (silent no-op).
+    pub fn slot(&self, index: usize) -> Option<&Path> {
+        if index >= Self::SLOT_COUNT {
+            return None;
+        }
+        self.roots.get(index).map(PathBuf::as_path)
+    }
+}
+
+/// Intent for jumping to a Marked Workspace root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkedWorkspaceJump {
+    /// Root is already an open Project Workspace — switch to it.
+    Switch,
+    /// Root exists on disk but is closed — open/create then switch.
+    OpenThenSwitch,
+    /// Root missing on disk — notify; leave Mark List unchanged.
+    NotifyMissing,
+}
+
+/// Resolves jump intent for a filled Mark List slot.
+///
+/// Callers supply whether `root` exists on disk and the open Project Workspace
+/// roots (Default Workspace excluded). Empty slots are handled by [`MarkList::slot`].
+pub fn marked_workspace_jump(
+    root: &Path,
+    open_project_roots: &[impl AsRef<Path>],
+    exists_on_disk: bool,
+) -> MarkedWorkspaceJump {
+    if !exists_on_disk {
+        return MarkedWorkspaceJump::NotifyMissing;
+    }
+    if open_project_roots.iter().any(|open| open.as_ref() == root) {
+        MarkedWorkspaceJump::Switch
+    } else {
+        MarkedWorkspaceJump::OpenThenSwitch
     }
 }
 
@@ -214,6 +258,41 @@ mod tests {
         assert_eq!(
             marks.roots(),
             &[PathBuf::from(r"P:\alpha"), PathBuf::from(r"P:\gamma")]
+        );
+    }
+
+    #[test]
+    fn slot_returns_first_four_marked_workspaces_and_empty_beyond_list() {
+        let marks = MarkList::parse("P:\\a\nP:\\b\nP:\\c\nP:\\d\nP:\\e\n");
+
+        assert_eq!(marks.slot(0), Some(Path::new(r"P:\a")));
+        assert_eq!(marks.slot(1), Some(Path::new(r"P:\b")));
+        assert_eq!(marks.slot(2), Some(Path::new(r"P:\c")));
+        assert_eq!(marks.slot(3), Some(Path::new(r"P:\d")));
+        assert_eq!(marks.slot(4), None);
+
+        let short = MarkList::parse("P:\\only\n");
+        assert_eq!(short.slot(0), Some(Path::new(r"P:\only")));
+        assert_eq!(short.slot(1), None);
+        assert_eq!(short.slot(2), None);
+        assert_eq!(short.slot(3), None);
+    }
+
+    #[test]
+    fn marked_workspace_jump_switches_open_root_opens_closed_and_notifies_missing() {
+        let open = [PathBuf::from(r"P:\open-a"), PathBuf::from(r"P:\open-b")];
+
+        assert_eq!(
+            marked_workspace_jump(Path::new(r"P:\open-a"), &open, true),
+            MarkedWorkspaceJump::Switch
+        );
+        assert_eq!(
+            marked_workspace_jump(Path::new(r"P:\closed"), &open, true),
+            MarkedWorkspaceJump::OpenThenSwitch
+        );
+        assert_eq!(
+            marked_workspace_jump(Path::new(r"P:\gone"), &open, false),
+            MarkedWorkspaceJump::NotifyMissing
         );
     }
 }

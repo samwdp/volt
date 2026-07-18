@@ -738,11 +738,6 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Workspace,
         ),
         normal_binding(
-            "Ctrl+e",
-            "vim.scroll-line-down",
-            PluginKeymapScope::Workspace,
-        ),
-        normal_binding(
             "Ctrl+f",
             "vim.scroll-page-down",
             PluginKeymapScope::Workspace,
@@ -929,11 +924,6 @@ pub fn package() -> PluginPackage {
             PluginKeymapScope::Workspace,
         ),
         visual_binding(
-            "Ctrl+e",
-            "vim.scroll-line-down",
-            PluginKeymapScope::Workspace,
-        ),
-        visual_binding(
             "Ctrl+f",
             "vim.scroll-page-down",
             PluginKeymapScope::Workspace,
@@ -1015,6 +1005,10 @@ pub fn package() -> PluginPackage {
         leader_binding("w -", "workspace.unmark", PluginKeymapScope::Workspace),
         leader_binding("w m", "workspace.marks", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
+        PluginKeyBinding::new("Ctrl+n", "workspace.marked-1", PluginKeymapScope::Workspace),
+        PluginKeyBinding::new("Ctrl+e", "workspace.marked-2", PluginKeymapScope::Workspace),
+        PluginKeyBinding::new("Ctrl+o", "workspace.marked-3", PluginKeymapScope::Workspace),
+        PluginKeyBinding::new("Ctrl+i", "workspace.marked-4", PluginKeymapScope::Workspace),
         // acp
         leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
         leader_binding("a n", "acp.new-session", PluginKeymapScope::Workspace),
@@ -1230,6 +1224,27 @@ mod tests {
                     && binding.vim_mode() == PluginVimMode::Normal
             }));
         }
+    }
+
+    #[test]
+    fn package_exports_marked_workspace_slot_jump_bindings_and_drops_ctrl_e_scroll() {
+        let package = package();
+        for (chord, command) in [
+            ("Ctrl+n", "workspace.marked-1"),
+            ("Ctrl+e", "workspace.marked-2"),
+            ("Ctrl+o", "workspace.marked-3"),
+            ("Ctrl+i", "workspace.marked-4"),
+        ] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command
+                    && binding.scope() == PluginKeymapScope::Workspace
+                    && binding.vim_mode() == PluginVimMode::Any
+            }));
+        }
+        assert!(!package.key_bindings().iter().any(|binding| {
+            binding.chord() == "Ctrl+e" && binding.command_name() == "vim.scroll-line-down"
+        }));
     }
 
     #[test]

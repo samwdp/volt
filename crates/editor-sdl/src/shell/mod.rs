@@ -81,9 +81,9 @@ use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, CycleDirection, EditorRuntime, HookEvent,
     KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
-    PaneId, PendingKeySequence, SectionAction, SectionCollapseState, SectionRenderLine,
-    SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace, push_key_sequence,
-    tick_key_sequence,
+    MarkedWorkspaceJump, PaneId, PendingKeySequence, SectionAction, SectionCollapseState,
+    SectionRenderLine, SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace,
+    marked_workspace_jump, push_key_sequence, tick_key_sequence,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -253,6 +253,10 @@ const HOOK_WORKSPACE_PREVIOUS: &str = "workspace.previous";
 const HOOK_WORKSPACE_MARK: &str = "workspace.mark";
 const HOOK_WORKSPACE_UNMARK: &str = "workspace.unmark";
 const HOOK_WORKSPACE_MARKS: &str = "workspace.marks";
+const HOOK_WORKSPACE_MARKED_1: &str = "workspace.marked-1";
+const HOOK_WORKSPACE_MARKED_2: &str = "workspace.marked-2";
+const HOOK_WORKSPACE_MARKED_3: &str = "workspace.marked-3";
+const HOOK_WORKSPACE_MARKED_4: &str = "workspace.marked-4";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";
@@ -15639,6 +15643,26 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_MARKED_1,
+        "Jumps to Mark List slot 1 (first Marked Workspace).",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_MARKED_2,
+        "Jumps to Mark List slot 2 (second Marked Workspace).",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_MARKED_3,
+        "Jumps to Mark List slot 3 (third Marked Workspace).",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_MARKED_4,
+        "Jumps to Mark List slot 4 (fourth Marked Workspace).",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -17025,6 +17049,34 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_WORKSPACE_MARKS,
             "shell.workspace-marks",
             |_, runtime| open_mark_list(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_MARKED_1,
+            "shell.workspace-marked-1",
+            |_, runtime| jump_to_marked_workspace_slot(runtime, 0),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_MARKED_2,
+            "shell.workspace-marked-2",
+            |_, runtime| jump_to_marked_workspace_slot(runtime, 1),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_MARKED_3,
+            "shell.workspace-marked-3",
+            |_, runtime| jump_to_marked_workspace_slot(runtime, 2),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_MARKED_4,
+            "shell.workspace-marked-4",
+            |_, runtime| jump_to_marked_workspace_slot(runtime, 3),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -30217,6 +30269,72 @@ fn open_mark_list(runtime: &mut EditorRuntime) -> Result<(), String> {
     }
     open_workspace_file(runtime, &path)?;
     Ok(())
+}
+
+fn open_project_workspace_roots(runtime: &EditorRuntime) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for workspace_id in open_project_workspace_ids(runtime)? {
+        let Some(root) = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .root()
+            .map(Path::to_path_buf)
+        else {
+            continue;
+        };
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+fn marked_workspace_display_name(root: &Path) -> String {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
+fn notify_marked_workspace_missing(runtime: &mut EditorRuntime, root: &Path) -> Result<(), String> {
+    shell_ui_mut(runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "workspace.marked.missing-path".to_owned(),
+            severity: NotificationSeverity::Warning,
+            title: "Marked Workspace path missing".to_owned(),
+            body_lines: vec![format!(
+                "Mark List entry `{}` does not exist on disk.",
+                root.display()
+            )],
+            progress: None,
+            active: false,
+            action: None,
+        },
+        Instant::now(),
+    );
+    Ok(())
+}
+
+fn jump_to_marked_workspace_slot(
+    runtime: &mut EditorRuntime,
+    slot_index: usize,
+) -> Result<(), String> {
+    let Some(root) = mark_list_state(runtime)?
+        .list
+        .slot(slot_index)
+        .map(Path::to_path_buf)
+    else {
+        return Ok(());
+    };
+    let open_roots = open_project_workspace_roots(runtime)?;
+    match marked_workspace_jump(&root, &open_roots, root.exists()) {
+        MarkedWorkspaceJump::NotifyMissing => notify_marked_workspace_missing(runtime, &root),
+        MarkedWorkspaceJump::Switch | MarkedWorkspaceJump::OpenThenSwitch => {
+            let name = marked_workspace_display_name(&root);
+            open_workspace_from_project(runtime, &name, &root)?;
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn open_workspace_from_project(

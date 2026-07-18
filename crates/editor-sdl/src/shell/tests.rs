@@ -2304,6 +2304,97 @@ fn workspace_marks_opens_real_file_and_save_reloads_normalized_list() -> Result<
 }
 
 #[test]
+fn workspace_marked_slot_jump_switches_open_opens_closed_and_handles_empty_missing()
+-> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("workspace-marked-jump-state");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+
+    let open_root = unique_temp_dir("workspace-marked-jump-open");
+    let closed_root = unique_temp_dir("workspace-marked-jump-closed");
+    let missing_root = state_dir.join("missing-marked-workspace");
+    open_workspace_from_project(&mut state.runtime, "open-project", &open_root)?;
+    let open_workspace_id = shell_ui(&state.runtime)?.active_workspace();
+
+    {
+        let list = &mut mark_list_state_mut(&mut state.runtime)?.list;
+        assert!(list.mark(&open_root));
+        assert!(list.mark(&closed_root));
+        assert!(list.mark(&missing_root));
+    }
+    persist_mark_list(mark_list_state(&state.runtime)?)?;
+
+    let default_workspace = shell_ui(&state.runtime)?.default_workspace();
+    switch_runtime_workspace(&mut state.runtime, default_workspace)?;
+    assert_ne!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        open_workspace_id
+    );
+
+    state
+        .runtime
+        .execute_command("workspace.marked-1")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        open_workspace_id
+    );
+
+    state
+        .runtime
+        .execute_command("workspace.marked-2")
+        .map_err(|error| error.to_string())?;
+    let closed_workspace_id = shell_ui(&state.runtime)?.active_workspace();
+    assert_ne!(closed_workspace_id, open_workspace_id);
+    assert_ne!(closed_workspace_id, default_workspace);
+    assert_eq!(
+        state
+            .runtime
+            .model()
+            .workspace(closed_workspace_id)
+            .map_err(|error| error.to_string())?
+            .root(),
+        Some(closed_root.as_path())
+    );
+
+    let before_missing = mark_list_state(&state.runtime)?.list.roots().to_vec();
+    state
+        .runtime
+        .execute_command("workspace.marked-3")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        mark_list_state(&state.runtime)?.list.roots(),
+        before_missing.as_slice()
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        closed_workspace_id
+    );
+    let notifications = shell_ui(&state.runtime)?.visible_notifications(Instant::now());
+    assert!(
+        notifications
+            .iter()
+            .any(|notification| notification.title == "Marked Workspace path missing")
+    );
+
+    switch_runtime_workspace(&mut state.runtime, open_workspace_id)?;
+    state
+        .runtime
+        .execute_command("workspace.marked-4")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        open_workspace_id
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&open_root).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&closed_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_save_command_writes_all_dirty_workspace_files() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let root = unique_temp_dir("workspace-save-command");

@@ -25,7 +25,9 @@ pub use sections::{
     SectionRenderLineKind, SectionTree,
 };
 pub use services::ServiceRegistry;
-pub use workspace_nav::{CycleDirection, MarkList, cycle_project_workspace};
+pub use workspace_nav::{
+    CycleDirection, MarkList, MarkedWorkspaceJump, cycle_project_workspace, marked_workspace_jump,
+};
 
 /// Describes the high-level runtime identity of the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
