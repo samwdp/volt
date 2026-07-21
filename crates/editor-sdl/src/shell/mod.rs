@@ -83,7 +83,8 @@ use editor_core::{
     KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
     MarkedWorkspaceJump, PaneId, PendingKeySequence, SectionAction, SectionCollapseState,
     SectionRenderLine, SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace,
-    marked_workspace_jump, push_key_sequence, tick_key_sequence,
+    marked_workspace_jump, normalize_project_root_path, project_roots_equal, push_key_sequence,
+    tick_key_sequence,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -8414,7 +8415,7 @@ impl MarkListState {
         };
         Ok(Self {
             path,
-            list: MarkList::parse(&text),
+            list: mark_list_from_persisted_text(&text),
         })
     }
 
@@ -25410,7 +25411,7 @@ fn normalize_mark_list_buffer_before_save(
         let buffer = shell_buffer(runtime, buffer_id)?;
         (buffer.text.text(), buffer.cursor_point())
     };
-    let normalized = MarkList::parse(&current).serialize();
+    let normalized = mark_list_from_persisted_text(&current).serialize();
     if current == normalized {
         return Ok(());
     }
@@ -25427,7 +25428,7 @@ fn reload_mark_list_after_save(runtime: &mut EditorRuntime, path: &Path) -> Resu
     }
     let text = fs::read_to_string(path)
         .map_err(|error| format!("failed to reload Mark List `{}`: {error}", path.display()))?;
-    mark_list_state_mut(runtime)?.list = MarkList::parse(&text);
+    mark_list_state_mut(runtime)?.list = mark_list_from_persisted_text(&text);
     Ok(())
 }
 
@@ -30049,15 +30050,16 @@ fn find_workspace_by_root(
     runtime: &EditorRuntime,
     root: &std::path::Path,
 ) -> Result<Option<WorkspaceId>, String> {
+    let identity = canonicalize_project_root_path(root);
     let window = runtime
         .model()
         .active_window()
         .map_err(|error| error.to_string())?;
     Ok(window.workspaces().find_map(|workspace| {
-        workspace
-            .root()
-            .filter(|workspace_root| *workspace_root == root)
-            .map(|_| workspace.id())
+        workspace.root().and_then(|workspace_root| {
+            project_roots_equal(&canonicalize_project_root_path(workspace_root), &identity)
+                .then_some(workspace.id())
+        })
     }))
 }
 
@@ -30128,8 +30130,8 @@ fn open_project_workspace_ids(runtime: &EditorRuntime) -> Result<Vec<WorkspaceId
         .map_err(|error| error.to_string())?;
     Ok(window
         .workspaces()
+        .filter(|workspace| workspace.id() != default_workspace && workspace.root().is_some())
         .map(|workspace| workspace.id())
-        .filter(|workspace_id| *workspace_id != default_workspace)
         .collect())
 }
 
@@ -30157,6 +30159,34 @@ fn mark_list_state_mut(runtime: &mut EditorRuntime) -> Result<&mut MarkListState
         .services_mut()
         .get_mut::<MarkListState>()
         .ok_or_else(|| "Mark List state service missing".to_owned())
+}
+
+/// Canonical absolute project root for Mark List identity (strips Windows `\\?\`).
+fn canonicalize_project_root_path(path: &Path) -> PathBuf {
+    match fs::canonicalize(path) {
+        Ok(canonical) => normalize_project_root_path(&canonical),
+        Err(_) => normalize_project_root_path(path),
+    }
+}
+
+/// Parses Mark List text, canonicalizing existing roots and keeping missing paths as written.
+fn mark_list_from_persisted_text(text: &str) -> MarkList {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let path = PathBuf::from(line);
+        let identity = if path.exists() {
+            canonicalize_project_root_path(&path)
+        } else {
+            path
+        };
+        if !roots
+            .iter()
+            .any(|root| project_roots_equal(root, &identity))
+        {
+            roots.push(identity);
+        }
+    }
+    MarkList::from_roots(roots)
 }
 
 #[cfg(test)]
@@ -30246,6 +30276,7 @@ fn mark_active_project_workspace(runtime: &mut EditorRuntime) -> Result<(), Stri
     let Some(root) = active_project_workspace_root(runtime)? else {
         return notify_default_workspace_has_no_project_root(runtime);
     };
+    let root = canonicalize_project_root_path(&root);
     if mark_list_state_mut(runtime)?.list.mark(&root) {
         persist_mark_list_and_refresh_open_buffers(runtime)?;
     }
@@ -30256,6 +30287,7 @@ fn unmark_active_project_workspace(runtime: &mut EditorRuntime) -> Result<(), St
     let Some(root) = active_project_workspace_root(runtime)? else {
         return notify_default_workspace_has_no_project_root(runtime);
     };
+    let root = canonicalize_project_root_path(&root);
     if mark_list_state_mut(runtime)?.list.unmark(&root) {
         persist_mark_list_and_refresh_open_buffers(runtime)?;
     }
@@ -30283,7 +30315,7 @@ fn open_project_workspace_roots(runtime: &EditorRuntime) -> Result<Vec<PathBuf>,
         else {
             continue;
         };
-        roots.push(root);
+        roots.push(canonicalize_project_root_path(&root));
     }
     Ok(roots)
 }
@@ -30326,6 +30358,7 @@ fn jump_to_marked_workspace_slot(
     else {
         return Ok(());
     };
+    let root = canonicalize_project_root_path(&root);
     let open_roots = open_project_workspace_roots(runtime)?;
     match marked_workspace_jump(&root, &open_roots, root.exists()) {
         MarkedWorkspaceJump::NotifyMissing => notify_marked_workspace_missing(runtime, &root),

@@ -5,6 +5,27 @@
 
 use std::path::{Path, PathBuf};
 
+/// Strips Windows verbatim (`\\?\`) prefixes so canonical roots round-trip cleanly.
+///
+/// Non-Windows paths and already-plain Windows paths are returned unchanged.
+pub fn normalize_project_root_path(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// Returns whether two project roots share Mark List path identity after normalization.
+pub fn project_roots_equal(left: &Path, right: &Path) -> bool {
+    normalize_project_root_path(left) == normalize_project_root_path(right)
+}
+
 /// Ordered app-wide project roots recorded as Marked Workspaces.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkList {
@@ -46,19 +67,29 @@ impl MarkList {
         &self.roots
     }
 
+    /// Builds a Mark List from already-ordered roots (caller owns normalization).
+    pub fn from_roots(roots: Vec<PathBuf>) -> Self {
+        Self { roots }
+    }
+
     /// Appends a root when absent, returning whether the Mark List changed.
     pub fn mark(&mut self, root: &Path) -> bool {
-        if self.roots.iter().any(|marked| marked == root) {
+        if self
+            .roots
+            .iter()
+            .any(|marked| project_roots_equal(marked, root))
+        {
             return false;
         }
-        self.roots.push(root.to_path_buf());
+        self.roots.push(normalize_project_root_path(root));
         true
     }
 
     /// Removes all occurrences of a root, returning whether the Mark List changed.
     pub fn unmark(&mut self, root: &Path) -> bool {
         let original_len = self.roots.len();
-        self.roots.retain(|marked| marked != root);
+        self.roots
+            .retain(|marked| !project_roots_equal(marked, root));
         self.roots.len() != original_len
     }
 
@@ -97,7 +128,10 @@ pub fn marked_workspace_jump(
     if !exists_on_disk {
         return MarkedWorkspaceJump::NotifyMissing;
     }
-    if open_project_roots.iter().any(|open| open.as_ref() == root) {
+    if open_project_roots
+        .iter()
+        .any(|open| project_roots_equal(open.as_ref(), root))
+    {
         MarkedWorkspaceJump::Switch
     } else {
         MarkedWorkspaceJump::OpenThenSwitch
@@ -293,6 +327,48 @@ mod tests {
         assert_eq!(
             marked_workspace_jump(Path::new(r"P:\gone"), &open, false),
             MarkedWorkspaceJump::NotifyMissing
+        );
+    }
+
+    #[test]
+    fn normalize_project_root_path_strips_windows_verbatim_prefix() {
+        assert_eq!(
+            normalize_project_root_path(Path::new(r"\\?\P:\volt")),
+            PathBuf::from(r"P:\volt")
+        );
+        assert_eq!(
+            normalize_project_root_path(Path::new(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(
+            normalize_project_root_path(Path::new(r"P:\volt")),
+            PathBuf::from(r"P:\volt")
+        );
+    }
+
+    #[test]
+    fn project_roots_equal_treats_verbatim_and_plain_spellings_as_same_identity() {
+        assert!(project_roots_equal(
+            Path::new(r"\\?\P:\volt"),
+            Path::new(r"P:\volt")
+        ));
+        assert!(!project_roots_equal(
+            Path::new(r"P:\volt"),
+            Path::new(r"P:\other")
+        ));
+    }
+
+    #[test]
+    fn mark_and_jump_use_normalized_path_identity() {
+        let mut marks = MarkList::parse("P:\\volt\n");
+        assert!(!marks.mark(Path::new(r"\\?\P:\volt")));
+        assert!(marks.unmark(Path::new(r"\\?\P:\volt")));
+        assert!(marks.roots().is_empty());
+
+        let open = [PathBuf::from(r"\\?\P:\open-a")];
+        assert_eq!(
+            marked_workspace_jump(Path::new(r"P:\open-a"), &open, true),
+            MarkedWorkspaceJump::Switch
         );
     }
 }

@@ -1,6 +1,6 @@
 # Workspace Switching and Marks
 
-Status: ready-for-agent
+Status: resolved
 
 ## Problem Statement
 

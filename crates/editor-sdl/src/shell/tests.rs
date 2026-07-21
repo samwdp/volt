@@ -2157,12 +2157,48 @@ fn buffer_save_command_writes_edited_file_buffer_to_disk() -> Result<(), String>
 }
 
 #[test]
+fn workspace_cycle_skips_non_default_workspace_without_project_root() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-cycle-first");
+    let second_root = unique_temp_dir("workspace-cycle-second");
+    let first = open_workspace_from_project(&mut state.runtime, "first", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "second", &second_root)?;
+    let window_id = active_window_id(&state.runtime)?;
+    let rootless = state
+        .runtime
+        .model_mut()
+        .open_workspace(window_id, "rootless", None)
+        .map_err(|error| error.to_string())?;
+
+    let cycle_ids = open_project_workspace_ids(&state.runtime)?;
+    assert_eq!(cycle_ids, vec![first, second]);
+    assert!(!cycle_ids.contains(&rootless));
+
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    state
+        .runtime
+        .execute_command("workspace.next")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), second);
+    state
+        .runtime
+        .execute_command("workspace.next")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), first);
+
+    std::fs::remove_dir_all(&first_root).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&second_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_mark_and_unmark_commands_persist_active_project_root() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let state_dir = unique_temp_dir("workspace-mark-state");
     let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
     install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
     let project_root = unique_temp_dir("workspace-mark-project");
+    let canonical_root = canonicalize_project_root_path(&project_root);
     open_workspace_from_project(&mut state.runtime, "marked-project", &project_root)?;
 
     state
@@ -2174,9 +2210,11 @@ fn workspace_mark_and_unmark_commands_persist_active_project_root() -> Result<()
         .execute_command("workspace.mark")
         .map_err(|error| error.to_string())?;
 
-    assert_eq!(
-        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
-        format!("{}\n", project_root.display())
+    let persisted = std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?;
+    assert_eq!(persisted, format!("{}\n", canonical_root.display()));
+    assert!(
+        !persisted.contains(r"\\?\"),
+        "Mark List must store stripped canonical roots, got {persisted}"
     );
 
     state
@@ -2194,12 +2232,69 @@ fn workspace_mark_and_unmark_commands_persist_active_project_root() -> Result<()
 }
 
 #[test]
+fn find_workspace_by_root_matches_normalized_path_identity() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let project_root = unique_temp_dir("workspace-root-identity");
+    let workspace_id =
+        open_workspace_from_project(&mut state.runtime, "identity-project", &project_root)?;
+    let verbatim = PathBuf::from(format!(r"\\?\{}", project_root.display()));
+
+    assert_eq!(
+        find_workspace_by_root(&state.runtime, &verbatim)?,
+        Some(workspace_id)
+    );
+
+    std::fs::remove_dir_all(&project_root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn mark_list_load_canonicalizes_existing_roots_and_keeps_missing_as_written() -> Result<(), String>
+{
+    let state_dir = unique_temp_dir("workspace-mark-load-normalize");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    let existing = unique_temp_dir("workspace-mark-load-existing");
+    let missing = state_dir.join("missing-on-disk");
+    let verbatim_existing = PathBuf::from(format!(r"\\?\{}", existing.display()));
+    std::fs::write(
+        &mark_list_path,
+        format!("{}\n{}\n", verbatim_existing.display(), missing.display()),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let loaded = MarkListState::load(mark_list_path)?;
+    assert_eq!(
+        loaded.list.roots(),
+        &[canonicalize_project_root_path(&existing), missing.clone(),]
+    );
+    assert!(
+        !loaded.list.roots()[0].to_string_lossy().contains(r"\\?\"),
+        "existing Mark List roots must strip verbatim prefixes"
+    );
+
+    let missing_verbatim =
+        PathBuf::from(format!(r"\\?\{}", state_dir.join("also-missing").display()));
+    let with_missing_verbatim =
+        mark_list_from_persisted_text(&format!("{}\n", missing_verbatim.display()));
+    assert_eq!(
+        with_missing_verbatim.roots(),
+        &[missing_verbatim],
+        "missing paths must stay as-written when canonicalize cannot run"
+    );
+
+    std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&existing).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_mark_refreshes_clean_open_mark_list_buffer() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let state_dir = unique_temp_dir("workspace-mark-open-list");
     let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
     install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
     let project_root = unique_temp_dir("workspace-mark-open-project");
+    let canonical_root = canonicalize_project_root_path(&project_root);
     open_workspace_from_project(&mut state.runtime, "marked-project", &project_root)?;
     state
         .runtime
@@ -2214,7 +2309,7 @@ fn workspace_mark_refreshes_clean_open_mark_list_buffer() -> Result<(), String> 
 
     assert_eq!(
         shell_buffer(&state.runtime, buffer_id)?.text.text(),
-        format!("{}\n", project_root.display())
+        format!("{}\n", canonical_root.display())
     );
     state
         .runtime
@@ -2222,7 +2317,7 @@ fn workspace_mark_refreshes_clean_open_mark_list_buffer() -> Result<(), String> 
         .map_err(|error| error.to_string())?;
     assert_eq!(
         std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
-        format!("{}\n", project_root.display())
+        format!("{}\n", canonical_root.display())
     );
 
     std::fs::remove_dir_all(&state_dir).map_err(|error| error.to_string())?;

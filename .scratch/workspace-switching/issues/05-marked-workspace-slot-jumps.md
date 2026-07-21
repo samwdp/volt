@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Minor Mode Keybinding Precedence; 04 — Mark List Management
 
-**Status:** ready-for-human
+**Status:** resolved
 
 ## Parent
 
@@ -20,3 +20,7 @@
 - [x] Vim `Ctrl+e` scroll-line-down no longer claims Workspace `Ctrl+e`
 - [x] Domain seam tests cover slot empty/filled/missing and open-or-switch intents without SDL
 - [x] Spoken language matches `CONTEXT.md` (Marked Workspace, Mark List, Minor Mode)
+
+## Answer
+
+Domain `marked_workspace_jump` + shell `jump_to_marked_workspace_slot` (Switch / OpenThenSwitch / NotifyMissing). Slot chords in Workspace Minor Mode; overlays win while active. Vim `Ctrl+e` scroll-line-down removed. Canonical path identity used for open-root match.

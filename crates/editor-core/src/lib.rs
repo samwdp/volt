@@ -27,6 +27,7 @@ pub use sections::{
 pub use services::ServiceRegistry;
 pub use workspace_nav::{
     CycleDirection, MarkList, MarkedWorkspaceJump, cycle_project_workspace, marked_workspace_jump,
+    normalize_project_root_path, project_roots_equal,
 };
 
 /// Describes the high-level runtime identity of the editor.
@@ -749,10 +750,6 @@ mod tests {
     fn model_switches_and_closes_workspaces() -> Result<(), ModelError> {
         let mut runtime = EditorRuntime::new();
         let window_id = runtime.model_mut().create_window("main");
-        let default_root = match std::env::current_dir() {
-            Ok(path) => path,
-            Err(error) => panic!("current directory should be available during tests: {error}"),
-        };
         let default_workspace = runtime
             .model_mut()
             .open_workspace(window_id, "default", None)?;
@@ -773,10 +770,7 @@ mod tests {
             vec!["default".to_owned(), "project".to_owned()]
         );
         assert_eq!(runtime.model().active_workspace_id()?, project_workspace);
-        assert_eq!(
-            runtime.model().workspace(default_workspace)?.root(),
-            Some(default_root.as_path())
-        );
+        assert_eq!(runtime.model().workspace(default_workspace)?.root(), None);
         assert_eq!(
             runtime.model().workspace(project_workspace)?.root(),
             Some(project_root.as_path())
