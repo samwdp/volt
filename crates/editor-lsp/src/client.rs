@@ -909,7 +909,6 @@ struct SessionWorkspaceConfiguration {
     section: Option<String>,
     base_settings: Option<Value>,
     runtime_override: Option<Value>,
-    csharp_solution_fallback: Option<String>,
 }
 
 impl SessionWorkspaceConfiguration {
@@ -923,10 +922,6 @@ impl SessionWorkspaceConfiguration {
             runtime_override: normalized_workspace_configuration_settings(
                 section.as_deref(),
                 runtime_override,
-            ),
-            csharp_solution_fallback: csharp_solution_path_fallback(
-                session.server_id(),
-                session.root().map(PathBuf::as_path),
             ),
             section,
         }
@@ -977,7 +972,6 @@ impl SessionWorkspaceConfiguration {
         effective_workspace_configuration_settings(
             self.base_settings.as_ref(),
             self.runtime_override.as_ref(),
-            self.csharp_solution_fallback.as_deref(),
         )
     }
 }
@@ -3484,26 +3478,15 @@ fn normalized_workspace_configuration_settings(
 fn effective_workspace_configuration_settings(
     base_settings: Option<&Value>,
     runtime_override: Option<&Value>,
-    csharp_solution_fallback: Option<&str>,
 ) -> Option<Value> {
-    let mut settings = match (base_settings, runtime_override) {
+    match (base_settings, runtime_override) {
         (Some(base_settings), Some(runtime_override)) => {
             Some(merge_json_values(base_settings, runtime_override))
         }
         (Some(base_settings), None) => Some(base_settings.clone()),
         (None, Some(runtime_override)) => Some(runtime_override.clone()),
         (None, None) => None,
-    };
-    if let Some(solution_path) = csharp_solution_fallback
-        && !settings_contains_key(settings.as_ref(), "solutionPathOverride")
-    {
-        let fallback = json!({ "solutionPathOverride": solution_path });
-        settings = Some(match settings.take() {
-            Some(settings) => merge_json_values(&settings, &fallback),
-            None => fallback,
-        });
     }
-    settings
 }
 
 fn settings_contains_key(settings: Option<&Value>, key: &str) -> bool {
@@ -3615,33 +3598,6 @@ fn without_csharp_solution_path_override(current: Option<Value>) -> Option<Value
     };
     current.remove("solutionPathOverride");
     (!current.is_empty()).then_some(Value::Object(current))
-}
-
-fn csharp_solution_path_fallback(server_id: &str, root: Option<&Path>) -> Option<String> {
-    is_csharp_server(server_id)
-        .then(|| resolve_single_solution_path(root))
-        .flatten()
-        .map(|solution_path| solution_path.display().to_string())
-}
-
-fn resolve_single_solution_path(root: Option<&Path>) -> Option<PathBuf> {
-    let root = root?;
-    if path_is_solution(root) {
-        return Some(root.to_path_buf());
-    }
-    let mut solutions = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path_is_solution(path))
-        .collect::<Vec<_>>();
-    (solutions.len() == 1).then(|| solutions.pop()).flatten()
-}
-
-fn path_is_solution(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("sln"))
 }
 
 fn wrap_workspace_configuration_settings(section: &str, settings: Value) -> Value {
@@ -5248,7 +5204,6 @@ mod tests {
                     "useTabs": true,
                 }
             })),
-            csharp_solution_fallback: None,
         };
 
         let response = server_request_response(
@@ -5305,7 +5260,6 @@ mod tests {
                 "featureFlag": false,
                 "verbosity": "debug",
             })),
-            csharp_solution_fallback: None,
         };
 
         let response = server_request_response(

@@ -95,3 +95,13 @@ _Avoid_: created, created_at (as spoken term)
 **Closed at**:
 The timestamp when an Issue last entered Closed. Absent while not Closed.
 _Avoid_: completed_at, resolved_at
+
+### Language servers
+
+**Solution**:
+A `.sln` file that groups one or more C# projects. When a Solution is available, csharp-ls uses one Language Server Session for that Solution — not one Session per `.csproj`.
+_Avoid_: project (when meaning the `.sln`), workspace (when meaning the `.sln`)
+
+**Language Server Session**:
+One planned or live language-server process for a given server and root. For csharp-ls, the root is the Solution’s directory when a Solution applies; otherwise the nearest `.csproj` directory or the Project Workspace root.
+_Avoid_: LSP instance (as the spoken product term), server process (when meaning the Session identity)

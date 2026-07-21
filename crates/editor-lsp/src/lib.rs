@@ -26,6 +26,8 @@ pub use client::{
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str = "Language Server Protocol registry, session plans, diagnostics, launch metadata, and client runtime management.";
 
+const CSHARP_LS_SERVER_ID: &str = "csharp-ls";
+
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
     ROLE
@@ -467,6 +469,9 @@ impl LanguageServerSpec {
     }
 
     /// Adds root markers used for workspace discovery.
+    ///
+    /// Marker order is preference priority: earlier markers win over later ones across the full
+    /// ancestor walk (for example `*.sln` before `*.csproj`).
     pub fn with_root_markers(
         mut self,
         markers: impl IntoIterator<Item = impl Into<String>>,
@@ -700,11 +705,14 @@ impl LanguageServerSpec {
 
     /// Returns the launch spec used to start the server.
     pub fn launch_job(&self, root: Option<PathBuf>) -> JobSpec {
-        let mut job = JobSpec::command(
-            format!("lsp:{}", self.id),
-            self.program.clone(),
-            self.args.clone(),
-        );
+        let mut args = self.args.clone();
+        if self.id == CSHARP_LS_SERVER_ID
+            && let Some(solution_name) = unique_solution_file_name(root.as_deref())
+        {
+            args.push("--solution".to_owned());
+            args.push(solution_name);
+        }
+        let mut job = JobSpec::command(format!("lsp:{}", self.id), self.program.clone(), args);
         if let Some(root) = root {
             job = job.with_cwd(root);
         }
@@ -1222,10 +1230,24 @@ fn find_root_for_path(
     if root_markers.is_empty() {
         return None;
     }
+    // Earlier markers are preferred over later ones across the whole ancestor walk.
+    for marker in root_markers {
+        if let Some(root) = find_root_for_path_matching_marker(path, workspace_root, marker) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+fn find_root_for_path_matching_marker(
+    path: &Path,
+    workspace_root: Option<&Path>,
+    marker: &str,
+) -> Option<PathBuf> {
     let workspace_root = workspace_root.filter(|root| path.starts_with(root));
     let mut current = path.parent();
     while let Some(directory) = current {
-        if directory_matches_root_markers(directory, root_markers) {
+        if directory_matches_root_marker(directory, marker) {
             return Some(directory.to_path_buf());
         }
         if workspace_root.is_some_and(|root| root == directory) {
@@ -1234,12 +1256,6 @@ fn find_root_for_path(
         current = directory.parent();
     }
     None
-}
-
-fn directory_matches_root_markers(directory: &Path, root_markers: &[String]) -> bool {
-    root_markers
-        .iter()
-        .any(|marker| directory_matches_root_marker(directory, marker))
 }
 
 fn directory_matches_root_marker(directory: &Path, marker: &str) -> bool {
@@ -1262,6 +1278,33 @@ fn directory_contains_extension(directory: &Path, extension: &str) -> bool {
             .map(|value| value.eq_ignore_ascii_case(&extension))
             .unwrap_or(false)
     })
+}
+
+fn unique_solution_file_name(root: Option<&Path>) -> Option<String> {
+    resolve_single_solution_path(root)?
+        .file_name()?
+        .to_str()
+        .map(str::to_owned)
+}
+
+fn resolve_single_solution_path(root: Option<&Path>) -> Option<PathBuf> {
+    let root = root?;
+    if path_is_solution(root) {
+        return Some(root.to_path_buf());
+    }
+    let mut solutions = fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path_is_solution(path))
+        .collect::<Vec<_>>();
+    (solutions.len() == 1).then(|| solutions.pop()).flatten()
+}
+
+fn path_is_solution(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sln"))
 }
 
 #[cfg(test)]
@@ -1314,7 +1357,7 @@ mod tests {
             "csharp-ls",
             ["--features", "razor-support,metadata-uris"],
         )
-        .with_root_markers(["*.sln", "global.json"])
+        .with_root_markers(["*.sln", "*.csproj"])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
     }
 
@@ -1689,6 +1732,62 @@ mod tests {
             must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
         assert_eq!(session.root(), Some(&root));
         assert_eq!(session.launch().cwd(), Some(&root));
+        assert_eq!(
+            session.launch().args(),
+            [
+                "--features",
+                "razor-support,metadata-uris",
+                "--solution",
+                "af-platform-api.sln"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_falls_back_to_csproj_without_solution_arg() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("AssetFusion.Api");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session =
+            must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
+        assert_eq!(session.root(), Some(&project_dir));
+        assert_eq!(session.launch().cwd(), Some(&project_dir));
+        assert_eq!(
+            session.launch().args(),
+            ["--features", "razor-support,metadata-uris"]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_skips_solution_arg_when_multiple_solutions_exist() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("AssetFusion.Api");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(root.join("App.sln"), "").expect("solution");
+        fs::write(root.join("App.Tests.sln"), "").expect("solution");
+        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session =
+            must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
+        assert_eq!(session.root(), Some(&root));
+        assert_eq!(
+            session.launch().args(),
+            ["--features", "razor-support,metadata-uris"]
+        );
 
         let _ = fs::remove_dir_all(root);
     }
