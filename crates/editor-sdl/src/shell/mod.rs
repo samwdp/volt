@@ -10919,13 +10919,7 @@ impl ShellState {
                     return Ok(false);
                 }
 
-                if keymod.intersects(ctrl_mod()) && keycode == Keycode::Q {
-                    if picker_visible {
-                        quickfix_open_current_list(&mut self.runtime)
-                            .map_err(ShellError::Runtime)?;
-                        self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
-                        return Ok(false);
-                    }
+                if !picker_visible && keymod.intersects(ctrl_mod()) && keycode == Keycode::Q {
                     return Ok(true);
                 }
 
@@ -18994,6 +18988,32 @@ fn sync_quickfix_popup_buffer(
     Ok(Some(buffer_id))
 }
 
+fn quickfix_entries_from_one_shot(rows: &[PickerExportableRow]) -> Vec<QuickfixEntry> {
+    rows.iter()
+        .map(|row| {
+            QuickfixEntry::new(
+                row.id(),
+                PathBuf::from(row.path()),
+                TextPoint::new(row.line(), row.column()),
+                row.label(),
+            )
+        })
+        .collect()
+}
+
+fn quickfix_open_from_one_shot(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let Some(context) = shell_ui_mut(runtime)?.take_picker_one_shot() else {
+        return Ok(false);
+    };
+    let entries = quickfix_entries_from_one_shot(context.exportable_quickfix());
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    quickfix_state_mut(runtime)?.set_entries(entries);
+    sync_quickfix_popup_buffer(runtime, true)?;
+    Ok(true)
+}
+
 fn quickfix_open_picker_matches(runtime: &mut EditorRuntime) -> Result<bool, String> {
     let entries = {
         let ui = shell_ui(runtime)?;
@@ -19050,6 +19070,9 @@ fn quickfix_open_selected_entry(runtime: &mut EditorRuntime) -> Result<bool, Str
 }
 
 fn quickfix_open_current_list(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if quickfix_open_from_one_shot(runtime)? {
+        return Ok(());
+    }
     if quickfix_open_picker_matches(runtime)? {
         return Ok(());
     }

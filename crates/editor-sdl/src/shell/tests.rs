@@ -15932,6 +15932,23 @@ fn browser_devtools_shortcut_requested_rejects_other_modifiers() {
     ));
 }
 
+#[test]
+fn workspace_search_provider_extras_copy_ctrl_q_onto_instance() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-search-ctrl-q-extra");
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "workspace-search-ctrl-q-extra", &root)?;
+
+    let overlay = picker::picker_overlay(&state.runtime, "workspace.search")?;
+    assert!(
+        overlay.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+q" && binding.command_name() == "quickfix.open"
+        }),
+        "workspace.search provider extras should land on the open picker instance"
+    );
+    Ok(())
+}
+
 fn prepare_quickfix_workspace_search_picker(
     test_name: &str,
 ) -> Result<(ShellState, PathBuf, PathBuf, PathBuf), String> {
@@ -15945,25 +15962,28 @@ fn prepare_quickfix_workspace_search_picker(
     std::fs::write(&second, "fn beta() {}\n").map_err(|error| error.to_string())?;
     open_workspace_from_project(&mut state.runtime, test_name, &root)?;
 
-    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
-        "Workspace Search",
-        vec![
-            workspace_search::workspace_search_match_entry(
-                &root,
-                "src/main.rs",
-                1,
-                4,
-                "fn alpha() {}",
-            ),
-            workspace_search::workspace_search_match_entry(
-                &root,
-                "src/lib.rs",
-                1,
-                4,
-                "fn beta() {}",
-            ),
-        ],
-    ));
+    shell_ui_mut(&mut state.runtime)?.set_picker(
+        PickerOverlay::from_entries(
+            "Workspace Search",
+            vec![
+                workspace_search::workspace_search_match_entry(
+                    &root,
+                    "src/main.rs",
+                    1,
+                    4,
+                    "fn alpha() {}",
+                ),
+                workspace_search::workspace_search_match_entry(
+                    &root,
+                    "src/lib.rs",
+                    1,
+                    4,
+                    "fn beta() {}",
+                ),
+            ],
+        )
+        .with_extra_keybinds(vec![PickerExtraKeybind::new("Ctrl+q", "quickfix.open")]),
+    );
 
     Ok((state, root, first, second))
 }
@@ -16056,6 +16076,53 @@ fn ctrl_q_with_non_quickfix_picker_does_not_quit() -> Result<(), String> {
     assert!(!handled);
     assert!(shell_ui(&state.runtime)?.picker().is_some());
     assert_eq!(active_shell_buffer_id(&state.runtime)?, original_buffer_id);
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn ctrl_q_without_quickfix_extra_does_not_export_popup_global() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("quickfix-ctrl-q-no-extra");
+    let first = root.join("src").join("main.rs");
+    std::fs::create_dir_all(first.parent().ok_or_else(|| "missing src dir".to_owned())?)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(&first, "fn alpha() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "quickfix-ctrl-q-no-extra", &root)?;
+
+    shell_ui_mut(&mut state.runtime)?.set_picker(PickerOverlay::from_entries(
+        "Workspace Search",
+        vec![workspace_search::workspace_search_match_entry(
+            &root,
+            "src/main.rs",
+            1,
+            4,
+            "fn alpha() {}",
+        )],
+    ));
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Q),
+                scancode: None,
+                keymod: ctrl_mod(),
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled);
+    assert!(shell_ui(&state.runtime)?.picker().is_some());
     assert!(active_runtime_popup(&state.runtime)?.is_none());
     Ok(())
 }

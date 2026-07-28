@@ -169,7 +169,6 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+n", "picker.select-next", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Ctrl+p", "picker.select-previous", PluginKeymapScope::Popup),
-        PluginKeyBinding::new("Ctrl+q", "quickfix.open", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Enter", "picker.submit", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Escape", "picker.cancel", PluginKeymapScope::Popup),
     ])
@@ -219,7 +218,8 @@ pub fn providers() -> Vec<PickerProviderSpec> {
             "workspace.search",
             "Workspace Search",
             PickerSource::WorkspaceSearch,
-        ),
+        )
+        .with_extra_keybind("Ctrl+q", "quickfix.open"),
         PickerProviderSpec::new("undo-tree", "Undo Tree", PickerSource::UndoTree),
     ]
 }
@@ -470,13 +470,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn package_binds_ctrl_q_to_quickfix_open_in_popups() {
+    fn package_does_not_bind_ctrl_q_quickfix_as_popup_default() {
         let package = package();
-        assert!(package.key_bindings().iter().any(|binding| {
-            binding.chord() == "Ctrl+q"
-                && binding.command_name() == "quickfix.open"
-                && binding.scope() == PluginKeymapScope::Popup
-                && binding.vim_mode() == PluginVimMode::Any
+        assert!(package.key_bindings().iter().all(|binding| {
+            !(binding.chord() == "Ctrl+q" && binding.command_name() == "quickfix.open")
+        }));
+    }
+
+    #[test]
+    fn workspace_search_provider_declares_ctrl_q_quickfix_extra() {
+        let provider = providers()
+            .into_iter()
+            .find(|provider| provider.id() == "workspace.search")
+            .expect("workspace.search provider");
+        assert!(provider.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+q" && binding.command_name() == "quickfix.open"
         }));
     }
 
