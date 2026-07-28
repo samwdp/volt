@@ -99,6 +99,11 @@ pub fn package() -> PluginPackage {
             "Jumps to Mark List slot 4 (fourth Marked Workspace).",
             "workspace.marked-4",
         ),
+        hook_command(
+            "workspace.worktree-remove",
+            "Force-removes the selected Worktree from disk after closing matching Project Workspaces.",
+            "workspace.worktree-remove",
+        ),
         PluginCommand::new(
             "workspace.format",
             "Formats the active file buffer, preferring LSP formatting when available.",
@@ -445,5 +450,16 @@ mod tests {
         assert!(names.contains(&"workspace.marked-2"));
         assert!(names.contains(&"workspace.marked-3"));
         assert!(names.contains(&"workspace.marked-4"));
+    }
+
+    #[test]
+    fn package_exports_worktree_remove_command() {
+        let package = package();
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "workspace.worktree-remove")
+        );
     }
 }

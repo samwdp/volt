@@ -180,6 +180,53 @@ pub fn cycle_project_workspace<T: PartialEq + Copy>(
     Some(project_workspaces[next_index])
 }
 
+/// Streamed `git worktree remove` request shape (no Mark List mutation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRemoveRequest {
+    /// Absolute Worktree path to remove from disk.
+    pub path: PathBuf,
+    /// Args after `git`: `worktree remove <path> --force`.
+    pub args: Vec<String>,
+}
+
+/// Planned Worktree Remove: matching Project Workspaces to close + git request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRemovePlan<Id: Clone> {
+    /// Every open Project Workspace whose root matches the Worktree path (incl. active).
+    pub workspace_ids_to_close: Vec<Id>,
+    /// Streamed remove command request.
+    pub request: WorktreeRemoveRequest,
+}
+
+/// Plans Worktree Remove from a snapshotted path and open Project Workspace roots.
+///
+/// Missing path (create affordance / empty selection) → [`None`] (silent no-op).
+/// Mark List is not part of the plan.
+pub fn plan_worktree_remove<Id: Clone>(
+    selected_path: Option<&Path>,
+    open_project_workspaces: &[(Id, impl AsRef<Path>)],
+) -> Option<WorktreeRemovePlan<Id>> {
+    let path = selected_path?;
+    let workspace_ids_to_close = open_project_workspaces
+        .iter()
+        .filter(|(_, root)| project_roots_equal(root.as_ref(), path))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let path_display = path.display().to_string();
+    Some(WorktreeRemovePlan {
+        workspace_ids_to_close,
+        request: WorktreeRemoveRequest {
+            path: normalize_project_root_path(path),
+            args: vec![
+                "worktree".to_owned(),
+                "remove".to_owned(),
+                path_display,
+                "--force".to_owned(),
+            ],
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +416,59 @@ mod tests {
         assert_eq!(
             marked_workspace_jump(Path::new(r"P:\open-a"), &open, true),
             MarkedWorkspaceJump::Switch
+        );
+    }
+
+    #[test]
+    fn worktree_remove_missing_path_is_noop() {
+        let open = [("ws-a", PathBuf::from(r"P:\repo\feature"))];
+        assert!(plan_worktree_remove::<&str>(None, &open).is_none());
+    }
+
+    #[test]
+    fn worktree_remove_plans_matching_workspaces_and_force_remove_args() {
+        let path = Path::new(r"P:\repo\feature");
+        let open = [
+            ("ws-main", PathBuf::from(r"P:\repo\main")),
+            ("ws-feature", PathBuf::from(r"P:\repo\feature")),
+            ("ws-feature-dup", PathBuf::from(r"\\?\P:\repo\feature")),
+            ("ws-other", PathBuf::from(r"P:\other")),
+        ];
+
+        let plan = plan_worktree_remove(Some(path), &open).expect("path present");
+
+        assert_eq!(
+            plan.workspace_ids_to_close,
+            vec!["ws-feature", "ws-feature-dup"]
+        );
+        assert_eq!(plan.request.path, PathBuf::from(r"P:\repo\feature"));
+        assert_eq!(
+            plan.request.args,
+            vec![
+                "worktree".to_owned(),
+                "remove".to_owned(),
+                r"P:\repo\feature".to_owned(),
+                "--force".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn worktree_remove_with_no_matching_workspaces_still_plans_git_remove() {
+        let path = Path::new(r"P:\repo\stale");
+        let open = [("ws-main", PathBuf::from(r"P:\repo\main"))];
+
+        let plan = plan_worktree_remove(Some(path), &open).expect("path present");
+
+        assert!(plan.workspace_ids_to_close.is_empty());
+        assert_eq!(
+            plan.request.args,
+            vec![
+                "worktree".to_owned(),
+                "remove".to_owned(),
+                r"P:\repo\stale".to_owned(),
+                "--force".to_owned(),
+            ]
         );
     }
 }

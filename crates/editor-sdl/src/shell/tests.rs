@@ -15140,6 +15140,265 @@ fn workspace_dashboard_command_opens_fallback_picker_outside_git() -> Result<(),
     Ok(())
 }
 
+fn seed_worktree_remove_one_shot(runtime: &mut EditorRuntime, path: &Path) -> Result<(), String> {
+    let path_text = path.display().to_string();
+    shell_ui_mut(runtime)?.set_picker_one_shot(PickerOneShotContext::new(
+        Some(PickerSelectedRow::new(
+            path_text.clone(),
+            "worktree",
+            Some(path_text),
+        )),
+        Vec::new(),
+    ));
+    Ok(())
+}
+
+fn unique_sibling_path(anchor: &Path, label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    anchor.parent().unwrap_or(anchor).join(format!(
+        "volt-shell-tests-{label}-{}-{unique}",
+        std::process::id()
+    ))
+}
+
+fn add_linked_worktree(main: &Path, label: &str, branch: &str) -> Result<PathBuf, String> {
+    let worktree = unique_sibling_path(main, label);
+    run_git_in_dir(main, &["branch", "-q", branch])?;
+    let path_arg = worktree
+        .to_str()
+        .ok_or_else(|| format!("non-utf8 worktree path `{}`", worktree.display()))?;
+    run_git_in_dir(main, &["worktree", "add", "-q", path_arg, branch])?;
+    Ok(worktree)
+}
+
+fn wait_for_streamed_notification_title(
+    state: &mut ShellState,
+    needle: &str,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        refresh_pending_streamed_commands(&mut state.runtime)?;
+        let visible = shell_ui(&state.runtime)?.visible_notifications(Instant::now());
+        if visible.iter().any(|entry| entry.title.contains(needle)) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "notification title containing `{needle}` never appeared"
+    ))
+}
+
+#[test]
+fn worktree_remove_missing_one_shot_is_silent_noop() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let before = shell_ui(&state.runtime)?.notification_revision();
+
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    assert_eq!(shell_ui(&state.runtime)?.notification_revision(), before);
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_create_affordance_one_shot_is_silent_noop() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    shell_ui_mut(&mut state.runtime)?.set_picker_one_shot(PickerOneShotContext::new(
+        Some(PickerSelectedRow::new(
+            "git-worktree-dashboard:create",
+            "+ new worktree",
+            None::<&str>,
+        )),
+        Vec::new(),
+    ));
+    let before = shell_ui(&state.runtime)?.notification_revision();
+
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    assert_eq!(shell_ui(&state.runtime)?.notification_revision(), before);
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_closes_matching_workspaces_streams_and_closes_on_success() -> Result<(), String>
+{
+    let mut state = state_with_user_library()?;
+    let state_dir = unique_temp_dir("worktree-remove-success-marks");
+    let mark_list_path = state_dir.join(MARK_LIST_FILE_NAME);
+    install_mark_list_state_for_test(&mut state.runtime, mark_list_path.clone())?;
+
+    let main = init_git_repo_with_commit("worktree-remove-success-main")?;
+    let feature = add_linked_worktree(&main, "worktree-remove-success-feature", "feature-remove")?;
+    let main_ws = open_workspace_from_project(&mut state.runtime, "main", &main)?;
+    let feature_ws = open_workspace_from_project(&mut state.runtime, "feature", &feature)?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), feature_ws);
+
+    state
+        .runtime
+        .execute_command("workspace.mark")
+        .map_err(|error| error.to_string())?;
+    let marks_before =
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?;
+    assert!(!marks_before.trim().is_empty());
+
+    seed_worktree_remove_one_shot(&mut state.runtime, &feature)?;
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+
+    assert!(
+        find_workspace_by_root(&state.runtime, &feature)?.is_none(),
+        "matching Project Workspace should close before git starts"
+    );
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), main_ws);
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "streamed Worktree Remove popup was not opened".to_owned())?;
+    let buffer_id = popup.active_buffer;
+    assert!(shell_ui(&state.runtime)?.popup_focus);
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let contents = (0..buffer.line_count())
+        .map(|line_index| buffer.text.line(line_index).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        contents.contains("git worktree remove") && contents.contains("--force"),
+        "popup should show force remove command, got `{contents}`"
+    );
+    assert!(
+        contents.contains(&feature.display().to_string()),
+        "popup should include worktree path, got `{contents}`"
+    );
+
+    wait_for_streamed_notification_title(&mut state, "Worktree Remove succeeded")?;
+    wait_for_streamed_command_buffer_close(&mut state, buffer_id)?;
+    assert!(
+        !feature.exists(),
+        "worktree path should be removed from disk"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&mark_list_path).map_err(|error| error.to_string())?,
+        marks_before,
+        "Mark List must stay untouched"
+    );
+
+    let branch_list = run_git_in_dir(&main, &["branch", "--list", "feature-remove"])?;
+    assert!(
+        branch_list.contains("feature-remove"),
+        "Worktree Remove must not delete the branch"
+    );
+
+    let _ = std::fs::remove_dir_all(&main);
+    let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_failure_notifies_and_keeps_buffer_after_closing_workspaces() -> Result<(), String>
+{
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("worktree-remove-fail-main")?;
+    let main_ws = open_workspace_from_project(&mut state.runtime, "main", &main)?;
+    let default_workspace = shell_ui(&state.runtime)?.default_workspace();
+
+    seed_worktree_remove_one_shot(&mut state.runtime, &main)?;
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+
+    assert!(
+        find_workspace_by_root(&state.runtime, &main)?.is_none(),
+        "Project Workspace should stay closed after git failure"
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        default_workspace
+    );
+    assert_ne!(main_ws, default_workspace);
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "streamed Worktree Remove popup was not opened".to_owned())?;
+    let buffer_id = popup.active_buffer;
+    wait_for_streamed_notification_title(&mut state, "Worktree Remove failed")?;
+    assert!(
+        shell_ui(&state.runtime)?.buffer(buffer_id).is_some(),
+        "failure must keep the streamed popup buffer"
+    );
+    assert!(
+        !shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id),
+        "worker should finish even when buffer is kept"
+    );
+    assert!(main.exists(), "main worktree should remain on disk");
+
+    let _ = std::fs::remove_dir_all(&main);
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_second_invocation_opens_distinct_streamed_buffer() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("worktree-remove-concurrent-main")?;
+    let first = add_linked_worktree(&main, "worktree-remove-concurrent-a", "feature-a")?;
+    let second = add_linked_worktree(&main, "worktree-remove-concurrent-b", "feature-b")?;
+    open_workspace_from_project(&mut state.runtime, "main", &main)?;
+
+    seed_worktree_remove_one_shot(&mut state.runtime, &first)?;
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+    let first_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "first Worktree Remove popup missing".to_owned())?;
+    let first_buffer = first_popup.active_buffer;
+
+    seed_worktree_remove_one_shot(&mut state.runtime, &second)?;
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+    let second_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "second Worktree Remove popup missing".to_owned())?;
+    let second_buffer = second_popup.active_buffer;
+
+    assert_ne!(first_buffer, second_buffer);
+    assert!(
+        shell_ui(&state.runtime)?.buffer(first_buffer).is_some()
+            || shell_ui(&state.runtime)?
+                .streamed_command_worker
+                .contains(first_buffer),
+        "first remove buffer should still exist or still be tracked"
+    );
+    assert!(
+        shell_ui(&state.runtime)?.buffer(second_buffer).is_some()
+            || shell_ui(&state.runtime)?
+                .streamed_command_worker
+                .contains(second_buffer),
+        "second remove buffer should exist or be tracked"
+    );
+
+    wait_for_streamed_command_buffer_close(&mut state, first_buffer)?;
+    wait_for_streamed_command_buffer_close(&mut state, second_buffer)?;
+
+    let _ = std::fs::remove_dir_all(&main);
+    let _ = std::fs::remove_dir_all(&first);
+    let _ = std::fs::remove_dir_all(&second);
+    Ok(())
+}
+
 #[test]
 fn split_runtime_pane_switches_focus_to_the_new_pane() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;

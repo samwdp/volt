@@ -26,8 +26,9 @@ pub use sections::{
 };
 pub use services::ServiceRegistry;
 pub use workspace_nav::{
-    CycleDirection, MarkList, MarkedWorkspaceJump, cycle_project_workspace, marked_workspace_jump,
-    normalize_project_root_path, project_roots_equal,
+    CycleDirection, MarkList, MarkedWorkspaceJump, WorktreeRemovePlan, WorktreeRemoveRequest,
+    cycle_project_workspace, marked_workspace_jump, normalize_project_root_path,
+    plan_worktree_remove, project_roots_equal,
 };
 
 /// Describes the high-level runtime identity of the editor.

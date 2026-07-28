@@ -83,8 +83,8 @@ use editor_core::{
     KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
     MarkedWorkspaceJump, PaneId, PendingKeySequence, SectionAction, SectionCollapseState,
     SectionRenderLine, SectionRenderLineKind, WorkspaceId, builtins, cycle_project_workspace,
-    marked_workspace_jump, normalize_project_root_path, project_roots_equal, push_key_sequence,
-    tick_key_sequence,
+    marked_workspace_jump, normalize_project_root_path, plan_worktree_remove, project_roots_equal,
+    push_key_sequence, tick_key_sequence,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -261,6 +261,7 @@ const HOOK_WORKSPACE_MARKED_1: &str = "workspace.marked-1";
 const HOOK_WORKSPACE_MARKED_2: &str = "workspace.marked-2";
 const HOOK_WORKSPACE_MARKED_3: &str = "workspace.marked-3";
 const HOOK_WORKSPACE_MARKED_4: &str = "workspace.marked-4";
+const HOOK_WORKSPACE_WORKTREE_REMOVE: &str = "workspace.worktree-remove";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";
@@ -15773,6 +15774,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_WORKTREE_REMOVE,
+        "Force-removes the selected Worktree from disk after closing matching Project Workspaces.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -17187,6 +17193,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_WORKSPACE_MARKED_4,
             "shell.workspace-marked-4",
             |_, runtime| jump_to_marked_workspace_slot(runtime, 3),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_WORKTREE_REMOVE,
+            "shell.workspace-worktree-remove",
+            |_, runtime| worktree_remove_from_one_shot(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -30270,6 +30283,25 @@ fn open_project_workspace_ids(runtime: &EditorRuntime) -> Result<Vec<WorkspaceId
         .workspaces()
         .filter(|workspace| workspace.id() != default_workspace && workspace.root().is_some())
         .map(|workspace| workspace.id())
+        .collect())
+}
+
+fn open_project_workspaces_with_roots(
+    runtime: &EditorRuntime,
+) -> Result<Vec<(WorkspaceId, PathBuf)>, String> {
+    let default_workspace = shell_ui(runtime)?.default_workspace();
+    let window = runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?;
+    Ok(window
+        .workspaces()
+        .filter(|workspace| workspace.id() != default_workspace)
+        .filter_map(|workspace| {
+            workspace
+                .root()
+                .map(|root| (workspace.id(), root.to_path_buf()))
+        })
         .collect())
 }
 

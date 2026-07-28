@@ -2585,6 +2585,54 @@ pub(super) fn open_git_worktree_dashboard_create(
     begin_oil_worktree_request(runtime, buffer_id)
 }
 
+/// Force-removes a Worktree from disk using one-shot picker context.
+///
+/// Closes matching Project Workspaces first, then streams
+/// `git worktree remove <path> --force`. Missing path / create affordance → no-op.
+pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let Some(context) = shell_ui_mut(runtime)?.take_picker_one_shot() else {
+        return Ok(());
+    };
+    let selected_path = context
+        .selected()
+        .and_then(PickerSelectedRow::path)
+        .map(PathBuf::from);
+    let open = open_project_workspaces_with_roots(runtime)?;
+    let Some(plan) = plan_worktree_remove(selected_path.as_deref(), &open) else {
+        return Ok(());
+    };
+
+    for workspace_id in plan.workspace_ids_to_close {
+        delete_runtime_workspace(runtime, workspace_id)?;
+    }
+
+    let cwd = git_common_dir(&plan.request.path).unwrap_or_else(|_| {
+        plan.request
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| plan.request.path.clone())
+    });
+    let command_label = format!("git {}", plan.request.args.join(" "));
+    let buffer_name = format!("*{command_label}*");
+    open_streamed_command_popup(
+        runtime,
+        StreamedCommandSpec {
+            popup_title: "Worktree Remove".to_owned(),
+            buffer_name,
+            command_label,
+            program: "git".to_owned(),
+            args: plan.request.args,
+            env: Vec::new(),
+            cwd,
+            on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+            notify_on_success: true,
+            notify_on_failure: true,
+        },
+    )?;
+    Ok(())
+}
+
 fn worktree_dashboard_base_dir(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     if let Some(root) = active_directory_root(runtime)? {
         return git_common_dir(&root).or(Ok(root));
