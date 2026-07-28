@@ -30,6 +30,22 @@ _Avoid_: favorite, bookmark, pin, starred workspace
 A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, autocomplete, and hover are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
 _Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
 
+**Worktree**:
+A git worktree checkout path that can be opened as a Project Workspace root. Distinct from the open editor Workspace itself.
+_Avoid_: project (when meaning the checkout path), branch (when meaning the directory), workspace (when meaning the on-disk checkout)
+
+**Workspace Dashboard**:
+The picker that lists Worktrees for the active context so the user can open, create, or remove them. Opened by `workspace.dashboard` / `<leader> p d`.
+_Avoid_: project dashboard, worktree list (as the spoken product name)
+
+**Worktree Remove**:
+Force-removing a Worktree from disk (`git worktree remove <path> --force`), after first closing every open Project Workspace whose root is that path (including the active one). Does not change the Mark List, and does not delete the branch by itself.
+_Avoid_: delete workspace (when meaning disk remove), worktree delete (as the spoken product name)
+
+**Picker Extra Keybind**:
+A chord→command binding attached to one open picker instance (copied from its provider declaration), layered above the shared picker-plugin Popup bindings. Firing an extra always closes the picker after snapshotting the needed row/list context into the command invocation. Used for picker-specific actions such as Quickfix export or Worktree Remove.
+_Avoid_: popup keymap (when meaning per-picker extras), secondary action (as the spoken product name)
+
 ### Issues
 
 **Issue**:

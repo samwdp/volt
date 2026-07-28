@@ -2479,10 +2479,63 @@ pub(super) fn open_git_worktree_branch_picker(runtime: &mut EditorRuntime) -> Re
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GitWorktreeListEntry {
+    /// Exact `worktree` path from `git worktree list --porcelain` (Git identity).
+    raw_path: String,
+    /// Normalized filesystem path for workspace / picker use.
     path: PathBuf,
     branch: Option<String>,
     head: Option<String>,
     bare: bool,
+    /// `prunable` in porcelain — checkout/admin already broken; `remove` cannot succeed.
+    prunable: bool,
+}
+
+/// Git invocation for Worktree Remove after resolving the registered worktree entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WorktreeRemoveGitInvocation {
+    /// `git worktree remove <raw_path> --force` using the porcelain path spelling.
+    Remove { cli_path: String },
+    /// `git worktree prune -v` when the entry is already prunable.
+    Prune,
+}
+
+/// Picks remove vs prune and the CLI path Git will recognize.
+///
+/// Git for Windows may register worktrees as `/w/...` while Volt normalizes to `W:\...`.
+/// `git worktree remove` matches the registered spelling, so args must use [`GitWorktreeListEntry::raw_path`].
+pub(super) fn worktree_remove_git_invocation_for_entries(
+    entries: &[GitWorktreeListEntry],
+    selected: &Path,
+) -> WorktreeRemoveGitInvocation {
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| !entry.bare && project_roots_equal(&entry.path, selected))
+    else {
+        return WorktreeRemoveGitInvocation::Remove {
+            cli_path: selected.display().to_string(),
+        };
+    };
+    if entry.prunable {
+        WorktreeRemoveGitInvocation::Prune
+    } else {
+        WorktreeRemoveGitInvocation::Remove {
+            cli_path: entry.raw_path.clone(),
+        }
+    }
+}
+
+pub(super) fn worktree_remove_git_args(invocation: &WorktreeRemoveGitInvocation) -> Vec<String> {
+    match invocation {
+        WorktreeRemoveGitInvocation::Remove { cli_path } => vec![
+            "worktree".to_owned(),
+            "remove".to_owned(),
+            cli_path.clone(),
+            "--force".to_owned(),
+        ],
+        WorktreeRemoveGitInvocation::Prune => {
+            vec!["worktree".to_owned(), "prune".to_owned(), "-v".to_owned()]
+        }
+    }
 }
 
 impl GitWorktreeListEntry {
@@ -2606,14 +2659,20 @@ pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Resu
         delete_runtime_workspace(runtime, workspace_id)?;
     }
 
-    let cwd = git_common_dir(&plan.request.path).unwrap_or_else(|_| {
-        plan.request
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| plan.request.path.clone())
-    });
-    let command_label = format!("git {}", plan.request.args.join(" "));
+    let cwd = worktree_remove_repo_cwd(runtime, &plan.request.path)?;
+    let entries = git_worktree_list(&cwd)?;
+    let invocation = worktree_remove_git_invocation_for_entries(&entries, &plan.request.path);
+    if matches!(invocation, WorktreeRemoveGitInvocation::Prune)
+        && plan.request.path.exists()
+        && let Err(error) = std::fs::remove_dir_all(&plan.request.path)
+    {
+        return Err(format!(
+            "failed to delete leftover worktree `{}`: {error}",
+            plan.request.path.display()
+        ));
+    }
+    let args = worktree_remove_git_args(&invocation);
+    let command_label = format!("git {}", args.join(" "));
     let buffer_name = format!("*{command_label}*");
     open_streamed_command_popup(
         runtime,
@@ -2622,7 +2681,7 @@ pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Resu
             buffer_name,
             command_label,
             program: "git".to_owned(),
-            args: plan.request.args,
+            args,
             env: Vec::new(),
             cwd,
             on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
@@ -2645,6 +2704,37 @@ fn worktree_dashboard_base_dir(runtime: &EditorRuntime) -> Result<PathBuf, Strin
         });
     }
     env::current_dir().map_err(|error| format!("workspace dashboard requires a root: {error}"))
+}
+
+/// Resolves a git cwd that can list/remove worktrees for `selected`.
+///
+/// Broken/prunable checkouts may lack `.git`, so fall back to open Project
+/// Workspace roots and parent directories before giving up.
+fn worktree_remove_repo_cwd(runtime: &EditorRuntime, selected: &Path) -> Result<PathBuf, String> {
+    if let Ok(cwd) = git_common_dir(selected) {
+        return Ok(cwd);
+    }
+
+    for (_, root) in open_project_workspaces_with_roots(runtime)? {
+        if let Ok(cwd) = git_common_dir(&root) {
+            return Ok(cwd);
+        }
+    }
+
+    let mut cursor = selected.parent();
+    while let Some(dir) = cursor {
+        if let Ok(cwd) = git_common_dir(dir) {
+            return Ok(cwd);
+        }
+        cursor = dir.parent();
+    }
+
+    selected.parent().map(Path::to_path_buf).ok_or_else(|| {
+        format!(
+            "cannot resolve git repository for worktree `{}`",
+            selected.display()
+        )
+    })
 }
 
 fn git_common_dir(root: &Path) -> Result<PathBuf, String> {
@@ -2682,7 +2772,7 @@ fn git_worktree_list(root: &Path) -> Result<Vec<GitWorktreeListEntry>, String> {
     )?)
 }
 
-fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, String> {
+pub(super) fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, String> {
     let mut entries = Vec::new();
     let mut current: Option<GitWorktreeListEntry> = None;
     for line in output.lines() {
@@ -2698,10 +2788,12 @@ fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, St
                 entries.push(entry);
             }
             current = Some(GitWorktreeListEntry {
+                raw_path: path.to_owned(),
                 path: normalize_git_output_path(path),
                 branch: None,
                 head: None,
                 bare: false,
+                prunable: false,
             });
         } else if let Some(entry) = current.as_mut() {
             if let Some(branch) = line.strip_prefix("branch ") {
@@ -2710,6 +2802,8 @@ fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeListEntry>, St
                 entry.head = Some(head.to_owned());
             } else if line == "bare" {
                 entry.bare = true;
+            } else if line.starts_with("prunable") {
+                entry.prunable = true;
             }
         } else {
             return Err(format!(

@@ -10729,7 +10729,6 @@ impl ShellState {
             Event::KeyDown {
                 keycode: Some(keycode),
                 keymod,
-                repeat: _,
                 ..
             } => {
                 let runtime_surface_before =

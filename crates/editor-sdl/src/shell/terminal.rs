@@ -620,7 +620,7 @@ pub(super) fn render_terminal_buffer(
             .and_then(|line| line.chars().nth(col))
             .map(|character| character.to_string())
             .unwrap_or_else(|| " ".to_owned());
-        Some(editor_terminal::TerminalCursorSnapshot::new(
+        (row < layout.visible_rows).then_some(editor_terminal::TerminalCursorSnapshot::new(
             row.min(layout.visible_rows.saturating_sub(1)) as u16,
             col.min(terminal_render.cols() as usize) as u16,
             1,
@@ -634,7 +634,6 @@ pub(super) fn render_terminal_buffer(
             },
             text,
         ))
-        .filter(|_| row < layout.visible_rows)
     } else {
         None
     };

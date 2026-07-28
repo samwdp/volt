@@ -5391,7 +5391,7 @@ pub(super) fn alpha_bitmap_surface(
             let src = &bitmap[row * width..(row + 1) * width];
             let row_start = row * pitch;
             let dst = &mut pixels[row_start..row_start + width * 4];
-            for (alpha, rgba) in src.iter().zip(dst.chunks_exact_mut(4)) {
+            for (alpha, rgba) in src.iter().zip(dst.as_chunks_mut::<4>().0) {
                 let alpha = ((*alpha as u16 * color.a as u16) / 255) as u8;
                 rgba[0] = color.r;
                 rgba[1] = color.g;

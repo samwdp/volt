@@ -556,6 +556,67 @@ fn normalize_git_output_path_converts_git_for_windows_drive_roots() {
     assert_eq!(normalize_git_output_path(".git"), PathBuf::from(".git"));
 }
 
+#[cfg(windows)]
+#[test]
+fn worktree_remove_uses_porcelain_raw_path_not_normalized_windows_path() {
+    let entries = parse_git_worktree_list(
+        "\
+worktree /w/ftc-ui-web
+bare
+
+worktree /w/ftc-ui-web/map
+HEAD a3dcf8f90bfe54a1bffb3c505ec878c8566986fd
+branch refs/heads/feature/TASK-5645-mapchanges
+
+worktree W:\\ftc-ui-web/main
+HEAD 3811c5ec536197500efa15290940d47f3f55cff5
+branch refs/heads/origin-main
+",
+    )
+    .expect("porcelain parses");
+
+    let invocation =
+        worktree_remove_git_invocation_for_entries(&entries, Path::new(r"W:\ftc-ui-web\map"));
+    assert_eq!(
+        invocation,
+        WorktreeRemoveGitInvocation::Remove {
+            cli_path: "/w/ftc-ui-web/map".to_owned(),
+        },
+        "Git only recognizes the registered MSYS spelling"
+    );
+    assert_eq!(
+        worktree_remove_git_args(&invocation),
+        vec![
+            "worktree".to_owned(),
+            "remove".to_owned(),
+            "/w/ftc-ui-web/map".to_owned(),
+            "--force".to_owned(),
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn worktree_remove_prunes_when_porcelain_marks_entry_prunable() {
+    let entries = parse_git_worktree_list(
+        "\
+worktree /w/ftc-ui-web/map
+HEAD a3dcf8f90bfe54a1bffb3c505ec878c8566986fd
+branch refs/heads/feature/TASK-5645-mapchanges
+prunable gitdir file points to non-existent location
+",
+    )
+    .expect("porcelain parses");
+
+    let invocation =
+        worktree_remove_git_invocation_for_entries(&entries, Path::new(r"W:\ftc-ui-web\map"));
+    assert_eq!(invocation, WorktreeRemoveGitInvocation::Prune);
+    assert_eq!(
+        worktree_remove_git_args(&invocation),
+        vec!["worktree".to_owned(), "prune".to_owned(), "-v".to_owned()]
+    );
+}
+
 #[test]
 fn shell_state_uses_default_workspace_root() -> Result<(), String> {
     let state = ShellState::new().map_err(|error| error.to_string())?;
@@ -1418,7 +1479,7 @@ fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<
     surface.with_lock(|pixels| {
         for row in pixels.chunks(pitch).take(height) {
             let row_pixels = &row[..width.saturating_mul(4)];
-            for rgba in row_pixels.chunks_exact(4) {
+            for rgba in row_pixels.as_chunks::<4>().0 {
                 let alpha = rgba[3];
                 if alpha != 0 && alpha != u8::MAX {
                     partial_alpha_pixels += 1;
@@ -9943,7 +10004,7 @@ fn compose_emoji_surface_rasterizes_simple_emoji() -> Result<(), String> {
 
     let mut has_visible_alpha = false;
     surface.with_lock(|pixels| {
-        has_visible_alpha = pixels.chunks_exact(4).any(|rgba| rgba[3] != 0);
+        has_visible_alpha = pixels.as_chunks::<4>().0.iter().any(|rgba| rgba[3] != 0);
     });
     assert!(
         has_visible_alpha,
@@ -15276,8 +15337,12 @@ fn worktree_remove_closes_matching_workspaces_streams_and_closes_on_success() ->
         contents.contains("git worktree remove") && contents.contains("--force"),
         "popup should show force remove command, got `{contents}`"
     );
+    let feature_name = feature
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "feature worktree name".to_owned())?;
     assert!(
-        contents.contains(&feature.display().to_string()),
+        contents.contains(feature_name),
         "popup should include worktree path, got `{contents}`"
     );
 
@@ -15301,6 +15366,56 @@ fn worktree_remove_closes_matching_workspaces_streams_and_closes_on_success() ->
 
     let _ = std::fs::remove_dir_all(&main);
     let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_prunable_checkout_streams_prune_and_clears_registration() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("worktree-remove-prunable-main")?;
+    let feature = add_linked_worktree(&main, "worktree-remove-prunable-feature", "feature-prune")?;
+    let _main_ws = open_workspace_from_project(&mut state.runtime, "main", &main)?;
+    // Break the checkout so porcelain marks it prunable (matches stale `/w/...` trees).
+    std::fs::remove_file(feature.join(".git")).map_err(|error| error.to_string())?;
+
+    seed_worktree_remove_one_shot(&mut state.runtime, &feature)?;
+    state
+        .runtime
+        .execute_command("workspace.worktree-remove")
+        .map_err(|error| error.to_string())?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "streamed Worktree Remove popup was not opened".to_owned())?;
+    let buffer_id = popup.active_buffer;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let contents = (0..buffer.line_count())
+        .map(|line_index| buffer.text.line(line_index).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        contents.contains("git worktree prune"),
+        "prunable worktree should prune, got `{contents}`"
+    );
+
+    wait_for_streamed_notification_title(&mut state, "Worktree Remove succeeded")?;
+    wait_for_streamed_command_buffer_close(&mut state, buffer_id)?;
+    assert!(
+        !feature.exists(),
+        "leftover prunable checkout path should be deleted"
+    );
+    let list = run_git_in_dir(&main, &["worktree", "list", "--porcelain"])?;
+    assert!(
+        !list.contains("feature-prune")
+            && !list.contains(
+                feature
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("feature-prune")
+            ),
+        "pruned worktree must not remain registered, got `{list}`"
+    );
+
+    let _ = std::fs::remove_dir_all(&main);
     Ok(())
 }
 
@@ -16697,7 +16812,7 @@ fn picker_extra_keybind_snapshots_context_closes_and_runs_command() -> Result<()
             .get::<CommandLog>()
             .ok_or_else(|| "command log missing".to_owned())?
             .0,
-        vec![format!(r"P:\repo\feature|feature|P:\repo\feature")]
+        vec![r"P:\repo\feature|feature|P:\repo\feature".to_string()]
     );
     Ok(())
 }

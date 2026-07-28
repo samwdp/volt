@@ -802,10 +802,9 @@ pub fn parse_code_reference_line(
 
     let (marker, after_marker) = if let Some(after) = rest.strip_prefix("TODO") {
         (ReferenceMarker::Todo, after)
-    } else if let Some(after) = rest.strip_prefix("FIXME") {
-        (ReferenceMarker::Fixme, after)
     } else {
-        return None;
+        let after = rest.strip_prefix("FIXME")?;
+        (ReferenceMarker::Fixme, after)
     };
 
     let (issue_id, title) = if let Some(after_paren) = after_marker.strip_prefix('(') {
