@@ -87,7 +87,7 @@ non-obvious runtime caveats, not one-off setup steps.
 
 ### Issue tracker
 
-Issues live as local markdown under `.scratch/<feature>/` (PRDs + numbered issue files; triage via `Status:` lines). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `samwdp/volt` (via `gh`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
