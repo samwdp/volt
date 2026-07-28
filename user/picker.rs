@@ -198,7 +198,8 @@ pub fn providers() -> Vec<PickerProviderSpec> {
             "workspace.dashboard",
             "Worktrees",
             PickerSource::WorkspaceDashboard,
-        ),
+        )
+        .with_extra_keybind("Ctrl+d", "workspace.worktree-remove"),
         PickerProviderSpec::new(
             "workspace.switch",
             "Workspaces and Projects",
@@ -485,6 +486,17 @@ mod tests {
             .expect("workspace.search provider");
         assert!(provider.extra_keybinds().iter().any(|binding| {
             binding.chord() == "Ctrl+q" && binding.command_name() == "quickfix.open"
+        }));
+    }
+
+    #[test]
+    fn workspace_dashboard_provider_declares_ctrl_d_worktree_remove_extra() {
+        let provider = providers()
+            .into_iter()
+            .find(|provider| provider.id() == "workspace.dashboard")
+            .expect("workspace.dashboard provider");
+        assert!(provider.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+d" && binding.command_name() == "workspace.worktree-remove"
         }));
     }
 

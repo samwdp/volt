@@ -15399,6 +15399,248 @@ fn worktree_remove_second_invocation_opens_distinct_streamed_buffer() -> Result<
     Ok(())
 }
 
+fn open_workspace_dashboard(runtime: &mut EditorRuntime) -> Result<(), String> {
+    runtime
+        .execute_command("workspace.dashboard")
+        .map_err(|error| error.to_string())?;
+    shell_ui(runtime)?
+        .picker()
+        .ok_or_else(|| "workspace.dashboard did not open picker".to_owned())?;
+    Ok(())
+}
+
+fn select_dashboard_row_matching_path(
+    runtime: &mut EditorRuntime,
+    path: &Path,
+) -> Result<(), String> {
+    let picker = shell_ui_mut(runtime)?
+        .picker_mut()
+        .ok_or_else(|| "dashboard picker missing".to_owned())?;
+    let index = picker
+        .session
+        .matches()
+        .iter()
+        .position(|matched| project_roots_equal(Path::new(matched.item().id()), path))
+        .ok_or_else(|| format!("dashboard missing worktree row for `{}`", path.display()))?;
+    picker.session.set_selected_index(index);
+    Ok(())
+}
+
+fn select_dashboard_create_row(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let picker = shell_ui_mut(runtime)?
+        .picker_mut()
+        .ok_or_else(|| "dashboard picker missing".to_owned())?;
+    let index = picker
+        .session
+        .matches()
+        .iter()
+        .position(|matched| matched.item().id() == "git-worktree-dashboard:create")
+        .ok_or_else(|| "dashboard missing `+ new worktree` row".to_owned())?;
+    picker.session.set_selected_index(index);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_provider_extras_copy_ctrl_d_onto_instance() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("dashboard-ctrl-d-extra-main")?;
+    open_workspace_from_project(&mut state.runtime, "dashboard-ctrl-d-extra", &main)?;
+
+    let overlay = picker::picker_overlay(&state.runtime, "workspace.dashboard")?;
+    assert!(
+        overlay.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+d" && binding.command_name() == "workspace.worktree-remove"
+        }),
+        "workspace.dashboard provider extras should land on the open picker instance"
+    );
+
+    let _ = std::fs::remove_dir_all(&main);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_ctrl_d_on_worktree_runs_remove_ux() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("dashboard-ctrl-d-remove-main")?;
+    let feature = add_linked_worktree(
+        &main,
+        "dashboard-ctrl-d-remove-feature",
+        "feature-dash-remove",
+    )?;
+    let main_ws = open_workspace_from_project(&mut state.runtime, "main", &main)?;
+    let feature_ws = open_workspace_from_project(&mut state.runtime, "feature", &feature)?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), feature_ws);
+
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_row_matching_path(&mut state.runtime, &feature)?;
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled);
+    assert!(
+        shell_ui(&state.runtime)?.picker().is_none(),
+        "Ctrl+d should close the Workspace Dashboard picker"
+    );
+    assert!(
+        find_workspace_by_root(&state.runtime, &feature)?.is_none(),
+        "matching Project Workspace should close"
+    );
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), main_ws);
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "streamed Worktree Remove popup was not opened".to_owned())?;
+    let buffer_id = popup.active_buffer;
+    assert!(shell_ui(&state.runtime)?.popup_focus);
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let contents = (0..buffer.line_count())
+        .map(|line_index| buffer.text.line(line_index).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        contents.contains("git worktree remove") && contents.contains("--force"),
+        "popup should show force remove command, got `{contents}`"
+    );
+
+    wait_for_streamed_notification_title(&mut state, "Worktree Remove succeeded")?;
+    wait_for_streamed_command_buffer_close(&mut state, buffer_id)?;
+    assert!(
+        !feature.exists(),
+        "worktree path should be removed from disk"
+    );
+
+    let _ = std::fs::remove_dir_all(&main);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_ctrl_d_on_create_row_is_silent_noop() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("dashboard-ctrl-d-create-noop-main")?;
+    open_workspace_from_project(&mut state.runtime, "main", &main)?;
+
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_create_row(&mut state.runtime)?;
+    let before = shell_ui(&state.runtime)?.notification_revision();
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Ctrl+d extra should still fire and close picker");
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    assert_eq!(shell_ui(&state.runtime)?.notification_revision(), before);
+    assert!(main.exists(), "primary worktree must stay on disk");
+
+    let _ = std::fs::remove_dir_all(&main);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_ctrl_d_second_remove_while_first_runs() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("dashboard-ctrl-d-concurrent-main")?;
+    let first = add_linked_worktree(&main, "dashboard-ctrl-d-concurrent-a", "feature-a")?;
+    let second = add_linked_worktree(&main, "dashboard-ctrl-d-concurrent-b", "feature-b")?;
+    open_workspace_from_project(&mut state.runtime, "main", &main)?;
+
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_row_matching_path(&mut state.runtime, &first)?;
+    state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    let first_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "first Worktree Remove popup missing".to_owned())?;
+    let first_buffer = first_popup.active_buffer;
+
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_row_matching_path(&mut state.runtime, &second)?;
+    state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    let second_popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "second Worktree Remove popup missing".to_owned())?;
+    let second_buffer = second_popup.active_buffer;
+
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert_ne!(first_buffer, second_buffer);
+    assert!(
+        shell_ui(&state.runtime)?.buffer(first_buffer).is_some()
+            || shell_ui(&state.runtime)?
+                .streamed_command_worker
+                .contains(first_buffer),
+        "first remove buffer should still exist or still be tracked"
+    );
+
+    wait_for_streamed_command_buffer_close(&mut state, first_buffer)?;
+    wait_for_streamed_command_buffer_close(&mut state, second_buffer)?;
+
+    let _ = std::fs::remove_dir_all(&main);
+    let _ = std::fs::remove_dir_all(&first);
+    let _ = std::fs::remove_dir_all(&second);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_enter_still_switches_and_creates() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let main = init_git_repo_with_commit("dashboard-enter-unchanged-main")?;
+    let feature = add_linked_worktree(&main, "dashboard-enter-unchanged-feature", "feature-enter")?;
+    let main_ws = open_workspace_from_project(&mut state.runtime, "main", &main)?;
+    let feature_ws = open_workspace_from_project(&mut state.runtime, "feature", &feature)?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), feature_ws);
+
+    // Switch: Enter on an already-open Worktree row.
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_row_matching_path(&mut state.runtime, &main)?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), main_ws);
+
+    // Open/create: Enter on a Worktree that is not yet a Project Workspace.
+    let closed = add_linked_worktree(&main, "dashboard-enter-unchanged-closed", "feature-closed")?;
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_row_matching_path(&mut state.runtime, &closed)?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    let opened = find_workspace_by_root(&state.runtime, &closed)?
+        .ok_or_else(|| "Enter should open Project Workspace for worktree".to_owned())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), opened);
+
+    // Create affordance: Enter on `+ new worktree` still starts create flow.
+    open_workspace_dashboard(&mut state.runtime)?;
+    select_dashboard_create_row(&mut state.runtime)?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .directory_state()
+            .is_some(),
+        "`+ new worktree` Enter should open oil directory"
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?
+            .picker()
+            .map(|picker| picker.session.title().to_owned()),
+        Some("Git Worktree Branch".to_owned()),
+        "`+ new worktree` Enter should open the branch picker"
+    );
+
+    let _ = std::fs::remove_dir_all(&main);
+    let _ = std::fs::remove_dir_all(&feature);
+    let _ = std::fs::remove_dir_all(&closed);
+    Ok(())
+}
+
 #[test]
 fn split_runtime_pane_switches_focus_to_the_new_pane() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
