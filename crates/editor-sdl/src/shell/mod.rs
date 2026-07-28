@@ -102,7 +102,10 @@ use editor_lsp::{
     LspInlineCompletionItem, LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationAction,
     LspNotificationLevel, LspNotificationSnapshot, LspTextEdit, LspWorkspaceDiagnostic,
 };
-use editor_picker::{PickerItem, PickerResultOrder, PickerSession};
+use editor_picker::{
+    PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerItem, PickerOneShotContext,
+    PickerResultOrder, PickerSelectedRow, PickerSession, resolve_picker_extra,
+};
 use editor_plugin_api::{
     AcpActionSpec, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption,
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
@@ -8026,6 +8029,10 @@ impl QuickfixEntry {
             self.label
         )
     }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -8140,6 +8147,7 @@ pub(crate) struct PickerOverlay {
     session: PickerSession,
     actions: BTreeMap<String, PickerAction>,
     quickfix_entries: BTreeMap<String, QuickfixEntry>,
+    extra_keybinds: Vec<PickerExtraKeybind>,
     submit_action: Option<PickerAction>,
     show_preview: bool,
     preview_syntax_key: Option<String>,
@@ -8168,6 +8176,7 @@ impl PickerOverlay {
             session: PickerSession::new(title, items),
             actions,
             quickfix_entries,
+            extra_keybinds: Vec::new(),
             submit_action: None,
             show_preview: false,
             preview_syntax_key: None,
@@ -8175,6 +8184,15 @@ impl PickerOverlay {
             mode: PickerMode::Static,
             kind: PickerKind::Generic,
         }
+    }
+
+    fn with_extra_keybinds(mut self, extra_keybinds: Vec<PickerExtraKeybind>) -> Self {
+        self.extra_keybinds = extra_keybinds;
+        self
+    }
+
+    fn extra_keybinds(&self) -> &[PickerExtraKeybind] {
+        &self.extra_keybinds
     }
 
     fn with_result_order(mut self, result_order: PickerResultOrder) -> Self {
@@ -8212,6 +8230,7 @@ impl PickerOverlay {
                 .with_preserve_order(),
             actions,
             quickfix_entries,
+            extra_keybinds: Vec::new(),
             submit_action: Some(PickerAction::VimSearch(direction)),
             show_preview: false,
             preview_syntax_key: None,
@@ -8228,6 +8247,7 @@ impl PickerOverlay {
                 .with_preserve_order(),
             actions: BTreeMap::new(),
             quickfix_entries: BTreeMap::new(),
+            extra_keybinds: Vec::new(),
             submit_action: Some(PickerAction::NoOp),
             show_preview: true,
             preview_syntax_key: None,
@@ -8303,6 +8323,50 @@ impl PickerOverlay {
             .collect()
     }
 
+    fn selected_row_for_extra(&self) -> Option<PickerSelectedRow> {
+        self.session.selected().map(|matched| {
+            let item = matched.item();
+            let path = absolute_path_hint(item.id())
+                .or_else(|| item.preview().and_then(absolute_path_hint))
+                .map(str::to_owned);
+            PickerSelectedRow::new(item.id(), item.label(), path)
+        })
+    }
+
+    fn exportable_rows_for_extra(&self) -> Vec<PickerExportableRow> {
+        self.exportable_quickfix_entries()
+            .into_iter()
+            .map(|entry| {
+                PickerExportableRow::new(
+                    entry.id(),
+                    entry.path().display().to_string(),
+                    entry.target().line,
+                    entry.target().column,
+                    entry.label(),
+                )
+            })
+            .collect()
+    }
+
+    fn resolve_extra(&self, chord: &str) -> PickerExtraDispatch {
+        resolve_picker_extra(
+            self.extra_keybinds(),
+            chord,
+            self.selected_row_for_extra(),
+            self.exportable_rows_for_extra(),
+        )
+    }
+}
+
+fn absolute_path_hint(value: &str) -> Option<&str> {
+    if Path::new(value).is_absolute() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+impl PickerOverlay {
     fn set_entries(&mut self, entries: Vec<PickerEntry>, selected_index: usize) {
         let mut actions = BTreeMap::new();
         let mut quickfix_entries = BTreeMap::new();
@@ -8441,6 +8505,7 @@ pub(crate) struct ShellUiState {
     pending_key_sequence: Option<KeySequenceState>,
     attached_lsp_servers: BTreeMap<WorkspaceId, String>,
     picker: Option<PickerOverlay>,
+    picker_one_shot: Option<PickerOneShotContext>,
     command_line: Option<CommandLineOverlay>,
     autocomplete: Option<AutocompleteOverlay>,
     hover: Option<HoverOverlay>,
@@ -8504,6 +8569,7 @@ impl ShellUiState {
             pending_key_sequence: None,
             attached_lsp_servers: BTreeMap::new(),
             picker: None,
+            picker_one_shot: None,
             command_line: None,
             autocomplete: None,
             hover: None,
@@ -9111,6 +9177,7 @@ impl ShellUiState {
         self.close_hover();
         self.vim_search_worker.clear_pending();
         self.workspace_search_worker.clear_pending();
+        self.picker_one_shot = None;
         self.picker = Some(picker);
     }
 
@@ -9118,6 +9185,15 @@ impl ShellUiState {
         self.vim_search_worker.clear_pending();
         self.workspace_search_worker.clear_pending();
         self.picker = None;
+    }
+
+    fn set_picker_one_shot(&mut self, context: PickerOneShotContext) {
+        self.picker_one_shot = Some(context);
+    }
+
+    /// Takes the one-shot picker context left by a Picker Extra Keybind fire.
+    pub(crate) fn take_picker_one_shot(&mut self) -> Option<PickerOneShotContext> {
+        self.picker_one_shot.take()
     }
 
     fn command_line(&self) -> Option<&CommandLineOverlay> {
@@ -11913,6 +11989,9 @@ impl ShellState {
         let runtime_surface_before =
             active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
         let overlay_modes = self.overlay_minor_modes()?;
+        if self.ui()?.picker_visible() && self.try_picker_extra_keybinding(chord)? {
+            return Ok(());
+        }
         if self
             .runtime
             .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
@@ -13350,6 +13429,13 @@ impl ShellState {
         }
 
         let overlay_modes = self.overlay_minor_modes()?;
+        if picker_visible && self.try_picker_extra_keybinding(&chord)? {
+            self.queue_suppressed_text_input_for_chord(&chord);
+            self.record_vim_input(VimRecordedInput::Chord(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+
         if self
             .runtime
             .execute_key_binding_in_scopes(&overlay_modes, vim_mode, &chord)
@@ -13381,6 +13467,35 @@ impl ShellState {
         }
 
         Ok(false)
+    }
+
+    fn try_picker_extra_keybinding(&mut self, chord: &str) -> Result<bool, ShellError> {
+        let dispatch = {
+            let ui = self.ui()?;
+            let Some(picker) = ui.picker() else {
+                return Ok(false);
+            };
+            picker.resolve_extra(chord)
+        };
+        let PickerExtraDispatch::Fire {
+            command_name,
+            context,
+            close_picker: _,
+        } = dispatch
+        else {
+            return Ok(false);
+        };
+        {
+            let ui = self.ui_mut()?;
+            ui.set_picker_one_shot(context);
+            ui.close_picker();
+        }
+        self.runtime
+            .execute_command(&command_name)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        // Handlers should take the context; clear any leftover so it never sticks.
+        let _ = self.ui_mut()?.take_picker_one_shot();
+        Ok(true)
     }
 
     fn try_plugin_buffer_keybinding(

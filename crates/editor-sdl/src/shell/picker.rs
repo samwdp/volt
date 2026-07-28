@@ -1,5 +1,16 @@
 use super::*;
 
+fn provider_extra_keybinds(spec: &PickerProviderSpec) -> Vec<PickerExtraKeybind> {
+    spec.extra_keybinds()
+        .iter()
+        .map(|binding| PickerExtraKeybind::new(binding.chord(), binding.command_name()))
+        .collect()
+}
+
+fn with_provider_extras(overlay: PickerOverlay, spec: &PickerProviderSpec) -> PickerOverlay {
+    overlay.with_extra_keybinds(provider_extra_keybinds(spec))
+}
+
 pub(super) fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(), String> {
     let bindings = [
         ("F3", "picker.open-commands"),
@@ -46,12 +57,15 @@ fn picker_overlay_from_spec(
 ) -> Result<PickerOverlay, String> {
     if spec.source() == PickerSource::WorkspaceSearch {
         return workspace_search_picker_overlay(runtime)
-            .map(|overlay| overlay.with_title(spec.title()));
+            .map(|overlay| with_provider_extras(overlay.with_title(spec.title()), spec));
     }
     if spec.source() == PickerSource::WorkspaceDashboard {
-        return Ok(git_worktree_dashboard_picker_overlay(runtime)
-            .unwrap_or_else(workspace_dashboard_unavailable_overlay)
-            .with_title(spec.title()));
+        return Ok(with_provider_extras(
+            git_worktree_dashboard_picker_overlay(runtime)
+                .unwrap_or_else(workspace_dashboard_unavailable_overlay)
+                .with_title(spec.title()),
+            spec,
+        ));
     }
 
     let context = picker_provider_context(runtime, spec)?;
@@ -99,7 +113,7 @@ fn user_picker_overlay(
             overlay.session.set_selected_index(selected_index);
         }
     }
-    Ok(overlay)
+    Ok(with_provider_extras(overlay, spec))
 }
 
 fn workspace_dashboard_unavailable_overlay(error: String) -> PickerOverlay {
@@ -957,6 +971,36 @@ mod tests {
 
         assert_eq!(picker.session().item_count(), 80);
         assert_eq!(picker.session().match_count(), 80);
+        Ok(())
+    }
+
+    #[test]
+    fn provider_extra_keybinds_copy_onto_open_picker_instance() -> Result<(), String> {
+        let provider = PickerProviderSpec::static_items(
+            "tools",
+            "Tools",
+            vec![PickerItemSpec::new(
+                "open-commands",
+                "Command palette",
+                "Open command picker",
+                PickerActionSpec::execute_command("picker.open-commands"),
+            )],
+        )
+        .with_extra_keybind("Ctrl+d", "workspace.worktree-remove");
+
+        let mut runtime = EditorRuntime::new();
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::new(NullUserLibrary)));
+        let context = picker_provider_context(&runtime, &provider)?;
+        let picker = user_picker_overlay(&runtime, &provider, context)?;
+
+        assert_eq!(picker.extra_keybinds().len(), 1);
+        assert_eq!(picker.extra_keybinds()[0].chord(), "Ctrl+d");
+        assert_eq!(
+            picker.extra_keybinds()[0].command_name(),
+            "workspace.worktree-remove"
+        );
         Ok(())
     }
 

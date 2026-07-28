@@ -16061,6 +16061,118 @@ fn ctrl_q_with_non_quickfix_picker_does_not_quit() -> Result<(), String> {
 }
 
 #[test]
+fn picker_extra_keybind_snapshots_context_closes_and_runs_command() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    state.runtime.services_mut().insert(CommandLog::default());
+    state
+        .runtime
+        .register_command(
+            "tests.picker-extra",
+            "Consumes picker one-shot context",
+            CommandSource::Core,
+            |runtime| {
+                let context = shell_ui_mut(runtime)?
+                    .take_picker_one_shot()
+                    .ok_or_else(|| "picker one-shot missing".to_owned())?;
+                let selected = context
+                    .selected()
+                    .ok_or_else(|| "selected row missing".to_owned())?;
+                let log = runtime
+                    .services_mut()
+                    .get_mut::<CommandLog>()
+                    .ok_or_else(|| "command log missing".to_owned())?;
+                log.0.push(format!(
+                    "{}|{}|{}",
+                    selected.id(),
+                    selected.label(),
+                    selected.path().unwrap_or("")
+                ));
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    shell_ui_mut(&mut state.runtime)?.set_picker(
+        PickerOverlay::from_entries(
+            "Worktrees",
+            vec![PickerEntry {
+                item: PickerItem::new(
+                    r"P:\repo\feature",
+                    "feature",
+                    "branch",
+                    Some(r"P:\repo\feature"),
+                ),
+                action: PickerAction::NoOp,
+                quickfix: None,
+            }],
+        )
+        .with_extra_keybinds(vec![PickerExtraKeybind::new(
+            "Ctrl+d",
+            "tests.picker-extra",
+        )]),
+    );
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled);
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert!(
+        shell_ui_mut(&mut state.runtime)?
+            .take_picker_one_shot()
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .runtime
+            .services()
+            .get::<CommandLog>()
+            .ok_or_else(|| "command log missing".to_owned())?
+            .0,
+        vec![format!(r"P:\repo\feature|feature|P:\repo\feature")]
+    );
+    Ok(())
+}
+
+#[test]
+fn picker_extra_keybind_falls_through_for_shared_popup_navigation() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    shell_ui_mut(&mut state.runtime)?.set_picker(
+        PickerOverlay::from_entries(
+            "Buffers",
+            vec![
+                PickerEntry {
+                    item: PickerItem::new("a", "alpha", "scratch", None::<&str>),
+                    action: PickerAction::NoOp,
+                    quickfix: None,
+                },
+                PickerEntry {
+                    item: PickerItem::new("b", "beta", "scratch", None::<&str>),
+                    action: PickerAction::NoOp,
+                    quickfix: None,
+                },
+            ],
+        )
+        .with_extra_keybinds(vec![PickerExtraKeybind::new(
+            "Ctrl+d",
+            "tests.picker-extra",
+        )]),
+    );
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::N, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled);
+    assert!(shell_ui(&state.runtime)?.picker().is_some());
+    let selected = shell_ui(&state.runtime)?
+        .picker()
+        .and_then(|picker| picker.session().selected())
+        .map(|matched| matched.item().id().to_owned());
+    assert_eq!(selected.as_deref(), Some("b"));
+    Ok(())
+}
+
+#[test]
 #[ignore = "enable once quickfix picker export command lands"]
 fn quickfix_picker_export_opens_popup_and_renders_workspace_search_results() -> Result<(), String> {
     let (state, root, first, second) =

@@ -652,6 +652,34 @@ pub enum PickerTruncateStrategy {
     Auto,
 }
 
+/// One picker-instance extra keybind (chord → command) declared on a provider.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PickerExtraKeybindSpec {
+    chord: RString,
+    command_name: RString,
+}
+
+impl PickerExtraKeybindSpec {
+    /// Creates a provider extra keybind.
+    pub fn new(chord: impl Into<RString>, command_name: impl Into<RString>) -> Self {
+        Self {
+            chord: chord.into(),
+            command_name: command_name.into(),
+        }
+    }
+
+    /// Returns the chord string (for example `Ctrl+d`).
+    pub fn chord(&self) -> &str {
+        self.chord.as_str()
+    }
+
+    /// Returns the bound command name.
+    pub fn command_name(&self) -> &str {
+        self.command_name.as_str()
+    }
+}
+
 /// Declares a picker provider that can be opened with `ui.picker.open`.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
@@ -660,6 +688,7 @@ pub struct PickerProviderSpec {
     title: RString,
     source: PickerSource,
     items: RVec<PickerItemSpec>,
+    extra_keybinds: RVec<PickerExtraKeybindSpec>,
 }
 
 impl PickerProviderSpec {
@@ -669,6 +698,7 @@ impl PickerProviderSpec {
             title: title.into(),
             source,
             items: RVec::new(),
+            extra_keybinds: RVec::new(),
         }
     }
 
@@ -682,11 +712,29 @@ impl PickerProviderSpec {
             title: title.into(),
             source: PickerSource::Static,
             items: items.into(),
+            extra_keybinds: RVec::new(),
         }
     }
 
     pub fn user(id: impl Into<RString>, title: impl Into<RString>) -> Self {
         Self::new(id, title, PickerSource::User)
+    }
+
+    /// Attaches extra chord→command bindings copied onto the open picker instance.
+    pub fn with_extra_keybinds(mut self, keybinds: Vec<PickerExtraKeybindSpec>) -> Self {
+        self.extra_keybinds = keybinds.into();
+        self
+    }
+
+    /// Appends one extra chord→command binding.
+    pub fn with_extra_keybind(
+        mut self,
+        chord: impl Into<RString>,
+        command_name: impl Into<RString>,
+    ) -> Self {
+        self.extra_keybinds
+            .push(PickerExtraKeybindSpec::new(chord, command_name));
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -703,6 +751,11 @@ impl PickerProviderSpec {
 
     pub fn items(&self) -> &[PickerItemSpec] {
         self.items.as_slice()
+    }
+
+    /// Returns provider-declared extras copied onto each open instance.
+    pub fn extra_keybinds(&self) -> &[PickerExtraKeybindSpec] {
+        self.extra_keybinds.as_slice()
     }
 }
 
@@ -2986,11 +3039,39 @@ impl PluginPackage {
 #[cfg(test)]
 mod tests {
     use super::{
-        OilKeyAction, PluginAction, PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate,
-        PluginBufferSections, PluginCommand, PluginHookBinding, PluginHookDeclaration,
-        PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, VimActionContext,
-        VimActionSpec, VimEditAction,
+        OilKeyAction, PickerExtraKeybindSpec, PickerProviderSpec, PickerSource, PluginAction,
+        PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate, PluginBufferSections,
+        PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginKeyBinding,
+        PluginKeymapScope, PluginPackage, PluginVimMode, VimActionContext, VimActionSpec,
+        VimEditAction,
     };
+
+    #[test]
+    fn picker_provider_spec_accepts_extra_keybinds() {
+        let provider = PickerProviderSpec::new(
+            "workspace.dashboard",
+            "Worktrees",
+            PickerSource::WorkspaceDashboard,
+        )
+        .with_extra_keybind("Ctrl+d", "workspace.worktree-remove")
+        .with_extra_keybind("Ctrl+q", "quickfix.open");
+
+        assert_eq!(provider.extra_keybinds().len(), 2);
+        assert_eq!(provider.extra_keybinds()[0].chord(), "Ctrl+d");
+        assert_eq!(
+            provider.extra_keybinds()[0].command_name(),
+            "workspace.worktree-remove"
+        );
+        assert_eq!(provider.extra_keybinds()[1].chord(), "Ctrl+q");
+        assert_eq!(provider.extra_keybinds()[1].command_name(), "quickfix.open");
+
+        let replaced = provider.with_extra_keybinds(vec![PickerExtraKeybindSpec::new(
+            "Ctrl+x",
+            "scratch.command",
+        )]);
+        assert_eq!(replaced.extra_keybinds().len(), 1);
+        assert_eq!(replaced.extra_keybinds()[0].chord(), "Ctrl+x");
+    }
 
     #[test]
     fn plugin_package_constructor_preserves_metadata_and_registrations() {

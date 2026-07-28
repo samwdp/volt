@@ -1,5 +1,12 @@
 #![doc = r#"Generic fuzzy list providers, picker state, and preview surfaces."#]
 
+mod extra_dispatch;
+
+pub use extra_dispatch::{
+    PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerOneShotContext,
+    PickerSelectedRow, resolve_picker_extra,
+};
+
 use std::cmp::Reverse;
 
 /// Human-readable summary of this crate's responsibility.
