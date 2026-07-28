@@ -8894,7 +8894,7 @@ fn render_plugin_sections_draw_visual_selection_highlight() -> Result<(), String
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+        DrawCommand::FillRoundedRect { color, .. } if *color == to_render_color(selection_color)
     )));
     Ok(())
 }
@@ -9289,6 +9289,7 @@ fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     buffer.init_acp_view("GitHub Copilot");
     buffer.acp_push_system_message("alpha beta");
+    buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
 
     let rect = PixelRectToRect::rect(0, 0, 640, 360);
     let layout = buffer_footer_layout(buffer, rect, 16, 8);
@@ -9324,7 +9325,7 @@ fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+        DrawCommand::FillRoundedRect { color, .. } if *color == to_render_color(selection_color)
     )));
     Ok(())
 }
@@ -15461,7 +15462,7 @@ fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), Strin
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { color, .. } if *color == to_render_color(selection_color)
+        DrawCommand::FillRoundedRect { color, .. } if *color == to_render_color(selection_color)
     )));
     Ok(())
 }

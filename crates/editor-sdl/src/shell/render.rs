@@ -2298,14 +2298,13 @@ fn render_buffer_with_view_state(
                             .char_map
                             .display_cols_between(segment.start_col, start);
                         let width_display = wrapped.char_map.display_cols_between(start, end);
-                        fill_rect(
+                        fill_selection_highlight(
                             target,
-                            PixelRectToRect::rect(
-                                segment_x + (start_display as i32 * cell_width),
-                                y,
-                                (width_display as i32 * cell_width) as u32,
-                                line_height.max(1) as u32,
-                            ),
+                            segment_x + (start_display as i32 * cell_width),
+                            y,
+                            (width_display as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                            cursor_roundness,
                             selection,
                         )?;
                     }
@@ -2318,14 +2317,13 @@ fn render_buffer_with_view_state(
                             .char_map
                             .display_cols_between(segment.start_col, start);
                         let width_display = wrapped.char_map.display_cols_between(start, end);
-                        fill_rect(
+                        fill_selection_highlight(
                             target,
-                            PixelRectToRect::rect(
-                                segment_x + (start_display as i32 * cell_width),
-                                y,
-                                (width_display as i32 * cell_width) as u32,
-                                line_height.max(1) as u32,
-                            ),
+                            segment_x + (start_display as i32 * cell_width),
+                            y,
+                            (width_display as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                            cursor_roundness,
                             blend_color(selection, cursor, 0.25),
                         )?;
                     }
@@ -2338,14 +2336,13 @@ fn render_buffer_with_view_state(
                             .char_map
                             .display_cols_between(segment.start_col, start);
                         let width_display = wrapped.char_map.display_cols_between(start, end);
-                        fill_rect(
+                        fill_selection_highlight(
                             target,
-                            PixelRectToRect::rect(
-                                segment_x + (start_display as i32 * cell_width),
-                                y,
-                                (width_display as i32 * cell_width) as u32,
-                                line_height.max(1) as u32,
-                            ),
+                            segment_x + (start_display as i32 * cell_width),
+                            y,
+                            (width_display as i32 * cell_width) as u32,
+                            line_height.max(1) as u32,
+                            cursor_roundness,
                             yank_flash_color,
                         )?;
                     }
@@ -2577,14 +2574,13 @@ fn render_buffer_with_view_state(
             for (row, start_col, end_col) in
                 input.selection_visual_ranges(VisualSelectionKind::Character, available_input_cols)
             {
-                fill_rect(
+                fill_selection_highlight(
                     target,
-                    PixelRectToRect::rect(
-                        input_x + ((prompt_len + start_col) as i32 * cell_width),
-                        layout.input_y + row as i32 * line_height,
-                        ((end_col.saturating_sub(start_col)) as i32 * cell_width.max(1)) as u32,
-                        line_height.max(1) as u32,
-                    ),
+                    input_x + ((prompt_len + start_col) as i32 * cell_width),
+                    layout.input_y + row as i32 * line_height,
+                    ((end_col.saturating_sub(start_col)) as i32 * cell_width.max(1)) as u32,
+                    line_height.max(1) as u32,
+                    cursor_roundness,
                     selection,
                 )?;
             }
@@ -3246,14 +3242,13 @@ pub(super) fn render_text_panel(
                 if start < end {
                     let start_display = char_map.display_cols_between(segment.start_col, start);
                     let width_display = char_map.display_cols_between(start, end);
-                    fill_rect(
+                    fill_selection_highlight(
                         target,
-                        PixelRectToRect::rect(
-                            body_x + (start_display as i32 * cell_width),
-                            y,
-                            (width_display as i32 * cell_width) as u32,
-                            line_height.max(1) as u32,
-                        ),
+                        body_x + (start_display as i32 * cell_width),
+                        y,
+                        (width_display as i32 * cell_width) as u32,
+                        line_height.max(1) as u32,
+                        cursor_roundness,
                         selection,
                     )?;
                 }
@@ -3264,14 +3259,13 @@ pub(super) fn render_text_panel(
                 if start < end {
                     let start_display = char_map.display_cols_between(segment.start_col, start);
                     let width_display = char_map.display_cols_between(start, end);
-                    fill_rect(
+                    fill_selection_highlight(
                         target,
-                        PixelRectToRect::rect(
-                            body_x + (start_display as i32 * cell_width),
-                            y,
-                            (width_display as i32 * cell_width) as u32,
-                            line_height.max(1) as u32,
-                        ),
+                        body_x + (start_display as i32 * cell_width),
+                        y,
+                        (width_display as i32 * cell_width) as u32,
+                        line_height.max(1) as u32,
+                        cursor_roundness,
                         yank_flash_color,
                     )?;
                 }
@@ -3373,14 +3367,13 @@ pub(super) fn render_input_panel(
         for (row, start_col, end_col) in
             input.selection_visual_ranges(VisualSelectionKind::Character, available_input_cols)
         {
-            fill_rect(
+            fill_selection_highlight(
                 target,
-                PixelRectToRect::rect(
-                    input_x + ((prompt_len + start_col) as i32 * cell_width),
-                    input_y + row as i32 * line_height,
-                    ((end_col.saturating_sub(start_col)) as i32 * cell_width.max(1)) as u32,
-                    line_height.max(1) as u32,
-                ),
+                input_x + ((prompt_len + start_col) as i32 * cell_width),
+                input_y + row as i32 * line_height,
+                ((end_col.saturating_sub(start_col)) as i32 * cell_width.max(1)) as u32,
+                line_height.max(1) as u32,
+                cursor_roundness,
                 selection,
             )?;
         }
@@ -3863,16 +3856,14 @@ pub(super) fn render_acp_pane(
                         let start = selection_start.max(segment.start_col);
                         let end = selection_end.min(segment.end_col);
                         if start < end {
-                            fill_rect(
+                            fill_selection_highlight(
                                 target,
-                                PixelRectToRect::rect(
-                                    segment_x
-                                        + (start.saturating_sub(segment.start_col) as i32
-                                            * cell_width),
-                                    y,
-                                    (end.saturating_sub(start) as i32 * cell_width) as u32,
-                                    line_height.max(1) as u32,
-                                ),
+                                segment_x
+                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                y,
+                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                line_height.max(1) as u32,
+                                cursor_roundness,
                                 selection,
                             )?;
                         }
@@ -3881,16 +3872,14 @@ pub(super) fn render_acp_pane(
                         let start = selection_start.max(segment.start_col);
                         let end = selection_end.min(segment.end_col);
                         if start < end {
-                            fill_rect(
+                            fill_selection_highlight(
                                 target,
-                                PixelRectToRect::rect(
-                                    segment_x
-                                        + (start.saturating_sub(segment.start_col) as i32
-                                            * cell_width),
-                                    y,
-                                    (end.saturating_sub(start) as i32 * cell_width) as u32,
-                                    line_height.max(1) as u32,
-                                ),
+                                segment_x
+                                    + (start.saturating_sub(segment.start_col) as i32 * cell_width),
+                                y,
+                                (end.saturating_sub(start) as i32 * cell_width) as u32,
+                                line_height.max(1) as u32,
+                                cursor_roundness,
                                 yank_flash_color,
                             )?;
                         }
@@ -6479,6 +6468,31 @@ pub(super) fn fill_rect(
         }),
     }
     Ok(())
+}
+
+/// Extra right-side pixels so selection glyphs are not flush against the highlight edge.
+const SELECTION_HIGHLIGHT_RIGHT_PAD_PX: u32 = 2;
+
+pub(super) fn fill_selection_highlight(
+    target: &mut DrawTarget<'_>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    radius: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    fill_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            x,
+            y,
+            width.saturating_add(SELECTION_HIGHLIGHT_RIGHT_PAD_PX),
+            height,
+        ),
+        radius,
+        color,
+    )
 }
 
 pub(super) fn window_surface_color(color: Color, window_effects: WindowEffects) -> Color {

@@ -560,28 +560,26 @@ pub(super) fn render_terminal_buffer(
         if let Some((selection_start, selection_end)) = visual_selection
             .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
         {
-            fill_rect(
+            fill_selection_highlight(
                 target,
-                PixelRectToRect::rect(
-                    text_x + selection_start as i32 * cell_width,
-                    y,
-                    (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
-                    line_height.max(1) as u32,
-                ),
+                text_x + selection_start as i32 * cell_width,
+                y,
+                (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
+                line_height.max(1) as u32,
+                cursor_roundness,
                 selection_color,
             )?;
         }
         if let Some((selection_start, selection_end)) = yank_flash
             .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
         {
-            fill_rect(
+            fill_selection_highlight(
                 target,
-                PixelRectToRect::rect(
-                    text_x + selection_start as i32 * cell_width,
-                    y,
-                    (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
-                    line_height.max(1) as u32,
-                ),
+                text_x + selection_start as i32 * cell_width,
+                y,
+                (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
+                line_height.max(1) as u32,
+                cursor_roundness,
                 yank_flash_color,
             )?;
         }
