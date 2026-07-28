@@ -1,7 +1,3 @@
-// TODO(ISS-001): test
-// TODO(ISS-002): test2
-
-
 > [!WARNING]
 > Volt is in early development and issues are to be expected. Please feel free to report bugs and issues in the Issues section.
 
