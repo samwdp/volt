@@ -16818,6 +16818,51 @@ fn picker_extra_keybind_snapshots_context_closes_and_runs_command() -> Result<()
 }
 
 #[test]
+fn popup_focus_ctrl_n_cycles_popup_buffers_instead_of_marked_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let first = state
+        .runtime
+        .model_mut()
+        .create_popup_buffer(workspace_id, "*popup-a*", BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    let second = state
+        .runtime
+        .model_mut()
+        .create_popup_buffer(workspace_id, "*popup-b*", BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .open_popup(workspace_id, "Popup", vec![first, second], first)
+        .map_err(|error| error.to_string())?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.ensure_popup_buffer(first, "*popup-a*", BufferKind::Scratch, &*user_library);
+        ui.ensure_popup_buffer(second, "*popup-b*", BufferKind::Scratch, &*user_library);
+        ui.set_popup_buffer(first);
+        ui.set_popup_focus(true);
+        ui.enter_normal_mode();
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::N, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled);
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "popup missing after Ctrl+n".to_owned())?;
+    assert_eq!(popup.active_buffer, second);
+    assert_eq!(shell_ui(&state.runtime)?.popup_buffer_id, Some(second));
+    Ok(())
+}
+
+#[test]
 fn picker_extra_keybind_falls_through_for_shared_popup_navigation() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     shell_ui_mut(&mut state.runtime)?.set_picker(

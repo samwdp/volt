@@ -27,8 +27,7 @@ pub use editor_plugin_api::PickerTruncateStrategy;
 
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerProviderSpec, PickerSource,
-    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
-    picker_hooks,
+    PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, picker_hooks,
 };
 
 /// Picker label truncation when a row is narrower than the label.
@@ -163,12 +162,10 @@ pub fn package() -> PluginPackage {
         PluginKeyBinding::new("F4", "picker.open-buffers", PluginKeymapScope::Global),
         PluginKeyBinding::new("F7", "picker.open-keybindings", PluginKeymapScope::Global),
         PluginKeyBinding::new("F6", "picker.open-themes", PluginKeymapScope::Global),
-        PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
-            .with_vim_mode(PluginVimMode::Normal),
-        PluginKeyBinding::new("Ctrl+p", "popup.previous", PluginKeymapScope::Global)
-            .with_vim_mode(PluginVimMode::Normal),
-        PluginKeyBinding::new("Ctrl+n", "picker.select-next", PluginKeymapScope::Popup),
-        PluginKeyBinding::new("Ctrl+p", "picker.select-previous", PluginKeymapScope::Popup),
+        // Popup Minor Mode owns Ctrl+n/p: cycle docked popup buffers, or advance
+        // the picker when it is the active overlay (see shell popup-next/previous).
+        PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Popup),
+        PluginKeyBinding::new("Ctrl+p", "popup.previous", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Enter", "picker.submit", PluginKeymapScope::Popup),
         PluginKeyBinding::new("Escape", "picker.cancel", PluginKeymapScope::Popup),
     ])
@@ -469,6 +466,24 @@ fn hook_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_binds_popup_navigation_on_popup_minor_mode() {
+        let package = package();
+        for (chord, command) in [("Ctrl+n", "popup.next"), ("Ctrl+p", "popup.previous")] {
+            assert!(package.key_bindings().iter().any(|binding| {
+                binding.chord() == chord
+                    && binding.command_name() == command
+                    && binding.scope() == PluginKeymapScope::Popup
+            }));
+        }
+        assert!(!package.key_bindings().iter().any(|binding| {
+            matches!(
+                binding.command_name(),
+                "picker.select-next" | "picker.select-previous"
+            )
+        }));
+    }
 
     #[test]
     fn package_does_not_bind_ctrl_q_quickfix_as_popup_default() {

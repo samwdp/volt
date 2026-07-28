@@ -25,8 +25,8 @@
     "semantic_hash": ""
   },
   "crates/editor-core/src/keymaps.rs": {
-    "mtime": 1784294240.9874406,
-    "ast_hash": "00f42a9f0a2d105060118872f05451a0",
+    "mtime": 1785269078.6665728,
+    "ast_hash": "b122b2dc8e119d4f245d2e7cc249132e",
     "semantic_hash": ""
   },
   "crates/editor-core/src/lib.rs": {
@@ -150,8 +150,8 @@
     "semantic_hash": ""
   },
   "crates/editor-issues/src/lib.rs": {
-    "mtime": 1784209790.2678273,
-    "ast_hash": "8ae6d115dea05cc6cf7ba12b9cc0511e",
+    "mtime": 1785262656.2497635,
+    "ast_hash": "abe9e5bc56ba094f417878cfce66ef61",
     "semantic_hash": ""
   },
   "crates/editor-jobs/src/lib.rs": {
@@ -245,8 +245,8 @@
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/git.rs": {
-    "mtime": 1785255271.86378,
-    "ast_hash": "a23b027edca1e43d27fec52279ccf7e8",
+    "mtime": 1785262548.6669283,
+    "ast_hash": "ad019c3646c474d2ed99a4ff9e31b948",
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/issues.rs": {
@@ -255,8 +255,8 @@
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/mod.rs": {
-    "mtime": 1785255297.3082323,
-    "ast_hash": "33a746615a6d54cc16bdaef9665f4858",
+    "mtime": 1785269265.688447,
+    "ast_hash": "ee38a76b72da3238a69ca9cbd225eea1",
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/pdf.rs": {
@@ -270,18 +270,18 @@
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/render.rs": {
-    "mtime": 1784726603.6607783,
-    "ast_hash": "c34befc28d03d40f8fdd1327df31f47e",
+    "mtime": 1785262792.166511,
+    "ast_hash": "291c906ff7d95a947694e068a6cda7c6",
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/terminal.rs": {
-    "mtime": 1784726604.915589,
-    "ast_hash": "f0ac91a8db52afa2dc6352e8b0f3a4d3",
+    "mtime": 1785262792.2150044,
+    "ast_hash": "05e5a317c7060a7bda21f530e13b7b74",
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/tests.rs": {
-    "mtime": 1785256099.0226865,
-    "ast_hash": "9d04f991d73ff17709190fb26466b9ab",
+    "mtime": 1785269088.8370197,
+    "ast_hash": "ae95d39276aa47d8c7fd5c9ba17f4b33",
     "semantic_hash": ""
   },
   "crates/editor-sdl/src/shell/treesitter_install.rs": {
@@ -805,8 +805,8 @@
     "semantic_hash": ""
   },
   "user/picker.rs": {
-    "mtime": 1785255949.2894049,
-    "ast_hash": "730990e2b777562335b312533a64c1d8",
+    "mtime": 1785269244.065601,
+    "ast_hash": "9f0cfd404d480ebb0a07cd31aa7f8023",
     "semantic_hash": ""
   },
   "user/sdk/src/abi.rs": {
@@ -894,114 +894,14 @@
     "ast_hash": "172fab7e44448b546a42b8c81771dce5",
     "semantic_hash": ""
   },
-  ".scratch/workspace-issues/PRD.md": {
-    "mtime": 1784207548.1752553,
-    "ast_hash": "2df22d8bb722fedeb1c1ed1e0db3c1af",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/01-issue-store-and-create.md": {
-    "mtime": 1784209529.8512769,
-    "ast_hash": "9f25100b16f87b963242b5c7dc14aad8",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/02-status-commands.md": {
-    "mtime": 1784209529.8552926,
-    "ast_hash": "451dd87541a95052e3924e491c986deb",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/03-capture-focused-file.md": {
-    "mtime": 1784209529.8582928,
-    "ast_hash": "b9eb00e4e14aed59fde04c8425747bc5",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/04-async-capture-on-save.md": {
-    "mtime": 1784209529.8608024,
-    "ast_hash": "a3a703d6c51894f0538d2e3e0fc8ee7d",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/05-issue-board.md": {
-    "mtime": 1784209529.8628151,
-    "ast_hash": "67c5e9dcbaae40f147d69babc2b99cd7",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/06-place-and-jump-to-code.md": {
-    "mtime": 1784209529.8668263,
-    "ast_hash": "85e39a6f3362feedd44842caaf287737",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/07-open-issue-from-code-reference.md": {
-    "mtime": 1784209529.869091,
-    "ast_hash": "457e39f4ca3f20ce0c0bee1f459ed7af",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-issues/issues/08-issue-scan.md": {
-    "mtime": 1784209529.8716197,
-    "ast_hash": "c089bc2db16218a8377c206f3d41ff91",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/PRD.md": {
-    "mtime": 1784490228.418664,
-    "ast_hash": "e239389f5cff1a77e974a5d69813daa1",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/issues/01-ambiguous-prefix-timeout.md": {
-    "mtime": 1784292206.5154233,
-    "ast_hash": "b3f2c82b386a24629154b030089aac11",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/issues/02-minor-mode-keybinding-precedence.md": {
-    "mtime": 1784294454.352932,
-    "ast_hash": "583b364f9df5688084dea0f736a372f8",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/issues/03-cycle-project-workspaces.md": {
-    "mtime": 1784296252.5414727,
-    "ast_hash": "6d0d97380eaad1546231d96b26242e5b",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/issues/04-mark-list-management.md": {
-    "mtime": 1784490227.7426856,
-    "ast_hash": "206f4f11d01ee5dbd703e4d4bdff3a09",
-    "semantic_hash": ""
-  },
-  ".scratch/workspace-switching/issues/05-marked-workspace-slot-jumps.md": {
-    "mtime": 1784490228.0271065,
-    "ast_hash": "a517e201e0be522c143907d18585e9bf",
-    "semantic_hash": ""
-  },
-  ".scratch/worktree-remove/PRD.md": {
-    "mtime": 1785252545.3090014,
-    "ast_hash": "6682d3c59c63f20578a497334a0a47ce",
-    "semantic_hash": ""
-  },
-  ".scratch/worktree-remove/issues/01-picker-extra-keybinds.md": {
-    "mtime": 1785254117.0878944,
-    "ast_hash": "b11d5f8668087b955abd7e4b9626272d",
-    "semantic_hash": ""
-  },
-  ".scratch/worktree-remove/issues/02-migrate-quickfix-ctrl-q.md": {
-    "mtime": 1785254853.714069,
-    "ast_hash": "4c6157bb6b8bb89e13eb90cfaac209ed",
-    "semantic_hash": ""
-  },
-  ".scratch/worktree-remove/issues/03-worktree-remove-command.md": {
-    "mtime": 1785255783.3226879,
-    "ast_hash": "d2bbea27287d2c4210c44d221a01fe83",
-    "semantic_hash": ""
-  },
-  ".scratch/worktree-remove/issues/04-dashboard-ctrl-d.md": {
-    "mtime": 1785255795.7791567,
-    "ast_hash": "462893cb502e544c4f5194f6b24e8506",
-    "semantic_hash": ""
-  },
   "Agents.md": {
-    "mtime": 1784201556.7518535,
-    "ast_hash": "26ca6c50429a321205845ecc3f7bf615",
+    "mtime": 1785265106.1035569,
+    "ast_hash": "e09f39f41da93af70475bf1716fb01a0",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
-    "mtime": 1779188394.7112346,
-    "ast_hash": "2ed67c68f28bc1ef95ac24167431d7e8",
+    "mtime": 1785265105.7928443,
+    "ast_hash": "c19b5700da79059fc1ae5018926ca40d",
     "semantic_hash": ""
   },
   "CONTEXT.md": {
@@ -1010,8 +910,8 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1784211737.8881629,
-    "ast_hash": "e98eea646e65a56899c8129cc89846ce",
+    "mtime": 1785268628.864971,
+    "ast_hash": "ef86895b8b811b35f9b0f5ea17c33eb2",
     "semantic_hash": ""
   },
   "docs/adr/0001-csharp-ls-one-session-per-solution.md": {
@@ -1020,18 +920,18 @@
     "semantic_hash": ""
   },
   "docs/agents/domain.md": {
-    "mtime": 1784201561.638241,
-    "ast_hash": "0c0972b77c4edaa4fbe03d562f04e8fb",
+    "mtime": 1784275698.8948588,
+    "ast_hash": "35089ed6a70a657c91fd100ade31b642",
     "semantic_hash": ""
   },
   "docs/agents/issue-tracker.md": {
-    "mtime": 1784201558.1931105,
-    "ast_hash": "0a40143f4d749d659e091db279c7596a",
+    "mtime": 1784275698.8968575,
+    "ast_hash": "3cd8509285524d31a33279b8cb0870e5",
     "semantic_hash": ""
   },
   "docs/agents/triage-labels.md": {
-    "mtime": 1784201561.246932,
-    "ast_hash": "85409347dbf487c8a25c9dac59708b83",
+    "mtime": 1784275698.9008589,
+    "ast_hash": "22add54cb98451c55b20e6b7992d4a85",
     "semantic_hash": ""
   },
   "docs/architecture-diagram.html": {
@@ -1085,182 +985,172 @@
     "semantic_hash": ""
   },
   "docs/user-packages.md": {
-    "mtime": 1784295812.7148235,
-    "ast_hash": "d129226d9186135f9849b757bb22864b",
-    "semantic_hash": ""
-  },
-  "issues/ISS-001-test.md": {
-    "mtime": 1784211737.0669682,
-    "ast_hash": "b78565782ae3c444f7207082326c65d3",
-    "semantic_hash": ""
-  },
-  "issues/ISS-002-test2.md": {
-    "mtime": 1784211737.0669682,
-    "ast_hash": "8586155a36ecbdd8b51939880e27ba16",
+    "mtime": 1785269058.332973,
+    "ast_hash": "9c515b1d6d059892522a37fffdfc629f",
     "semantic_hash": ""
   },
   "issues/ISS-003-add-when-asm-is-added.md": {
-    "mtime": 1784211737.1358006,
+    "mtime": 1785268633.5680947,
     "ast_hash": "e5a9925d4227d797d7e59402e9ea44c4",
     "semantic_hash": ""
   },
   "issues/ISS-004-can-t-get-this-to-work-goal-is-to-indent-at-the.md": {
-    "mtime": 1784211737.1433156,
+    "mtime": 1785268633.5680947,
     "ast_hash": "0b3fabfcfc321c3f7a915dc74afbfe90",
     "semantic_hash": ""
   },
   "issues/ISS-005-missing-local-reference-usage-tuned-for-each-rel.md": {
-    "mtime": 1784211737.1513467,
+    "mtime": 1785268633.5690951,
     "ast_hash": "736de9c2758cd57126f8e423c086a593",
     "semantic_hash": ""
   },
   "issues/ISS-006-when-nvim-treesitter-has-postcss-and-less-parser.md": {
-    "mtime": 1784211737.1573658,
+    "mtime": 1785268633.5690951,
     "ast_hash": "1826e9a3dec2e4db96a387f8195862d4",
     "semantic_hash": ""
   },
   "issues/ISS-007-context-blocks-for.md": {
-    "mtime": 1784211737.1634037,
+    "mtime": 1785268633.5690951,
     "ast_hash": "59affb3d95610875efa59796e3b09767",
     "semantic_hash": ""
   },
   "issues/ISS-008-ideally-only-for-identifiers-under-a-variable-bl.md": {
-    "mtime": 1784211737.1719246,
+    "mtime": 1785268633.5690951,
     "ast_hash": "0567746c2aa0f1816f50d34deb218883",
     "semantic_hash": ""
   },
   "issues/ISS-009-update-grammar.md": {
-    "mtime": 1784211737.1784754,
+    "mtime": 1785268633.5690951,
     "ast_hash": "a9f392865165ee7286cfc8a1f92b10bd",
     "semantic_hash": ""
   },
   "issues/ISS-010-update-grammar.md": {
-    "mtime": 1784211737.20918,
+    "mtime": 1785268633.5700977,
     "ast_hash": "1c9e2db4919cca3ee33d7311965b8976",
     "semantic_hash": ""
   },
   "issues/ISS-011-https-github-com-nvim-treesitter-nvim-treesitter.md": {
-    "mtime": 1784211737.216251,
+    "mtime": 1785268633.5700977,
     "ast_hash": "4ee5fd32ae3d95576e333d54978c768c",
     "semantic_hash": ""
   },
   "issues/ISS-012-inaccessible-node.md": {
-    "mtime": 1784211737.222817,
+    "mtime": 1785268633.5700977,
     "ast_hash": "5f88d1d92d9747fd1fe1c75abd27f05c",
     "semantic_hash": ""
   },
   "issues/ISS-013-this-will-highlight-the-keyword-outside-of-lambd.md": {
-    "mtime": 1784211737.228333,
+    "mtime": 1785268633.5700977,
     "ast_hash": "2d29a90f18f6cfe0e44227558c5e21e1",
     "semantic_hash": ""
   },
   "issues/ISS-014-this-will-highlight-the-keyword-outside-of-gette.md": {
-    "mtime": 1784211737.2599318,
+    "mtime": 1785268633.5700977,
     "ast_hash": "80b7dbe69dcaf32c2a3c3593435ef919",
     "semantic_hash": ""
   },
   "issues/ISS-015-only-match-raw.md": {
-    "mtime": 1784211737.2666125,
+    "mtime": 1785268633.5700977,
     "ast_hash": "5926698cbe1b34fd601b7c3953e23e7d",
     "semantic_hash": ""
   },
   "issues/ISS-016-add-once-coffeescript-parser-is-added.md": {
-    "mtime": 1784211737.2726684,
+    "mtime": 1785268633.5716069,
     "ast_hash": "05cdfcad1e66621ff6813312f1848d85",
     "semantic_hash": ""
   },
   "issues/ISS-017-class-literals-with-pascalcase.md": {
-    "mtime": 1784211737.2797246,
+    "mtime": 1785268633.5716069,
     "ast_hash": "b20c0bc764c3debc418239f68cb85942",
     "semantic_hash": ""
   },
   "issues/ISS-018-while-try.md": {
-    "mtime": 1784211737.2867646,
+    "mtime": 1785268633.5721357,
     "ast_hash": "b590609b57c7834bccd9d1fd986210f3",
     "semantic_hash": ""
   },
   "issues/ISS-019-complete-terminals-in-grammar-and-then-simplify.md": {
-    "mtime": 1784211737.292442,
+    "mtime": 1785268633.5721357,
     "ast_hash": "7a3d45b3b9c027ed4bfb5a65344d2a67",
     "semantic_hash": ""
   },
   "issues/ISS-020-highlight-builtin-methods-table-unpack-etc-as-fu.md": {
-    "mtime": 1784211737.2984436,
+    "mtime": 1785268633.5731435,
     "ast_hash": "3e149cab0f7d239b16874b30fcefd846",
     "semantic_hash": ""
   },
   "issues/ISS-021-in-decl-class.md": {
-    "mtime": 1784211737.306517,
+    "mtime": 1785268633.5731435,
     "ast_hash": "961d9f8a63dc5e74db391e93099f707c",
     "semantic_hash": ""
   },
   "issues/ISS-022-string-and-print-numbered-format-injection.md": {
-    "mtime": 1784211737.3130744,
+    "mtime": 1785268633.5731435,
     "ast_hash": "db76c13d20e0c49776f59cc35d538e5e",
     "semantic_hash": ""
   },
   "issues/ISS-023-https-github-com-nvim-treesitter-nvim-treesitter.md": {
-    "mtime": 1784211737.319592,
+    "mtime": 1785268633.5731435,
     "ast_hash": "7514ea8885f343344a755ec4d0f03ce1",
     "semantic_hash": ""
   },
   "issues/ISS-024-add-method-call-expression-to-grammar-and.md": {
-    "mtime": 1784211737.3271189,
+    "mtime": 1785268633.5741498,
     "ast_hash": "349a80611f28900f8d3320062361ce3f",
     "semantic_hash": ""
   },
   "issues/ISS-025-inaccessible-nodes.md": {
-    "mtime": 1784211737.359241,
+    "mtime": 1785268633.5741498,
     "ast_hash": "bcd060f35d4d3db2164713a0fba7e390",
     "semantic_hash": ""
   },
   "issues/ISS-026-todo-in-crates-volt-assets-grammars-queries-dart.md": {
-    "mtime": 1784211737.3900056,
+    "mtime": 1785268633.5741498,
     "ast_hash": "b5055c6d929fd6da59e18a0a777c2110",
     "semantic_hash": ""
   },
   "issues/ISS-027-todo-in-crates-volt-assets-grammars-queries-dart.md": {
-    "mtime": 1784211737.422561,
+    "mtime": 1785268633.5741498,
     "ast_hash": "8a0ea14d1ec9435e0b577379dcc221e0",
     "semantic_hash": ""
   },
   "issues/ISS-028-uncomment-when-asm-is-added.md": {
-    "mtime": 1784211737.4295704,
+    "mtime": 1785268633.575151,
     "ast_hash": "b128d848746b436eca974d97199642fe",
     "semantic_hash": ""
   },
   "issues/ISS-029-special-casing-for-the-macro.md": {
-    "mtime": 1784211737.436342,
+    "mtime": 1785268633.575151,
     "ast_hash": "fc2382efa80c204c4cdeb280c8ad9da3",
     "semantic_hash": ""
   },
   "issues/ISS-030-do-all-these-items-belong-here.md": {
-    "mtime": 1784211737.4628212,
+    "mtime": 1785268633.575151,
     "ast_hash": "cadeade28213ca1c8c377229e62a98d1",
     "semantic_hash": ""
   },
   "issues/ISS-031-add-comment-highlight.md": {
-    "mtime": 1784211737.48984,
+    "mtime": 1785268633.5761504,
     "ast_hash": "7a882bc6b3b2ede6eb1c453b42c5ba0f",
     "semantic_hash": ""
   },
   "issues/ISS-032-add-comment-highlight.md": {
-    "mtime": 1784211737.5187755,
+    "mtime": 1785268633.5761504,
     "ast_hash": "eaad994f448e543fd06ea1aa87cb687b",
     "semantic_hash": ""
   },
   "issues/ISS-033-fix-parameter-highlighting.md": {
-    "mtime": 1784211737.5481317,
+    "mtime": 1785268633.5761504,
     "ast_hash": "bf80130d698ced5046e8926a30c5fe45",
     "semantic_hash": ""
   },
   "issues/ISS-034-reproduce-bug-and-file-ticket.md": {
-    "mtime": 1784211737.5814548,
+    "mtime": 1785268633.5768824,
     "ast_hash": "0e77ce21289e814c38657ffa7621302f",
     "semantic_hash": ""
   },
   "issues/ISS-035-add-when-asm-is-added.md": {
-    "mtime": 1784211737.588694,
+    "mtime": 1785268633.5768824,
     "ast_hash": "76ac05e13d1c9b4a06b0567cc32abbac",
     "semantic_hash": ""
   },
@@ -1332,11 +1222,6 @@
   "docs/assets/logo_32x32.png": {
     "mtime": 1779188405.8083405,
     "ast_hash": "f9a379598fe40775a138e9f156506910",
-    "semantic_hash": ""
-  },
-  "ols.png": {
-    "mtime": 1784209636.62088,
-    "ast_hash": "0244106ac424f2394c73da54915f1e21",
     "semantic_hash": ""
   }
 }

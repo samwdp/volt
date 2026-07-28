@@ -12016,6 +12016,11 @@ impl ShellState {
         let mut modes = Vec::new();
         if ui.picker_visible() {
             modes.push(KeymapScope::Popup);
+        } else if let Some(popup) =
+            active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?
+            && ui.popup_focus_active(&popup)
+        {
+            modes.push(KeymapScope::Popup);
         }
         if ui
             .autocomplete()
@@ -17337,12 +17342,24 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_POPUP_NEXT, "shell.popup-next", |_, runtime| {
+            if shell_ui(runtime)?.picker_visible() {
+                if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
+                    picker.session.select_next();
+                }
+                return Ok(());
+            }
             cycle_runtime_popup_buffer(runtime, true)?;
             Ok(())
         })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_POPUP_PREVIOUS, "shell.popup-previous", |_, runtime| {
+            if shell_ui(runtime)?.picker_visible() {
+                if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
+                    picker.session.select_previous();
+                }
+                return Ok(());
+            }
             cycle_runtime_popup_buffer(runtime, false)?;
             Ok(())
         })

@@ -205,8 +205,7 @@ normalized (`"C-c C-c"` resolves the same as `"Ctrl+c Ctrl+c"`).
 Bindings can also be restricted to a **Vim mode**:
 
 ```rust
-PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Global)
-    .with_vim_mode(PluginVimMode::Normal)
+PluginKeyBinding::new("Ctrl+n", "popup.next", PluginKeymapScope::Popup)
 ```
 
 | Vim mode              | When active                              |

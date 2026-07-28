@@ -745,7 +745,7 @@ mod tests {
         )?;
         registry.register(
             "Ctrl+n",
-            "picker.select-next",
+            "popup.next",
             KeymapScope::Popup,
             CommandSource::Core,
         )?;
@@ -758,7 +758,7 @@ mod tests {
             )
             .expect("Popup Minor Mode should win");
 
-        assert_eq!(binding.command_name(), "picker.select-next");
+        assert_eq!(binding.command_name(), "popup.next");
         Ok(())
     }
 
