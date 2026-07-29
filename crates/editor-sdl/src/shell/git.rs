@@ -149,7 +149,6 @@ pub(super) struct ActiveBufferEventContext {
     pub(super) is_terminal: bool,
     pub(super) is_db_query: bool,
     pub(super) is_plugin_evaluatable: bool,
-    pub(super) is_compilation: bool,
 }
 
 pub(super) fn default_vim_target(has_input: bool) -> VimTarget {

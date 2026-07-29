@@ -48,8 +48,6 @@ pub enum BufferKind {
     Git,
     /// Directory browsing and manipulation.
     Directory,
-    /// Compilation results and command output.
-    Compilation,
     /// Diagnostics, messages, and structured status buffers.
     Diagnostics,
     /// Quickfix result lists exported from pickers.

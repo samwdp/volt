@@ -1760,8 +1760,8 @@ pub mod plugin_hooks {
     /// Emitted when a plugin wants the host to run a build/compile command.
     /// Detail format: `{language}` (e.g. `"rust"`).  The host looks up the
     /// default command via `UserLibrary::default_build_command`, opens a
-    /// `*compile <workspace>*` popup buffer with an input field pre-filled
-    /// with the default, and runs the command on Ctrl+Enter.
+    /// prompt pre-filled with it, then streams output into the
+    /// `*compile <workspace>*` popup.
     pub const RUN_COMMAND: &str = "plugin.run-command";
 
     /// Emitted when a plugin wants the host to re-run the last build command

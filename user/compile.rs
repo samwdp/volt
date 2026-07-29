@@ -7,15 +7,12 @@
 //! # Workflow
 //!
 //! 1. `workspace.compile` emits `plugin.run-command` with the active language
-//!    as the hook detail.  The host looks up the default command via
-//!    `UserLibrary::default_build_command`, opens a `*compile <workspace>*`
-//!    popup buffer with an input field pre-filled, and runs the command on
-//!    Ctrl+Enter.
+//!    as the hook detail. The host looks up the default command via
+//!    `UserLibrary::default_build_command`, opens a prompt pre-filled with it,
+//!    then streams output into the `*compile <workspace>*` popup.
 //! 2. `workspace.recompile` emits `plugin.rerun-command`.  The host re-runs
 //!    the last stored command for the active workspace (or falls back to
 //!    `workspace.compile` if none has been run).
-//! 3. In the compilation popup, pressing Enter on a line matching the pattern
-//!    `path:line` or `path:line:col` navigates to that location.
 //!
 //! # Adding a new language
 //!
@@ -35,7 +32,7 @@ pub fn package() -> PluginPackage {
         .with_commands(vec![
             PluginCommand::new(
                 "workspace.compile",
-                "Open the compilation buffer and run (or prompt for) the build command.",
+                "Prompt for the build command, then stream it in a popup.",
                 vec![PluginAction::emit_hook(
                     plugin_hooks::RUN_COMMAND,
                     None::<&str>,

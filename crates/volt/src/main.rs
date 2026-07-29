@@ -802,7 +802,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .create_buffer(
                     workspace_id,
                     "*compile-self-check*",
-                    BufferKind::Compilation,
+                    BufferKind::Diagnostics,
                     None,
                 )
                 .map_err(|error| error.to_string())?;

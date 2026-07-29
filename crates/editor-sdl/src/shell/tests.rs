@@ -10631,50 +10631,6 @@ fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
 }
 
 #[test]
-fn compile_buffer_submit_runs_command_via_shell() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
-    open_compile_buffer(&mut state.runtime)?;
-    let buffer_id = active_shell_buffer_id(&state.runtime)?;
-    let command = if cfg!(windows) {
-        "Write-Output volt-compile"
-    } else {
-        "printf 'volt-compile\\n'"
-    };
-    {
-        let buffer = shell_ui_mut(&mut state.runtime)?
-            .buffer_mut(buffer_id)
-            .ok_or_else(|| "compile shell buffer missing".to_owned())?;
-        let input = buffer
-            .input_field_mut()
-            .ok_or_else(|| "compile input field missing".to_owned())?;
-        input.set_text(command);
-    }
-
-    submit_input_buffer(&mut state.runtime)?;
-
-    let buffer = shell_ui(&state.runtime)?
-        .buffer(buffer_id)
-        .ok_or_else(|| "compile shell buffer missing".to_owned())?;
-    let text = buffer.text.text();
-    assert!(
-        text.contains("volt-compile"),
-        "compile output should include shell transcript"
-    );
-    assert!(
-        text.contains("Build succeeded"),
-        "compile output should include success marker"
-    );
-    assert_eq!(
-        buffer
-            .input_field()
-            .ok_or_else(|| "compile input field missing".to_owned())?
-            .text(),
-        ""
-    );
-    Ok(())
-}
-
-#[test]
 fn browser_escape_from_insert_keeps_input_cursor_position() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;
@@ -17078,38 +17034,106 @@ fn closing_streamed_command_popup_kills_worker() -> Result<(), String> {
 // InputPromptOverlay
 // ---------------------------------------------------------------------------
 
-#[test]
-fn input_prompt_overlay_confirm_with_text() -> Result<(), String> {
-    let mut state = state_with_user_library()?;
-    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "");
-    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
-    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+fn shell_echo_command(marker: &str) -> String {
+    if cfg!(windows) {
+        format!("Write-Output {marker}")
+    } else {
+        format!("printf '{marker}\\n'")
+    }
+}
 
+fn shell_sleep_then_echo_command(seconds: u64, marker: &str) -> String {
+    if cfg!(windows) {
+        format!("Start-Sleep -Seconds {seconds}; Write-Output {marker}")
+    } else {
+        format!("sleep {seconds}; printf '{marker}\\n'")
+    }
+}
+
+fn execute_shell_command(state: &mut ShellState, command: &str) -> Result<(), String> {
     state
-        .handle_text_input("hello")
-        .map_err(|e| e.to_string())?;
-    assert_eq!(
-        shell_ui(&state.runtime)?.input_prompt().map(|p| p.text()),
-        Some("hello")
-    );
+        .runtime
+        .execute_command(command)
+        .map_err(|error| error.to_string())
+}
 
+fn active_input_prompt_text(state: &ShellState) -> Result<Option<String>, String> {
+    Ok(shell_ui(&state.runtime)?
+        .input_prompt()
+        .map(|prompt| prompt.text().to_owned()))
+}
+
+fn confirm_input_prompt(state: &mut ShellState, text: &str) -> Result<(), String> {
+    if !text.is_empty() {
+        state
+            .handle_text_input(text)
+            .map_err(|error| error.to_string())?;
+    }
     state
         .try_runtime_keybinding(Keycode::Return, Mod::empty())
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn start_workspace_compile(state: &mut ShellState, command: &str) -> Result<BufferId, String> {
+    execute_shell_command(state, "workspace.compile")?;
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "workspace.compile should open InputPromptOverlay"
+    );
+    confirm_input_prompt(state, command)?;
+    active_runtime_popup(&state.runtime)?
+        .map(|popup| popup.active_buffer)
+        .ok_or_else(|| "compile confirmation did not open streamed popup".to_owned())
+}
+
+fn prompt_prefill_for_marker(
+    tag: &str,
+    marker_name: &str,
+    marker_contents: &str,
+) -> Result<String, String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir(tag);
+    if !marker_name.is_empty() {
+        std::fs::write(root.join(marker_name), marker_contents)
+            .map_err(|error| error.to_string())?;
+    }
+    open_workspace_from_project(&mut state.runtime, tag, &root)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
+    let text = active_input_prompt_text(&state)?.unwrap_or_default();
+    std::fs::remove_dir_all(&root).ok();
+    Ok(text)
+}
+
+#[test]
+fn input_prompt_overlay_confirm_delivers_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("input-prompt-confirm");
+    open_workspace_from_project(&mut state.runtime, "input-prompt-confirm", &root)?;
+    let marker = "volt-input-prompt-confirm";
+    let popup_buffer = start_workspace_compile(&mut state, &shell_echo_command(marker))?;
+    wait_for_streamed_command_output_line(&mut state, popup_buffer, marker)?;
 
     assert!(
         !shell_ui(&state.runtime)?.input_prompt_visible(),
         "prompt should close after Enter with text"
     );
+    assert!(
+        shell_ui(&state.runtime)?
+            .buffer(popup_buffer)
+            .is_some_and(|buffer| buffer.text.text().contains(marker)),
+        "confirmed prompt text should reach streamed compile command"
+    );
+    std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
 
 #[test]
 fn input_prompt_overlay_escape_cancels() -> Result<(), String> {
     let mut state = state_with_user_library()?;
-    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "prefill");
-    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
-    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+    let root = unique_temp_dir("input-prompt-escape");
+    open_workspace_from_project(&mut state.runtime, "input-prompt-escape", &root)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
 
     state
         .try_runtime_keybinding(Keycode::Escape, Mod::empty())
@@ -17119,15 +17143,20 @@ fn input_prompt_overlay_escape_cancels() -> Result<(), String> {
         !shell_ui(&state.runtime)?.input_prompt_visible(),
         "prompt should close on Escape"
     );
+    assert!(
+        active_runtime_popup(&state.runtime)?.is_none(),
+        "Escape should discard the compile prompt without opening a popup"
+    );
+    std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
 
 #[test]
 fn input_prompt_overlay_enter_with_empty_text_is_noop() -> Result<(), String> {
     let mut state = state_with_user_library()?;
-    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "");
-    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
-    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+    let root = unique_temp_dir("input-prompt-empty");
+    open_workspace_from_project(&mut state.runtime, "input-prompt-empty", &root)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
 
     state
         .try_runtime_keybinding(Keycode::Return, Mod::empty())
@@ -17137,6 +17166,11 @@ fn input_prompt_overlay_enter_with_empty_text_is_noop() -> Result<(), String> {
         shell_ui(&state.runtime)?.input_prompt_visible(),
         "prompt must stay open when Enter pressed with empty text"
     );
+    assert!(
+        active_runtime_popup(&state.runtime)?.is_none(),
+        "empty Enter should not open the compile popup"
+    );
+    std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
 
@@ -17160,7 +17194,7 @@ fn workspace_compile_opens_input_prompt_overlay() -> Result<(), String> {
     let root = unique_temp_dir("compile-prompt-opens");
     open_workspace_from_project(&mut state.runtime, "compile-prompt-opens", &root)?;
 
-    open_compile_buffer(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
 
     let prompt = shell_ui(&state.runtime)?.input_prompt();
     assert!(prompt.is_some(), "InputPromptOverlay should be open");
@@ -17174,24 +17208,60 @@ fn workspace_compile_opens_input_prompt_overlay() -> Result<(), String> {
 }
 
 #[test]
-fn workspace_compile_prefills_with_detected_command_for_rust_workspace() -> Result<(), String> {
-    let mut state = state_with_user_library()?;
-    let root = unique_temp_dir("compile-prompt-rust");
-    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n")
-        .map_err(|e| e.to_string())?;
-    open_workspace_from_project(&mut state.runtime, "compile-prompt-rust", &root)?;
-
-    open_compile_buffer(&mut state.runtime)?;
-
-    let text = shell_ui(&state.runtime)?
-        .input_prompt()
-        .map(|p| p.text().to_owned())
-        .unwrap_or_default();
+fn workspace_compile_prefills_with_detected_command_for_cargo_toml() -> Result<(), String> {
     assert_eq!(
-        text, "cargo build",
-        "should detect cargo build from Cargo.toml"
+        prompt_prefill_for_marker(
+            "compile-prompt-cargo",
+            "Cargo.toml",
+            "[package]\nname = \"test\"\n",
+        )?,
+        "cargo build"
     );
-    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_detected_command_for_sln() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker("compile-prompt-sln", "App.sln", "")?,
+        "dotnet build"
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_detected_command_for_csproj() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker("compile-prompt-csproj", "App.csproj", "")?,
+        "dotnet build"
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_detected_command_for_package_json() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker("compile-prompt-package-json", "package.json", "{}")?,
+        "npm run build"
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_detected_command_for_makefile() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker("compile-prompt-makefile", "Makefile", "")?,
+        "make"
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_empty_command_for_empty_directory() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker("compile-prompt-empty", "", "")?,
+        ""
+    );
     Ok(())
 }
 
@@ -17201,7 +17271,7 @@ fn workspace_compile_escape_does_not_store_command() -> Result<(), String> {
     let root = unique_temp_dir("compile-escape");
     open_workspace_from_project(&mut state.runtime, "compile-escape", &root)?;
 
-    open_compile_buffer(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
     state
         .try_runtime_keybinding(Keycode::Escape, Mod::empty())
         .map_err(|e| e.to_string())?;
@@ -17242,7 +17312,7 @@ fn workspace_compile_prefills_with_stored_command_over_detected() -> Result<(), 
         .compile_commands
         .insert(workspace_id, "cargo build --release".to_owned());
 
-    open_compile_buffer(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.compile")?;
 
     let text = shell_ui(&state.runtime)?
         .input_prompt()
@@ -17271,14 +17341,17 @@ fn workspace_recompile_with_stored_command_does_not_open_input_prompt() -> Resul
         .map_err(|e| e.to_string())?;
     shell_ui_mut(&mut state.runtime)?
         .compile_commands
-        .insert(workspace_id, "echo recompile-ok".to_owned());
+        .insert(workspace_id, shell_echo_command("recompile-ok"));
 
-    rerun_compile_command(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.recompile")?;
 
     assert!(
         !shell_ui(&state.runtime)?.input_prompt_visible(),
         "recompile with stored command must not open InputPromptOverlay"
     );
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "recompile with stored command should open streamed popup".to_owned())?;
+    wait_for_streamed_command_output_line(&mut state, popup.active_buffer, "recompile-ok")?;
     std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
@@ -17289,7 +17362,7 @@ fn workspace_recompile_without_stored_command_falls_back_to_compile_prompt() -> 
     let root = unique_temp_dir("recompile-fallback");
     open_workspace_from_project(&mut state.runtime, "recompile-fallback", &root)?;
 
-    rerun_compile_command(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.recompile")?;
 
     assert!(
         shell_ui(&state.runtime)?.input_prompt_visible(),
@@ -17313,7 +17386,7 @@ fn workspace_recompile_uses_workspace_scoped_stored_command() -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     shell_ui_mut(&mut state.runtime)?
         .compile_commands
-        .insert(workspace_a, "echo workspace-a".to_owned());
+        .insert(workspace_a, shell_echo_command("workspace-a"));
 
     open_workspace_from_project(&mut state.runtime, "recompile-scope-b", &root_b)?;
     let workspace_b = state
@@ -17323,7 +17396,7 @@ fn workspace_recompile_uses_workspace_scoped_stored_command() -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     assert_ne!(workspace_a, workspace_b);
 
-    rerun_compile_command(&mut state.runtime)?;
+    execute_shell_command(&mut state, "workspace.recompile")?;
 
     assert!(
         shell_ui(&state.runtime)?.input_prompt_visible(),
@@ -17331,5 +17404,56 @@ fn workspace_recompile_uses_workspace_scoped_stored_command() -> Result<(), Stri
     );
     std::fs::remove_dir_all(&root_a).ok();
     std::fs::remove_dir_all(&root_b).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_confirm_reuses_existing_streamed_popup() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-reuse-popup");
+    open_workspace_from_project(&mut state.runtime, "compile-reuse-popup", &root)?;
+
+    let first_buffer = start_workspace_compile(&mut state, &shell_echo_command("compile-one"))?;
+    wait_for_streamed_command_output_line(&mut state, first_buffer, "compile-one")?;
+    wait_for_streamed_command_worker_done(&mut state, first_buffer)?;
+
+    let second_buffer = start_workspace_compile(&mut state, &shell_echo_command("compile-two"))?;
+    assert_eq!(
+        first_buffer, second_buffer,
+        "workspace.compile should reuse the existing streamed popup buffer"
+    );
+    wait_for_streamed_command_output_line(&mut state, second_buffer, "compile-two")?;
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_closing_popup_mid_build_stops_tracking_worker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-close-popup");
+    open_workspace_from_project(&mut state.runtime, "compile-close-popup", &root)?;
+
+    let buffer_id = start_workspace_compile(
+        &mut state,
+        &shell_sleep_then_echo_command(60, "compile-stop"),
+    )?;
+    assert!(
+        shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id),
+        "compile worker should be tracked before popup close"
+    );
+
+    close_buffer_immediate(&mut state.runtime, buffer_id).map_err(|error| error.to_string())?;
+    wait_for_streamed_command_worker_done(&mut state, buffer_id)?;
+    assert!(
+        !shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id),
+        "closing compile popup should stop tracking the worker within the poll timeout"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
     Ok(())
 }

@@ -12550,14 +12550,6 @@ impl ShellState {
                 self.maybe_finish_change_after_input()?;
                 return Ok(());
             }
-            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
-                && active_buffer.is_compilation
-                && chord == "<CR>"
-            {
-                jump_to_compilation_error(&mut self.runtime).map_err(ShellError::Runtime)?;
-                self.ui_mut()?.vim_mut().clear_transient();
-                return Ok(());
-            }
             if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
@@ -16282,7 +16274,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     register_hook(
         runtime,
         HOOK_PLUGIN_RUN_COMMAND,
-        "Opens the compilation buffer and runs (or prompts for) the workspace build command.",
+        "Opens the build prompt and streams the workspace build command.",
     )?;
     register_hook(
         runtime,
@@ -16326,7 +16318,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_RUN_COMMAND,
             "shell.plugin-run-command",
-            |_event, runtime| open_compile_buffer(runtime),
+            |_event, runtime| open_compile_prompt(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -19708,7 +19700,6 @@ fn active_buffer_event_context(
         is_terminal: buffer_is_terminal(&buffer.kind),
         is_db_query: buffer_is_db_query(&buffer.kind),
         is_plugin_evaluatable: plugin_evaluatable_kind(&buffer.kind, runtime),
-        is_compilation: buffer_is_compilation(&buffer.kind),
     })
 }
 
@@ -19875,10 +19866,6 @@ fn buffer_is_db_browser(kind: &BufferKind) -> bool {
                 DB_CONNECTIONS_KIND | DB_SCHEMA_KIND | DB_HISTORY_KIND | DB_SNIPPETS_KIND
             )
     )
-}
-
-fn buffer_is_compilation(kind: &BufferKind) -> bool {
-    matches!(kind, BufferKind::Compilation)
 }
 
 fn buffer_is_quickfix(kind: &BufferKind) -> bool {
@@ -25132,7 +25119,7 @@ fn emit_workspace_format(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (prompt, text, kind) = {
+    let (prompt, text, kind, name) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let Some(input) = buffer.input_field() else {
             return Ok(());
@@ -25141,6 +25128,7 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             input.prompt().to_owned(),
             input.text().to_owned(),
             buffer.kind.clone(),
+            buffer.display_name().to_owned(),
         )
     };
     if text.trim().is_empty() {
@@ -25155,8 +25143,8 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     if buffer_is_db_connect(&kind) {
         return submit_db_connect_prompt(runtime, buffer_id, &text);
     }
-    if buffer_is_compilation(&kind) {
-        return run_compile_command_in_buffer(runtime, buffer_id, &text);
+    if buffer_is_command_output(&kind, &name) {
+        return run_shell_command_in_buffer(runtime, buffer_id, &text);
     }
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
@@ -28819,13 +28807,18 @@ fn command_output_buffer_name(workspace_name: &str) -> String {
     format!("*command {workspace_name}*")
 }
 
+fn buffer_is_command_output(kind: &BufferKind, name: &str) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND)
+        && name.starts_with("*command ")
+}
+
 /// Open an [`InputPromptOverlay`] pre-filled with the auto-detected (or last
 /// stored) build command for the active workspace.
 ///
 /// Called by the `plugin.run-command` hook subscriber.  On confirmation the
 /// overlay dispatches to [`dispatch_input_prompt_confirm`] with id
 /// `COMPILE_PROMPT_ID`.
-fn open_compile_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+fn open_compile_prompt(runtime: &mut EditorRuntime) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -28953,7 +28946,12 @@ fn open_command_output_buffer(runtime: &mut EditorRuntime) -> Result<BufferId, S
     }
     let id = runtime
         .model_mut()
-        .create_buffer(workspace_id, &buf_name, BufferKind::Compilation, None)
+        .create_buffer(
+            workspace_id,
+            &buf_name,
+            BufferKind::Plugin(INTERACTIVE_INPUT_KIND.to_owned()),
+            None,
+        )
         .map_err(|error| error.to_string())?;
     let buffer = runtime
         .model()
@@ -29064,117 +29062,8 @@ fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
     if let Some(cmd) = stored {
         run_compile_command_streamed(runtime, &cmd)
     } else {
-        open_compile_buffer(runtime)
+        open_compile_prompt(runtime)
     }
-}
-
-/// Run `command` in the compilation buffer `buffer_id`, capturing stdout +
-/// stderr into it.  Stores the command as the active workspace's last command.
-fn run_compile_command_in_buffer(
-    runtime: &mut EditorRuntime,
-    buffer_id: BufferId,
-    command: &str,
-) -> Result<(), String> {
-    let command = command.trim().to_owned();
-    if command.is_empty() {
-        return Ok(());
-    }
-
-    // Determine working directory (workspace root or cwd).
-    let cwd = active_workspace_root(runtime)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Store command for this workspace.
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|e| e.to_string())?;
-    if let Ok(ui) = shell_ui_mut(runtime) {
-        ui.compile_commands.insert(workspace_id, command.clone());
-    }
-
-    // Write header to buffer.
-    {
-        let buf = shell_buffer_mut(runtime, buffer_id)?;
-        buf.append_output_lines(&[format!("$ {command}"), String::new()]);
-        buf.clear_input();
-    }
-
-    // Run through configured shell so builtins, quoting, and shell operators work.
-    let terminal_config = shell_user_library(runtime).terminal_config();
-    let mut args = terminal_config.args;
-    let shell_program = terminal_config.program;
-    args.push(shell_command_eval_flag(&shell_program).to_owned());
-    args.push(command.clone());
-
-    // Spawn the job and wait (synchronously — same pattern as git commands).
-    let spec = JobSpec::compilation("compile", shell_program, args).with_cwd(cwd);
-    let manager = runtime
-        .services()
-        .get::<Mutex<JobManager>>()
-        .ok_or_else(|| "job manager service missing".to_owned())?;
-    let mut manager = manager
-        .lock()
-        .map_err(|_| "job manager lock poisoned".to_owned())?;
-    let handle = manager.spawn(spec).map_err(|e| e.to_string())?;
-    drop(manager);
-    let result = handle.wait().map_err(|e| e.to_string())?;
-
-    // Write output to the buffer.
-    let transcript = result.transcript();
-    let output_lines: Vec<String> = transcript.lines().map(str::to_owned).collect();
-    let status_line = if result.succeeded() {
-        "── ✓ Build succeeded ──────────────────────────────────────────────────".to_owned()
-    } else {
-        format!(
-            "── ✗ Build failed (exit {}) ─────────────────────────────────────────",
-            result.exit_code().unwrap_or(-1)
-        )
-    };
-    {
-        let buf = shell_buffer_mut(runtime, buffer_id)?;
-        buf.append_output_lines(&output_lines);
-        buf.append_output_lines(&[status_line]);
-    }
-
-    if result.succeeded() && command_builds_user_library(&command) {
-        let reload_lines = match built_user_library_path_for_command(runtime, &command) {
-            Some(built_path) => match stage_user_library_for_reload(&built_path) {
-                Ok(staged_path) => {
-                    let library = DynamicUserLibrary::load_from_file(&staged_path)
-                        .and_then(|library| {
-                            validate_runtime_user_library(library.as_ref())?;
-                            Ok(library)
-                        })
-                        .and_then(|library| {
-                            if let Some(state) =
-                                runtime.services_mut().get_mut::<UserLibraryReloadState>()
-                            {
-                                state.last_staged_path = Some(staged_path.clone());
-                            }
-                            let mut lines = replace_runtime_user_library(runtime, library)?;
-                            lines.push(format!(
-                                "Loaded runtime library from staged copy `{}`.",
-                                staged_path.display()
-                            ));
-                            Ok(lines)
-                        });
-                    library.unwrap_or_else(|error| {
-                        vec![format!("── ✗ User library reload failed: {error}")]
-                    })
-                }
-                Err(error) => vec![format!("── ✗ User library staging failed: {error}")],
-            },
-            None => vec![
-                "── ✗ User library reload failed: could not resolve build output path".to_owned(),
-            ],
-        };
-        let buf = shell_buffer_mut(runtime, buffer_id)?;
-        buf.append_output_lines(&reload_lines);
-    }
-    Ok(())
 }
 
 fn command_builds_user_library(command: &str) -> bool {
@@ -29415,88 +29304,6 @@ fn reload_user_library(runtime: &mut EditorRuntime) -> Result<Vec<String>, Strin
         }
     }
     Err(last_error.unwrap_or_else(|| "no runtime user library candidate found".to_owned()))
-}
-
-/// In a compilation buffer, jump to the file location on the current line
-/// by parsing `path:line` or `path:line:col`.
-fn jump_to_compilation_error(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    let line_text = {
-        let buf = shell_buffer(runtime, buffer_id)?;
-        let cursor_line = buf.cursor_point().line;
-        buf.text.line(cursor_line).unwrap_or_default().to_owned()
-    };
-
-    // Parse the error line via the user library's compile module pattern.
-    // We use the same logic as user::compile::parse_error_location but replicated
-    // here generically so the shell does not depend on user code at parse time.
-    let parsed = parse_compilation_error_line(&line_text);
-    let (path, line_num, _col) = match parsed {
-        Some(loc) => loc,
-        None => return Ok(()), // not an error line, silently ignore
-    };
-
-    // Determine the absolute path (relative to workspace root if needed).
-    let root = active_workspace_root(runtime).ok().flatten();
-    let abs_path = if std::path::Path::new(&path).is_absolute() {
-        PathBuf::from(&path)
-    } else if let Some(ref root) = root {
-        root.join(&path)
-    } else {
-        PathBuf::from(&path)
-    };
-
-    // Find or open the file buffer and navigate to the line.
-    open_file_at_line(runtime, &abs_path, line_num)
-}
-
-/// Generic compilation error line parser.  Handles:
-/// - `path:line:col`
-/// - `path:line`
-/// - `  --> path:line:col` (Rust rustc style)
-fn parse_compilation_error_line(line: &str) -> Option<(String, u32, u32)> {
-    let line = line.trim();
-    let line = line.strip_prefix("-->").map(str::trim).unwrap_or(line);
-    let parts: Vec<&str> = line.splitn(4, ':').collect();
-    match parts.as_slice() {
-        [path, line_str, col_str, ..] => {
-            let line_num = line_str.trim().parse::<u32>().ok()?;
-            let col_num = col_str
-                .trim()
-                .split_once(|c: char| !c.is_ascii_digit())
-                .and_then(|(n, _)| n.parse().ok())
-                .or_else(|| col_str.trim().parse().ok())
-                .unwrap_or(1);
-            if !path.is_empty() && line_num > 0 {
-                return Some(((*path).to_owned(), line_num, col_num));
-            }
-            None
-        }
-        [path, line_str] => {
-            let line_num = line_str.trim().parse::<u32>().ok()?;
-            if !path.is_empty() && line_num > 0 {
-                return Some(((*path).to_owned(), line_num, 1));
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Open `path` in the most-recently-active non-compilation buffer and move
-/// the cursor to `line_num`.
-fn open_file_at_line(
-    runtime: &mut EditorRuntime,
-    path: &Path,
-    line_num: u32,
-) -> Result<(), String> {
-    open_workspace_file_at(
-        runtime,
-        path,
-        TextPoint::new(line_num.saturating_sub(1) as usize, 0),
-    )?;
-    shell_ui_mut(runtime)?.enter_normal_mode();
-    Ok(())
 }
 
 fn execute_oil_action(runtime: &mut EditorRuntime, action: OilKeyAction) -> Result<bool, String> {
@@ -32650,13 +32457,6 @@ fn buffer_interaction(
         BufferKind::Terminal => (true, None),
         BufferKind::Directory => (false, None),
         BufferKind::Quickfix => (true, None),
-        BufferKind::Compilation => {
-            let mut input = InputField::new("$ ");
-            input.set_placeholder(Some(
-                "Enter build command (e.g. cargo build) then press Ctrl+Enter".to_owned(),
-            ));
-            (true, Some(input))
-        }
         _ => (false, None),
     }
 }
@@ -32710,10 +32510,6 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             BufferKind::Directory => vec![
                 format!("{name} is a directory buffer."),
                 "Oil-style editing surfaces can be rendered through the same shell.".to_owned(),
-            ],
-            BufferKind::Compilation => vec![
-                format!("{name} collects compilation output."),
-                "Compilation runner integration is available through the core job model.".to_owned(),
             ],
             BufferKind::Diagnostics => vec![
                 format!("{name} is a diagnostics-oriented buffer."),
@@ -32785,7 +32581,6 @@ fn buffer_kind_label(kind: &BufferKind) -> String {
         BufferKind::Terminal => "terminal".to_owned(),
         BufferKind::Git => "git".to_owned(),
         BufferKind::Directory => "directory".to_owned(),
-        BufferKind::Compilation => "compilation".to_owned(),
         BufferKind::Diagnostics => "diagnostics".to_owned(),
         BufferKind::Quickfix => "quickfix".to_owned(),
         BufferKind::Plugin(plugin_kind) => plugin_kind.clone(),

@@ -347,7 +347,6 @@ fn map_buffer_kind(buffer_kind: &str) -> BufferKind {
         "terminal" => BufferKind::Terminal,
         "git" => BufferKind::Git,
         "directory" => BufferKind::Directory,
-        "compilation" => BufferKind::Compilation,
         "diagnostics" => BufferKind::Diagnostics,
         other => BufferKind::Plugin(other.to_owned()),
     }
