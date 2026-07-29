@@ -17255,3 +17255,81 @@ fn workspace_compile_prefills_with_stored_command_over_detected() -> Result<(), 
     std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
+
+// ─── workspace.recompile tests ────────────────────────────────────────────────
+
+#[test]
+fn workspace_recompile_with_stored_command_does_not_open_input_prompt() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("recompile-stored");
+    open_workspace_from_project(&mut state.runtime, "recompile-stored", &root)?;
+
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    shell_ui_mut(&mut state.runtime)?
+        .compile_commands
+        .insert(workspace_id, "echo recompile-ok".to_owned());
+
+    rerun_compile_command(&mut state.runtime)?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.input_prompt_visible(),
+        "recompile with stored command must not open InputPromptOverlay"
+    );
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_recompile_without_stored_command_falls_back_to_compile_prompt() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("recompile-fallback");
+    open_workspace_from_project(&mut state.runtime, "recompile-fallback", &root)?;
+
+    rerun_compile_command(&mut state.runtime)?;
+
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "recompile without stored command must open InputPromptOverlay"
+    );
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_recompile_uses_workspace_scoped_stored_command() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root_a = unique_temp_dir("recompile-scope-a");
+    let root_b = unique_temp_dir("recompile-scope-b");
+
+    open_workspace_from_project(&mut state.runtime, "recompile-scope-a", &root_a)?;
+    let workspace_a = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    shell_ui_mut(&mut state.runtime)?
+        .compile_commands
+        .insert(workspace_a, "echo workspace-a".to_owned());
+
+    open_workspace_from_project(&mut state.runtime, "recompile-scope-b", &root_b)?;
+    let workspace_b = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    assert_ne!(workspace_a, workspace_b);
+
+    rerun_compile_command(&mut state.runtime)?;
+
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "recompile in workspace B must open prompt when only workspace A has a stored command"
+    );
+    std::fs::remove_dir_all(&root_a).ok();
+    std::fs::remove_dir_all(&root_b).ok();
+    Ok(())
+}
