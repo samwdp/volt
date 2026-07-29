@@ -22,6 +22,11 @@ pub(super) enum StreamedCommandExitAction {
     /// Keep the popup buffer open after the process exits; no git refresh, no close.
     #[allow(dead_code)]
     LeaveOpen,
+    /// Keep the popup buffer open; if the build succeeded and the command targets
+    /// `volt-user`, trigger a user-library hot-reload into the running runtime.
+    LeaveOpenAndMaybeReloadUserLibrary {
+        command: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +311,62 @@ pub(super) fn refresh_pending_streamed_commands(
                         }
                     }
                     StreamedCommandExitAction::LeaveOpen => {}
+                    StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary { command } => {
+                        if outcome.success && command_builds_user_library(&command) {
+                            let reload_lines =
+                                match built_user_library_path_for_command(runtime, &command) {
+                                    Some(built_path) => {
+                                        match stage_user_library_for_reload(&built_path) {
+                                            Ok(staged_path) => {
+                                                DynamicUserLibrary::load_from_file(&staged_path)
+                                                    .and_then(|library| {
+                                                        validate_runtime_user_library(
+                                                            library.as_ref(),
+                                                        )?;
+                                                        Ok(library)
+                                                    })
+                                                    .and_then(|library| {
+                                                        if let Some(state) = runtime
+                                                            .services_mut()
+                                                            .get_mut::<UserLibraryReloadState>(
+                                                        ) {
+                                                            state.last_staged_path =
+                                                                Some(staged_path.clone());
+                                                        }
+                                                        let mut lines =
+                                                            replace_runtime_user_library(
+                                                                runtime, library,
+                                                            )?;
+                                                        lines.push(format!(
+                                                        "Loaded runtime library from staged copy \
+                                                         `{}`.",
+                                                        staged_path.display()
+                                                    ));
+                                                        Ok(lines)
+                                                    })
+                                                    .unwrap_or_else(|error| {
+                                                        vec![format!(
+                                                            "── ✗ User library reload failed: \
+                                                             {error}"
+                                                        )]
+                                                    })
+                                            }
+                                            Err(error) => vec![format!(
+                                                "── ✗ User library staging failed: {error}"
+                                            )],
+                                        }
+                                    }
+                                    None => vec![
+                                        "── ✗ User library reload failed: could not resolve \
+                                         build output path"
+                                            .to_owned(),
+                                    ],
+                                };
+                            if let Ok(buf) = shell_buffer_mut(runtime, buffer_id) {
+                                buf.append_output_lines(&reload_lines);
+                            }
+                        }
+                    }
                 }
                 changed = true;
             }

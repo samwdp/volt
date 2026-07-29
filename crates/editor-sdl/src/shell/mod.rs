@@ -16326,7 +16326,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(
             HOOK_PLUGIN_RUN_COMMAND,
             "shell.plugin-run-command",
-            |event, runtime| open_compile_buffer(runtime, event.detail.as_deref()),
+            |_event, runtime| open_compile_buffer(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime
@@ -27178,17 +27178,15 @@ fn open_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 /// Called when the user confirms an [`InputPromptOverlay`] with Enter.
-///
-/// `id` identifies which prompt was confirmed so callers can dispatch
-/// accordingly.  The runtime hook point is intentionally left as a no-op here;
-/// feature-specific callers (e.g. the compile flow) register their own
-/// handling by inspecting `id`.
 fn dispatch_input_prompt_confirm(
-    _runtime: &mut EditorRuntime,
-    _id: &str,
-    _text: &str,
+    runtime: &mut EditorRuntime,
+    id: &str,
+    text: &str,
 ) -> Result<(), String> {
-    Ok(())
+    match id {
+        COMPILE_PROMPT_ID => run_compile_command_streamed(runtime, text),
+        _ => Ok(()),
+    }
 }
 
 fn cycle_vim_command_line_completion(
@@ -28809,6 +28807,9 @@ fn switch_active_plugin_pane(
 
 // ─── Generic compile / build infrastructure ───────────────────────────────────
 
+/// [`InputPromptOverlay`] id used for the `workspace.compile` prompt.
+const COMPILE_PROMPT_ID: &str = "compile";
+
 /// Buffer name pattern for the compilation popup.
 fn compile_buffer_name(workspace_name: &str) -> String {
     format!("*compile {workspace_name}*")
@@ -28818,86 +28819,107 @@ fn command_output_buffer_name(workspace_name: &str) -> String {
     format!("*command {workspace_name}*")
 }
 
-/// Open (or focus) the `*compile <workspace>*` compilation buffer and
-/// pre-fill its input field with the default build command for `language`
-/// (obtained from the user library).  The user can edit the command and press
-/// Ctrl+Enter to run it.
+/// Open an [`InputPromptOverlay`] pre-filled with the auto-detected (or last
+/// stored) build command for the active workspace.
 ///
-/// Called by the `plugin.run-command` hook subscriber.
-fn open_compile_buffer(
-    runtime: &mut EditorRuntime,
-    language_hint: Option<&str>,
-) -> Result<(), String> {
+/// Called by the `plugin.run-command` hook subscriber.  On confirmation the
+/// overlay dispatches to [`dispatch_input_prompt_confirm`] with id
+/// `COMPILE_PROMPT_ID`.
+fn open_compile_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
+
+    // Prefer the last stored command for this workspace; fall back to
+    // auto-detection from the workspace root.
+    let prefill = shell_ui(runtime)
+        .ok()
+        .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned())
+        .unwrap_or_else(|| {
+            active_workspace_root(runtime)
+                .ok()
+                .flatten()
+                .map(|root| detect_build_command(&root))
+                .unwrap_or_default()
+        });
+
+    let overlay = InputPromptOverlay::new(COMPILE_PROMPT_ID, "Build command: ", &prefill);
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+/// Run `command` in the `*compile <workspace>*` streamed popup.
+///
+/// Stores the command per-workspace, opens (or reuses) the popup, and streams
+/// stdout+stderr into it.  On success, triggers a user-library hot-reload if
+/// the command targets `volt-user`.
+fn run_compile_command_streamed(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Ok(());
+    }
+
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
     let workspace_name = runtime
         .model()
         .active_workspace()
-        .map_err(|error| error.to_string())?
+        .map_err(|e| e.to_string())?
         .name()
         .to_owned();
-    let buf_name = compile_buffer_name(&workspace_name);
 
-    // Reuse an existing buffer if present.
-    let existing = shell_ui(runtime).ok().and_then(|ui| {
+    // Store the confirmed command for this workspace.
+    if let Ok(ui) = shell_ui_mut(runtime) {
+        ui.compile_commands.insert(workspace_id, command.clone());
+    }
+
+    let cwd = active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let terminal_config = shell_user_library(runtime).terminal_config();
+    let shell_program = terminal_config.program.clone();
+    let mut args = terminal_config.args.clone();
+    args.push(shell_command_eval_flag(&shell_program).to_owned());
+    args.push(command.clone());
+
+    let buf_name = compile_buffer_name(&workspace_name);
+    let popup_title = buf_name.clone();
+
+    let on_exit = StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary {
+        command: command.clone(),
+    };
+
+    let spec = StreamedCommandSpec {
+        popup_title: popup_title.clone(),
+        buffer_name: buf_name.clone(),
+        command_label: command.clone(),
+        program: shell_program,
+        args,
+        env: Vec::new(),
+        cwd,
+        on_exit,
+        notify_on_success: true,
+        notify_on_failure: true,
+    };
+
+    // Reuse the existing popup buffer if one with this name is already open.
+    let existing_id = shell_ui(runtime).ok().and_then(|ui| {
         ui.buffers
             .iter()
             .find(|b| b.display_name() == buf_name)
             .map(|b| b.id())
     });
 
-    let buffer_id = if let Some(existing) = existing {
-        runtime
-            .model_mut()
-            .focus_buffer(workspace_id, existing)
-            .map_err(|error| error.to_string())?;
-        let ui = shell_ui_mut(runtime)?;
-        ui.focus_buffer_in_active_pane(existing);
-        ui.enter_normal_mode();
-        existing
+    if let Some(buffer_id) = existing_id {
+        continue_streamed_command_popup(runtime, buffer_id, spec)?;
     } else {
-        let id = runtime
-            .model_mut()
-            .create_buffer(workspace_id, &buf_name, BufferKind::Compilation, None)
-            .map_err(|error| error.to_string())?;
-        let buffer = runtime
-            .model()
-            .workspace(workspace_id)
-            .map_err(|e| e.to_string())?
-            .buffer(id)
-            .ok_or_else(|| format!("buffer `{id}` is missing"))?;
-        let user_library = shell_user_library(runtime);
-        let initial = vec![format!("# {workspace_name} — compilation output")];
-        let mut shell_buf = ShellBuffer::from_runtime_buffer(buffer, initial, &*user_library);
-        // Pre-fill the input field with the default build command.
-        let default_cmd = language_hint
-            .and_then(|lang| user_library.default_build_command(lang))
-            .unwrap_or_default();
-        if let Some(input) = shell_buf.input_field_mut() {
-            input.set_text(&default_cmd);
-        }
-        let ui = shell_ui_mut(runtime)?;
-        ui.insert_buffer(shell_buf);
-        ui.focus_buffer_in_active_pane(id);
-        ui.enter_normal_mode();
-        id
-    };
-
-    // If the buffer already has a stored command for this workspace, pre-fill it.
-    let stored = shell_ui(runtime)
-        .ok()
-        .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
-    if let Some(cmd) = stored
-        && let Some(buf) = shell_ui_mut(runtime)
-            .ok()
-            .and_then(|ui| ui.buffer_mut(buffer_id))
-        && let Some(input) = buf.input_field_mut()
-    {
-        input.set_text(&cmd);
+        open_streamed_command_popup(runtime, spec)?;
     }
-
     Ok(())
 }
 
@@ -29030,7 +29052,7 @@ fn shell_command_eval_flag(program: &str) -> &'static str {
 }
 
 /// Re-run the last stored build command for the active workspace.
-/// If no command has been stored yet, falls back to opening the compile buffer.
+/// If no command has been stored yet, falls back to opening the compile prompt.
 fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
     let workspace_id = runtime
         .model()
@@ -29040,26 +29062,9 @@ fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
         .ok()
         .and_then(|ui| ui.compile_commands.get(&workspace_id).cloned());
     if let Some(cmd) = stored {
-        let workspace_name = runtime
-            .model()
-            .active_workspace()
-            .map_err(|error| error.to_string())?
-            .name()
-            .to_owned();
-        let buf_name = compile_buffer_name(&workspace_name);
-        let buf_id = shell_ui(runtime).ok().and_then(|ui| {
-            ui.buffers
-                .iter()
-                .find(|b| b.display_name() == buf_name)
-                .map(|b| b.id())
-        });
-        if let Some(buffer_id) = buf_id {
-            run_compile_command_in_buffer(runtime, buffer_id, &cmd)
-        } else {
-            open_compile_buffer(runtime, None)
-        }
+        run_compile_command_streamed(runtime, &cmd)
     } else {
-        open_compile_buffer(runtime, None)
+        open_compile_buffer(runtime)
     }
 }
 

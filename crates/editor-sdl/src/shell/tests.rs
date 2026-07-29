@@ -10633,7 +10633,7 @@ fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
 #[test]
 fn compile_buffer_submit_runs_command_via_shell() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
-    open_compile_buffer(&mut state.runtime, None)?;
+    open_compile_buffer(&mut state.runtime)?;
     let buffer_id = active_shell_buffer_id(&state.runtime)?;
     let command = if cfg!(windows) {
         "Write-Output volt-compile"
@@ -17149,5 +17149,109 @@ fn input_prompt_overlay_prefill_appears_in_text() -> Result<(), String> {
         shell_ui(&state.runtime)?.input_prompt().map(|p| p.text()),
         Some("cargo build")
     );
+    Ok(())
+}
+
+// ─── workspace.compile prompt tests ──────────────────────────────────────────
+
+#[test]
+fn workspace_compile_opens_input_prompt_overlay() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-prompt-opens");
+    open_workspace_from_project(&mut state.runtime, "compile-prompt-opens", &root)?;
+
+    open_compile_buffer(&mut state.runtime)?;
+
+    let prompt = shell_ui(&state.runtime)?.input_prompt();
+    assert!(prompt.is_some(), "InputPromptOverlay should be open");
+    assert_eq!(
+        prompt.map(|p| p.id.as_str()),
+        Some(COMPILE_PROMPT_ID),
+        "overlay id must be COMPILE_PROMPT_ID"
+    );
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_detected_command_for_rust_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-prompt-rust");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n")
+        .map_err(|e| e.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "compile-prompt-rust", &root)?;
+
+    open_compile_buffer(&mut state.runtime)?;
+
+    let text = shell_ui(&state.runtime)?
+        .input_prompt()
+        .map(|p| p.text().to_owned())
+        .unwrap_or_default();
+    assert_eq!(
+        text, "cargo build",
+        "should detect cargo build from Cargo.toml"
+    );
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_escape_does_not_store_command() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-escape");
+    open_workspace_from_project(&mut state.runtime, "compile-escape", &root)?;
+
+    open_compile_buffer(&mut state.runtime)?;
+    state
+        .try_runtime_keybinding(Keycode::Escape, Mod::empty())
+        .map_err(|e| e.to_string())?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.input_prompt_visible(),
+        "prompt should close on Escape"
+    );
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    let stored = shell_ui(&state.runtime)?
+        .compile_commands
+        .get(&workspace_id)
+        .cloned();
+    assert!(stored.is_none(), "Escape must not store a command");
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn workspace_compile_prefills_with_stored_command_over_detected() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("compile-stored");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n")
+        .map_err(|e| e.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "compile-stored", &root)?;
+
+    // Pre-store a custom command.
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    shell_ui_mut(&mut state.runtime)?
+        .compile_commands
+        .insert(workspace_id, "cargo build --release".to_owned());
+
+    open_compile_buffer(&mut state.runtime)?;
+
+    let text = shell_ui(&state.runtime)?
+        .input_prompt()
+        .map(|p| p.text().to_owned())
+        .unwrap_or_default();
+    assert_eq!(
+        text, "cargo build --release",
+        "stored command should take priority over auto-detection"
+    );
+    std::fs::remove_dir_all(&root).ok();
     Ok(())
 }
