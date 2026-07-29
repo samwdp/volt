@@ -16962,3 +16962,192 @@ fn quickfix_export_from_unsupported_picker_is_noop() -> Result<(), String> {
     let _ = active_runtime_popup(&state.runtime)?;
     unimplemented!("invoke quickfix export and assert picker closes or no-ops without popup");
 }
+
+// ---------------------------------------------------------------------------
+// LeaveOpen exit action
+// ---------------------------------------------------------------------------
+
+fn wait_for_streamed_command_worker_done(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        refresh_pending_streamed_commands(&mut state.runtime)?;
+        let tracked = shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id);
+        if !tracked {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "streamed command worker for buffer `{buffer_id}` did not finish in time"
+    ))
+}
+
+#[test]
+fn leave_open_keeps_popup_buffer_after_process_exits() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_streamed_command_popup(
+        &mut state.runtime,
+        StreamedCommandSpec {
+            popup_title: "Leave Open Test".to_owned(),
+            buffer_name: "*leave-open-test*".to_owned(),
+            command_label: "true".to_owned(),
+            #[cfg(unix)]
+            program: "true".to_owned(),
+            #[cfg(windows)]
+            program: "cmd".to_owned(),
+            #[cfg(unix)]
+            args: vec![],
+            #[cfg(windows)]
+            args: vec!["/C".to_owned(), "exit 0".to_owned()],
+            env: Vec::new(),
+            cwd: std::env::temp_dir(),
+            on_exit: StreamedCommandExitAction::LeaveOpen,
+            notify_on_success: false,
+            notify_on_failure: false,
+        },
+    )?;
+
+    wait_for_streamed_command_worker_done(&mut state, buffer_id)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(
+        ui.buffer(buffer_id).is_some(),
+        "LeaveOpen: popup buffer must remain open after process exits"
+    );
+    assert!(
+        !ui.streamed_command_worker.contains(buffer_id),
+        "LeaveOpen: worker should be done"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cancel flag: closing a popup buffer kills its worker
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closing_streamed_command_popup_kills_worker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_streamed_command_popup(
+        &mut state.runtime,
+        StreamedCommandSpec {
+            popup_title: "Cancel Test".to_owned(),
+            buffer_name: "*cancel-test*".to_owned(),
+            command_label: "sleep".to_owned(),
+            #[cfg(unix)]
+            program: "sleep".to_owned(),
+            #[cfg(windows)]
+            program: "cmd".to_owned(),
+            #[cfg(unix)]
+            args: vec!["60".to_owned()],
+            #[cfg(windows)]
+            args: vec!["/C".to_owned(), "timeout /T 60 /NOBREAK".to_owned()],
+            env: Vec::new(),
+            cwd: std::env::temp_dir(),
+            on_exit: StreamedCommandExitAction::LeaveOpen,
+            notify_on_success: false,
+            notify_on_failure: false,
+        },
+    )?;
+
+    assert!(
+        shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id),
+        "worker should be active before close"
+    );
+
+    close_buffer_immediate(&mut state.runtime, buffer_id).map_err(|error| error.to_string())?;
+
+    assert!(
+        !shell_ui(&state.runtime)?
+            .streamed_command_worker
+            .contains(buffer_id),
+        "worker should be removed immediately after buffer close"
+    );
+
+    wait_for_streamed_command_worker_done(&mut state, buffer_id)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// InputPromptOverlay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn input_prompt_overlay_confirm_with_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "");
+    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
+    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+
+    state
+        .handle_text_input("hello")
+        .map_err(|e| e.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.input_prompt().map(|p| p.text()),
+        Some("hello")
+    );
+
+    state
+        .try_runtime_keybinding(Keycode::Return, Mod::empty())
+        .map_err(|e| e.to_string())?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.input_prompt_visible(),
+        "prompt should close after Enter with text"
+    );
+    Ok(())
+}
+
+#[test]
+fn input_prompt_overlay_escape_cancels() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "prefill");
+    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
+    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+
+    state
+        .try_runtime_keybinding(Keycode::Escape, Mod::empty())
+        .map_err(|e| e.to_string())?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.input_prompt_visible(),
+        "prompt should close on Escape"
+    );
+    Ok(())
+}
+
+#[test]
+fn input_prompt_overlay_enter_with_empty_text_is_noop() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let overlay = InputPromptOverlay::new("test.prompt", "Enter value: ", "");
+    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
+    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+
+    state
+        .try_runtime_keybinding(Keycode::Return, Mod::empty())
+        .map_err(|e| e.to_string())?;
+
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "prompt must stay open when Enter pressed with empty text"
+    );
+    Ok(())
+}
+
+#[test]
+fn input_prompt_overlay_prefill_appears_in_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let overlay = InputPromptOverlay::new("test.prompt", "Build: ", "cargo build");
+    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
+    assert_eq!(
+        shell_ui(&state.runtime)?.input_prompt().map(|p| p.text()),
+        Some("cargo build")
+    );
+    Ok(())
+}

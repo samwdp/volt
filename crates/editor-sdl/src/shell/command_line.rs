@@ -1,5 +1,61 @@
 use super::*;
 
+/// A generic bottom-of-screen text prompt overlay.
+///
+/// Distinct from [`CommandLineOverlay`]: no Vim history, no Ex-command dispatch,
+/// no completion. Enter confirms (non-empty), Escape cancels.
+#[derive(Debug, Clone)]
+pub(super) struct InputPromptOverlay {
+    input: InputField,
+    /// Called with the confirmed text on Enter.  Stored as an identifier string
+    /// so the caller can switch on it; actual dispatch happens in the keydown handler.
+    pub(super) id: String,
+}
+
+impl InputPromptOverlay {
+    #[allow(dead_code)]
+    pub(super) fn new(id: impl Into<String>, label: impl Into<String>, prefill: &str) -> Self {
+        let mut input = InputField::new(label);
+        input.set_text(prefill);
+        Self {
+            input,
+            id: id.into(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn input(&self) -> &InputField {
+        &self.input
+    }
+
+    pub(super) fn text(&self) -> &str {
+        self.input.text()
+    }
+
+    pub(super) fn append_text(&mut self, text: &str) {
+        let filtered: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        if !filtered.is_empty() {
+            self.input.insert_text(&filtered);
+        }
+    }
+
+    pub(super) fn backspace(&mut self) {
+        self.input.backspace();
+    }
+
+    pub(super) fn delete_forward(&mut self) {
+        self.input.delete_forward();
+    }
+
+    pub(super) fn move_left(&mut self) {
+        let _ = self.input.move_left();
+    }
+
+    pub(super) fn move_right(&mut self) {
+        let _ = self.input.move_right();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CommandLineCompletionState {
     seed: String,

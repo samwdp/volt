@@ -8508,6 +8508,7 @@ pub(crate) struct ShellUiState {
     picker: Option<PickerOverlay>,
     picker_one_shot: Option<PickerOneShotContext>,
     command_line: Option<CommandLineOverlay>,
+    input_prompt: Option<InputPromptOverlay>,
     autocomplete: Option<AutocompleteOverlay>,
     hover: Option<HoverOverlay>,
     notifications: NotificationCenter,
@@ -8572,6 +8573,7 @@ impl ShellUiState {
             picker: None,
             picker_one_shot: None,
             command_line: None,
+            input_prompt: None,
             autocomplete: None,
             hover: None,
             notifications: NotificationCenter::default(),
@@ -9118,7 +9120,7 @@ impl ShellUiState {
             self.lsp_sync_worker.cancel_path(path);
         }
         self.indent_parse_sessions.remove(&buffer_id);
-        self.streamed_command_worker.remove(buffer_id);
+        self.streamed_command_worker.cancel_and_remove(buffer_id);
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.retain(|id| *id != buffer_id);
@@ -9214,6 +9216,31 @@ impl ShellUiState {
 
     fn close_command_line(&mut self) {
         self.command_line = None;
+    }
+
+    pub(in crate::shell) fn input_prompt(&self) -> Option<&InputPromptOverlay> {
+        self.input_prompt.as_ref()
+    }
+
+    pub(in crate::shell) fn input_prompt_mut(&mut self) -> Option<&mut InputPromptOverlay> {
+        self.input_prompt.as_mut()
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::shell) fn open_input_prompt(&mut self, overlay: InputPromptOverlay) {
+        self.close_picker();
+        self.close_autocomplete();
+        self.close_hover();
+        self.close_command_line();
+        self.input_prompt = Some(overlay);
+    }
+
+    pub(super) fn close_input_prompt(&mut self) {
+        self.input_prompt = None;
+    }
+
+    pub(super) fn input_prompt_visible(&self) -> bool {
+        self.input_prompt.is_some()
     }
 
     fn autocomplete(&self) -> Option<&AutocompleteOverlay> {
@@ -10899,6 +10926,9 @@ impl ShellState {
                     }
                     return Ok(false);
                 }
+                if self.handle_input_prompt_keydown(keycode, keymod)? {
+                    return Ok(false);
+                }
                 if self.handle_command_line_keydown(keycode, keymod)? {
                     return Ok(false);
                 }
@@ -12271,7 +12301,10 @@ impl ShellState {
     }
 
     fn text_input_activates_typing_budget(&self) -> Result<bool, ShellError> {
-        if self.command_line_visible()? || self.picker_visible()? {
+        if self.ui()?.input_prompt_visible()
+            || self.command_line_visible()?
+            || self.picker_visible()?
+        {
             return Ok(true);
         }
         Ok(matches!(
@@ -12281,6 +12314,13 @@ impl ShellState {
     }
 
     fn handle_text_input_inner(&mut self, text: &str) -> Result<(), ShellError> {
+        if self.ui()?.input_prompt_visible() {
+            clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
+            if let Some(prompt) = self.ui_mut()?.input_prompt_mut() {
+                prompt.append_text(text);
+            }
+            return Ok(());
+        }
         if self.command_line_visible()? {
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(command_line) = self.ui_mut()?.command_line_mut() {
@@ -13249,6 +13289,61 @@ impl ShellState {
         Ok(handled)
     }
 
+    fn handle_input_prompt_keydown(
+        &mut self,
+        keycode: Keycode,
+        _keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        if !self.ui()?.input_prompt_visible() {
+            return Ok(false);
+        }
+        match keycode {
+            Keycode::Escape => {
+                self.ui_mut()?.close_input_prompt();
+                Ok(true)
+            }
+            Keycode::Return | Keycode::KpEnter | Keycode::Return2 => {
+                let confirmed = self
+                    .ui()
+                    .ok()
+                    .and_then(|ui| ui.input_prompt())
+                    .filter(|p| !p.text().is_empty())
+                    .map(|p| (p.id.clone(), p.text().to_owned()));
+                if let Some((id, text)) = confirmed {
+                    self.ui_mut()?.close_input_prompt();
+                    dispatch_input_prompt_confirm(&mut self.runtime, &id, &text)
+                        .map_err(ShellError::Runtime)?;
+                }
+                Ok(true)
+            }
+            Keycode::Backspace => {
+                if let Some(prompt) = self.ui_mut()?.input_prompt_mut() {
+                    prompt.backspace();
+                }
+                Ok(true)
+            }
+            Keycode::Delete => {
+                if let Some(prompt) = self.ui_mut()?.input_prompt_mut() {
+                    prompt.delete_forward();
+                }
+                Ok(true)
+            }
+            Keycode::Left => {
+                if let Some(prompt) = self.ui_mut()?.input_prompt_mut() {
+                    prompt.move_left();
+                }
+                Ok(true)
+            }
+            Keycode::Right => {
+                if let Some(prompt) = self.ui_mut()?.input_prompt_mut() {
+                    prompt.move_right();
+                }
+                Ok(true)
+            }
+            _ => Ok(keydown_chord(keycode, _keymod).is_some()),
+        }
+    }
+
     fn handle_command_line_keydown(
         &mut self,
         keycode: Keycode,
@@ -13308,6 +13403,9 @@ impl ShellState {
         keycode: Keycode,
         keymod: Mod,
     ) -> Result<bool, ShellError> {
+        if self.handle_input_prompt_keydown(keycode, keymod)? {
+            return Ok(true);
+        }
         if self.handle_command_line_keydown(keycode, keymod)? {
             return Ok(true);
         }
@@ -27076,6 +27174,20 @@ fn open_vim_command_line(runtime: &mut EditorRuntime) -> Result<(), String> {
     }
     clear_key_sequence(runtime)?;
     shell_ui_mut(runtime)?.set_command_line(CommandLineOverlay::new());
+    Ok(())
+}
+
+/// Called when the user confirms an [`InputPromptOverlay`] with Enter.
+///
+/// `id` identifies which prompt was confirmed so callers can dispatch
+/// accordingly.  The runtime hook point is intentionally left as a no-op here;
+/// feature-specific callers (e.g. the compile flow) register their own
+/// handling by inspecting `id`.
+fn dispatch_input_prompt_confirm(
+    _runtime: &mut EditorRuntime,
+    _id: &str,
+    _text: &str,
+) -> Result<(), String> {
     Ok(())
 }
 

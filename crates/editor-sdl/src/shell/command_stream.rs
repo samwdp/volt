@@ -7,8 +7,10 @@ use super::{
 };
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use std::{
+    collections::BTreeMap,
     io::{BufReader, Read},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
 };
 
@@ -17,6 +19,9 @@ pub(super) enum StreamedCommandExitAction {
     RefreshGitStatusBuffersAndCloseBuffer,
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
+    /// Keep the popup buffer open after the process exits; no git refresh, no close.
+    #[allow(dead_code)]
+    LeaveOpen,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +81,7 @@ enum StreamedCommandUpdate {
 #[derive(Debug, Default)]
 pub(super) struct StreamedCommandWorkerState {
     active_buffers: BTreeSet<BufferId>,
+    cancel_flags: BTreeMap<BufferId, Arc<AtomicBool>>,
     updates: Arc<Mutex<Vec<StreamedCommandUpdate>>>,
 }
 
@@ -88,7 +94,16 @@ impl StreamedCommandWorkerState {
         self.active_buffers.contains(&buffer_id)
     }
 
+    /// Signal cancel for a running buffer's worker thread and remove it from tracking.
+    pub(super) fn cancel_and_remove(&mut self, buffer_id: BufferId) {
+        if let Some(flag) = self.cancel_flags.remove(&buffer_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.active_buffers.remove(&buffer_id);
+    }
+
     pub(super) fn remove(&mut self, buffer_id: BufferId) -> bool {
+        self.cancel_flags.remove(&buffer_id);
         self.active_buffers.remove(&buffer_id)
     }
 
@@ -102,13 +117,17 @@ impl StreamedCommandWorkerState {
 
     fn start(&mut self, request: StreamedCommandRequest) -> Result<(), String> {
         let buffer_id = request.buffer_id;
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         let updates = Arc::clone(&self.updates);
+        let cancel = Arc::clone(&cancel_flag);
         self.active_buffers.insert(buffer_id);
+        self.cancel_flags.insert(buffer_id, cancel_flag);
         if let Err(error) = thread::Builder::new()
             .name(format!("streamed-command-{buffer_id}"))
-            .spawn(move || run_streamed_command(request, updates))
+            .spawn(move || run_streamed_command(request, updates, cancel))
         {
             self.active_buffers.remove(&buffer_id);
+            self.cancel_flags.remove(&buffer_id);
             return Err(format!("failed to start streamed command worker: {error}"));
         }
         Ok(())
@@ -286,6 +305,7 @@ pub(super) fn refresh_pending_streamed_commands(
                             );
                         }
                     }
+                    StreamedCommandExitAction::LeaveOpen => {}
                 }
                 changed = true;
             }
@@ -375,6 +395,7 @@ fn append_streamed_command_error(
 fn run_streamed_command(
     request: StreamedCommandRequest,
     updates: Arc<Mutex<Vec<StreamedCommandUpdate>>>,
+    cancel: Arc<AtomicBool>,
 ) {
     let StreamedCommandRequest {
         buffer_id,
@@ -435,7 +456,24 @@ fn run_streamed_command(
         thread::spawn(move || stream_command_output(buffer_id, stderr, updates))
     });
 
-    let status = child.wait();
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(reader) = stdout_reader {
+                let _ = reader.join();
+            }
+            if let Some(reader) = stderr_reader {
+                let _ = reader.join();
+            }
+            return;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(error) => break Err(error),
+        }
+    };
     if let Some(reader) = stdout_reader {
         let _ = reader.join();
     }
@@ -542,11 +580,138 @@ fn drain_completed_output_lines(pending: &mut Vec<u8>) -> Vec<String> {
     lines
 }
 
+/// Detect a build command from marker files at the top level of `dir`.
+///
+/// Priority order: `Cargo.toml` → `cargo build`, `*.sln`/`*.csproj` →
+/// `dotnet build`, `package.json` → `npm run build`, `Makefile` → `make`.
+/// Returns an empty string if no marker is found. Detection is shallow (no
+/// recursion into sub-directories).
+#[allow(dead_code)]
+pub(super) fn detect_build_command(dir: &std::path::Path) -> String {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return String::new(),
+    };
+    let mut has_dotnet = false;
+    let mut has_npm = false;
+    let mut has_makefile = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "Cargo.toml" {
+            return "cargo build".to_owned();
+        }
+        if name.ends_with(".sln") || name.ends_with(".csproj") {
+            has_dotnet = true;
+        } else if name == "package.json" {
+            has_npm = true;
+        } else if name == "Makefile" {
+            has_makefile = true;
+        }
+    }
+    if has_dotnet {
+        "dotnet build".to_owned()
+    } else if has_npm {
+        "npm run build".to_owned()
+    } else if has_makefile {
+        "make".to_owned()
+    } else {
+        String::new()
+    }
+}
+
 fn push_streamed_command_update(
     updates: &Arc<Mutex<Vec<StreamedCommandUpdate>>>,
     update: StreamedCommandUpdate,
 ) {
     if let Ok(mut updates) = updates.lock() {
         updates.push(update);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_build_command;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("volt-detect-build-{tag}-{unique}"));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn detects_cargo_toml() {
+        let dir = TempDir::new("cargo");
+        fs::write(dir.path.join("Cargo.toml"), "").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "cargo build");
+    }
+
+    #[test]
+    fn detects_sln() {
+        let dir = TempDir::new("sln");
+        fs::write(dir.path.join("MyApp.sln"), "").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "dotnet build");
+    }
+
+    #[test]
+    fn detects_csproj() {
+        let dir = TempDir::new("csproj");
+        fs::write(dir.path.join("MyApp.csproj"), "").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "dotnet build");
+    }
+
+    #[test]
+    fn detects_package_json() {
+        let dir = TempDir::new("npm");
+        fs::write(dir.path.join("package.json"), "{}").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "npm run build");
+    }
+
+    #[test]
+    fn detects_makefile() {
+        let dir = TempDir::new("make");
+        fs::write(dir.path.join("Makefile"), "").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "make");
+    }
+
+    #[test]
+    fn empty_dir_returns_empty_string() {
+        let dir = TempDir::new("empty");
+        assert_eq!(detect_build_command(&dir.path), "");
+    }
+
+    #[test]
+    fn cargo_toml_wins_over_other_markers() {
+        let dir = TempDir::new("priority");
+        fs::write(dir.path.join("Cargo.toml"), "").expect("write");
+        fs::write(dir.path.join("package.json"), "{}").expect("write");
+        fs::write(dir.path.join("Makefile"), "").expect("write");
+        assert_eq!(detect_build_command(&dir.path), "cargo build");
+    }
+
+    #[test]
+    fn missing_dir_returns_empty_string() {
+        let path = std::path::Path::new("/nonexistent/volt/test/dir");
+        assert_eq!(detect_build_command(path), "");
     }
 }
