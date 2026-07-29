@@ -17186,6 +17186,64 @@ fn input_prompt_overlay_prefill_appears_in_text() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let overlay = InputPromptOverlay::new(COMPILE_PROMPT_ID, "Build command: ", "cargo build");
+    shell_ui_mut(&mut state.runtime)?.open_input_prompt(overlay);
+
+    let ui = shell_ui(&state.runtime)?;
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: None,
+            font_size: 16,
+            emoji_font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &NullUserLibrary,
+        "default",
+        None,
+        false,
+        false,
+        None,
+        640,
+        360,
+        None,
+        8,
+        16,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { text, .. } if text.contains("Build command: cargo build")
+        )),
+        "InputPromptOverlay must draw into the command-line footer row"
+    );
+    Ok(())
+}
+
 // ─── workspace.compile prompt tests ──────────────────────────────────────────
 
 #[test]

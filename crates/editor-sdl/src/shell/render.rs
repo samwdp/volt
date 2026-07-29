@@ -47,7 +47,8 @@ pub(super) fn render_shell_state(
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
-    let command_line_row_visible = user_library.commandline_enabled();
+    let command_line_row_visible =
+        user_library.commandline_enabled() || state.input_prompt_visible();
 
     clear_window_surface(target, base_background, window_effects);
 
@@ -80,7 +81,16 @@ pub(super) fn render_shell_state(
             let visual_range = state.visual_selection_for_buffer(buffer, active);
             let multicursor = state.multicursor_for_buffer(buffer.id(), active).cloned();
             let yank_flash = state.yank_flash(buffer.id(), now);
-            let command_line = active.then(|| state.command_line()).flatten();
+            // Prefer the Vim command line; fall back to a generic input prompt
+            // (e.g. workspace.compile) which shares the same footer row.
+            let command_line_input = active
+                .then(|| {
+                    state
+                        .command_line()
+                        .map(CommandLineOverlay::input)
+                        .or_else(|| state.input_prompt().map(InputPromptOverlay::input))
+                })
+                .flatten();
             let view_state = if active {
                 buffer.view_state()
             } else {
@@ -100,7 +110,7 @@ pub(super) fn render_shell_state(
                 input_mode,
                 vim_targets_input,
                 state.vim().recording_macro,
-                command_line,
+                command_line_input,
                 command_line_row_visible,
                 user_library,
                 workspace_name,
@@ -1836,7 +1846,7 @@ pub(super) fn render_buffer(
     input_mode: InputMode,
     vim_targets_input: bool,
     recording_macro: Option<char>,
-    command_line: Option<&CommandLineOverlay>,
+    command_line_input: Option<&InputField>,
     command_line_row_visible: bool,
     user_library: &dyn UserLibrary,
     workspace_name: &str,
@@ -1862,7 +1872,7 @@ pub(super) fn render_buffer(
         input_mode,
         vim_targets_input,
         recording_macro,
-        command_line,
+        command_line_input,
         command_line_row_visible,
         user_library,
         workspace_name,
@@ -1891,7 +1901,7 @@ fn render_buffer_with_view_state(
     input_mode: InputMode,
     vim_targets_input: bool,
     recording_macro: Option<char>,
-    command_line: Option<&CommandLineOverlay>,
+    command_line_input: Option<&InputField>,
     command_line_row_visible: bool,
     user_library: &dyn UserLibrary,
     workspace_name: &str,
@@ -2081,7 +2091,7 @@ fn render_buffer_with_view_state(
         }
         render_command_line_overlay(
             target,
-            command_line,
+            command_line_input,
             rect,
             layout,
             active,
@@ -2720,7 +2730,7 @@ fn render_buffer_with_view_state(
     }
     render_command_line_overlay(
         target,
-        command_line,
+        command_line_input,
         rect,
         layout,
         active,
@@ -2752,7 +2762,7 @@ fn render_buffer_with_view_state(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_command_line_overlay(
     target: &mut DrawTarget<'_>,
-    command_line: Option<&CommandLineOverlay>,
+    command_line_input: Option<&InputField>,
     rect: Rect,
     layout: BufferFooterLayout,
     active: bool,
@@ -2781,11 +2791,10 @@ pub(super) fn render_command_line_overlay(
             window_effects,
         )?;
     }
-    let Some(command_line) = command_line else {
+    let Some(input) = command_line_input else {
         return Ok(());
     };
     let text_x = rect.x() + 12;
-    let input = command_line.input();
     let prompt = input.prompt();
     let rendered = if input.text().is_empty() {
         input.placeholder().map_or_else(

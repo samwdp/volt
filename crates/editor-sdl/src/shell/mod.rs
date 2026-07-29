@@ -9226,7 +9226,6 @@ impl ShellUiState {
         self.input_prompt.as_mut()
     }
 
-    #[allow(dead_code)]
     pub(in crate::shell) fn open_input_prompt(&mut self, overlay: InputPromptOverlay) {
         self.close_picker();
         self.close_autocomplete();

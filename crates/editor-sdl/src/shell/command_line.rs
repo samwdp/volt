@@ -13,7 +13,6 @@ pub(super) struct InputPromptOverlay {
 }
 
 impl InputPromptOverlay {
-    #[allow(dead_code)]
     pub(super) fn new(id: impl Into<String>, label: impl Into<String>, prefill: &str) -> Self {
         let mut input = InputField::new(label);
         input.set_text(prefill);
@@ -23,7 +22,6 @@ impl InputPromptOverlay {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn input(&self) -> &InputField {
         &self.input
     }

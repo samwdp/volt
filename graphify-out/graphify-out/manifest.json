@@ -1,0 +1,32 @@
+{
+  ".graphify_labels.json": {
+    "mtime": 1785322610.712181,
+    "ast_hash": "06734d22959fdf84acbd4eff36f67340",
+    "semantic_hash": ""
+  },
+  ".graphify_semantic_new.json": {
+    "mtime": 1779188405.9973671,
+    "ast_hash": "0be644ee87a94d225cae891cc11cdad4",
+    "semantic_hash": ""
+  },
+  "graph.json": {
+    "mtime": 1785322609.2520976,
+    "ast_hash": "6b03c153a9e98102b9489dc25dd8df1f",
+    "semantic_hash": ""
+  },
+  ".graphify_uncached.txt": {
+    "mtime": 1779188406.0069659,
+    "ast_hash": "fe1be68db3273d2f0108b96287b0e312",
+    "semantic_hash": ""
+  },
+  "GRAPH_REPORT.md": {
+    "mtime": 1785322610.7111795,
+    "ast_hash": "18bdc7465eb6b6a7ae67b20245c377c7",
+    "semantic_hash": ""
+  },
+  "graph.html": {
+    "mtime": 1785322611.013012,
+    "ast_hash": "32c60f3e7dc076ff48ba141e92930b01",
+    "semantic_hash": ""
+  }
+}
