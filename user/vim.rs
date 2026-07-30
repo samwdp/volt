@@ -610,6 +610,7 @@ pub fn package() -> PluginPackage {
         normal_binding("j", "vim.move-down", PluginKeymapScope::Workspace),
         normal_binding("k", "vim.move-up", PluginKeymapScope::Workspace),
         normal_binding("g", "vim.start-g-prefix", PluginKeymapScope::Workspace),
+        normal_binding("g g", "vim.goto-first-line", PluginKeymapScope::Workspace),
         normal_binding("g d", "lsp.definition", PluginKeymapScope::Workspace),
         normal_binding("g r", "lsp.references", PluginKeymapScope::Workspace),
         normal_binding("g r r", "lsp.references", PluginKeymapScope::Workspace),
