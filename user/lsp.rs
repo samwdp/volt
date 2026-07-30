@@ -82,13 +82,13 @@ pub fn package() -> PluginPackage {
         ),
         hook_command(
             "lsp.stop",
-            "Stops the language servers attached to the active file.",
+            "Stops a live Language Server Session chosen from a picker.",
             HOOK_LSP_STOP,
             None,
         ),
         hook_command(
             "lsp.restart",
-            "Restarts the language servers for the active file.",
+            "Restarts a live Language Server Session chosen from a picker.",
             HOOK_LSP_RESTART,
             None,
         ),

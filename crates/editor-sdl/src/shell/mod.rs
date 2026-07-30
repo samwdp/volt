@@ -99,8 +99,9 @@ use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
     LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction, LspFormattingOptions,
-    LspInlineCompletionItem, LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationAction,
-    LspNotificationLevel, LspNotificationSnapshot, LspTextEdit, LspWorkspaceDiagnostic,
+    LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogEntry, LspLogSnapshot,
+    LspNotificationAction, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
+    LspWorkspaceDiagnostic,
 };
 use editor_picker::{
     PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerItem, PickerOneShotContext,
@@ -7864,12 +7865,6 @@ impl ShellPane {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LspLifecycleAction {
-    Start,
-    Restart,
-}
-
 #[derive(Debug, Clone)]
 enum PickerAction {
     NoOp,
@@ -7969,6 +7964,14 @@ enum PickerAction {
         option_id: String,
     },
     CopyToClipboard(String),
+    StopLspSession {
+        server_id: String,
+        root: Option<PathBuf>,
+    },
+    RestartLspSession {
+        server_id: String,
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18237,6 +18240,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::CopyToClipboard(text) => {
                     write_system_clipboard(&text);
                 }
+                PickerAction::StopLspSession { server_id, root } => {
+                    stop_lsp_session(runtime, &server_id, root.as_deref())?;
+                }
+                PickerAction::RestartLspSession { server_id, root } => {
+                    restart_lsp_session(runtime, &server_id, root.as_deref())?;
+                }
             }
 
             if let Some(PickerKind::AcpPermission { request_id }) = picker_kind {
@@ -18343,7 +18352,7 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
     if runtime.hooks().contains(HOOK_LSP_STOP) {
         runtime
             .subscribe_hook(HOOK_LSP_STOP, "shell.stop-lsp-server", |_, runtime| {
-                stop_lsp_for_active_buffer(runtime)
+                open_lsp_session_stop_picker(runtime)
             })
             .map_err(|error| error.to_string())?;
     }
@@ -18353,7 +18362,7 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .subscribe_hook(
                 HOOK_LSP_RESTART,
                 "shell.restart-lsp-server",
-                |_, runtime| restart_lsp_for_active_buffer(runtime, None),
+                |_, runtime| open_lsp_session_restart_picker(runtime),
             )
             .map_err(|error| error.to_string())?;
     }
@@ -18439,7 +18448,7 @@ fn start_lsp_for_active_buffer(
     runtime: &mut EditorRuntime,
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
-    run_lsp_lifecycle_for_active_buffer(runtime, preferred_server_id, LspLifecycleAction::Start)
+    run_lsp_start_for_active_buffer(runtime, preferred_server_id)
 }
 
 fn copilot_sign_in_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -18455,12 +18464,11 @@ fn copilot_sign_in_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), 
         context.root.as_deref(),
         Some(COPILOT_LANGUAGE_SERVER),
     )?;
-    execute_lsp_lifecycle_for_buffer(
+    execute_lsp_start_for_buffer(
         runtime,
         &lsp_client,
         &context,
         Some(COPILOT_LANGUAGE_SERVER),
-        LspLifecycleAction::Start,
     )?;
     begin_copilot_sign_in(runtime, context.root.as_deref())
 }
@@ -18478,12 +18486,11 @@ fn copilot_sign_out_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(),
         context.root.as_deref(),
         Some(COPILOT_LANGUAGE_SERVER),
     )?;
-    execute_lsp_lifecycle_for_buffer(
+    execute_lsp_start_for_buffer(
         runtime,
         &lsp_client,
         &context,
         Some(COPILOT_LANGUAGE_SERVER),
-        LspLifecycleAction::Start,
     )?;
     let signed_out = lsp_client
         .copilot_sign_out(context.root.as_deref())
@@ -18561,37 +18568,212 @@ fn apply_copilot_auth_notification(
     Ok(())
 }
 
-fn stop_lsp_for_active_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let context = active_lsp_buffer_context(runtime)?;
+fn open_lsp_session_stop_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_lsp_session_lifecycle_picker(runtime, LspSessionPickerAction::Stop)
+}
+
+fn open_lsp_session_restart_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_lsp_session_lifecycle_picker(runtime, LspSessionPickerAction::Restart)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LspSessionPickerAction {
+    Stop,
+    Restart,
+}
+
+fn open_lsp_session_lifecycle_picker(
+    runtime: &mut EditorRuntime,
+    action: LspSessionPickerAction,
+) -> Result<(), String> {
+    let sessions = live_lsp_sessions_for_active_workspace(runtime)?;
+    if sessions.is_empty() {
+        return Err("no running Language Server Sessions".to_owned());
+    }
+    let picker = lsp_session_lifecycle_picker_overlay(action, &sessions);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn live_lsp_sessions_for_active_workspace(
+    runtime: &EditorRuntime,
+) -> Result<Vec<LspLiveSession>, String> {
     let lsp_client = runtime
         .services()
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
-    cancel_lsp_sync_for_path(runtime, &context.path)?;
+    let project_workspace_root = active_workspace_root(runtime)?;
+    let open_buffer_paths = active_workspace_open_buffer_paths(runtime)?;
     lsp_client
-        .stop_buffer(&context.path)
-        .map_err(|error| error.to_string())?;
-    let ui = shell_ui_mut(runtime)?;
-    if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
-        buffer.set_lsp_enabled(false);
-        buffer.set_lsp_diagnostics(Vec::new());
+        .live_sessions_for_workspace(&open_buffer_paths, project_workspace_root.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+fn active_workspace_open_buffer_paths(runtime: &EditorRuntime) -> Result<Vec<PathBuf>, String> {
+    let ui = shell_ui(runtime)?;
+    Ok(ui
+        .active_workspace_buffer_ids()
+        .into_iter()
+        .flatten()
+        .filter_map(|buffer_id| ui.buffer(*buffer_id))
+        .filter_map(|buffer| buffer.path().map(Path::to_path_buf))
+        .collect())
+}
+
+fn lsp_session_lifecycle_picker_overlay(
+    action: LspSessionPickerAction,
+    sessions: &[LspLiveSession],
+) -> PickerOverlay {
+    let title = match action {
+        LspSessionPickerAction::Stop => "Stop Language Server Session",
+        LspSessionPickerAction::Restart => "Restart Language Server Session",
+    };
+    let entries = sessions
+        .iter()
+        .map(|session| lsp_session_lifecycle_picker_entry(action, session))
+        .collect();
+    PickerOverlay::from_entries(title, entries)
+}
+
+fn lsp_session_lifecycle_picker_entry(
+    action: LspSessionPickerAction,
+    session: &LspLiveSession,
+) -> PickerEntry {
+    let root = session.root().map(Path::to_path_buf);
+    let picker_action = match action {
+        LspSessionPickerAction::Stop => PickerAction::StopLspSession {
+            server_id: session.server_id().to_owned(),
+            root: root.clone(),
+        },
+        LspSessionPickerAction::Restart => PickerAction::RestartLspSession {
+            server_id: session.server_id().to_owned(),
+            root: root.clone(),
+        },
+    };
+    let id = match root.as_deref() {
+        Some(path) => format!("lsp-session:{}:{}", session.server_id(), path.display()),
+        None => format!("lsp-session:{}:", session.server_id()),
+    };
+    PickerEntry {
+        item: PickerItem::new(id, session.picker_label(), String::new(), None::<String>),
+        action: picker_action,
+        quickfix: None,
     }
-    ui.set_attached_lsp_server(context.workspace_id, None);
+}
+
+fn stop_lsp_session(
+    runtime: &mut EditorRuntime,
+    server_id: &str,
+    root: Option<&Path>,
+) -> Result<(), String> {
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let paths = lsp_client
+        .stop_session(server_id, root)
+        .map_err(|error| error.to_string())?;
+    clear_lsp_ui_for_stopped_paths(runtime, &paths)
+}
+
+fn restart_lsp_session(
+    runtime: &mut EditorRuntime,
+    server_id: &str,
+    root: Option<&Path>,
+) -> Result<(), String> {
+    let lsp_client = runtime
+        .services()
+        .get::<Arc<LspClientManager>>()
+        .cloned()
+        .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let paths = lsp_client
+        .restart_session(server_id, root)
+        .map_err(|error| error.to_string())?;
+    clear_lsp_ui_for_stopped_paths(runtime, &paths)?;
+    for path in paths {
+        let Some(context) = lsp_buffer_context_for_path(runtime, &path)? else {
+            continue;
+        };
+        cancel_lsp_sync_for_path(runtime, &path)?;
+        lsp_client
+            .sync_buffer_onto_session(
+                &context.path,
+                &context.text,
+                context.revision,
+                server_id,
+                root,
+            )
+            .map_err(|error| error.to_string())?;
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+            buffer.set_lsp_enabled(true);
+            buffer.set_lsp_diagnostics(Vec::new());
+        }
+        ui.set_attached_lsp_server(context.workspace_id, Some(server_id.to_owned()));
+    }
     Ok(())
 }
 
-fn restart_lsp_for_active_buffer(
+fn clear_lsp_ui_for_stopped_paths(
     runtime: &mut EditorRuntime,
-    preferred_server_id: Option<&str>,
+    paths: &[PathBuf],
 ) -> Result<(), String> {
-    run_lsp_lifecycle_for_active_buffer(runtime, preferred_server_id, LspLifecycleAction::Restart)
+    for path in paths {
+        cancel_lsp_sync_for_path(runtime, path)?;
+    }
+    let path_set = paths.iter().cloned().collect::<HashSet<_>>();
+    let ui = shell_ui_mut(runtime)?;
+    let mut touched_workspaces = BTreeSet::new();
+    for buffer in &mut ui.buffers {
+        let Some(path) = buffer.path().map(Path::to_path_buf) else {
+            continue;
+        };
+        if !path_set.contains(&path) {
+            continue;
+        }
+        buffer.set_lsp_diagnostics(Vec::new());
+        let buffer_id = buffer.id();
+        for (workspace_id, view) in &ui.workspace_views {
+            if view.buffer_ids.contains(&buffer_id) {
+                touched_workspaces.insert(*workspace_id);
+            }
+        }
+    }
+    for workspace_id in touched_workspaces {
+        ui.set_attached_lsp_server(workspace_id, None);
+    }
+    Ok(())
 }
 
-fn run_lsp_lifecycle_for_active_buffer(
+fn lsp_buffer_context_for_path(
+    runtime: &EditorRuntime,
+    path: &Path,
+) -> Result<Option<ActiveLspBufferContext>, String> {
+    let ui = shell_ui(runtime)?;
+    let Some(buffer_id) = ui
+        .buffers
+        .iter()
+        .find(|buffer| buffer.path() == Some(path))
+        .map(ShellBuffer::id)
+    else {
+        return Ok(None);
+    };
+    let Some(workspace_id) = ui
+        .workspace_views
+        .iter()
+        .find(|(_, view)| view.buffer_ids.contains(&buffer_id))
+        .map(|(workspace_id, _)| *workspace_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(lsp_buffer_context(runtime, workspace_id, buffer_id)?))
+}
+
+fn run_lsp_start_for_active_buffer(
     runtime: &mut EditorRuntime,
     preferred_server_id: Option<&str>,
-    lifecycle: LspLifecycleAction,
 ) -> Result<(), String> {
     let context = active_lsp_buffer_context(runtime)?;
     let lsp_client = runtime
@@ -18605,13 +18787,7 @@ fn run_lsp_lifecycle_for_active_buffer(
         context.root.as_deref(),
         preferred_server_id,
     )?;
-    execute_lsp_lifecycle_for_buffer(
-        runtime,
-        &lsp_client,
-        &context,
-        preferred_server_id,
-        lifecycle,
-    )
+    execute_lsp_start_for_buffer(runtime, &lsp_client, &context, preferred_server_id)
 }
 
 fn validate_lsp_server_request(
@@ -18642,47 +18818,21 @@ fn validate_lsp_server_request(
     Ok(())
 }
 
-fn execute_lsp_lifecycle_for_buffer(
+fn execute_lsp_start_for_buffer(
     runtime: &mut EditorRuntime,
     manager: &LspClientManager,
     context: &ActiveLspBufferContext,
     preferred_server_id: Option<&str>,
-    lifecycle: LspLifecycleAction,
 ) -> Result<(), String> {
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, manager, context)?;
-    match lifecycle {
-        LspLifecycleAction::Start => {
-            {
-                let ui = shell_ui_mut(runtime)?;
-                if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
-                    buffer.set_lsp_enabled(true);
-                }
-            }
-            schedule_immediate_lsp_sync(runtime, context, preferred_server_id)
-        }
-        LspLifecycleAction::Restart => {
-            let labels = manager
-                .restart_buffer(
-                    &context.path,
-                    &context.text,
-                    context.revision,
-                    context.root.as_deref(),
-                    preferred_server_id,
-                )
-                .map_err(|error| error.to_string())?;
-            let ui = shell_ui_mut(runtime)?;
-            if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
-                buffer.set_lsp_enabled(true);
-                buffer.set_lsp_diagnostics(Vec::new());
-            }
-            ui.set_attached_lsp_server(
-                context.workspace_id,
-                (!labels.is_empty()).then(|| labels.join(", ")),
-            );
-            Ok(())
+    {
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
+            buffer.set_lsp_enabled(true);
         }
     }
+    schedule_immediate_lsp_sync(runtime, context, preferred_server_id)
 }
 
 fn schedule_immediate_lsp_sync(

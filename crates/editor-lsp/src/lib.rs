@@ -17,10 +17,10 @@ use serde_json::{Number, Value};
 pub use client::{
     CopilotDeviceCodePrompt, LspClientError, LspClientManager, LspCodeAction, LspCompletionItem,
     LspCompletionKind, LspDocumentTextEdits, LspFormattingOptions, LspHoverContents,
-    LspInlineCompletionItem, LspLocation, LspLogDirection, LspLogEntry, LspLogSnapshot,
-    LspNotification, LspNotificationAction, LspNotificationEntry, LspNotificationLevel,
-    LspNotificationProgress, LspNotificationSnapshot, LspServerCommand, LspSignatureHelpContents,
-    LspTextEdit,
+    LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogDirection, LspLogEntry,
+    LspLogSnapshot, LspNotification, LspNotificationAction, LspNotificationEntry,
+    LspNotificationLevel, LspNotificationProgress, LspNotificationSnapshot, LspServerCommand,
+    LspSignatureHelpContents, LspTextEdit, language_server_session_in_workspace_scope,
 };
 
 /// Human-readable summary of this crate's responsibility.

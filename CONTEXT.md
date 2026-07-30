@@ -121,3 +121,11 @@ _Avoid_: project (when meaning the `.sln`), workspace (when meaning the `.sln`)
 **Language Server Session**:
 One planned or live language-server process for a given server and root. For csharp-ls, the root is the Solution’s directory when a Solution applies; otherwise the nearest `.csproj` directory or the Project Workspace root.
 _Avoid_: LSP instance (as the spoken product term), server process (when meaning the Session identity)
+
+**Language Server Session Stop**:
+Choosing one live Language Server Session from a picker scoped to the active Workspace and shutting that Session down for the whole app. `lsp.stop` means this — not detaching LSP from the active buffer only.
+_Avoid_: stop buffer LSP, detach LSP (as the spoken product meaning of `lsp.stop`)
+
+**Language Server Session Restart**:
+Same picker grain as Language Server Session Stop: choose one live Session in the active Workspace and restart it. `lsp.restart` means this.
+_Avoid_: restart buffer LSP (as the spoken product meaning of `lsp.restart`)

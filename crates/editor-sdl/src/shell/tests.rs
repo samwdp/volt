@@ -3,7 +3,7 @@ use agent_client_protocol::{
     Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallContent, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
-use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLogDirection};
+use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLiveSession, LspLogDirection};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, OilDefaults, OilKeyAction,
@@ -17514,4 +17514,80 @@ fn workspace_compile_closing_popup_mid_build_stops_tracking_worker() -> Result<(
 
     std::fs::remove_dir_all(&root).ok();
     Ok(())
+}
+
+#[test]
+fn lsp_stop_with_no_live_sessions_returns_error_without_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("lsp-stop-empty");
+    open_workspace_from_project(&mut state.runtime, "lsp-stop-empty", &root)?;
+    let path = root.join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    open_workspace_file(&mut state.runtime, &path)?;
+
+    let error = state
+        .runtime
+        .execute_command("lsp.stop")
+        .expect_err("lsp.stop should fail when no Sessions are live");
+    assert!(
+        error
+            .to_string()
+            .contains("no running Language Server Sessions"),
+        "unexpected error: {error}"
+    );
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn lsp_restart_with_no_live_sessions_returns_error_without_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let error = state
+        .runtime
+        .execute_command("lsp.restart")
+        .expect_err("lsp.restart should fail when no Sessions are live");
+    assert!(
+        error
+            .to_string()
+            .contains("no running Language Server Sessions"),
+        "unexpected error: {error}"
+    );
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    Ok(())
+}
+
+#[test]
+fn lsp_session_lifecycle_picker_labels_sessions_and_wires_stop_action() {
+    let root = {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"p:\volt")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/volt")
+        }
+    };
+    let session = LspLiveSession::new("rust-analyzer", Some(root.clone()));
+    let picker = lsp_session_lifecycle_picker_overlay(LspSessionPickerAction::Stop, &[session]);
+    assert_eq!(picker.session().title(), "Stop Language Server Session");
+    assert_eq!(picker.session().item_count(), 1);
+    let selected = picker.session().selected().expect("one row");
+    assert_eq!(
+        selected.item().label(),
+        format!("rust-analyzer — {}", root.display())
+    );
+    let action = picker
+        .actions
+        .get(selected.item().id())
+        .expect("stop action");
+    assert!(matches!(
+        action,
+        PickerAction::StopLspSession {
+            server_id,
+            root: action_root
+        } if server_id == "rust-analyzer" && action_root.as_deref() == Some(root.as_path())
+    ));
 }

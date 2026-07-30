@@ -821,6 +821,80 @@ pub enum LspClientError {
     Disconnected(String),
 }
 
+/// Identity of one live Language Server Session (server id + root).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LspLiveSession {
+    server_id: String,
+    root: Option<PathBuf>,
+}
+
+impl LspLiveSession {
+    /// Creates a live Session identity.
+    pub fn new(server_id: impl Into<String>, root: Option<PathBuf>) -> Self {
+        Self {
+            server_id: server_id.into(),
+            root: normalize_session_root(root.as_deref()),
+        }
+    }
+
+    /// Returns the language server id.
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    /// Returns the Session root path, if any.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Picker label: `server-id — <root>` or `server-id — (no root)`.
+    pub fn picker_label(&self) -> String {
+        match self.root.as_deref() {
+            Some(root) => format!("{} — {}", self.server_id, root.display()),
+            None => format!("{} — (no root)", self.server_id),
+        }
+    }
+}
+
+/// Whether a live Session belongs in the active Workspace stop/restart picker.
+///
+/// Include when it serves an open buffer, or (Project Workspace only) when its
+/// root equals or lies under the Project Workspace root.
+pub fn language_server_session_in_workspace_scope(
+    session_root: Option<&Path>,
+    tracked_paths: &[PathBuf],
+    open_buffer_paths: &[PathBuf],
+    project_workspace_root: Option<&Path>,
+) -> bool {
+    let open = open_buffer_paths
+        .iter()
+        .map(|path| normalize_path_for_compare(path))
+        .collect::<BTreeSet<_>>();
+    if tracked_paths
+        .iter()
+        .any(|path| open.contains(&normalize_path_for_compare(path)))
+    {
+        return true;
+    }
+    let Some(workspace_root) = project_workspace_root else {
+        return false;
+    };
+    let Some(session_root) = session_root else {
+        return false;
+    };
+    path_equals_or_under(session_root, workspace_root)
+}
+
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    normalize_session_root(Some(path)).unwrap_or_else(|| path.to_path_buf())
+}
+
+fn path_equals_or_under(path: &Path, ancestor: &Path) -> bool {
+    let path = normalize_path_for_compare(path);
+    let ancestor = normalize_path_for_compare(ancestor);
+    path == ancestor || path.starts_with(&ancestor)
+}
+
 impl std::fmt::Display for LspClientError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1400,6 +1474,157 @@ impl LspClientManager {
                 .collect::<BTreeSet<_>>()
         };
         self.shutdown_sessions(&session_keys)
+    }
+
+    /// Lists live Language Server Sessions in scope for the active Workspace picker.
+    pub fn live_sessions_for_workspace(
+        &self,
+        open_buffer_paths: &[PathBuf],
+        project_workspace_root: Option<&Path>,
+    ) -> Result<Vec<LspLiveSession>, LspClientError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        let mut stale_keys = Vec::new();
+        let mut candidates = Vec::new();
+        for (key, session) in &state.sessions {
+            if session.is_disconnected() {
+                stale_keys.push(key.clone());
+                continue;
+            }
+            let tracked_paths = state
+                .tracked_buffers
+                .iter()
+                .filter(|(_, tracked)| tracked.sessions.contains(key))
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            let live = LspLiveSession::new(key.server_id.clone(), key.root.clone());
+            if language_server_session_in_workspace_scope(
+                live.root(),
+                &tracked_paths,
+                open_buffer_paths,
+                project_workspace_root,
+            ) {
+                candidates.push(live);
+            }
+        }
+        for key in stale_keys {
+            state.sessions.remove(&key);
+        }
+        candidates.sort();
+        Ok(candidates)
+    }
+
+    /// Shuts down one live Language Server Session. Returns paths that were tracked to it.
+    pub fn stop_session(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<Vec<PathBuf>, LspClientError> {
+        let key = SessionKey::new(server_id, root);
+        let tracked_paths = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state
+                .tracked_buffers
+                .iter()
+                .filter(|(_, tracked)| tracked.sessions.contains(&key))
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>()
+        };
+        for path in &tracked_paths {
+            self.close_buffer(path)?;
+        }
+        let mut keys = BTreeSet::new();
+        keys.insert(key);
+        self.shutdown_sessions(&keys)?;
+        Ok(tracked_paths)
+    }
+
+    /// Stops one Session, then starts the same server id + root again.
+    pub fn restart_session(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<Vec<PathBuf>, LspClientError> {
+        let tracked_paths = self.stop_session(server_id, root)?;
+        self.ensure_session(server_id, root)?;
+        Ok(tracked_paths)
+    }
+
+    /// Ensures a live Session exists for the exact server id + root.
+    pub fn ensure_session(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<(), LspClientError> {
+        let _ = self.ensure_session_handle(server_id, root)?;
+        Ok(())
+    }
+
+    /// Syncs a buffer onto an exact Language Server Session (server id + root).
+    pub fn sync_buffer_onto_session(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        server_id: &str,
+        session_root: Option<&Path>,
+    ) -> Result<Vec<String>, LspClientError> {
+        let handle = self.ensure_session_handle(server_id, session_root)?;
+        self.sync_buffer_to_sessions(path, text.into(), revision, vec![handle])
+    }
+
+    fn ensure_session_handle(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<Arc<LspSessionHandle>, LspClientError> {
+        let key = SessionKey::new(server_id, root);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            if let Some(existing) = state.sessions.get(&key).cloned() {
+                if existing.is_disconnected() {
+                    state.sessions.remove(&key);
+                } else {
+                    return Ok(existing);
+                }
+            }
+            state.start_failures.remove(&key);
+        }
+        let session = self
+            .registry
+            .prepare_session(server_id, key.root.clone())
+            .map_err(LspClientError::from)?;
+        let (runtime_override, initialization_options_override) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            (
+                state.settings_overrides.get(&key).cloned(),
+                state.initialization_options_overrides.get(&key).cloned(),
+            )
+        };
+        let handle = LspSessionHandle::start(
+            session,
+            runtime_override,
+            initialization_options_override,
+            Arc::clone(&self.transport_log),
+            Arc::clone(&self.notifications),
+        )?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        state.sessions.insert(key, Arc::clone(&handle));
+        Ok(handle)
     }
 
     fn shutdown_sessions(&self, session_keys: &BTreeSet<SessionKey>) -> Result<(), LspClientError> {
@@ -6668,5 +6893,203 @@ mod tests {
             toast.body_lines(),
             ["Starting Odin Language Server dev-2026-05", r"P:\odinpong"]
         );
+    }
+
+    #[test]
+    fn session_in_scope_when_open_buffer_is_tracked() {
+        let tracked = [PathBuf::from(r"P:\volt\src\main.rs")];
+        let open = [PathBuf::from(r"P:\volt\src\main.rs")];
+        assert!(language_server_session_in_workspace_scope(
+            Some(Path::new(r"P:\volt")),
+            &tracked,
+            &open,
+            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+        ));
+    }
+
+    #[test]
+    fn session_in_scope_when_root_under_project_workspace_without_open_buffer() {
+        let tracked = [PathBuf::from(r"P:\volt\src\lib.rs")];
+        let open: [PathBuf; 0] = [];
+        assert!(language_server_session_in_workspace_scope(
+            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+            &tracked,
+            &open,
+            Some(Path::new(r"P:\volt")),
+        ));
+    }
+
+    #[test]
+    fn session_out_of_scope_when_parent_root_and_no_open_buffer() {
+        let tracked = [PathBuf::from(r"P:\volt\src\main.rs")];
+        let open: [PathBuf; 0] = [];
+        assert!(!language_server_session_in_workspace_scope(
+            Some(Path::new(r"P:\volt")),
+            &tracked,
+            &open,
+            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+        ));
+    }
+
+    #[test]
+    fn default_workspace_lists_only_sessions_serving_open_buffers() {
+        let tracked = [PathBuf::from(r"P:\scratch\main.rs")];
+        let open = [PathBuf::from(r"P:\scratch\main.rs")];
+        assert!(language_server_session_in_workspace_scope(
+            Some(Path::new(r"P:\scratch")),
+            &tracked,
+            &open,
+            None,
+        ));
+        assert!(!language_server_session_in_workspace_scope(
+            Some(Path::new(r"P:\scratch")),
+            &tracked,
+            &[],
+            None,
+        ));
+    }
+
+    #[test]
+    fn live_session_picker_label_includes_server_and_root() {
+        let root = {
+            #[cfg(windows)]
+            {
+                PathBuf::from(r"p:\volt")
+            }
+            #[cfg(not(windows))]
+            {
+                PathBuf::from("/volt")
+            }
+        };
+        let with_root = LspLiveSession::new("rust-analyzer", Some(root.clone()));
+        assert_eq!(
+            with_root.picker_label(),
+            format!("rust-analyzer — {}", root.display())
+        );
+        let no_root = LspLiveSession::new("marksman", None);
+        assert_eq!(no_root.picker_label(), "marksman — (no root)");
+    }
+
+    #[test]
+    fn live_sessions_for_workspace_includes_root_scoped_and_buffer_served() {
+        let workspace = PathBuf::from(r"P:\volt");
+        let nested_open = workspace.join("crates").join("editor-lsp").join("lib.rs");
+        let under_root_path = workspace.join("src").join("main.rs");
+        let nested_root = workspace.join("crates").join("editor-lsp");
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+
+        let parent_session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &nested_open,
+            Some(workspace.as_path()),
+            BTreeMap::new(),
+        );
+        let under_root_session = test_session_handle_in_workspace(
+            "marksman",
+            &under_root_path,
+            Some(nested_root.as_path()),
+            BTreeMap::new(),
+        );
+        let parent_key = parent_session.key.clone();
+        let under_key = under_root_session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state.sessions.insert(parent_key.clone(), parent_session);
+            state.sessions.insert(under_key.clone(), under_root_session);
+
+            let mut tracked_nested = TrackedBufferState {
+                revision: 1,
+                version: 1,
+                ..TrackedBufferState::default()
+            };
+            tracked_nested.sessions.insert(parent_key);
+            state
+                .tracked_buffers
+                .insert(nested_open.clone(), tracked_nested);
+
+            let mut tracked_under = TrackedBufferState {
+                revision: 1,
+                version: 1,
+                ..TrackedBufferState::default()
+            };
+            tracked_under.sessions.insert(under_key);
+            state.tracked_buffers.insert(under_root_path, tracked_under);
+        }
+
+        // Nested Project Workspace: parent Session included via open buffer;
+        // marksman included via root under workspace.
+        let listed = manager
+            .live_sessions_for_workspace(&[nested_open], Some(workspace.as_path()))
+            .expect("list");
+        let ids = listed
+            .iter()
+            .map(|session| session.server_id().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["marksman".to_owned(), "rust-analyzer".to_owned()]);
+    }
+
+    #[test]
+    fn stop_session_removes_live_session_and_returns_tracked_paths() {
+        let root = PathBuf::from(r"P:\workspace");
+        let path = root.join("src").join("a.rs");
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        let session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &path,
+            Some(root.as_path()),
+            BTreeMap::new(),
+        );
+        let session_key = session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state.sessions.insert(session_key.clone(), session);
+            let mut tracked = TrackedBufferState {
+                revision: 1,
+                version: 1,
+                ..TrackedBufferState::default()
+            };
+            tracked.sessions.insert(session_key);
+            state.tracked_buffers.insert(path.clone(), tracked);
+        }
+
+        let stopped_paths = manager
+            .stop_session("rust-analyzer", Some(root.as_path()))
+            .expect("stop");
+        assert_eq!(stopped_paths, vec![path]);
+        assert!(
+            manager
+                .state
+                .lock()
+                .expect("state lock")
+                .sessions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sync_buffer_onto_session_attaches_to_exact_root() {
+        let root = PathBuf::from(r"P:\workspace");
+        let path = root.join("src").join("a.rs");
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        let session = test_session_handle_in_workspace(
+            "rust-analyzer",
+            &path,
+            Some(root.as_path()),
+            BTreeMap::new(),
+        );
+        let session_key = session.key.clone();
+        {
+            let mut state = manager.state.lock().expect("state lock");
+            state.sessions.insert(session_key.clone(), session);
+        }
+
+        manager
+            .sync_buffer_onto_session(&path, "fn a() {}", 1, "rust-analyzer", Some(root.as_path()))
+            .expect("sync onto session");
+
+        let state = manager.state.lock().expect("state lock");
+        let tracked = state.tracked_buffers.get(&path).expect("buffer tracked");
+        assert!(tracked.sessions.contains(&session_key));
+        assert_eq!(state.sessions.len(), 1);
     }
 }
