@@ -6,6 +6,7 @@ mod command_stream;
 mod diagnostics;
 mod directory;
 mod git;
+mod git_editor;
 mod issues;
 mod pdf;
 mod picker;
@@ -21,6 +22,7 @@ use command_stream::*;
 use diagnostics::*;
 use directory::*;
 use git::*;
+use git_editor::*;
 use issues::*;
 use pdf::*;
 use render::*;
@@ -8529,6 +8531,7 @@ pub(crate) struct ShellUiState {
     syntax_refresh_worker: SyntaxRefreshWorkerState,
     lsp_sync_worker: LspSyncWorkerState,
     streamed_command_worker: StreamedCommandWorkerState,
+    git_editor: GitEditorState,
     issues_worker: IssuesWorkerState,
     indent_parse_sessions: BTreeMap<BufferId, SyntaxParseSession>,
     /// Per-workspace last-used build command.  Set when the user runs
@@ -8594,6 +8597,7 @@ impl ShellUiState {
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
             lsp_sync_worker: LspSyncWorkerState::new(),
             streamed_command_worker: StreamedCommandWorkerState::new(),
+            git_editor: GitEditorState::new(),
             issues_worker: IssuesWorkerState::new(),
             indent_parse_sessions: BTreeMap::new(),
             compile_commands: BTreeMap::new(),
@@ -9124,6 +9128,7 @@ impl ShellUiState {
         }
         self.indent_parse_sessions.remove(&buffer_id);
         self.streamed_command_worker.cancel_and_remove(buffer_id);
+        self.git_editor.abort_if_session(buffer_id);
         for view in self.workspace_views.values_mut() {
             if view.buffer_ids.contains(&buffer_id) {
                 view.buffer_ids.retain(|id| *id != buffer_id);
@@ -10796,6 +10801,45 @@ impl ShellState {
                                 .map_err(ShellError::Runtime)?;
                         } else {
                             cancel_git_commit_buffer(&mut self.runtime, active_buffer.buffer_id)
+                                .map_err(ShellError::Runtime)?;
+                        }
+                        return Ok(false);
+                    }
+                    if consume {
+                        return Ok(false);
+                    }
+                }
+                if active_buffer.is_git_editor {
+                    let mut should_confirm = false;
+                    let mut should_abort = false;
+                    let mut consume = false;
+                    {
+                        let ui = self.ui_mut()?;
+                        if ui.pending_ctrl_c.is_some() {
+                            if is_ctrl_c {
+                                ui.pending_ctrl_c = None;
+                                should_confirm = true;
+                                consume = true;
+                            } else if is_ctrl_k {
+                                ui.pending_ctrl_c = None;
+                                should_abort = true;
+                                consume = true;
+                            } else if is_ctrl_key {
+                                consume = true;
+                            } else {
+                                ui.pending_ctrl_c = None;
+                            }
+                        } else if is_ctrl_c {
+                            ui.pending_ctrl_c = Some(Instant::now());
+                            consume = true;
+                        }
+                    }
+                    if should_confirm || should_abort {
+                        if should_confirm {
+                            confirm_git_editor_buffer(&mut self.runtime, active_buffer.buffer_id)
+                                .map_err(ShellError::Runtime)?;
+                        } else {
+                            abort_git_editor_buffer(&mut self.runtime, active_buffer.buffer_id)
                                 .map_err(ShellError::Runtime)?;
                         }
                         return Ok(false);
@@ -14574,6 +14618,16 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let git_editor_changed = match refresh_pending_git_editor(&mut state.runtime) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error(
+                            "shell.git-editor-refresh",
+                            ShellError::Runtime(error),
+                        );
+                        false
+                    }
+                };
                 let terminal_refresh_started = Instant::now();
                 let terminal_changed =
                     if typing_refresh_budget_active && !state.active_buffer_is_terminal() {
@@ -14674,6 +14728,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || inline_completion_changed
                     || hover_changed
                     || command_stream_changed
+                    || git_editor_changed
                     || terminal_changed
                     || syntax_changed
                     || acp_changed
@@ -19843,6 +19898,7 @@ fn active_buffer_event_context(
         is_read_only: buffer.is_read_only(),
         is_git_status: buffer_is_git_status(&buffer.kind),
         is_git_commit: buffer_is_git_commit(&buffer.kind),
+        is_git_editor: buffer_is_git_editor(&buffer.kind),
         is_acp: buffer_is_acp(&buffer.kind),
         is_directory: buffer_is_directory(&buffer.kind),
         is_browser: buffer_is_browser(&buffer.kind),
@@ -19988,6 +20044,10 @@ fn buffer_is_git_status(kind: &BufferKind) -> bool {
 
 fn buffer_is_git_commit(kind: &BufferKind) -> bool {
     matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND)
+}
+
+fn buffer_is_git_editor(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_EDITOR_KIND)
 }
 
 fn buffer_is_acp(kind: &BufferKind) -> bool {
@@ -29023,12 +29083,6 @@ fn run_compile_command_streamed(runtime: &mut EditorRuntime, command: &str) -> R
         .flatten()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let terminal_config = shell_user_library(runtime).terminal_config();
-    let shell_program = terminal_config.program.clone();
-    let mut args = terminal_config.args.clone();
-    args.push(shell_command_eval_flag(&shell_program).to_owned());
-    args.push(command.clone());
-
     let buf_name = compile_buffer_name(&workspace_name);
     let popup_title = buf_name.clone();
 
@@ -29036,17 +29090,18 @@ fn run_compile_command_streamed(runtime: &mut EditorRuntime, command: &str) -> R
         command: command.clone(),
     };
 
-    let spec = StreamedCommandSpec {
+    let spec = ExternalCommandSpec {
         popup_title: popup_title.clone(),
         buffer_name: buf_name.clone(),
-        command_label: command.clone(),
-        program: shell_program,
-        args,
+        command_label: Some(command.clone()),
+        invocation: ExternalCommandInvocation::Shell(command.clone()),
         env: Vec::new(),
         cwd,
+        stream: true,
         on_exit,
         notify_on_success: true,
         notify_on_failure: true,
+        use_git_editor: false,
     };
 
     // Reuse the existing popup buffer if one with this name is already open.
@@ -29058,9 +29113,22 @@ fn run_compile_command_streamed(runtime: &mut EditorRuntime, command: &str) -> R
     });
 
     if let Some(buffer_id) = existing_id {
-        continue_streamed_command_popup(runtime, buffer_id, spec)?;
+        let (program, args, label) = resolve_external_invocation(runtime, &spec.invocation)?;
+        let streamed = StreamedCommandSpec {
+            popup_title: spec.popup_title,
+            buffer_name: spec.buffer_name,
+            command_label: spec.command_label.unwrap_or(label),
+            program,
+            args,
+            env: spec.env,
+            cwd: spec.cwd,
+            on_exit: spec.on_exit,
+            notify_on_success: spec.notify_on_success,
+            notify_on_failure: spec.notify_on_failure,
+        };
+        continue_streamed_command_popup(runtime, buffer_id, streamed)?;
     } else {
-        open_streamed_command_popup(runtime, spec)?;
+        run_command(runtime, spec)?;
     }
     Ok(())
 }
@@ -29180,7 +29248,7 @@ fn run_shell_command_in_buffer(
     Ok(())
 }
 
-fn shell_command_eval_flag(program: &str) -> &'static str {
+pub(super) fn shell_command_eval_flag(program: &str) -> &'static str {
     let shell = Path::new(program)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -32600,6 +32668,7 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_LOG_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STASH_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_COMMIT_KIND => (false, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_EDITOR_KIND => (false, None),
         BufferKind::Plugin(plugin_kind) if is_issues_board_kind(plugin_kind) => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_PREVIEW_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == OIL_HELP_KIND => (true, None),

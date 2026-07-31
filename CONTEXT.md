@@ -112,6 +112,24 @@ _Avoid_: created, created_at (as spoken term)
 The timestamp when an Issue last entered Closed. Absent while not Closed.
 _Avoid_: completed_at, resolved_at
 
+### External commands
+
+**External Command**:
+A process the editor spawns outside its own address space (for example git or a build tool), distinct from an internal editor command id.
+_Avoid_: job (as the spoken product term), shell command (as the umbrella), subprocess (as the spoken product term)
+
+**Command Stream**:
+Live stdout/stderr of an External Command written into a popup buffer while the process runs. Default presentation for user-facing long, network, or progress External Commands.
+_Avoid_: terminal session (when meaning this popup), log buffer, streamed job
+
+**Silent Command**:
+An External Command run to completion with no Command Stream popup; the caller waits and receives the result. Used for silent prep (for example Workspace Dashboard `git fetch --prune`) and fast local mutators.
+_Avoid_: background command (when meaning this sync wait), quiet job, hidden stream
+
+**Git Editor Buffer**:
+A normal editable pane buffer that stands in for `GIT_EDITOR` while an External Command waits. Confirm saves the file and exits the editor stub successfully; abort exits non-zero. Distinct from the dedicated commit message buffer, which never uses `GIT_EDITOR`.
+_Avoid_: commit message buffer (when meaning the dedicated commit UI), stream popup (as the editor surface)
+
 ### Language servers
 
 **Solution**:

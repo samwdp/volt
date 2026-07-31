@@ -17,6 +17,13 @@ use std::{
 #[derive(Debug)]
 pub(super) enum StreamedCommandExitAction {
     RefreshGitStatusBuffersAndCloseBuffer,
+    /// Refresh git status, close the stream popup, then open the commit buffer.
+    RefreshGitStatusCloseAndOpenCommitBuffer,
+    /// Refresh git status, close the stream popup, then open a Project Workspace.
+    RefreshGitStatusCloseAndOpenWorkspace {
+        name: String,
+        path: PathBuf,
+    },
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
     /// Keep the popup buffer open after the process exits; no git refresh, no close.
@@ -27,6 +34,87 @@ pub(super) enum StreamedCommandExitAction {
     LeaveOpenAndMaybeReloadUserLibrary {
         command: String,
     },
+}
+
+/// How an External Command is invoked.
+#[derive(Debug, Clone)]
+pub(super) enum ExternalCommandInvocation {
+    Argv { program: String, args: Vec<String> },
+    Shell(String),
+}
+
+/// Spec for the host [`run_command`] entry point (Command Stream or Silent Command).
+#[derive(Debug)]
+pub(super) struct ExternalCommandSpec {
+    pub(super) popup_title: String,
+    pub(super) buffer_name: String,
+    pub(super) command_label: Option<String>,
+    pub(super) invocation: ExternalCommandInvocation,
+    pub(super) env: Vec<(String, String)>,
+    pub(super) cwd: PathBuf,
+    /// Default true: Command Stream into a popup. False: Silent Command (sync wait).
+    pub(super) stream: bool,
+    pub(super) on_exit: StreamedCommandExitAction,
+    pub(super) notify_on_success: bool,
+    pub(super) notify_on_failure: bool,
+    /// Inject `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR` pointing at the Volt Git Editor stub.
+    pub(super) use_git_editor: bool,
+}
+
+#[derive(Debug)]
+pub(super) enum ExternalCommandResult {
+    Streamed {
+        #[expect(dead_code)]
+        buffer_id: BufferId,
+    },
+    Silent {
+        #[expect(dead_code)]
+        stdout: String,
+    },
+}
+
+impl ExternalCommandSpec {
+    pub(super) fn git_argv(
+        popup_title: impl Into<String>,
+        args: Vec<String>,
+        cwd: PathBuf,
+        on_exit: StreamedCommandExitAction,
+    ) -> Self {
+        let command_label = format!("git {}", args.join(" "));
+        let buffer_name = format!("*{command_label}*");
+        Self {
+            popup_title: popup_title.into(),
+            buffer_name,
+            command_label: Some(command_label),
+            invocation: ExternalCommandInvocation::Argv {
+                program: "git".to_owned(),
+                args,
+            },
+            env: Vec::new(),
+            cwd,
+            stream: true,
+            on_exit,
+            notify_on_success: true,
+            notify_on_failure: true,
+            use_git_editor: false,
+        }
+    }
+
+    pub(super) fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    pub(super) fn with_notify(mut self, on_success: bool, on_failure: bool) -> Self {
+        self.notify_on_success = on_success;
+        self.notify_on_failure = on_failure;
+        self
+    }
+
+    pub(super) fn with_git_editor(mut self, enabled: bool) -> Self {
+        self.use_git_editor = enabled;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +267,164 @@ pub(super) fn open_streamed_command_popup(
     Ok(buffer_id)
 }
 
+/// Run an External Command: Command Stream by default, Silent Command when `stream` is false.
+pub(super) fn run_command(
+    runtime: &mut EditorRuntime,
+    mut spec: ExternalCommandSpec,
+) -> Result<ExternalCommandResult, String> {
+    if spec.use_git_editor {
+        inject_git_editor_env(runtime, &mut spec.env)?;
+    }
+    let (program, args, resolved_label) = resolve_external_invocation(runtime, &spec.invocation)?;
+    let command_label = spec.command_label.clone().unwrap_or(resolved_label);
+
+    if spec.stream {
+        let streamed = StreamedCommandSpec {
+            popup_title: spec.popup_title,
+            buffer_name: spec.buffer_name,
+            command_label,
+            program,
+            args,
+            env: spec.env,
+            cwd: spec.cwd,
+            on_exit: spec.on_exit,
+            notify_on_success: spec.notify_on_success,
+            notify_on_failure: spec.notify_on_failure,
+        };
+        let buffer_id = open_streamed_command_popup(runtime, streamed)?;
+        return Ok(ExternalCommandResult::Streamed { buffer_id });
+    }
+
+    run_silent_external_command(
+        runtime,
+        &spec.popup_title,
+        &command_label,
+        &program,
+        &args,
+        &spec.env,
+        &spec.cwd,
+        spec.notify_on_success,
+        spec.notify_on_failure,
+    )
+}
+
+pub(super) fn resolve_external_invocation(
+    runtime: &EditorRuntime,
+    invocation: &ExternalCommandInvocation,
+) -> Result<(String, Vec<String>, String), String> {
+    match invocation {
+        ExternalCommandInvocation::Argv { program, args } => {
+            let label = if args.is_empty() {
+                program.clone()
+            } else {
+                format!("{program} {}", args.join(" "))
+            };
+            Ok((program.clone(), args.clone(), label))
+        }
+        ExternalCommandInvocation::Shell(command) => {
+            let terminal_config = shell_user_library(runtime).terminal_config();
+            let shell_program = terminal_config.program.clone();
+            let mut args = terminal_config.args.clone();
+            args.push(shell_command_eval_flag(&shell_program).to_owned());
+            args.push(command.clone());
+            Ok((shell_program, args, command.clone()))
+        }
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn run_silent_external_command(
+    runtime: &mut EditorRuntime,
+    popup_title: &str,
+    command_label: &str,
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    cwd: &Path,
+    notify_on_success: bool,
+    notify_on_failure: bool,
+) -> Result<ExternalCommandResult, String> {
+    let (program, args) = supervised_command_if_resolved(
+        program,
+        args,
+        &[],
+        None,
+        ProcessSupervisionMode::Background,
+    );
+    let mut command = Command::new(&program);
+    command
+        .args(&args)
+        .envs(env.iter().cloned())
+        .current_dir(cwd)
+        .stdin(Stdio::null());
+    configure_background_command(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start `{command_label}`: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let success = output.status.success();
+    let exit_code = output.status.code();
+    if (success && notify_on_success) || (!success && notify_on_failure) {
+        let error = (!success).then(|| {
+            let transcript = if stderr.is_empty() {
+                stdout.clone()
+            } else if stdout.is_empty() {
+                stderr.clone()
+            } else {
+                format!("{stdout}{stderr}")
+            };
+            if transcript.trim().is_empty() {
+                format!("Exit code: {}", exit_code.unwrap_or(-1))
+            } else {
+                transcript
+            }
+        });
+        let mut body_lines = vec![command_label.to_owned()];
+        if let Some(error) = error.as_deref() {
+            body_lines.push(error.to_owned());
+        } else if !success && let Some(exit_code) = exit_code {
+            body_lines.push(format!("Exit code: {exit_code}"));
+        }
+        shell_ui_mut(runtime)?.apply_notification(
+            NotificationUpdate {
+                key: format!("silent-command:{command_label}"),
+                severity: if success {
+                    NotificationSeverity::Success
+                } else {
+                    NotificationSeverity::Error
+                },
+                title: if success {
+                    format!("{popup_title} succeeded")
+                } else {
+                    format!("{popup_title} failed")
+                },
+                body_lines,
+                progress: None,
+                active: false,
+                action: None,
+            },
+            Instant::now(),
+        );
+    }
+    if !success {
+        let transcript = if stderr.is_empty() {
+            stdout.clone()
+        } else if stdout.is_empty() {
+            stderr.clone()
+        } else {
+            format!("{stdout}{stderr}")
+        };
+        let detail = if transcript.trim().is_empty() {
+            format!("exit code {}", exit_code.unwrap_or(-1))
+        } else {
+            transcript
+        };
+        return Err(format!("{command_label} failed: {detail}"));
+    }
+    Ok(ExternalCommandResult::Silent { stdout })
+}
+
 pub(super) fn continue_streamed_command_popup(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
@@ -215,6 +461,8 @@ pub(super) fn refresh_pending_streamed_commands(
     let mut changed = false;
     let mut buffers_to_close = Vec::new();
     let mut refresh_git_status = false;
+    let mut open_commit_after_close = false;
+    let mut open_workspace_after_close: Option<(String, PathBuf)> = None;
     let now = Instant::now();
 
     for update in updates {
@@ -271,6 +519,23 @@ pub(super) fn refresh_pending_streamed_commands(
                         if outcome.success {
                             buffers_to_close.push(buffer_id);
                             refresh_git_status = true;
+                        }
+                    }
+                    StreamedCommandExitAction::RefreshGitStatusCloseAndOpenCommitBuffer => {
+                        if outcome.success {
+                            buffers_to_close.push(buffer_id);
+                            refresh_git_status = true;
+                            open_commit_after_close = true;
+                        }
+                    }
+                    StreamedCommandExitAction::RefreshGitStatusCloseAndOpenWorkspace {
+                        name,
+                        path,
+                    } => {
+                        if outcome.success {
+                            buffers_to_close.push(buffer_id);
+                            refresh_git_status = true;
+                            open_workspace_after_close = Some((name, path));
                         }
                     }
                     StreamedCommandExitAction::ContinueTreeSitterInstall(state) => {
@@ -378,6 +643,14 @@ pub(super) fn refresh_pending_streamed_commands(
     }
     if refresh_git_status {
         refresh_git_status_buffers(runtime)?;
+        changed = true;
+    }
+    if open_commit_after_close {
+        open_git_commit_buffer(runtime)?;
+        changed = true;
+    }
+    if let Some((name, path)) = open_workspace_after_close {
+        open_workspace_from_project(runtime, &name, &path)?;
         changed = true;
     }
     Ok(changed)

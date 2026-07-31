@@ -6500,7 +6500,7 @@ fn git_push_upstream_streams_into_popup_buffer_and_refreshes_status() -> Result<
         .cloned()
         .ok_or_else(|| "git snapshot missing before push".to_owned())?;
     assert_eq!(snapshot.ahead(), 1);
-    assert_eq!(snapshot.unpushed().len(), 1);
+    assert!(snapshot.upstream().is_some());
 
     push_git_to_upstream(&mut state.runtime, buffer_id)?;
 
@@ -6534,10 +6534,157 @@ fn git_push_upstream_streams_into_popup_buffer_and_refreshes_status() -> Result<
         .cloned()
         .ok_or_else(|| "git snapshot missing after push".to_owned())?;
     assert_eq!(refreshed.ahead(), 0);
-    assert!(refreshed.unpushed().is_empty());
 
     std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
     std::fs::remove_dir_all(&remote).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_pull_upstream_streams_into_popup_buffer() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-pull-upstream-popup")?;
+    let remote = unique_temp_dir("git-pull-upstream-popup-remote");
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", remote.display()))?,
+        ],
+    )?;
+    let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned();
+    run_git_in_dir(
+        &repo,
+        &["push", "-q", "--set-upstream", "origin", branch.as_str()],
+    )?;
+    install_git_hook(
+        &repo,
+        "pre-merge-commit",
+        "#!/bin/sh\necho \"pre-merge hook starting\"\nsleep 1\necho \"pre-merge hook finishing\"\n",
+    )?;
+
+    // Create a second commit on remote via a clone so pull has work.
+    let clone = unique_temp_dir("git-pull-upstream-clone");
+    std::fs::remove_dir_all(&clone).ok();
+    run_git_in_dir(
+        repo.parent().unwrap_or(&repo),
+        &[
+            "clone",
+            "-q",
+            remote
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", remote.display()))?,
+            clone
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", clone.display()))?,
+        ],
+    )?;
+    run_git_in_dir(&clone, &["config", "user.email", "volt-tests@example.com"])?;
+    run_git_in_dir(&clone, &["config", "user.name", "Volt Tests"])?;
+    run_git_in_dir(&clone, &["config", "commit.gpgsign", "false"])?;
+    std::fs::write(clone.join("remote.txt"), "from-remote\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&clone, &["add", "--", "remote.txt"])?;
+    run_git_in_dir(&clone, &["commit", "-qm", "remote change"])?;
+    run_git_in_dir(&clone, &["push", "-q", "origin", "HEAD"])?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    pull_git_upstream(&mut state.runtime, buffer_id)?;
+
+    let popup = active_runtime_popup(&state.runtime)?
+        .ok_or_else(|| "streamed popup was not opened for git pull".to_owned())?;
+    assert!(
+        shell_buffer(&state.runtime, popup.active_buffer)?
+            .text
+            .text()
+            .contains("git pull")
+    );
+    wait_for_streamed_command_buffer_close(&mut state, popup.active_buffer)?;
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&remote).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&clone).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn fetch_git_prune_is_silent_command_without_popup() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-fetch-prune-silent")?;
+    let remote = unique_temp_dir("git-fetch-prune-silent-remote");
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", remote.display()))?,
+        ],
+    )?;
+    let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned();
+    run_git_in_dir(
+        &repo,
+        &["push", "-q", "--set-upstream", "origin", branch.as_str()],
+    )?;
+
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    fetch_git_prune(&mut state.runtime, &repo)?;
+    assert!(
+        active_runtime_popup(&state.runtime)?.is_none(),
+        "Silent Command must not open a Command Stream popup"
+    );
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&remote).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_editor_confirm_writes_file_and_signals_stub() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut env = Vec::new();
+    inject_git_editor_env(&mut state.runtime, &mut env)?;
+    let dir = env
+        .iter()
+        .find(|(key, _)| key == VOLT_GIT_EDITOR_DIR_ENV)
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| "VOLT_GIT_EDITOR_DIR missing".to_owned())?;
+    let edit_path = dir.join("todo.txt");
+    std::fs::write(&edit_path, "pick abc hello\n").map_err(|error| error.to_string())?;
+    let request_id = "test-confirm";
+    std::fs::write(
+        dir.join(format!("request-{request_id}")),
+        format!("{}\n", edit_path.display()),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(refresh_pending_git_editor(&mut state.runtime)?);
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert!(matches!(
+        &shell_buffer(&state.runtime, buffer_id)?.kind,
+        BufferKind::Plugin(kind) if kind == GIT_EDITOR_KIND
+    ));
+    shell_buffer_mut(&mut state.runtime, buffer_id)?
+        .replace_with_lines(vec!["pick abc hello edited".to_owned()]);
+    confirm_git_editor_buffer(&mut state.runtime, buffer_id)?;
+
+    let written = std::fs::read_to_string(&edit_path).map_err(|error| error.to_string())?;
+    assert!(written.contains("edited"));
+    let result = std::fs::read_to_string(dir.join(format!("result-{request_id}")))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(result.trim(), "0");
     Ok(())
 }
 

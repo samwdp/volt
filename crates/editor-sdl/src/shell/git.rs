@@ -143,6 +143,7 @@ pub(super) struct ActiveBufferEventContext {
     pub(super) is_read_only: bool,
     pub(super) is_git_status: bool,
     pub(super) is_git_commit: bool,
+    pub(super) is_git_editor: bool,
     pub(super) is_acp: bool,
     pub(super) is_directory: bool,
     pub(super) is_browser: bool,
@@ -1620,25 +1621,26 @@ pub(super) fn sequence_git_continue(
     kind: GitSequenceKind,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    match kind {
-        GitSequenceKind::CherryPick => {
-            git_command_output(
-                runtime,
-                &root,
-                "cherry-pick --continue",
-                &["cherry-pick", "--continue"],
-            )?;
-        }
-        GitSequenceKind::Revert => {
-            git_command_output(
-                runtime,
-                &root,
-                "revert --continue",
-                &["revert", "--continue"],
-            )?;
-        }
-    }
-    refresh_git_status_buffers(runtime)?;
+    let (title, args) = match kind {
+        GitSequenceKind::CherryPick => (
+            "Git Cherry-pick",
+            vec!["cherry-pick".to_owned(), "--continue".to_owned()],
+        ),
+        GitSequenceKind::Revert => (
+            "Git Revert",
+            vec!["revert".to_owned(), "--continue".to_owned()],
+        ),
+    };
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            title,
+            args,
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
@@ -1647,20 +1649,22 @@ pub(super) fn sequence_git_skip(
     kind: GitSequenceKind,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    match kind {
-        GitSequenceKind::CherryPick => {
-            git_command_output(
-                runtime,
-                &root,
-                "cherry-pick --skip",
-                &["cherry-pick", "--skip"],
-            )?;
-        }
-        GitSequenceKind::Revert => {
-            git_command_output(runtime, &root, "revert --skip", &["revert", "--skip"])?;
-        }
-    }
-    refresh_git_status_buffers(runtime)?;
+    let (title, args) = match kind {
+        GitSequenceKind::CherryPick => (
+            "Git Cherry-pick",
+            vec!["cherry-pick".to_owned(), "--skip".to_owned()],
+        ),
+        GitSequenceKind::Revert => ("Git Revert", vec!["revert".to_owned(), "--skip".to_owned()]),
+    };
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            title,
+            args,
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
@@ -1669,20 +1673,25 @@ pub(super) fn sequence_git_abort(
     kind: GitSequenceKind,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    match kind {
-        GitSequenceKind::CherryPick => {
-            git_command_output(
-                runtime,
-                &root,
-                "cherry-pick --abort",
-                &["cherry-pick", "--abort"],
-            )?;
-        }
-        GitSequenceKind::Revert => {
-            git_command_output(runtime, &root, "revert --abort", &["revert", "--abort"])?;
-        }
-    }
-    refresh_git_status_buffers(runtime)?;
+    let (title, args) = match kind {
+        GitSequenceKind::CherryPick => (
+            "Git Cherry-pick",
+            vec!["cherry-pick".to_owned(), "--abort".to_owned()],
+        ),
+        GitSequenceKind::Revert => (
+            "Git Revert",
+            vec!["revert".to_owned(), "--abort".to_owned()],
+        ),
+    };
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            title,
+            args,
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
@@ -1695,8 +1704,16 @@ pub(super) fn cherry_pick_git_commit(
     commit: &str,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "cherry-pick", &["cherry-pick", commit])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Cherry-pick",
+            vec!["cherry-pick".to_owned(), commit.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
@@ -1705,20 +1722,34 @@ pub(super) fn cherry_pick_git_commit_no_commit(
     commit: &str,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "cherry-pick --no-commit",
-        &["cherry-pick", "--no-commit", commit],
+        ExternalCommandSpec::git_argv(
+            "Git Cherry-pick",
+            vec![
+                "cherry-pick".to_owned(),
+                "--no-commit".to_owned(),
+                commit.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
     )?;
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 
 pub(super) fn revert_git_commit(runtime: &mut EditorRuntime, commit: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "revert", &["revert", commit])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Revert",
+            vec!["revert".to_owned(), commit.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
@@ -1727,13 +1758,19 @@ pub(super) fn revert_git_commit_no_commit(
     commit: &str,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "revert --no-commit",
-        &["revert", "--no-commit", commit],
+        ExternalCommandSpec::git_argv(
+            "Git Revert",
+            vec![
+                "revert".to_owned(),
+                "--no-commit".to_owned(),
+                commit.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
     )?;
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 
@@ -1821,45 +1858,69 @@ pub(super) fn reset_commit_at_point_or_picker(
 
 pub(super) fn merge_git_plain(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "merge", &["merge", branch])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec!["merge".to_owned(), branch.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
 pub(super) fn merge_git_edit(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "merge --no-commit --edit",
-        &["merge", "--no-commit", "--edit", branch],
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec![
+                "merge".to_owned(),
+                "--no-commit".to_owned(),
+                "--edit".to_owned(),
+                branch.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusCloseAndOpenCommitBuffer,
+        )
+        .with_git_editor(true),
     )?;
-    refresh_git_status_buffers(runtime)?;
-    open_git_commit_buffer(runtime)
+    Ok(())
 }
 
 pub(super) fn merge_git_no_commit(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "merge --no-commit",
-        &["merge", "--no-commit", branch],
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec![
+                "merge".to_owned(),
+                "--no-commit".to_owned(),
+                branch.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
     )?;
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 
 pub(super) fn merge_git_squash(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "merge --squash",
-        &["merge", "--squash", branch],
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec!["merge".to_owned(), "--squash".to_owned(), branch.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusCloseAndOpenCommitBuffer,
+        ),
     )?;
-    refresh_git_status_buffers(runtime)?;
-    open_git_commit_buffer(runtime)
+    Ok(())
 }
 
 pub(super) fn merge_git_preview(runtime: &mut EditorRuntime, branch: &str) -> Result<(), String> {
@@ -1875,22 +1936,45 @@ pub(super) fn merge_git_preview(runtime: &mut EditorRuntime, branch: &str) -> Re
 
 pub(super) fn merge_git_continue(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "merge --continue", &["merge", "--continue"])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec!["merge".to_owned(), "--continue".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
 pub(super) fn merge_git_abort(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "merge --abort", &["merge", "--abort"])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Merge",
+            vec!["merge".to_owned(), "--abort".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
 pub(super) fn rebase_git_onto(runtime: &mut EditorRuntime, target: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "rebase", &["rebase", target])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), target.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
@@ -1899,8 +1983,16 @@ pub(super) fn rebase_git_interactive_onto(
     target: &str,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "rebase -i", &["rebase", "-i", target])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), "-i".to_owned(), target.to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
+    )?;
     Ok(())
 }
 
@@ -1928,39 +2020,59 @@ pub(super) fn rebase_git_onto_pushremote(
 
 pub(super) fn rebase_git_continue(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "rebase --continue",
-        &["rebase", "--continue"],
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), "--continue".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
     )?;
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 
 pub(super) fn rebase_git_skip(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "rebase --skip", &["rebase", "--skip"])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), "--skip".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
 pub(super) fn rebase_git_edit_todo(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(
+    run_command(
         runtime,
-        &root,
-        "rebase --edit-todo",
-        &["rebase", "--edit-todo"],
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), "--edit-todo".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        )
+        .with_git_editor(true),
     )?;
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 
 pub(super) fn rebase_git_abort(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "rebase --abort", &["rebase", "--abort"])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Rebase",
+            vec!["rebase".to_owned(), "--abort".to_owned()],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
@@ -2137,15 +2249,37 @@ fn status_output_upstream(status_output: &str) -> Option<String> {
 
 pub(super) fn fetch_git_remote(runtime: &mut EditorRuntime, remote: &str) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "fetch", &["fetch", remote])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Fetch",
+            vec![
+                "fetch".to_owned(),
+                "--progress".to_owned(),
+                remote.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
 pub(super) fn fetch_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "fetch --all", &["fetch", "--all"])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Fetch",
+            vec![
+                "fetch".to_owned(),
+                "--all".to_owned(),
+                "--progress".to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
@@ -2156,11 +2290,23 @@ pub(super) fn fetch_git_prune(runtime: &mut EditorRuntime, root: &Path) -> Resul
     }
     for remote in remotes {
         let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
-        git_read_command_output(
-            root,
-            "fetch --prune remote-tracking refs",
-            &["fetch", "--prune", &remote, &refspec],
+        run_command(
+            runtime,
+            ExternalCommandSpec::git_argv(
+                "Git Fetch",
+                vec![
+                    "fetch".to_owned(),
+                    "--prune".to_owned(),
+                    remote.clone(),
+                    refspec,
+                ],
+                root.to_path_buf(),
+                StreamedCommandExitAction::LeaveOpen,
+            )
+            .with_stream(false)
+            .with_notify(false, false),
         )?;
+        // Silent success discards stdout; prune is for side effects.
     }
     refresh_git_status_buffers(runtime)?;
     Ok(())
@@ -2249,22 +2395,14 @@ fn run_git_push_in_popup_buffer(
     args: Vec<String>,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    let command_label = format!("git {}", args.join(" "));
-    let buffer_name = format!("*{command_label}*");
-    open_streamed_command_popup(
+    run_command(
         runtime,
-        StreamedCommandSpec {
-            popup_title: "Git Push".to_owned(),
-            buffer_name,
-            command_label,
-            program: "git".to_owned(),
+        ExternalCommandSpec::git_argv(
+            "Git Push",
             args,
-            env: Vec::new(),
-            cwd: root,
-            on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
-            notify_on_success: true,
-            notify_on_failure: true,
-        },
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
     )?;
     Ok(())
 }
@@ -2275,8 +2413,20 @@ pub(super) fn pull_git_remote_branch(
     branch: &str,
 ) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "pull", &["pull", remote, branch])?;
-    refresh_git_status_buffers(runtime)?;
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Git Pull",
+            vec![
+                "pull".to_owned(),
+                "--progress".to_owned(),
+                remote.to_owned(),
+                branch.to_owned(),
+            ],
+            root,
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
+    )?;
     Ok(())
 }
 
@@ -2671,22 +2821,14 @@ pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Resu
         ));
     }
     let args = worktree_remove_git_args(&invocation);
-    let command_label = format!("git {}", args.join(" "));
-    let buffer_name = format!("*{command_label}*");
-    open_streamed_command_popup(
+    run_command(
         runtime,
-        StreamedCommandSpec {
-            popup_title: "Worktree Remove".to_owned(),
-            buffer_name,
-            command_label,
-            program: "git".to_owned(),
+        ExternalCommandSpec::git_argv(
+            "Worktree Remove",
             args,
-            env: Vec::new(),
             cwd,
-            on_exit: StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
-            notify_on_success: true,
-            notify_on_failure: true,
-        },
+            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+        ),
     )?;
     Ok(())
 }
@@ -2976,26 +3118,48 @@ pub(super) fn create_git_worktree(
     }
     let path_arg = worktree_path.display().to_string();
     let args = if create_new_branch {
-        vec!["worktree", "add", "-b", local_branch, &path_arg]
+        vec![
+            "worktree".to_owned(),
+            "add".to_owned(),
+            "-b".to_owned(),
+            local_branch.to_owned(),
+            path_arg,
+        ]
     } else if remote_branch == local_branch {
-        vec!["worktree", "add", &path_arg, local_branch]
+        vec![
+            "worktree".to_owned(),
+            "add".to_owned(),
+            path_arg,
+            local_branch.to_owned(),
+        ]
     } else {
         vec![
-            "worktree",
-            "add",
-            "--track",
-            "-b",
-            local_branch,
-            &path_arg,
-            remote_branch,
+            "worktree".to_owned(),
+            "add".to_owned(),
+            "--track".to_owned(),
+            "-b".to_owned(),
+            local_branch.to_owned(),
+            path_arg,
+            remote_branch.to_owned(),
         ]
     };
-    git_command_output(runtime, &root, "worktree add", &args)?;
     let name = worktree_path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or(local_branch);
-    open_workspace_from_project(runtime, name, worktree_path)?;
+        .unwrap_or(local_branch)
+        .to_owned();
+    run_command(
+        runtime,
+        ExternalCommandSpec::git_argv(
+            "Worktree Add",
+            args,
+            root,
+            StreamedCommandExitAction::RefreshGitStatusCloseAndOpenWorkspace {
+                name,
+                path: worktree_path.to_path_buf(),
+            },
+        ),
+    )?;
     Ok(())
 }
 

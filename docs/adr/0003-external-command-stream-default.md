@@ -1,0 +1,3 @@
+# External Commands default to Command Stream
+
+User-facing External Commands (git push/pull/fetch, worktree add/remove, merge/rebase/cherry-pick/revert, compile) previously mixed silent JobManager waits with ad hoc streamed popups. We unify on one host `run_command`: Command Stream by default (popup buffer, success closes+refreshes for git, failure keeps+notifies), Silent Command when opted out (sync wait, no popup—e.g. Workspace Dashboard `fetch --prune`). Fast local mutators, the commit message buffer, and read-only probes stay outside that default. Interactive git uses a Git Editor Buffer as `GIT_EDITOR` (confirm/abort), not the stream popup. Packages emit hooks; only the host runs External Commands. Many Command Streams may run at once.
