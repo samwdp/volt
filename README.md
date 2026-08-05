@@ -162,7 +162,8 @@ flake below instead of installing apt packages by hand.
 
 1. Install [Nix](https://nixos.org/download/) with flakes enabled (Determinate installer or official installer).
 2. On WSL2, use a Linux distro with Nix installed *inside* WSL (not Windows-native Nix).
-3. GUI runs need a display: WSLg on recent WSL2, or an X11/Wayland session. Headless smoke tests still need a display because the shell constructs the WebKitGTK browser host at startup.
+3. Keep `flake.nix` / `.envrc` as LF line endings (enforced by `.gitattributes`). CRLF breaks the `shellHook` with `$'\r': command not found`.
+4. GUI runs need a display: WSLg on recent WSL2, or an X11/Wayland session. Headless smoke tests still need a display because the shell constructs the WebKitGTK browser host at startup.
 
 **Enter the shell**
 

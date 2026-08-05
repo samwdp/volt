@@ -1,0 +1,6 @@
+# Nix / shell scripts must stay LF — CRLF breaks `nix develop` shellHook on Linux/WSL.
+.gitattributes text eol=lf
+flake.nix text eol=lf
+flake.lock text eol=lf
+.envrc text eol=lf
+*.nix text eol=lf
