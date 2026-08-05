@@ -143,6 +143,31 @@
             echo "volt nix shell ready (rust $(rustc --version))"
             echo "  cargo xtask ci"
             echo "  cargo run -p volt -- --shell-hidden"
+
+            # `nix develop` always starts bashInteractive and overwrites SHELL.
+            # Re-exec the user's login shell for interactive sessions only.
+            # Skip: direnv (already in user's shell), `nix develop -c` (non-interactive),
+            # and NIX_SHELL_PRESERVE_BASH=1 / VOLT_DEV_SHELL overrides.
+            if [ -n "''${VOLT_DEV_SHELL:-}" ]; then
+              user_shell="''${VOLT_DEV_SHELL}"
+            else
+              user_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7 || true)"
+              if [ -z "$user_shell" ] && [ -r /etc/passwd ]; then
+                user_shell="$(awk -F: -v u="$(id -un)" '$1 == u { print $7; exit }' /etc/passwd)"
+              fi
+            fi
+            if [ -z "''${DIRENV_DIR:-}" ] && [ -z "''${DIRENV_IN_ENVRC:-}" ] \
+              && [ "''${NIX_SHELL_PRESERVE_BASH:-}" != 1 ] \
+              && [[ $- == *i* ]] \
+              && [ -n "$user_shell" ] && [ -x "$user_shell" ]; then
+              case "$(basename -- "$user_shell")" in
+                bash|sh) ;;
+                *)
+                  export SHELL="$user_shell"
+                  exec "$user_shell"
+                  ;;
+              esac
+            fi
           '';
         };
 
