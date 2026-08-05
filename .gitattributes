@@ -1,6 +1,26 @@
-# Nix / shell scripts must stay LF — CRLF breaks `nix develop` shellHook on Linux/WSL.
+# Keep source LF. Windows `core.autocrlf=true` otherwise checks out CRLF; WSL git then
+# sees a fully dirty tree and `nix develop` (libgit2) fails hashing files on `/mnt/*`.
+* text=auto eol=lf
+
+# Explicit for shell/Nix entrypoints (belt and suspenders).
 .gitattributes text eol=lf
-flake.nix text eol=lf
-flake.lock text eol=lf
 .envrc text eol=lf
+flake.lock text eol=lf
+flake.nix text eol=lf
 *.nix text eol=lf
+
+# Binary assets — never convert.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.pdf binary

@@ -129,16 +129,26 @@
           WEBKIT_DISABLE_COMPOSITING_MODE = "1";
 
           shellHook = ''
-            export LD_LIBRARY_PATH="${libraryPath}:''${LD_LIBRARY_PATH:-}"
-            export LIBRARY_PATH="${libraryPath}:''${LIBRARY_PATH:-}"
-            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-}"
-            export GIO_MODULE_DIR="${pkgs.glib-networking}/lib/gio/modules"
-
             if [ -z "''${XDG_RUNTIME_DIR:-}" ]; then
               export XDG_RUNTIME_DIR="/tmp/xdg-runtime-$UID"
               mkdir -p "$XDG_RUNTIME_DIR"
               chmod 700 "$XDG_RUNTIME_DIR"
             fi
+
+            # `nix develop` points TMPDIR at an ephemeral NIX_BUILD_TOP. Cargo and
+            # cmake need a stable writable scratch dir for the whole session.
+            export TMPDIR="''${XDG_RUNTIME_DIR:-/tmp}"
+            if [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; then
+              export TMPDIR="/tmp"
+            fi
+            export TMP="$TMPDIR"
+            export TEMP="$TMPDIR"
+            export TEMPDIR="$TMPDIR"
+
+            export LD_LIBRARY_PATH="${libraryPath}:''${LD_LIBRARY_PATH:-}"
+            export LIBRARY_PATH="${libraryPath}:''${LIBRARY_PATH:-}"
+            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-}"
+            export GIO_MODULE_DIR="${pkgs.glib-networking}/lib/gio/modules"
 
             echo "volt nix shell ready (rust $(rustc --version))"
             echo "  cargo xtask ci"
@@ -162,6 +172,42 @@
               && [ -n "$user_shell" ] && [ -x "$user_shell" ]; then
               case "$(basename -- "$user_shell")" in
                 bash|sh) ;;
+                zsh)
+                  # User ~/.zshrc / /etc/zshenv often reset PATH and drop the nix
+                  # stdenv (→ missing headers, empty .pc files, broken cmake).
+                  # Shim ZDOTDIR: load user rc, then restore toolchain vars.
+                  _volt_zdot="$(mktemp -d "$TMPDIR/volt-zdot.XXXXXX")"
+                  export VOLT_USER_ZDOTDIR="''${ZDOTDIR:-$HOME}"
+                  export VOLT_KEEP_PATH="$PATH"
+                  export VOLT_KEEP_PKG_CONFIG_PATH="''${PKG_CONFIG_PATH:-}"
+                  export VOLT_KEEP_LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:-}"
+                  export VOLT_KEEP_LIBRARY_PATH="''${LIBRARY_PATH:-}"
+                  export VOLT_KEEP_NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-}"
+                  export VOLT_KEEP_NIX_CFLAGS_LINK="''${NIX_CFLAGS_LINK:-}"
+                  export VOLT_KEEP_NIX_LDFLAGS="''${NIX_LDFLAGS:-}"
+                  export VOLT_KEEP_XDG_DATA_DIRS="''${XDG_DATA_DIRS:-}"
+                  export VOLT_KEEP_GIO_MODULE_DIR="''${GIO_MODULE_DIR:-}"
+                  cat > "$_volt_zdot/.zshrc" <<'ZSHRC'
+if [ -f "$VOLT_USER_ZDOTDIR/.zshenv" ]; then
+  source "$VOLT_USER_ZDOTDIR/.zshenv"
+fi
+if [ -f "$VOLT_USER_ZDOTDIR/.zshrc" ]; then
+  source "$VOLT_USER_ZDOTDIR/.zshrc"
+fi
+export PATH="$VOLT_KEEP_PATH''${PATH:+:$PATH}"
+export PKG_CONFIG_PATH="$VOLT_KEEP_PKG_CONFIG_PATH''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="$VOLT_KEEP_LD_LIBRARY_PATH''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$VOLT_KEEP_LIBRARY_PATH''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export XDG_DATA_DIRS="$VOLT_KEEP_XDG_DATA_DIRS''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+[ -n "$VOLT_KEEP_NIX_CFLAGS_COMPILE" ] && export NIX_CFLAGS_COMPILE="$VOLT_KEEP_NIX_CFLAGS_COMPILE"
+[ -n "$VOLT_KEEP_NIX_CFLAGS_LINK" ] && export NIX_CFLAGS_LINK="$VOLT_KEEP_NIX_CFLAGS_LINK"
+[ -n "$VOLT_KEEP_NIX_LDFLAGS" ] && export NIX_LDFLAGS="$VOLT_KEEP_NIX_LDFLAGS"
+[ -n "$VOLT_KEEP_GIO_MODULE_DIR" ] && export GIO_MODULE_DIR="$VOLT_KEEP_GIO_MODULE_DIR"
+ZSHRC
+                  export ZDOTDIR="$_volt_zdot"
+                  export SHELL="$user_shell"
+                  exec "$user_shell" --no-globalrcs
+                  ;;
                 *)
                   export SHELL="$user_shell"
                   exec "$user_shell"

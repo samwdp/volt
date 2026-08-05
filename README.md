@@ -162,8 +162,41 @@ flake below instead of installing apt packages by hand.
 
 1. Install [Nix](https://nixos.org/download/) with flakes enabled (Determinate installer or official installer).
 2. On WSL2, use a Linux distro with Nix installed *inside* WSL (not Windows-native Nix).
-3. Keep `flake.nix` / `.envrc` as LF line endings (enforced by `.gitattributes`). CRLF breaks the `shellHook` with `$'\r': command not found`.
+3. Keep source files as LF line endings (enforced by `.gitattributes`). CRLF breaks the `shellHook` with `$'\r': command not found`.
 4. GUI runs need a display: WSLg on recent WSL2, or an X11/Wayland session. Headless smoke tests still need a display because the shell constructs the WebKitGTK browser host at startup.
+
+**WSL2: prefer the Linux filesystem**
+
+Do **not** run `nix develop` from a Windows mount (`/mnt/p/volt`, `/mnt/c/...`) if you can avoid it. Nix hashes the git worktree via libgit2; on DrvFs that often fails with:
+
+```text
+error: getting working directory status: error reading file for hashing:  (libgit2 error code = 2)
+```
+
+Clone (or worktree) onto the WSL ext4 filesystem instead:
+
+```bash
+git clone git@github.com:samwdp/volt.git ~/volt
+# or: git clone /mnt/p/volt ~/volt
+cd ~/volt
+nix develop
+```
+
+If you must stay on `/mnt/p/volt` temporarily:
+
+```bash
+# Match Windows CRLF checkout so the tree is not "fully dirty" to WSL git
+git config core.autocrlf true
+git config core.filemode false
+nix develop
+```
+
+After `.gitattributes` (`eol=lf`) is applied, renormalize once so Windows and WSL both see LF:
+
+```bash
+git add --renormalize .
+git status   # review, then commit when ready
+```
 
 **Enter the shell**
 
