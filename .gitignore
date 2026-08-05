@@ -8,6 +8,11 @@ target-validation/*
 target-agent/*
 **/user/lang/grammars/**
 
+# Nix
+/result
+/result-*
+.direnv/
+
 # keep graph outputs, skip heavy/local-only files
 
 # optional: commit for shared extraction speed, skip to keep repo small

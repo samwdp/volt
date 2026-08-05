@@ -147,6 +147,56 @@ install the same packages as the release workflow, for example:
 sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
+For a fully pinned Linux/WSL2 toolchain (Rust + SDL build deps + WebKit), prefer the Nix
+flake below instead of installing apt packages by hand.
+
+### Nix flake (Linux / WSL2)
+
+`flake.nix` provides a reproducible development shell for Linux and WSL2. It installs:
+
+- Rust stable `>= 1.91` (edition 2024) via [oxalica/rust-overlay](https://github.com/oxalica/rust-overlay), with `clippy`, `rustfmt`, `rust-src`, and `rust-analyzer`
+- Native deps matching CI: cmake/ninja, X11/Wayland/GL, ALSA/Pulse, FreeType, GTK3, and WebKitGTK 4.1 (for `wry`)
+- Runtime env helpers for WSL2 / soft-GL (`LIBGL_ALWAYS_SOFTWARE`, `XDG_RUNTIME_DIR`, WebKit compositing workaround)
+
+**Prerequisites**
+
+1. Install [Nix](https://nixos.org/download/) with flakes enabled (Determinate installer or official installer).
+2. On WSL2, use a Linux distro with Nix installed *inside* WSL (not Windows-native Nix).
+3. GUI runs need a display: WSLg on recent WSL2, or an X11/Wayland session. Headless smoke tests still need a display because the shell constructs the WebKitGTK browser host at startup.
+
+**Enter the shell**
+
+```bash
+nix develop
+```
+
+This uses the pinned inputs in `flake.lock` (nixpkgs + rust-overlay). To refresh those pins later:
+
+```bash
+nix flake update
+```
+
+Optional direnv auto-enter (requires [direnv](https://direnv.net/) + [nix-direnv](https://github.com/nix-community/nix-direnv)):
+
+```bash
+direnv allow
+```
+
+**Typical workflow inside the shell**
+
+```bash
+cargo xtask ci
+cargo build -p volt -p volt-user
+cargo run -p volt -- --shell-hidden
+cargo run -p volt
+```
+
+**What the flake does not do**
+
+- It does not package or install a release `volt` binary; it is a *dev shell* only (`nix develop`).
+- It targets `x86_64-linux` and `aarch64-linux` only (not macOS/Windows).
+- Tree-sitter grammars still install under the normal Volt grammar directory (or `VOLT_GRAMMAR_DIR`) on first use; the shell only supplies `cc`/`c++` for compiling them.
+
 ## Current status
 
 The repository now has a validated multi-crate foundation that covers the major architecture slices requested for the editor:
