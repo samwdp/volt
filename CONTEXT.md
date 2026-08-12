@@ -147,3 +147,29 @@ _Avoid_: stop buffer LSP, detach LSP (as the spoken product meaning of `lsp.stop
 **Language Server Session Restart**:
 Same picker grain as Language Server Session Stop: choose one live Session in the active Workspace and restart it. `lsp.restart` means this.
 _Avoid_: restart buffer LSP (as the spoken product meaning of `lsp.restart`)
+
+### Markdown presentation
+
+**Markdown Pretty**:
+The beautified on-screen presentation of markdown (icons, concealed markers, inline images, and related chrome) while the buffer’s underlying text stays canonical markdown source.
+_Avoid_: preview pane (when meaning in-buffer pretty), rendered mode (as the spoken product term), WYSIWYG
+
+**Markdown Raw**:
+Showing the canonical markdown source text with Pretty chrome suppressed for that region or buffer.
+_Avoid_: source mode (when meaning this), plain markdown (as the spoken product term)
+
+**Anti-conceal**:
+Temporarily showing Markdown Raw for the cursor line, and for lines under a Visual selection, so navigation and yank operate on real source text.
+_Avoid_: unpretty, reveal syntax, disable pretty (when meaning only the cursor/selection reveal)
+
+**Forced Language**:
+A sticky language id on a buffer that is not inferred from path or extension, so non-file buffers (for example ACP output) can still be treated as markdown for highlighting and Pretty.
+_Avoid_: fake filetype, hardcoded filetype (as the spoken product term), override extension
+
+**Markdown Pipeline**:
+The single presentation path that turns markdown source (from a buffer or an ephemeral string) into highlight + Pretty output, shared by file buffers, hover, and ACP markdown payloads.
+_Avoid_: markdown renderer (when meaning several ad-hoc paths), hover-only markdown, ACP-only markdown paint
+
+**Pretty Kill-switch**:
+An optional size threshold that disables Markdown Pretty for an oversized source and falls back to Markdown Raw; default off.
+_Avoid_: pretty disable (when meaning the global/buffer enable toggle), render budget (as the spoken product term)

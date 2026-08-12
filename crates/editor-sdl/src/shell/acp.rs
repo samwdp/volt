@@ -985,7 +985,7 @@ fn create_acp_buffer(
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &*user_library);
     shell_buffer.init_acp_view(&client.label);
     shell_buffer.clear_input();
-    shell_buffer.set_language_id(Some("markdown".to_owned()));
+    shell_buffer.set_forced_language_id("markdown");
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
     Ok((buffer_id, workspace_id, workspace_name))
@@ -1042,17 +1042,23 @@ pub(super) fn submit_acp_prompt(
         manager.session_for_buffer(buffer_id)
     };
     let Some(session_id) = session_id else {
-        let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.acp_push_system_message("ACP session is not connected.");
-        buffer.clear_input();
+        let follow = {
+            let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            let follow = buffer.acp_push_system_message("ACP session is not connected.");
+            buffer.clear_input();
+            follow
+        };
+        refresh_acp_output_markdown(runtime, buffer_id, follow)?;
         refresh_acp_input_hint(runtime, buffer_id)?;
         return Ok(());
     };
-    {
+    let follow = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.acp_push_user_prompt(format!("{prompt}{text}"));
+        let follow = buffer.acp_push_user_prompt(format!("{prompt}{text}"));
         buffer.clear_input();
-    }
+        follow
+    };
+    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
     refresh_acp_input_hint(runtime, buffer_id)?;
     let mut manager = manager
         .lock()
@@ -2469,23 +2475,36 @@ impl AcpManager {
                         buffer_id,
                     );
                 }
-                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                    buffer.acp_push_system_message(message);
-                }
+                let follow = {
+                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                        return Ok(());
+                    };
+                    buffer.acp_push_system_message(message)
+                };
+                refresh_acp_output_markdown(runtime, buffer_id, follow)?;
             }
             AcpEvent::ClientLog { buffer_id, message } => {
-                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                    buffer.acp_push_system_message(message);
-                }
+                let follow = {
+                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                        return Ok(());
+                    };
+                    buffer.acp_push_system_message(message)
+                };
+                refresh_acp_output_markdown(runtime, buffer_id, follow)?;
             }
             AcpEvent::SessionUserPrompt { session_id, prompt } => {
                 if let Some(buffer_id) = self
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.acp_push_user_prompt(prompt);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_push_user_prompt(prompt)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionAgentChunk {
@@ -2496,9 +2515,14 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.acp_append_agent_chunk(content);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_append_agent_chunk(content)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionPlan { session_id, plan } => {
@@ -2519,9 +2543,14 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.acp_upsert_tool_call(tool_call);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_upsert_tool_call(tool_call)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionToolCallUpdate { session_id, update } => {
@@ -2529,9 +2558,14 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    buffer.acp_update_tool_call(update);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_update_tool_call(update)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionInfoUpdated { session_id, update } => {
@@ -2555,13 +2589,19 @@ impl AcpManager {
                 let Some(session) = self.sessions.get(&session_id) else {
                     return Ok(());
                 };
-                if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
-                    buffer.acp_update_tool_call(tool_call.clone());
-                }
+                let buffer_id = session.buffer_id;
+                let workspace_name = session.workspace_name.clone();
+                let follow = {
+                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                        return Ok(());
+                    };
+                    buffer.acp_update_tool_call(tool_call.clone())
+                };
+                refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 let request = AcpPendingPermissionUi {
                     request_id,
                     session_id: session_id.clone(),
-                    workspace_name: session.workspace_name.clone(),
+                    workspace_name,
                     tool_call,
                     options,
                 };
@@ -2624,11 +2664,18 @@ impl AcpManager {
                     .sessions
                     .get(&session_id)
                     .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
                 {
-                    for line in lines {
-                        buffer.acp_push_system_message(line);
-                    }
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        let mut follow = true;
+                        for line in lines {
+                            follow = buffer.acp_push_system_message(line);
+                        }
+                        follow
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionCommands {
@@ -3122,6 +3169,14 @@ enum AcpEvent {
         session_id: agent_client_protocol::SessionId,
         message: String,
     },
+}
+
+fn refresh_acp_output_markdown(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    follow_output: bool,
+) -> Result<(), String> {
+    super::rebuild_acp_output_markdown(runtime, buffer_id, follow_output)
 }
 
 fn drain_acp_event_batch(events: &mpsc::Receiver<AcpEvent>, limit: usize) -> Vec<AcpEvent> {

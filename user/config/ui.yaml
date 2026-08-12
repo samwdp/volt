@@ -4,5 +4,9 @@ ligatures_enabled: true
 pane:
   golden_ratio: true
 
+workspace_dock:
+  side: left
+  docked: false
+
 keymap:
   ambiguous_prefix_timeout_ms: 250

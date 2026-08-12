@@ -643,17 +643,21 @@ pub(super) fn browser_sync_plan(
         .map(|_| popup_window_height(height, line_height))
         .unwrap_or(0);
     let pane_height = height.saturating_sub(popup_height);
+    let dock = workspace_dock_layout(user_library, state, width, height, cell_width);
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let pane_rects = runtime_pane_rects(
+    let mut pane_rects = runtime_pane_rects(
         user_library,
         state.pane_split_direction(),
-        width,
+        dock.content_width,
         pane_height,
         panes.len(),
         state.active_pane_index(),
     );
+    for rect in &mut pane_rects {
+        rect.x = rect.x.saturating_add(dock.content_x);
+    }
     let notification_rects = notification_overlay_layouts(
         &state.visible_notifications(now),
         width,
@@ -702,7 +706,12 @@ pub(super) fn browser_sync_plan(
         && buffer_uses_browser_host_surface(buffer)
         && let Some(rect) = browser_host_viewport_rect(
             buffer,
-            PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
+            PixelRectToRect::rect(
+                dock.content_x,
+                pane_height as i32,
+                dock.content_width,
+                popup_height,
+            ),
             cell_width,
             line_height,
             user_library.commandline_enabled(),

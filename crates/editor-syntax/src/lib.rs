@@ -818,6 +818,21 @@ pub struct SyntaxNodeContext {
     pub end_position: SyntaxPoint,
 }
 
+/// A named tree-sitter node with byte/position span for structure walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxStructureNode {
+    /// Tree-sitter node kind.
+    pub kind: String,
+    /// Start byte offset.
+    pub start_byte: usize,
+    /// End byte offset.
+    pub end_byte: usize,
+    /// Starting line/column for the node.
+    pub start_position: SyntaxPoint,
+    /// Exclusive ending line/column for the node.
+    pub end_position: SyntaxPoint,
+}
+
 impl SyntaxSnapshot {
     /// Returns the number of highlight spans.
     pub fn highlight_count(&self) -> usize {
@@ -1454,6 +1469,25 @@ impl SyntaxRegistry {
         buffer: &TextBuffer,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_language_impl(language_id, buffer, None, None)
+    }
+
+    /// Walks the parse tree and returns every named node (pre-order).
+    pub fn structure_nodes_for_language(
+        &mut self,
+        language_id: &str,
+        buffer: &TextBuffer,
+    ) -> Result<Vec<SyntaxStructureNode>, SyntaxError> {
+        let language_id = language_id.to_owned();
+        if !self.languages.contains_key(&language_id) {
+            return Err(SyntaxError::UnknownLanguage(language_id));
+        }
+        self.ensure_loaded_language(&language_id)?;
+        let loaded = self
+            .loaded
+            .get(&language_id)
+            .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
+        let parse_result = parse_tree(&language_id, loaded, buffer, None)?;
+        Ok(collect_structure_nodes(parse_result.tree.root_node()))
     }
 
     /// Returns named ancestor nodes for a cursor location, ordered innermost to outermost.
@@ -3507,6 +3541,30 @@ fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
     let mut lines = BTreeSet::new();
     collect_lines(tree.root_node(), &mut lines);
     lines.into_iter().collect()
+}
+
+fn collect_structure_nodes(root: tree_sitter::Node<'_>) -> Vec<SyntaxStructureNode> {
+    fn walk(node: tree_sitter::Node<'_>, out: &mut Vec<SyntaxStructureNode>) {
+        if node.is_named() {
+            let start = node.start_position();
+            let end = node.end_position();
+            out.push(SyntaxStructureNode {
+                kind: node.kind().to_owned(),
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_position: SyntaxPoint::new(start.row, start.column),
+                end_position: SyntaxPoint::new(end.row, end.column),
+            });
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
 }
 
 fn buffer_text_for_byte_range(

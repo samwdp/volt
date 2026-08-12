@@ -31,7 +31,7 @@ pub use abi::{
     AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSection, AbiSectionAction, AbiSectionItem,
     AbiSectionTree, AbiStatusEntry, AbiStatuslineContext, AbiStringPair, AbiTerminalConfig,
     AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
-    AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -1434,6 +1434,12 @@ pub trait UserLibrary: Send + Sync {
             golden_ratio: false,
         }
     }
+    fn workspace_dock_config(&self) -> WorkspaceDockConfig {
+        WorkspaceDockConfig::default()
+    }
+    fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
+        MarkdownPrettyConfig::default()
+    }
     fn keymap_config(&self) -> KeymapConfig {
         KeymapConfig::default()
     }
@@ -2507,6 +2513,63 @@ pub struct LigatureConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneConfig {
     pub golden_ratio: bool,
+}
+
+/// Side of the window where the workspace dock appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceDockSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Workspace dock configuration exported by the user library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceDockConfig {
+    pub side: WorkspaceDockSide,
+    pub docked: bool,
+}
+
+impl Default for WorkspaceDockConfig {
+    fn default() -> Self {
+        Self {
+            side: WorkspaceDockSide::Left,
+            docked: false,
+        }
+    }
+}
+
+/// One treesitter-node → icon entry for Markdown Pretty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownPrettyIcon {
+    pub node_kind: String,
+    pub icon: String,
+}
+
+/// Markdown Pretty settings exported by the user library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownPrettyConfig {
+    pub enabled: bool,
+    pub kill_switch_enabled: bool,
+    pub kill_switch_max_lines: usize,
+    pub kill_switch_max_bytes: usize,
+    pub image_max_bytes: usize,
+    pub image_max_rows: usize,
+    pub icons: Vec<MarkdownPrettyIcon>,
+}
+
+impl Default for MarkdownPrettyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kill_switch_enabled: false,
+            kill_switch_max_lines: 20_000,
+            kill_switch_max_bytes: 2_000_000,
+            image_max_bytes: 10_000_000,
+            image_max_rows: 24,
+            icons: Vec::new(),
+        }
+    }
 }
 
 /// Keymap tunables exported by the user library (`ui.keymap.*`).

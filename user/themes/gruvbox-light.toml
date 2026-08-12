@@ -64,6 +64,11 @@ purple = "#8f3f71"
 "ui.notification.error" = "pallet.red-strong"
 "ui.panel.background" = "pallet.background"
 "ui.panel.header.background" = "pallet.surface"
+"ui.workspace-dock.background" = "pallet.surface"
+"ui.workspace-dock.foreground" = "pallet.foreground"
+"ui.workspace-dock.muted" = "pallet.foreground-muted"
+"ui.workspace-dock.selection" = "pallet.surface-selection"
+"ui.workspace-dock.accent" = "pallet.blue"
 
 # Oil directory buffer
 "oil.header" = "pallet.yellow"

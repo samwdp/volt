@@ -8,12 +8,14 @@ mod directory;
 mod git;
 mod git_editor;
 mod issues;
+mod markdown_pretty;
 mod pdf;
 mod picker;
 mod render;
 mod terminal;
 mod treesitter_install;
 mod ui_overlays;
+mod workspace_dock;
 mod workspace_search;
 
 use browser::*;
@@ -27,6 +29,7 @@ use issues::*;
 use pdf::*;
 use render::*;
 use terminal::*;
+use workspace_dock::*;
 use workspace_search::*;
 
 #[cfg(test)]
@@ -116,7 +119,7 @@ use editor_plugin_api::{
     PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
     PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
     PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
-    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction,
+    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction, WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,
@@ -290,6 +293,9 @@ const HOOK_HOVER_PREVIOUS: &str = hover_hooks::PREVIOUS;
 const HOOK_POPUP_TOGGLE: &str = "ui.popup.toggle";
 const HOOK_POPUP_NEXT: &str = "ui.popup.next";
 const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
+const HOOK_WORKSPACE_DOCK_TOGGLE: &str = "ui.workspace-dock.toggle";
+const HOOK_WORKSPACE_DOCK_PREVIOUS: &str = "ui.workspace-dock.previous";
+const HOOK_WORKSPACE_DOCK_NEXT: &str = "ui.workspace-dock.next";
 const HOOK_ACP_DISCONNECT: &str = "ui.acp.disconnect";
 const HOOK_ACP_PERMISSION_APPROVE: &str = "ui.acp.permission-approve";
 const HOOK_ACP_PERMISSION_DENY: &str = "ui.acp.permission-deny";
@@ -339,6 +345,7 @@ const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
 const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
 const HOOK_IMAGE_TOGGLE_MODE: &str = image_hooks::TOGGLE_MODE;
+const HOOK_MARKDOWN_PRETTY_TOGGLE: &str = "markdown.pretty.toggle";
 const HOOK_PDF_NEXT_PAGE: &str = pdf_hooks::NEXT_PAGE;
 const HOOK_PDF_PREVIOUS_PAGE: &str = pdf_hooks::PREVIOUS_PAGE;
 const HOOK_PDF_ROTATE_CLOCKWISE: &str = pdf_hooks::ROTATE_CLOCKWISE;
@@ -719,7 +726,16 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn pane_config(&self) -> editor_plugin_api::PaneConfig {
-        self.module.pane_config_v1()().into()
+        self.module.pane_config_v1()().pane_config()
+    }
+
+    fn workspace_dock_config(&self) -> editor_plugin_api::WorkspaceDockConfig {
+        self.module.pane_config_v1()().workspace_dock_config()
+    }
+
+    fn markdown_pretty_config(&self) -> editor_plugin_api::MarkdownPrettyConfig {
+        // Prefix ABI is at capacity; dynamic loads use planner defaults when icons empty.
+        editor_plugin_api::MarkdownPrettyConfig::default()
     }
 
     fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {
@@ -2092,7 +2108,14 @@ struct MarkdownTableRender {
     widths: Vec<usize>,
 }
 
+fn markdown_pretty_active_for_buffer(buffer: &ShellBuffer) -> bool {
+    buffer.markdown_pretty_enabled().unwrap_or(true)
+}
+
 fn detect_markdown_table(buffer: &ShellBuffer) -> Option<MarkdownTable> {
+    if !markdown_pretty_active_for_buffer(buffer) {
+        return None;
+    }
     if buffer.language_id() != Some("markdown") || buffer.line_count() < 2 {
         return None;
     }
@@ -3658,6 +3681,10 @@ pub(crate) struct ShellBuffer {
     backing_file_check_in_flight: bool,
     undo_tree: UndoTree,
     language_id: Option<String>,
+    /// When true, `language_id` is Forced Language and must not be cleared by syntax refresh.
+    forced_language: bool,
+    /// Per-buffer Markdown Pretty override (`None` = use user config default).
+    markdown_pretty_enabled: Option<bool>,
     pub(crate) scroll_row: usize,
     scroll_col: usize,
     line_wrap: bool,
@@ -3773,6 +3800,8 @@ struct AcpRenderedTextLine {
     prefix: Vec<AcpRenderedSegment>,
     text: String,
     text_role: AcpColorRole,
+    /// Markdown Pipeline spans for agent text (empty = solid `text_role` color).
+    syntax_spans: Vec<LineSyntaxSpan>,
 }
 
 #[derive(Debug, Clone)]
@@ -4498,6 +4527,8 @@ impl ShellBuffer {
             backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
+            forced_language: false,
+            markdown_pretty_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4571,6 +4602,8 @@ impl ShellBuffer {
             backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
+            forced_language: false,
+            markdown_pretty_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4647,6 +4680,8 @@ impl ShellBuffer {
             backing_file_check_in_flight: false,
             undo_tree,
             language_id: None,
+            forced_language: false,
+            markdown_pretty_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap,
@@ -5335,7 +5370,7 @@ impl ShellBuffer {
         None
     }
 
-    pub(crate) fn acp_push_user_prompt(&mut self, prompt: impl Into<String>) {
+    pub(crate) fn acp_push_user_prompt(&mut self, prompt: impl Into<String>) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -5351,9 +5386,10 @@ impl ShellBuffer {
                 .push(AcpOutputItem::UserPrompt(prompt.into()));
         }
         self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
-    pub(crate) fn acp_push_system_message(&mut self, message: impl Into<String>) {
+    pub(crate) fn acp_push_system_message(&mut self, message: impl Into<String>) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -5369,9 +5405,10 @@ impl ShellBuffer {
                 .push(AcpOutputItem::SystemMessage(message.into()));
         }
         self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
-    pub(crate) fn acp_append_agent_chunk(&mut self, content: ContentBlock) {
+    pub(crate) fn acp_append_agent_chunk(&mut self, content: ContentBlock) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -5395,6 +5432,7 @@ impl ShellBuffer {
             }
         }
         self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
     pub(crate) fn acp_set_plan(&mut self, plan: Plan) {
@@ -5426,7 +5464,7 @@ impl ShellBuffer {
         }
     }
 
-    pub(crate) fn acp_upsert_tool_call(&mut self, tool_call: ToolCall) {
+    pub(crate) fn acp_upsert_tool_call(&mut self, tool_call: ToolCall) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -5447,9 +5485,10 @@ impl ShellBuffer {
             }
         }
         self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
-    pub(crate) fn acp_update_tool_call(&mut self, update: ToolCallUpdate) {
+    pub(crate) fn acp_update_tool_call(&mut self, update: ToolCallUpdate) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -5475,6 +5514,7 @@ impl ShellBuffer {
             }
         }
         self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
     fn acp_rebuild_plan_view(&mut self) {
@@ -5489,11 +5529,23 @@ impl ShellBuffer {
     }
 
     fn acp_rebuild_output_view(&mut self, follow_output: bool) {
+        self.acp_rebuild_output_view_with(follow_output, None);
+    }
+
+    fn acp_rebuild_output_view_with(
+        &mut self,
+        follow_output: bool,
+        markdown: Option<AcpMarkdownPaint<'_>>,
+    ) {
         let visible_rows = self.acp_output_viewport_lines();
+        let buffer_enabled = self.markdown_pretty_enabled;
+        let Some(state) = self.acp_state.as_ref() else {
+            return;
+        };
+        let render_lines = acp_build_output_lines(&state.output_items, markdown, buffer_enabled);
         let Some(state) = self.acp_state.as_mut() else {
             return;
         };
-        let render_lines = acp_build_output_lines(&state.output_items);
         state
             .output_pane
             .replace_render_lines(render_lines, follow_output, visible_rows);
@@ -5917,7 +5969,24 @@ impl ShellBuffer {
     }
 
     fn set_language_id(&mut self, language_id: Option<String>) {
+        if self.forced_language && language_id.is_none() {
+            return;
+        }
         self.language_id = language_id;
+    }
+
+    fn set_forced_language_id(&mut self, language_id: impl Into<String>) {
+        self.language_id = Some(language_id.into());
+        self.forced_language = true;
+    }
+
+    fn markdown_pretty_enabled(&self) -> Option<bool> {
+        self.markdown_pretty_enabled
+    }
+
+    fn toggle_markdown_pretty(&mut self, default_enabled: bool) {
+        let current = self.markdown_pretty_enabled.unwrap_or(default_enabled);
+        self.markdown_pretty_enabled = Some(!current);
     }
 
     fn lsp_diagnostics(&self) -> &[LspDiagnostic] {
@@ -7373,27 +7442,32 @@ fn acp_tool_call_from_partial_update(update: &ToolCallUpdate) -> ToolCall {
 
 fn acp_build_plan_lines(entries: &[PlanEntry]) -> Vec<AcpRenderedLine> {
     if entries.is_empty() {
-        return vec![AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: vec![acp_icon_segment(
+        return vec![AcpRenderedLine::Text(acp_text_line(
+            vec![acp_icon_segment(
                 editor_icons::symbols::cod::COD_NOTEBOOK,
                 AcpColorRole::Muted,
             )],
-            text: " Waiting for plan updates...".to_owned(),
-            text_role: AcpColorRole::Muted,
-        })];
+            " Waiting for plan updates...",
+            AcpColorRole::Muted,
+        ))];
     }
     entries
         .iter()
         .map(|entry| {
             let mut prefix = acp_plan_status_segments(entry.status.clone(), entry.priority.clone());
             prefix.push(acp_text_segment(" ", AcpColorRole::Default));
-            AcpRenderedLine::Text(AcpRenderedTextLine {
+            AcpRenderedLine::Text(acp_text_line(
                 prefix,
-                text: entry.content.clone(),
-                text_role: AcpColorRole::Default,
-            })
+                entry.content.clone(),
+                AcpColorRole::Default,
+            ))
         })
         .collect()
+}
+
+struct AcpMarkdownPaint<'a> {
+    registry: &'a mut SyntaxRegistry,
+    config: &'a editor_markdown::MarkdownPrettyConfig,
 }
 
 fn normalize_acp_plan_entries(entries: &mut [PlanEntry]) {
@@ -7417,7 +7491,11 @@ fn normalize_acp_plan_entries(entries: &mut [PlanEntry]) {
     }
 }
 
-fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
+fn acp_build_output_lines(
+    items: &[AcpOutputItem],
+    mut markdown: Option<AcpMarkdownPaint<'_>>,
+    buffer_enabled: Option<bool>,
+) -> Vec<AcpRenderedLine> {
     let mut lines = Vec::new();
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
@@ -7448,17 +7526,28 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
             }
             AcpOutputItem::AgentBlocks(blocks) => {
                 for block in blocks {
-                    lines.extend(acp_render_content_block(
-                        block,
-                        vec![
-                            acp_icon_segment(
-                                editor_icons::symbols::cod::COD_COMMENT,
-                                AcpColorRole::Accent,
-                            ),
-                            acp_text_segment(" ", AcpColorRole::Default),
-                        ],
-                        AcpColorRole::Default,
-                    ));
+                    let prefix = vec![
+                        acp_icon_segment(
+                            editor_icons::symbols::cod::COD_COMMENT,
+                            AcpColorRole::Accent,
+                        ),
+                        acp_text_segment(" ", AcpColorRole::Default),
+                    ];
+                    if let (Some(paint), ContentBlock::Text(text)) = (markdown.as_mut(), block) {
+                        lines.extend(acp_render_markdown_text_block(
+                            prefix,
+                            &text.text,
+                            AcpColorRole::Default,
+                            paint,
+                            buffer_enabled,
+                        ));
+                    } else {
+                        lines.extend(acp_render_content_block(
+                            block,
+                            prefix,
+                            AcpColorRole::Default,
+                        ));
+                    }
                 }
             }
             AcpOutputItem::ToolCall(tool_call) => {
@@ -7469,11 +7558,11 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                     AcpColorRole::Accent,
                 ));
                 prefix.push(acp_text_segment(" ", AcpColorRole::Default));
-                lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
+                lines.push(AcpRenderedLine::Text(acp_text_line(
                     prefix,
-                    text: tool_call.title.clone(),
-                    text_role: AcpColorRole::Default,
-                }));
+                    tool_call.title.clone(),
+                    AcpColorRole::Default,
+                )));
                 for content in &tool_call.content {
                     lines.extend(acp_render_tool_content(content));
                 }
@@ -7482,30 +7571,30 @@ fn acp_build_output_lines(items: &[AcpOutputItem]) -> Vec<AcpRenderedLine> {
                         .line
                         .map(|line| format!("{}:{line}", location.path.display()))
                         .unwrap_or_else(|| location.path.display().to_string());
-                    lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
-                        prefix: vec![
+                    lines.push(AcpRenderedLine::Text(acp_text_line(
+                        vec![
                             acp_icon_segment(
                                 editor_icons::symbols::cod::COD_SEARCH,
                                 AcpColorRole::Muted,
                             ),
                             acp_text_segment(" ", AcpColorRole::Default),
                         ],
-                        text: line,
-                        text_role: AcpColorRole::Muted,
-                    }));
+                        line,
+                        AcpColorRole::Muted,
+                    )));
                 }
             }
         }
     }
     if lines.is_empty() {
-        lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: vec![acp_icon_segment(
+        lines.push(AcpRenderedLine::Text(acp_text_line(
+            vec![acp_icon_segment(
                 editor_icons::symbols::cod::COD_HISTORY,
                 AcpColorRole::Muted,
             )],
-            text: " Waiting for session output...".to_owned(),
-            text_role: AcpColorRole::Muted,
-        }));
+            " Waiting for session output...",
+            AcpColorRole::Muted,
+        )));
     }
     lines
 }
@@ -7523,39 +7612,39 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
             ],
             AcpColorRole::Default,
         ),
-        ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: vec![
+        ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(acp_text_line(
+            vec![
                 acp_icon_segment(
                     editor_icons::symbols::cod::COD_DIFF_MODIFIED,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
             ],
-            text: diff.path.display().to_string(),
-            text_role: AcpColorRole::Default,
-        })],
-        ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: vec![
+            diff.path.display().to_string(),
+            AcpColorRole::Default,
+        ))],
+        ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(acp_text_line(
+            vec![
                 acp_icon_segment(
                     editor_icons::symbols::cod::COD_TERMINAL,
                     AcpColorRole::Accent,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
             ],
-            text: format!("terminal {}", terminal.terminal_id),
-            text_role: AcpColorRole::Default,
-        })],
-        _ => vec![AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: vec![
+            format!("terminal {}", terminal.terminal_id),
+            AcpColorRole::Default,
+        ))],
+        _ => vec![AcpRenderedLine::Text(acp_text_line(
+            vec![
                 acp_icon_segment(
                     editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
                 ),
                 acp_text_segment(" ", AcpColorRole::Default),
             ],
-            text: "Unsupported tool content".to_owned(),
-            text_role: AcpColorRole::Warning,
-        })],
+            "Unsupported tool content",
+            AcpColorRole::Warning,
+        ))],
     }
 }
 
@@ -7622,6 +7711,53 @@ fn acp_render_content_block(
     }
 }
 
+fn acp_text_line(
+    prefix: Vec<AcpRenderedSegment>,
+    text: impl Into<String>,
+    text_role: AcpColorRole,
+) -> AcpRenderedTextLine {
+    AcpRenderedTextLine {
+        prefix,
+        text: text.into(),
+        text_role,
+        syntax_spans: Vec::new(),
+    }
+}
+
+fn acp_render_markdown_text_block(
+    prefix: Vec<AcpRenderedSegment>,
+    text: &str,
+    text_role: AcpColorRole,
+    paint: &mut AcpMarkdownPaint<'_>,
+    buffer_enabled: Option<bool>,
+) -> Vec<AcpRenderedLine> {
+    let rendered =
+        render_markdown_ephemeral_content(text, paint.config, buffer_enabled, Some(paint.registry));
+    if rendered.lines.is_empty() {
+        return acp_multiline_text_lines(prefix, text, text_role);
+    }
+    let continuation_prefix = acp_padding_prefix(&prefix);
+    let syntax_lines = rendered.syntax_lines;
+    rendered
+        .lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let syntax_spans = syntax_lines.get(&index).cloned().unwrap_or_default();
+            AcpRenderedLine::Text(AcpRenderedTextLine {
+                prefix: if index == 0 {
+                    prefix.clone()
+                } else {
+                    continuation_prefix.clone()
+                },
+                text: line,
+                text_role,
+                syntax_spans,
+            })
+        })
+        .collect()
+}
+
 fn acp_multiline_text_lines(
     prefix: Vec<AcpRenderedSegment>,
     text: impl AsRef<str>,
@@ -7635,15 +7771,15 @@ fn acp_multiline_text_lines(
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
         .collect::<Vec<_>>();
     for (index, line) in parts.into_iter().enumerate() {
-        lines.push(AcpRenderedLine::Text(AcpRenderedTextLine {
-            prefix: if index == 0 {
+        lines.push(AcpRenderedLine::Text(acp_text_line(
+            if index == 0 {
                 prefix.clone()
             } else {
                 continuation_prefix.clone()
             },
-            text: line,
+            line,
             text_role,
-        }));
+        )));
     }
     lines
 }
@@ -8520,6 +8656,9 @@ pub(crate) struct ShellUiState {
     last_lsp_notification_revision: u64,
     popup_focus: bool,
     popup_buffer_id: Option<BufferId>,
+    workspace_dock_open: bool,
+    workspace_dock_focus: bool,
+    workspace_dock_branches: WorkspaceDockBranchCache,
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
@@ -8586,6 +8725,9 @@ impl ShellUiState {
             last_lsp_notification_revision: 0,
             popup_focus: false,
             popup_buffer_id: None,
+            workspace_dock_open: false,
+            workspace_dock_focus: false,
+            workspace_dock_branches: WorkspaceDockBranchCache::new(),
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
@@ -8676,9 +8818,50 @@ impl ShellUiState {
         if self.popup_focus == focus {
             return;
         }
+        if focus {
+            self.workspace_dock_focus = false;
+        }
         self.persist_active_buffer_vim_state();
         self.popup_focus = focus;
         self.restore_active_buffer_vim_state();
+    }
+
+    fn workspace_dock_open(&self) -> bool {
+        self.workspace_dock_open
+    }
+
+    fn set_workspace_dock_open(&mut self, open: bool) {
+        self.workspace_dock_open = open;
+    }
+
+    fn toggle_workspace_dock_open(&mut self) {
+        self.workspace_dock_open = !self.workspace_dock_open;
+    }
+
+    fn workspace_dock_focus(&self) -> bool {
+        self.workspace_dock_focus
+    }
+
+    fn set_workspace_dock_focus(&mut self, focus: bool) {
+        if self.workspace_dock_focus == focus {
+            return;
+        }
+        if focus {
+            self.popup_focus = false;
+        }
+        self.workspace_dock_focus = focus;
+    }
+
+    fn workspace_dock_focus_active(&self, user_library: &dyn UserLibrary) -> bool {
+        self.workspace_dock_focus() && workspace_dock_visible(user_library, self)
+    }
+
+    fn workspace_dock_branches(&self) -> &WorkspaceDockBranchCache {
+        &self.workspace_dock_branches
+    }
+
+    fn workspace_dock_branches_mut(&mut self) -> &mut WorkspaceDockBranchCache {
+        &mut self.workspace_dock_branches
     }
 
     fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {
@@ -10602,6 +10785,36 @@ impl ShellState {
                 if picker_visible {
                     return Ok(false);
                 }
+                let user_library = shell_user_library(&self.runtime);
+                let dock = workspace_dock_layout(
+                    &*user_library,
+                    self.ui()?,
+                    render_width,
+                    render_height,
+                    cell_width,
+                );
+                if mouse_btn == MouseButton::Left {
+                    let entries = collect_workspace_dock_entries(&self.runtime)
+                        .map_err(ShellError::Runtime)?;
+                    if let Some(workspace_id) = workspace_dock_entry_at_point(
+                        &dock,
+                        &entries,
+                        line_height,
+                        mouse_x,
+                        mouse_y,
+                    ) {
+                        self.mouse_drag = None;
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_workspace_dock_focus(true);
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_popup_focus(false);
+                        switch_runtime_workspace(&mut self.runtime, workspace_id)
+                            .map_err(ShellError::Runtime)?;
+                        return Ok(false);
+                    }
+                }
                 let runtime_popup = self.runtime_popup()?;
                 let popup_height = runtime_popup
                     .as_ref()
@@ -10611,7 +10824,7 @@ impl ShellState {
                 let browser_plan = browser_sync_plan(
                     self.ui()?,
                     runtime_popup.as_ref(),
-                    &*shell_user_library(&self.runtime),
+                    &*user_library,
                     render_width,
                     render_height,
                     cell_width,
@@ -10620,7 +10833,11 @@ impl ShellState {
                 )?;
                 let clicked_browser_buffer =
                     browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
-                if runtime_popup.is_some() && mouse_y >= pane_height as i32 {
+                let in_popup = runtime_popup.is_some()
+                    && mouse_y >= pane_height as i32
+                    && mouse_x >= dock.content_x
+                    && mouse_x < dock.content_x.saturating_add(dock.content_width as i32);
+                if in_popup {
                     self.mouse_drag = None;
                     if let Some(popup) = runtime_popup.as_ref() {
                         let ui = self.ui_mut()?;
@@ -10638,9 +10855,14 @@ impl ShellState {
                     }
                     return Ok(false);
                 }
-                if let Some((pane_id, buffer_id, pane_rect)) =
-                    self.pane_surface_at_point(render_width, pane_height, mouse_x, mouse_y)?
-                {
+                if let Some((pane_id, buffer_id, pane_rect)) = self.pane_surface_at_point(
+                    render_width,
+                    render_height,
+                    pane_height,
+                    cell_width,
+                    mouse_x,
+                    mouse_y,
+                )? {
                     self.focus_runtime_pane(pane_id)?;
                     if let Some(buffer_id) = clicked_browser_buffer {
                         self.browser_host
@@ -10729,8 +10951,14 @@ impl ShellState {
                 if browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y).is_some() {
                     return Ok(false);
                 }
-                let Some((pane_id, _, _)) =
-                    self.pane_surface_at_point(render_width, pane_height, mouse_x, mouse_y)?
+                let Some((pane_id, _, _)) = self.pane_surface_at_point(
+                    render_width,
+                    render_height,
+                    pane_height,
+                    cell_width,
+                    mouse_x,
+                    mouse_y,
+                )?
                 else {
                     return Ok(false);
                 };
@@ -11366,7 +11594,9 @@ impl ShellState {
     fn pane_surface_at_point(
         &self,
         width: u32,
+        height: u32,
         pane_height: u32,
+        cell_width: i32,
         x: i32,
         y: i32,
     ) -> Result<Option<(PaneId, BufferId, PixelRect)>, ShellError> {
@@ -11377,14 +11607,19 @@ impl ShellState {
         let Some(panes) = ui.panes() else {
             return Ok(None);
         };
-        let pane_rects = runtime_pane_rects(
-            &*shell_user_library(&self.runtime),
+        let user_library = shell_user_library(&self.runtime);
+        let dock = workspace_dock_layout(&*user_library, ui, width, height, cell_width);
+        let mut pane_rects = runtime_pane_rects(
+            &*user_library,
             ui.pane_split_direction(),
-            width,
+            dock.content_width,
             pane_height,
             panes.len(),
             ui.active_pane_index(),
         );
+        for rect in &mut pane_rects {
+            rect.x = rect.x.saturating_add(dock.content_x);
+        }
         Ok(panes
             .iter()
             .zip(pane_rects.iter())
@@ -11409,6 +11644,7 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
         let ui = self.ui_mut()?;
         ui.set_popup_focus(false);
+        ui.set_workspace_dock_focus(false);
         ui.focus_pane(pane_id);
         Ok(())
     }
@@ -11599,6 +11835,18 @@ impl ShellState {
     ) -> Result<(), ShellError> {
         self.refresh_picker_preview_syntax();
         let runtime_popup = self.runtime_popup()?;
+        let now = Instant::now();
+        let dock_visible = {
+            let ui = self.ui()?;
+            workspace_dock_visible(&*shell_user_library(&self.runtime), ui)
+        };
+        let dock_entries =
+            collect_workspace_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
+        if dock_visible {
+            let roots = workspace_dock_project_roots(&self.runtime).map_err(ShellError::Runtime)?;
+            let cache = self.ui_mut()?.workspace_dock_branches_mut();
+            refresh_workspace_dock_branches(cache, &roots, now);
+        }
         let ui = self.ui()?;
         let acp_connected = acp::acp_connected(&self.runtime).unwrap_or(false);
         let lsp_workspace_loaded = active_lsp_workspace_loaded(&self.runtime, ui);
@@ -11610,13 +11858,13 @@ impl ShellState {
             .map_err(|error| ShellError::Runtime(error.to_string()))?
             .name()
             .to_owned();
-        let now = Instant::now();
         let typing_active = self.typing_refresh_budget_active(now);
         render_shell_state(
             target,
             fonts,
             ui,
             runtime_popup.as_ref(),
+            &dock_entries,
             &*shell_user_library(&self.runtime),
             &workspace_name,
             ui.attached_lsp_server(),
@@ -12090,7 +12338,9 @@ impl ShellState {
     fn overlay_minor_modes(&self) -> Result<Vec<KeymapScope>, ShellError> {
         let ui = self.ui()?;
         let mut modes = Vec::new();
-        if ui.picker_visible() {
+        if ui.picker_visible()
+            || ui.workspace_dock_focus_active(&*shell_user_library(&self.runtime))
+        {
             modes.push(KeymapScope::Popup);
         } else if let Some(popup) =
             active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?
@@ -13833,13 +14083,15 @@ impl ShellState {
             .map(|_| popup_window_height(render_height, line_height))
             .unwrap_or(0);
         let pane_height = render_height.saturating_sub(popup_height);
+        let user_library = shell_user_library(&self.runtime);
+        let dock = workspace_dock_layout(&*user_library, ui, render_width, render_height, 8);
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
         let pane_rects = runtime_pane_rects(
-            &*shell_user_library(&self.runtime),
+            &*user_library,
             ui.pane_split_direction(),
-            render_width,
+            dock.content_width,
             pane_height,
             panes.len(),
             ui.active_pane_index(),
@@ -13878,13 +14130,16 @@ impl ShellState {
             .map(|_| popup_window_height(render_height, line_height))
             .unwrap_or(0);
         let pane_height = render_height.saturating_sub(popup_height);
+        let user_library = shell_user_library(&self.runtime);
+        let dock =
+            workspace_dock_layout(&*user_library, ui, render_width, render_height, cell_width);
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
         let pane_rects = runtime_pane_rects(
-            &*shell_user_library(&self.runtime),
+            &*user_library,
             ui.pane_split_direction(),
-            render_width,
+            dock.content_width,
             pane_height,
             panes.len(),
             ui.active_pane_index(),
@@ -13910,7 +14165,7 @@ impl ShellState {
         if let Some(popup) = runtime_popup.as_ref() {
             visible_buffers.push((
                 popup.active_buffer,
-                render_width,
+                dock.content_width,
                 popup_height.max(1),
                 ui.popup_focus_active(popup),
             ));
@@ -16099,6 +16354,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_MARKDOWN_PRETTY_TOGGLE,
+        "Toggles Markdown Pretty for the active buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PDF_PREVIOUS_PAGE,
         "Moves the active PDF buffer to the previous page.",
     )?;
@@ -16151,6 +16411,21 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         HOOK_POPUP_TOGGLE,
         "Shows or closes the docked popup window.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_DOCK_TOGGLE,
+        "Shows or hides the workspace dock when it is not permanently docked.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_DOCK_PREVIOUS,
+        "Moves to the previous workspace in the dock list.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_WORKSPACE_DOCK_NEXT,
+        "Moves to the next workspace in the dock list.",
     )?;
     register_hook(runtime, HOOK_POPUP_NEXT, "Cycles to the next popup buffer.")?;
     register_hook(
@@ -17488,6 +17763,36 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_DOCK_TOGGLE,
+            "shell.workspace-dock-toggle",
+            |_, runtime| {
+                toggle_workspace_dock(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_DOCK_PREVIOUS,
+            "shell.workspace-dock-previous",
+            |_, runtime| {
+                cycle_workspace_dock(runtime, false)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_DOCK_NEXT,
+            "shell.workspace-dock-next",
+            |_, runtime| {
+                cycle_workspace_dock(runtime, true)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_POPUP_NEXT, "shell.popup-next", |_, runtime| {
             if shell_ui(runtime)?.picker_visible() {
                 if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
@@ -17974,6 +18279,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.image-toggle-mode",
             |_, runtime| {
                 toggle_active_image_buffer_mode(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_MARKDOWN_PRETTY_TOGGLE,
+            "shell.markdown-pretty-toggle",
+            |_, runtime| {
+                toggle_active_markdown_pretty(runtime)?;
                 Ok(())
             },
         )
@@ -19825,6 +20140,20 @@ fn toggle_active_image_buffer_mode(runtime: &mut EditorRuntime) -> Result<(), St
     if switched_to_source {
         queue_buffer_syntax_refresh(runtime, buffer_id)?;
     }
+    Ok(())
+}
+
+fn toggle_active_markdown_pretty(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let default_enabled = shell_user_library(runtime).markdown_pretty_config().enabled;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    if buffer.language_id() != Some("markdown") && !buffer.forced_language {
+        // Still allow toggle when Forced Language may be set next; only skip pure non-md.
+        if buffer.language_id().is_none() {
+            return Ok(());
+        }
+    }
+    buffer.toggle_markdown_pretty(default_enabled);
     Ok(())
 }
 
@@ -21750,12 +22079,39 @@ fn append_hover_rendered_content(
 }
 
 fn render_markdown_hover_content(runtime: &mut EditorRuntime, text: &str) -> HoverRenderedContent {
+    let config = markdown_pretty::user_library_pretty_config(&*shell_user_library(runtime));
+    let registry = syntax_registry_mut(runtime).ok();
+    render_markdown_ephemeral_content(text, &config, Some(config.enabled), registry)
+}
+
+fn render_markdown_ephemeral_content(
+    text: &str,
+    config: &editor_markdown::MarkdownPrettyConfig,
+    buffer_enabled: Option<bool>,
+    mut registry: Option<&mut SyntaxRegistry>,
+) -> HoverRenderedContent {
     let normalized = normalize_hover_multiline_text(text);
     let mut rendered = plain_hover_rendered_content(hover_multiline_lines(&normalized));
     if rendered.lines.is_empty() {
         return rendered;
     }
-    let Some(registry) = syntax_registry_mut(runtime).ok() else {
+    let plan = markdown_pretty::build_markdown_pretty_plan(
+        &normalized,
+        config,
+        buffer_enabled,
+        None,
+        None,
+        None,
+        None,
+        None,
+        registry.as_deref_mut(),
+    );
+    if !plan.skipped_by_kill_switch {
+        for (line_index, line) in rendered.lines.iter_mut().enumerate() {
+            *line = markdown_pretty::pretty_display_line(&plan, false, line_index, line);
+        }
+    }
+    let Some(registry) = registry else {
         return rendered;
     };
     let markdown_buffer = TextBuffer::from_text(&normalized);
@@ -21773,6 +22129,42 @@ fn render_markdown_hover_content(runtime: &mut EditorRuntime, text: &str) -> Hov
     }
     apply_markdown_code_fence_syntax(&mut rendered, registry);
     rendered
+}
+
+pub(super) fn rebuild_acp_output_markdown(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    follow_output: bool,
+) -> Result<(), String> {
+    let config = markdown_pretty::user_library_pretty_config(&*shell_user_library(runtime));
+    let (items, visible_rows, buffer_enabled) = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let Some(state) = buffer.acp_state.as_ref() else {
+            return Ok(());
+        };
+        (
+            state.output_items.clone(),
+            buffer.acp_output_viewport_lines(),
+            buffer.markdown_pretty_enabled(),
+        )
+    };
+    let render_lines = {
+        let markdown = match syntax_registry_mut(runtime) {
+            Ok(registry) => Some(AcpMarkdownPaint {
+                registry,
+                config: &config,
+            }),
+            Err(_) => None,
+        };
+        acp_build_output_lines(&items, markdown, buffer_enabled)
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    if let Some(state) = buffer.acp_state.as_mut() {
+        state
+            .output_pane
+            .replace_render_lines(render_lines, follow_output, visible_rows);
+    }
+    Ok(())
 }
 
 fn apply_markdown_code_fence_syntax(
@@ -30430,6 +30822,107 @@ pub(crate) fn switch_runtime_workspace(
     sync_active_buffer(runtime)
 }
 
+fn toggle_workspace_dock(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
+    if user_library.workspace_dock_config().docked {
+        shell_ui_mut(runtime)?.set_workspace_dock_open(true);
+        return Ok(());
+    }
+    shell_ui_mut(runtime)?.toggle_workspace_dock_open();
+    let visible = workspace_dock_visible(&*user_library, shell_ui(runtime)?);
+    if !visible {
+        shell_ui_mut(runtime)?.set_workspace_dock_focus(false);
+    }
+    Ok(())
+}
+
+fn workspace_dock_enter_direction(side: WorkspaceDockSide) -> WindowMoveDirection {
+    match side {
+        WorkspaceDockSide::Left => WindowMoveDirection::Left,
+        WorkspaceDockSide::Right => WindowMoveDirection::Right,
+    }
+}
+
+fn workspace_dock_exit_direction(side: WorkspaceDockSide) -> WindowMoveDirection {
+    match side {
+        WorkspaceDockSide::Left => WindowMoveDirection::Right,
+        WorkspaceDockSide::Right => WindowMoveDirection::Left,
+    }
+}
+
+fn cycle_workspace_dock(runtime: &mut EditorRuntime, forward: bool) -> Result<(), String> {
+    let entries = collect_workspace_dock_entries(runtime)?;
+    if entries.len() <= 1 {
+        return Ok(());
+    }
+    let active = shell_ui(runtime)?.active_workspace();
+    let current_index = entries
+        .iter()
+        .position(|entry| entry.workspace_id == active)
+        .unwrap_or(0);
+    let next_index = if forward {
+        (current_index + 1) % entries.len()
+    } else if current_index == 0 {
+        entries.len() - 1
+    } else {
+        current_index - 1
+    };
+    switch_runtime_workspace(runtime, entries[next_index].workspace_id)
+}
+
+fn collect_workspace_dock_entries(
+    runtime: &EditorRuntime,
+) -> Result<Vec<WorkspaceDockEntry>, String> {
+    let ui = shell_ui(runtime)?;
+    let active = ui.active_workspace();
+    let default_workspace = ui.default_workspace();
+    let branch_cache = ui.workspace_dock_branches().clone();
+    let window = runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?;
+    let mut entries = Vec::new();
+    for workspace in window.workspaces() {
+        if workspace.id() == default_workspace {
+            entries.push(WorkspaceDockEntry {
+                workspace_id: workspace.id(),
+                name: workspace.name().to_owned(),
+                buffer_count: workspace.buffer_count(),
+                branch: None,
+                active: workspace.id() == active,
+            });
+            break;
+        }
+    }
+    for workspace in window.workspaces() {
+        if workspace.id() == default_workspace {
+            continue;
+        }
+        let branch = workspace
+            .root()
+            .and_then(|root| branch_cache.branch_for_root(root));
+        entries.push(WorkspaceDockEntry {
+            workspace_id: workspace.id(),
+            name: workspace.name().to_owned(),
+            buffer_count: workspace.buffer_count(),
+            branch,
+            active: workspace.id() == active,
+        });
+    }
+    Ok(entries)
+}
+
+fn workspace_dock_project_roots(runtime: &EditorRuntime) -> Result<Vec<PathBuf>, String> {
+    let window = runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?;
+    Ok(window
+        .workspaces()
+        .filter_map(|workspace| workspace.root().map(Path::to_path_buf))
+        .collect())
+}
+
 fn open_project_workspace_ids(runtime: &EditorRuntime) -> Result<Vec<WorkspaceId>, String> {
     let default_workspace = shell_ui(runtime)?.default_workspace();
     let window = runtime
@@ -31243,6 +31736,22 @@ fn move_workspace_window(
     runtime: &mut EditorRuntime,
     direction: WindowMoveDirection,
 ) -> Result<(), String> {
+    let user_library = shell_user_library(runtime);
+    let dock_config = user_library.workspace_dock_config();
+    let dock_visible = workspace_dock_visible(&*user_library, shell_ui(runtime)?);
+    let dock_focused = shell_ui(runtime)?.workspace_dock_focus_active(&*user_library);
+    if dock_focused {
+        if direction == workspace_dock_exit_direction(dock_config.side) {
+            shell_ui_mut(runtime)?.set_workspace_dock_focus(false);
+            return Ok(());
+        }
+        return Ok(());
+    }
+    if dock_visible && direction == workspace_dock_enter_direction(dock_config.side) {
+        shell_ui_mut(runtime)?.set_workspace_dock_focus(true);
+        return Ok(());
+    }
+
     if let Some(popup) = active_runtime_popup(runtime)? {
         let (focus_allowed, focus_active) = {
             let ui = shell_ui(runtime)?;

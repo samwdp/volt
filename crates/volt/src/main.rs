@@ -268,7 +268,15 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn pane_config(&self) -> PaneConfig {
-        self.module.pane_config_v1()().into()
+        self.module.pane_config_v1()().pane_config()
+    }
+
+    fn workspace_dock_config(&self) -> editor_plugin_api::WorkspaceDockConfig {
+        self.module.pane_config_v1()().workspace_dock_config()
+    }
+
+    fn markdown_pretty_config(&self) -> editor_plugin_api::MarkdownPrettyConfig {
+        editor_plugin_api::MarkdownPrettyConfig::default()
     }
 
     fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {

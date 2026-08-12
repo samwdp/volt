@@ -1,0 +1,31 @@
+[package]
+name = "editor-markdown"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies.editor-buffer]
+path = "../editor-buffer"
+
+[dependencies.editor-icons]
+path = "../editor-icons"
+
+[dependencies.editor-syntax]
+path = "../editor-syntax"
+
+[lib]
+path = "src/lib.rs"
+name = "editor_markdown"
+crate-type = ["lib"]
+
+[lints]
+workspace = true

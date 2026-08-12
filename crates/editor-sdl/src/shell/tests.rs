@@ -1,14 +1,14 @@
 use super::*;
 use agent_client_protocol::{
-    Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, TextContent, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLiveSession, LspLogDirection};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
-    LanguageConfiguration, LanguageServerSpec, LigatureConfig, OilDefaults, OilKeyAction,
-    OilKeybindings, PaneConfig, PdfOpenMode, PluginBuffer, PluginBufferSections, TerminalConfig,
-    Theme, WorkspaceRoot,
+    LanguageConfiguration, LanguageServerSpec, LigatureConfig, MarkdownPrettyConfig, OilDefaults,
+    OilKeyAction, OilKeybindings, PaneConfig, PdfOpenMode, PluginBuffer, PluginBufferSections,
+    TerminalConfig, Theme, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
 };
 use editor_plugin_host::StatuslineContext;
 use editor_render::{horizontal_pane_rects, vertical_pane_rects};
@@ -315,6 +315,10 @@ impl UserLibrary for HeaderlineTestUserLibrary {
 
     fn commandline_enabled(&self) -> bool {
         true
+    }
+
+    fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
+        MarkdownPrettyConfig::default()
     }
 
     fn pane_config(&self) -> PaneConfig {
@@ -4375,6 +4379,7 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
         ],
         text: "Excellent! Now let me gather more context about the project to inform the documentation content:".to_owned(),
         text_role: AcpColorRole::Default,
+        syntax_spans: Vec::new(),
     };
 
     let segments = acp_rendered_text_segments(&line, 32);
@@ -4406,6 +4411,51 @@ fn acp_multiline_text_lines_strip_carriage_returns() {
         .collect::<Vec<_>>();
 
     assert_eq!(rendered, vec!["alpha", "beta", ""]);
+}
+
+#[test]
+fn acp_agent_markdown_uses_shared_pipeline_pretty() {
+    let config = editor_markdown::MarkdownPrettyConfig::default();
+    let rendered = render_markdown_ephemeral_content(
+        "# Title\n\nSee `EditorRuntime` and **Volt**.",
+        &config,
+        Some(true),
+        None,
+    );
+    assert!(
+        rendered
+            .lines
+            .first()
+            .is_some_and(|line| line.contains("Title") && !line.starts_with("# ")),
+        "heading markers should be pretty-concealed: {:?}",
+        rendered.lines.first()
+    );
+
+    let items = vec![AcpOutputItem::AgentBlocks(vec![ContentBlock::Text(
+        TextContent::new("# Title\nhello"),
+    )])];
+    let mut registry = SyntaxRegistry::new();
+    let lines = acp_build_output_lines(
+        &items,
+        Some(AcpMarkdownPaint {
+            registry: &mut registry,
+            config: &config,
+        }),
+        Some(true),
+    );
+    let texts: Vec<_> = lines
+        .iter()
+        .filter_map(|line| match line {
+            AcpRenderedLine::Text(line) => Some(line.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|line| line.contains("Title") && !line.starts_with("# ")),
+        "agent ACP lines should run through markdown pipeline: {texts:?}"
+    );
 }
 
 #[test]
@@ -7625,6 +7675,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         &fonts,
         ui,
         None,
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -7689,6 +7740,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         &fonts,
         ui,
         None,
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -7759,6 +7811,7 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
         &fonts,
         ui,
         None,
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -7826,6 +7879,7 @@ fn render_shell_state_scene_with_docked_runtime_popup(
         &fonts,
         ui,
         Some(&popup),
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -7960,6 +8014,7 @@ fn render_shell_state_scene_with_notification_overlay(
         &fonts,
         ui,
         None,
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -11097,11 +11152,13 @@ fn acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer() -> Result<(
                     prefix: Vec::new(),
                     text: "alpha".to_owned(),
                     text_role: AcpColorRole::Default,
+                    syntax_spans: Vec::new(),
                 }),
                 AcpRenderedLine::Text(AcpRenderedTextLine {
                     prefix: Vec::new(),
                     text: "beta".to_owned(),
                     text_role: AcpColorRole::Default,
+                    syntax_spans: Vec::new(),
                 }),
             ],
             false,
@@ -17364,6 +17421,7 @@ fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
         &fonts,
         ui,
         None,
+        &[],
         &NullUserLibrary,
         "default",
         None,
@@ -17737,4 +17795,344 @@ fn lsp_session_lifecycle_picker_labels_sessions_and_wires_stop_action() {
             root: action_root
         } if server_id == "rust-analyzer" && action_root.as_deref() == Some(root.as_path())
     ));
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceDockTestUserLibrary {
+    config: WorkspaceDockConfig,
+}
+
+impl UserLibrary for WorkspaceDockTestUserLibrary {
+    fn workspace_dock_config(&self) -> WorkspaceDockConfig {
+        self.config
+    }
+}
+
+fn state_with_workspace_dock_config(config: WorkspaceDockConfig) -> Result<ShellState, String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(WorkspaceDockTestUserLibrary { config });
+    ShellState::new_with_user_library(default_error_log_path(), false, user_library)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn workspace_dock_config_defaults_left_undocked() {
+    let config = WorkspaceDockConfig::default();
+    assert_eq!(config.side, WorkspaceDockSide::Left);
+    assert!(!config.docked);
+}
+
+#[test]
+fn workspace_dock_toggle_shows_and_hides_when_not_docked() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: false,
+    })?;
+    assert!(!shell_ui(&state.runtime)?.workspace_dock_open());
+    assert!(!workspace_dock_visible(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?
+    ));
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_TOGGLE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.workspace_dock_open());
+    assert!(workspace_dock_visible(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?
+    ));
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_TOGGLE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(!shell_ui(&state.runtime)?.workspace_dock_open());
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_docked_stays_visible_across_toggle() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    assert!(workspace_dock_visible(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?
+    ));
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_TOGGLE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(workspace_dock_visible(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?
+    ));
+    assert!(shell_ui(&state.runtime)?.workspace_dock_open());
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_entries_include_default_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-dock-default");
+    let project = open_workspace_from_project(&mut state.runtime, "dock-project", &root)?;
+    let default_workspace = shell_ui(&state.runtime)?.default_workspace();
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.workspace_id == default_workspace)
+    );
+    assert!(entries.iter().any(|entry| entry.workspace_id == project));
+    assert_eq!(entries[0].workspace_id, default_workspace);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_highlight_tracks_active_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-dock-highlight-a");
+    let second_root = unique_temp_dir("workspace-dock-highlight-b");
+    let first = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.workspace_id == first)
+            .is_some_and(|entry| entry.active)
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.workspace_id == second)
+            .is_some_and(|entry| !entry.active)
+    );
+
+    state
+        .runtime
+        .execute_command("workspace.next")
+        .map_err(|error| error.to_string())?;
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), second);
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.workspace_id == second)
+            .is_some_and(|entry| entry.active)
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_click_switches_workspace() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    let first_root = unique_temp_dir("workspace-dock-click-a");
+    let second_root = unique_temp_dir("workspace-dock-click-b");
+    let first = open_workspace_from_project(&mut state.runtime, "click-a", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "click-b", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    let second_index = entries
+        .iter()
+        .position(|entry| entry.workspace_id == second)
+        .ok_or_else(|| "missing second workspace in dock".to_owned())?;
+    let cell_width = 8;
+    let line_height = 16;
+    let render_width = 800;
+    let render_height = 600;
+    let layout = workspace_dock_layout(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?,
+        render_width,
+        render_height,
+        cell_width,
+    );
+    assert!(layout.visible);
+    let card_height = workspace_dock_card_height(line_height) as i32;
+    let click_x = layout.dock_rect.x + 8;
+    let click_y = layout.dock_rect.y + second_index as i32 * card_height + 4;
+
+    state
+        .handle_event(
+            Event::MouseButtonDown {
+                timestamp: 0,
+                window_id: 0,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 1,
+                x: click_x as f32,
+                y: click_y as f32,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), second);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_layout_shrinks_content_for_left_dock() -> Result<(), String> {
+    let state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    let layout = workspace_dock_layout(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?,
+        800,
+        600,
+        8,
+    );
+    assert!(layout.visible);
+    assert!(layout.dock_width > 0);
+    assert_eq!(layout.content_x, layout.dock_width as i32);
+    assert_eq!(layout.content_width, 800 - layout.dock_width);
+    assert_eq!(layout.dock_rect.x, 0);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_render_marks_active_row() -> Result<(), String> {
+    let state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: None,
+            font_size: 16,
+            emoji_font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &*shell_user_library(&state.runtime),
+    )
+    .map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        &entries,
+        &*shell_user_library(&state.runtime),
+        "default",
+        None,
+        false,
+        false,
+        None,
+        640,
+        360,
+        None,
+        8,
+        16,
+        12,
+        Instant::now(),
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+    let layout = workspace_dock_layout(&*shell_user_library(&state.runtime), ui, 640, 360, 8);
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == layout.dock_rect.x && rect.width == layout.dock_rect.width
+    )));
+    assert!(entries.iter().any(|entry| entry.active));
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_ctrl_h_enters_focus_from_panes_when_left_docked() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    assert!(!shell_ui(&state.runtime)?.workspace_dock_focus());
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_WINDOW_LEFT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(
+        shell_ui(&state.runtime)?.workspace_dock_focus_active(&*shell_user_library(&state.runtime))
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_ctrl_l_exits_focus_back_to_panes_when_left_docked() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    shell_ui_mut(&mut state.runtime)?.set_workspace_dock_focus(true);
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_WINDOW_RIGHT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(!shell_ui(&state.runtime)?.workspace_dock_focus());
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_h_j_cycles_workspaces_when_focused() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Left,
+        docked: true,
+    })?;
+    let first_root = unique_temp_dir("workspace-dock-keys-a");
+    let second_root = unique_temp_dir("workspace-dock-keys-b");
+    let first = open_workspace_from_project(&mut state.runtime, "keys-a", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "keys-b", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    shell_ui_mut(&mut state.runtime)?.set_workspace_dock_focus(true);
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_NEXT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), second);
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_PREVIOUS, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), first);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_ctrl_l_enters_focus_when_right_docked() -> Result<(), String> {
+    let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
+        side: WorkspaceDockSide::Right,
+        docked: true,
+    })?;
+    assert!(!shell_ui(&state.runtime)?.workspace_dock_focus());
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_WINDOW_RIGHT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(
+        shell_ui(&state.runtime)?.workspace_dock_focus_active(&*shell_user_library(&state.runtime))
+    );
+    Ok(())
 }

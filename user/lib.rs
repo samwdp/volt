@@ -90,6 +90,8 @@ pub mod undotree;
 pub mod vim;
 /// Workspace creation and project discovery.
 pub mod workspace;
+/// Vertical workspace dock (sibling to the bottom popup).
+pub mod workspace_dock;
 
 use abi_stable::{
     export_root_module,
@@ -125,6 +127,7 @@ pub fn packages() -> Vec<PluginPackage> {
         interactive::package(),
         issues::package(),
         pane::package(),
+        workspace_dock::package(),
         pdf::package(),
         hover::package(),
         lsp::package(),
@@ -186,9 +189,9 @@ use editor_plugin_api::{
     AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, BrowserFeatureSpec,
     ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec, GhostTextContext,
     GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
-    OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig, PickerItemSpec,
-    PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
-    TerminalFeatureSpec, UserLibrary, WorkspaceRoot,
+    MarkdownPrettyConfig, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig,
+    PickerItemSpec, PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
+    TerminalFeatureSpec, UserLibrary, WorkspaceDockConfig, WorkspaceRoot,
 };
 
 impl UserLibrary for UserLibraryImpl {
@@ -332,6 +335,14 @@ impl UserLibrary for UserLibraryImpl {
 
     fn pane_config(&self) -> PaneConfig {
         pane::config()
+    }
+
+    fn workspace_dock_config(&self) -> WorkspaceDockConfig {
+        workspace_dock::config()
+    }
+
+    fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
+        lang::markdown::pretty_config()
     }
 
     fn keymap_config(&self) -> KeymapConfig {
@@ -677,7 +688,10 @@ extern "C" fn exported_commandline_enabled() -> bool {
 }
 
 extern "C" fn exported_pane_config() -> AbiPaneConfig {
-    UserLibraryImpl.pane_config().into()
+    AbiPaneConfig::from_parts(
+        UserLibraryImpl.pane_config(),
+        UserLibraryImpl.workspace_dock_config(),
+    )
 }
 
 extern "C" fn exported_keymap_config() -> AbiKeymapConfig {
@@ -1454,6 +1468,11 @@ mod tests {
             "ui.notification.success",
             "ui.notification.warning",
             "ui.notification.error",
+            "ui.workspace-dock.background",
+            "ui.workspace-dock.foreground",
+            "ui.workspace-dock.muted",
+            "ui.workspace-dock.selection",
+            "ui.workspace-dock.accent",
         ];
         for theme in themes {
             for token in TOKENS {

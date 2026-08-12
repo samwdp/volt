@@ -1,6 +1,7 @@
 use editor_fs::ProjectSearchRoot;
 use editor_plugin_api::{
     OilDefaults, OilKeybindings, OilSortMode, PaneConfig, PickerTruncateStrategy,
+    WorkspaceDockConfig, WorkspaceDockSide,
 };
 use serde::Deserialize;
 use std::{
@@ -311,6 +312,8 @@ pub struct UiSection {
     #[serde(default)]
     pub pane: PaneSection,
     #[serde(default)]
+    pub workspace_dock: WorkspaceDockSection,
+    #[serde(default)]
     pub terminal: TerminalSection,
     #[serde(default)]
     pub keymap: KeymapSection,
@@ -322,6 +325,7 @@ impl Default for UiSection {
             picker_truncate_strategy: default_picker_truncate_strategy(),
             ligatures_enabled: default_ligatures_enabled(),
             pane: PaneSection::default(),
+            workspace_dock: WorkspaceDockSection::default(),
             terminal: TerminalSection::default(),
             keymap: KeymapSection::default(),
         }
@@ -412,6 +416,53 @@ impl PaneSection {
     pub fn pane_config(&self) -> PaneConfig {
         PaneConfig {
             golden_ratio: self.golden_ratio,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigWorkspaceDockSide {
+    #[default]
+    Left,
+    Right,
+}
+
+impl From<ConfigWorkspaceDockSide> for WorkspaceDockSide {
+    fn from(value: ConfigWorkspaceDockSide) -> Self {
+        match value {
+            ConfigWorkspaceDockSide::Left => Self::Left,
+            ConfigWorkspaceDockSide::Right => Self::Right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceDockSection {
+    #[serde(default)]
+    pub side: ConfigWorkspaceDockSide,
+    #[serde(default = "default_workspace_dock_docked")]
+    pub docked: bool,
+}
+
+impl Default for WorkspaceDockSection {
+    fn default() -> Self {
+        Self {
+            side: ConfigWorkspaceDockSide::Left,
+            docked: default_workspace_dock_docked(),
+        }
+    }
+}
+
+const fn default_workspace_dock_docked() -> bool {
+    false
+}
+
+impl WorkspaceDockSection {
+    pub fn workspace_dock_config(&self) -> WorkspaceDockConfig {
+        WorkspaceDockConfig {
+            side: self.side.into(),
+            docked: self.docked,
         }
     }
 }

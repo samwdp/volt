@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use editor_plugin_api::{
-    PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
+    MarkdownPrettyConfig, MarkdownPrettyIcon, PluginAction, PluginCommand, PluginHookBinding,
+    PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
 };
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
@@ -8,20 +11,30 @@ pub fn package() -> PluginPackage {
     PluginPackage::new(
         "lang-markdown",
         true,
-        "Markdown language defaults and tree-sitter mapping.",
+        "Markdown language defaults, Pretty icons, and tree-sitter mapping.",
     )
-    .with_commands(vec![PluginCommand::new(
-        "lang-markdown.attach",
-        "Attaches Markdown language defaults to the active workspace.",
-        vec![
-            PluginAction::log_message("Markdown language package attached."),
-            PluginAction::emit_hook(
-                "workspace.formatter.register",
-                Some("markdown|prettier|--write"),
-            ),
-            PluginAction::emit_hook("lang.markdown.attached", Some("markdown")),
-        ],
-    )])
+    .with_commands(vec![
+        PluginCommand::new(
+            "lang-markdown.attach",
+            "Attaches Markdown language defaults to the active workspace.",
+            vec![
+                PluginAction::log_message("Markdown language package attached."),
+                PluginAction::emit_hook(
+                    "workspace.formatter.register",
+                    Some("markdown|prettier|--write"),
+                ),
+                PluginAction::emit_hook("lang.markdown.attached", Some("markdown")),
+            ],
+        ),
+        PluginCommand::new(
+            "markdown.pretty.toggle",
+            "Toggles Markdown Pretty for the active buffer.",
+            vec![PluginAction::emit_hook(
+                "markdown.pretty.toggle",
+                None::<&str>,
+            )],
+        ),
+    ])
     .with_hook_declarations(vec![PluginHookDeclaration::new(
         "lang.markdown.attached",
         "Runs after the Markdown language package attaches to a buffer.",
@@ -40,6 +53,71 @@ pub fn package() -> PluginPackage {
             Some(".markdown"),
         ),
     ])
+    .with_key_bindings(vec![
+        PluginKeyBinding::new(
+            "<leader>mp",
+            "markdown.pretty.toggle",
+            PluginKeymapScope::Workspace,
+        )
+        .with_vim_mode(PluginVimMode::Normal),
+    ])
+}
+
+/// Default Markdown Pretty configuration (enable on, kill-switch off, icon map).
+pub fn pretty_config() -> MarkdownPrettyConfig {
+    MarkdownPrettyConfig {
+        enabled: true,
+        kill_switch_enabled: false,
+        kill_switch_max_lines: 20_000,
+        kill_switch_max_bytes: 2_000_000,
+        image_max_bytes: 10_000_000,
+        image_max_rows: 24,
+        icons: default_pretty_icons(),
+    }
+}
+
+/// treesitter node kind → icon map shipped as the default Pretty style.
+pub fn default_pretty_icons() -> Vec<MarkdownPrettyIcon> {
+    use editor_icons::symbols::{fa, md, oct};
+    let entries: [(&str, &str); 22] = [
+        ("atx_h1_marker", fa::FA_CIRCLE_DOT),
+        ("atx_h2_marker", fa::FA_CIRCLE_THIN),
+        ("atx_h3_marker", fa::FA_DIAMOND),
+        ("atx_h4_marker", oct::OCT_DIAMOND),
+        ("atx_h5_marker", md::MD_PAN_RIGHT),
+        ("atx_h6_marker", fa::FA_ANGLES_RIGHT),
+        ("list_marker_minus", md::MD_MINUS),
+        ("list_marker_plus", md::MD_PLUS),
+        ("list_marker_star", md::MD_STAR),
+        ("list_marker_dot", md::MD_CIRCLE_SMALL),
+        ("list_marker_parenthesis", md::MD_FORMAT_LIST_NUMBERED),
+        ("task_list_marker_unchecked", md::MD_CHECKBOX_BLANK_OUTLINE),
+        ("task_list_marker_checked", md::MD_CHECKBOX_MARKED),
+        ("thematic_break", oct::OCT_HORIZONTAL_RULE),
+        ("image", md::MD_IMAGE),
+        ("inline_link", md::MD_LINK),
+        ("full_reference_link", md::MD_LINK),
+        ("collapsed_reference_link", md::MD_LINK),
+        ("shortcut_link", md::MD_LINK),
+        ("uri_autolink", md::MD_LINK),
+        ("email_autolink", md::MD_LINK),
+        ("pipe_table", "|"),
+    ];
+    entries
+        .into_iter()
+        .map(|(node_kind, icon)| MarkdownPrettyIcon {
+            node_kind: node_kind.to_owned(),
+            icon: icon.to_owned(),
+        })
+        .collect()
+}
+
+/// Icon map as a BTreeMap for host planners.
+pub fn pretty_icon_map() -> BTreeMap<String, String> {
+    default_pretty_icons()
+        .into_iter()
+        .map(|entry| (entry.node_kind, entry.icon))
+        .collect()
 }
 
 /// Returns the syntax registration for the Markdown block grammar.
@@ -120,6 +198,31 @@ mod tests {
                 .any(|binding| binding.detail_filter() == Some(".markdown"))
         );
         assert_eq!(formatter_details, vec!["markdown|prettier|--write"]);
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "markdown.pretty.toggle")
+        );
+    }
+
+    #[test]
+    fn pretty_config_ships_consistent_icon_map() {
+        let config = pretty_config();
+        assert!(config.enabled);
+        assert!(!config.kill_switch_enabled);
+        assert!(
+            config
+                .icons
+                .iter()
+                .any(|entry| entry.node_kind == "atx_h1_marker")
+        );
+        assert!(
+            config
+                .icons
+                .iter()
+                .any(|entry| entry.node_kind == "inline_link")
+        );
     }
 
     #[test]

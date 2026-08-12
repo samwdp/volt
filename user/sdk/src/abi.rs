@@ -22,9 +22,10 @@ use crate::{
     BrowserFeatureSpec, ContextHelpEntry, ContextHelpSpec, DbFeatureSpec, GhostTextContext,
     GhostTextLine, GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix,
     HoverProvider, HoverProviderTopic, KeymapConfig, LigatureConfig, LspDiagnosticsInfo,
-    OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, OilSortMode, PaneConfig,
-    PdfOpenMode, PickerProviderContext, PickerProviderSpec, PickerTruncateStrategy,
-    StatuslineContext, TerminalConfig, TerminalFeatureSpec, WorkspaceRoot,
+    MarkdownPrettyConfig, MarkdownPrettyIcon, OilDefaults, OilFeatureSpec, OilKeyAction,
+    OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, PickerProviderContext,
+    PickerProviderSpec, PickerTruncateStrategy, StatuslineContext, TerminalConfig,
+    TerminalFeatureSpec, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -1559,20 +1560,54 @@ impl From<AbiLigatureConfig> for LigatureConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
 pub struct AbiPaneConfig {
     pub golden_ratio: bool,
+    pub workspace_dock_side: AbiWorkspaceDockSide,
+    pub workspace_dock_docked: bool,
 }
 
-impl From<PaneConfig> for AbiPaneConfig {
-    fn from(value: PaneConfig) -> Self {
+impl AbiPaneConfig {
+    pub fn from_parts(pane: PaneConfig, dock: WorkspaceDockConfig) -> Self {
         Self {
-            golden_ratio: value.golden_ratio,
+            golden_ratio: pane.golden_ratio,
+            workspace_dock_side: dock.side.into(),
+            workspace_dock_docked: dock.docked,
+        }
+    }
+
+    pub fn pane_config(self) -> PaneConfig {
+        PaneConfig {
+            golden_ratio: self.golden_ratio,
+        }
+    }
+
+    pub fn workspace_dock_config(self) -> WorkspaceDockConfig {
+        WorkspaceDockConfig {
+            side: self.workspace_dock_side.into(),
+            docked: self.workspace_dock_docked,
         }
     }
 }
 
-impl From<AbiPaneConfig> for PaneConfig {
-    fn from(value: AbiPaneConfig) -> Self {
-        Self {
-            golden_ratio: value.golden_ratio,
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AbiWorkspaceDockSide {
+    Left,
+    Right,
+}
+
+impl From<WorkspaceDockSide> for AbiWorkspaceDockSide {
+    fn from(value: WorkspaceDockSide) -> Self {
+        match value {
+            WorkspaceDockSide::Left => Self::Left,
+            WorkspaceDockSide::Right => Self::Right,
+        }
+    }
+}
+
+impl From<AbiWorkspaceDockSide> for WorkspaceDockSide {
+    fn from(value: AbiWorkspaceDockSide) -> Self {
+        match value {
+            AbiWorkspaceDockSide::Left => Self::Left,
+            AbiWorkspaceDockSide::Right => Self::Right,
         }
     }
 }
@@ -1595,6 +1630,67 @@ impl From<AbiKeymapConfig> for KeymapConfig {
     fn from(value: AbiKeymapConfig) -> Self {
         Self {
             ambiguous_prefix_timeout_ms: value.ambiguous_prefix_timeout_ms,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiMarkdownPrettyIcon {
+    pub node_kind: RString,
+    pub icon: RString,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiMarkdownPrettyConfig {
+    pub enabled: bool,
+    pub kill_switch_enabled: bool,
+    pub kill_switch_max_lines: usize,
+    pub kill_switch_max_bytes: usize,
+    pub image_max_bytes: usize,
+    pub image_max_rows: usize,
+    pub icons: RVec<AbiMarkdownPrettyIcon>,
+}
+
+impl From<MarkdownPrettyConfig> for AbiMarkdownPrettyConfig {
+    fn from(value: MarkdownPrettyConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            kill_switch_enabled: value.kill_switch_enabled,
+            kill_switch_max_lines: value.kill_switch_max_lines,
+            kill_switch_max_bytes: value.kill_switch_max_bytes,
+            image_max_bytes: value.image_max_bytes,
+            image_max_rows: value.image_max_rows,
+            icons: value
+                .icons
+                .into_iter()
+                .map(|entry| AbiMarkdownPrettyIcon {
+                    node_kind: entry.node_kind.into(),
+                    icon: entry.icon.into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<AbiMarkdownPrettyConfig> for MarkdownPrettyConfig {
+    fn from(value: AbiMarkdownPrettyConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            kill_switch_enabled: value.kill_switch_enabled,
+            kill_switch_max_lines: value.kill_switch_max_lines,
+            kill_switch_max_bytes: value.kill_switch_max_bytes,
+            image_max_bytes: value.image_max_bytes,
+            image_max_rows: value.image_max_rows,
+            icons: value
+                .icons
+                .into_iter()
+                .map(|entry| MarkdownPrettyIcon {
+                    node_kind: entry.node_kind.into(),
+                    icon: entry.icon.into(),
+                })
+                .collect(),
         }
     }
 }

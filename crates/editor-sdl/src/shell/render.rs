@@ -1,11 +1,163 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct MarkdownInlineImageDraw {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+    rows: usize,
+    alt: String,
+}
+
+#[derive(Debug, Default)]
+struct MarkdownPrettyPaintPlan {
+    text_overrides: BTreeMap<usize, String>,
+    images: BTreeMap<usize, MarkdownInlineImageDraw>,
+}
+
+fn markdown_inline_image_rows(
+    image_width: u32,
+    image_height: u32,
+    pane_width_px: u32,
+    line_height: i32,
+    max_rows: usize,
+) -> usize {
+    let line_height = line_height.max(1) as u32;
+    let pane_width_px = pane_width_px.max(1);
+    let scaled_height = if image_width == 0 {
+        image_height
+    } else {
+        let scaled = (u64::from(image_height) * u64::from(pane_width_px)) / u64::from(image_width);
+        scaled.min(u64::from(u32::MAX)) as u32
+    };
+    let rows = scaled_height.div_ceil(line_height).max(1) as usize;
+    rows.min(max_rows.max(1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn markdown_pretty_paint_plan(
+    buffer: &ShellBuffer,
+    user_library: &dyn UserLibrary,
+    visible_start: usize,
+    visible_end: usize,
+    visual_selection: Option<VisualSelection>,
+    input_mode: InputMode,
+    pane_width_px: u32,
+    line_height: i32,
+) -> MarkdownPrettyPaintPlan {
+    let mut paint = MarkdownPrettyPaintPlan::default();
+    if buffer.language_id() != Some("markdown") {
+        return paint;
+    }
+    let config = markdown_pretty::user_library_pretty_config(user_library);
+    let enabled = buffer.markdown_pretty_enabled().unwrap_or(config.enabled);
+    if !enabled {
+        return paint;
+    }
+    let text = buffer.text.text();
+    let cursor_line = buffer.cursor_row();
+    let visual_range = if matches!(input_mode, InputMode::Visual) {
+        visual_selection.map(|selection| match selection {
+            VisualSelection::Range(range) => {
+                let start = range.start().line.min(range.end().line);
+                let end = range.start().line.max(range.end().line);
+                start..end.saturating_add(1)
+            }
+            VisualSelection::Block(block) => {
+                let start = block.start_line.min(block.end_line);
+                let end = block.start_line.max(block.end_line);
+                start..end.saturating_add(1)
+            }
+        })
+    } else {
+        None
+    };
+    let plan = markdown_pretty::build_markdown_pretty_plan(
+        &text,
+        &config,
+        Some(enabled),
+        buffer.text.path(),
+        None,
+        Some(cursor_line),
+        visual_range.clone(),
+        Some(visible_start..visible_end.max(visible_start.saturating_add(1))),
+        None,
+    );
+    if plan.skipped_by_kill_switch || plan.lines.is_empty() {
+        return paint;
+    }
+    let request = editor_markdown::MarkdownPrettyRequest {
+        text: &text,
+        config: &config,
+        buffer_enabled: Some(enabled),
+        buffer_path: buffer.text.path(),
+        workspace_root: None,
+        cursor_line: Some(cursor_line),
+        visual_lines: visual_range,
+        visible_lines: Some(visible_start..visible_end.max(visible_start.saturating_add(1))),
+    };
+    let line_count = buffer.line_count();
+    for line_index in visible_start..visible_end.min(line_count) {
+        let source = buffer.text.line(line_index).unwrap_or_default();
+        let anti = plan.line_is_anti_concealed(&request, line_index);
+        if !anti
+            && let Some(image) =
+                markdown_pretty::line_plan(&plan, line_index).and_then(|line| line.image.as_ref())
+        {
+            let entry =
+                markdown_pretty::ensure_image_loaded(&image.destination, config.image_max_bytes);
+            match entry {
+                markdown_pretty::MarkdownImageCacheEntry::Ready(decoded) => {
+                    let rows = markdown_inline_image_rows(
+                        decoded.width,
+                        decoded.height,
+                        pane_width_px,
+                        line_height,
+                        config.image_max_rows,
+                    );
+                    paint.images.insert(
+                        line_index,
+                        MarkdownInlineImageDraw {
+                            width: decoded.width,
+                            height: decoded.height,
+                            pixels: Arc::clone(&decoded.pixels),
+                            rows,
+                            alt: image.alt.clone(),
+                        },
+                    );
+                    // Empty display text — image occupies the visual rows.
+                    paint.text_overrides.insert(line_index, String::new());
+                }
+                markdown_pretty::MarkdownImageCacheEntry::Loading => {
+                    paint.text_overrides.insert(
+                        line_index,
+                        format!("{} loading…", editor_icons::symbols::md::MD_IMAGE),
+                    );
+                }
+                markdown_pretty::MarkdownImageCacheEntry::Failed(error) => {
+                    paint.text_overrides.insert(
+                        line_index,
+                        format!("{} {}", editor_icons::symbols::md::MD_IMAGE_BROKEN, error),
+                    );
+                }
+            }
+            continue;
+        }
+        let display = markdown_pretty::pretty_display_line(&plan, anti, line_index, &source);
+        if display != source {
+            paint.text_overrides.insert(line_index, display);
+        }
+    }
+    paint
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_shell_state(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
+    workspace_dock_entries: &[WorkspaceDockEntry],
     user_library: &dyn UserLibrary,
     workspace_name: &str,
     lsp_server: Option<&str>,
@@ -21,6 +173,7 @@ pub(super) fn render_shell_state(
     now: Instant,
     typing_active: bool,
 ) -> Result<(), ShellError> {
+    let dock = workspace_dock_layout(user_library, state, width, height, cell_width);
     let content_height = height;
     let popup_height = runtime_popup
         .map(|_| popup_window_height(height, line_height))
@@ -29,14 +182,17 @@ pub(super) fn render_shell_state(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let pane_rects = runtime_pane_rects(
+    let mut pane_rects = runtime_pane_rects(
         user_library,
         state.pane_split_direction(),
-        width,
+        dock.content_width,
         pane_height,
         panes.len(),
         state.active_pane_index(),
     );
+    for rect in &mut pane_rects {
+        rect.x = rect.x.saturating_add(dock.content_x);
+    }
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
@@ -47,15 +203,28 @@ pub(super) fn render_shell_state(
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
+    let dock_focus = state.workspace_dock_focus_active(user_library);
     let command_line_row_visible =
         user_library.commandline_enabled() || state.input_prompt_visible();
 
     clear_window_surface(target, base_background, window_effects);
 
+    render_workspace_dock(
+        target,
+        &dock,
+        workspace_dock_entries,
+        theme_registry,
+        cell_width,
+        line_height,
+        ascent,
+    )?;
+
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
-        let active =
-            pane_index == state.active_pane_index() && !state.picker_visible() && !popup_focus;
+        let active = pane_index == state.active_pane_index()
+            && !state.picker_visible()
+            && !popup_focus
+            && !dock_focus;
         let background = if active {
             pane_active_background
         } else {
@@ -133,7 +302,12 @@ pub(super) fn render_shell_state(
             fonts,
             state,
             popup,
-            PixelRectToRect::rect(0, pane_height as i32, width, popup_height),
+            PixelRectToRect::rect(
+                dock.content_x,
+                pane_height as i32,
+                dock.content_width,
+                popup_height,
+            ),
             user_library,
             workspace_name,
             lsp_server,
@@ -1771,6 +1945,16 @@ pub(super) struct WrappedLine {
     pub(super) char_map: LineCharMap,
     pub(super) segments: Vec<LineWrapSegment>,
     pub(super) continuation_indent_cols: usize,
+    pub(super) inline_image: Option<MarkdownInlineImageDraw>,
+}
+
+impl WrappedLine {
+    fn visual_row_count(&self) -> usize {
+        self.inline_image
+            .as_ref()
+            .map(|image| image.rows.max(1))
+            .unwrap_or_else(|| self.segments.len().max(1))
+    }
 }
 
 pub(super) fn collect_wrapped_lines(
@@ -1782,6 +1966,31 @@ pub(super) fn collect_wrapped_lines(
     scroll_col: usize,
     line_wrap: bool,
 ) -> Vec<WrappedLine> {
+    collect_wrapped_lines_with_display(
+        buffer,
+        start_line,
+        max_rows,
+        wrap_cols,
+        indent_size,
+        scroll_col,
+        line_wrap,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_wrapped_lines_with_display(
+    buffer: &ShellBuffer,
+    start_line: usize,
+    max_rows: usize,
+    wrap_cols: usize,
+    indent_size: usize,
+    scroll_col: usize,
+    line_wrap: bool,
+    display_overrides: Option<&BTreeMap<usize, String>>,
+    inline_images: Option<&BTreeMap<usize, MarkdownInlineImageDraw>>,
+) -> Vec<WrappedLine> {
     if max_rows == 0 {
         return Vec::new();
     }
@@ -1792,12 +2001,27 @@ pub(super) fn collect_wrapped_lines(
     let mut line_index = start_line;
     let line_count = buffer.line_count();
     while line_index < line_count && visual_rows < max_rows {
-        let line = buffer.text.line(line_index).unwrap_or_default();
+        let inline_image = inline_images.and_then(|images| images.get(&line_index).cloned());
+        let line = if inline_image.is_some() {
+            String::new()
+        } else {
+            display_overrides
+                .and_then(|overrides| overrides.get(&line_index).cloned())
+                .unwrap_or_else(|| buffer.text.line(line_index).unwrap_or_default())
+        };
         let tab_width = resolved_tab_width(indent_size);
         let char_map = LineCharMap::with_tab_width(&line, tab_width);
         let (leading_indent_cols, _) = leading_whitespace_info(&line, tab_width);
         let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
-        let (continuation_indent_cols, segments) = if line_wrap {
+        let (continuation_indent_cols, segments) = if inline_image.is_some() {
+            (
+                0,
+                vec![LineWrapSegment {
+                    start_col: 0,
+                    end_col: 0,
+                }],
+            )
+        } else if line_wrap {
             let continuation_cols = wrap_cols.saturating_sub(continuation_indent_cols).max(1);
             (
                 continuation_indent_cols,
@@ -1819,13 +2043,18 @@ pub(super) fn collect_wrapped_lines(
                 }],
             )
         };
-        visual_rows = visual_rows.saturating_add(segments.len());
+        let row_count = inline_image
+            .as_ref()
+            .map(|image| image.rows.max(1))
+            .unwrap_or_else(|| segments.len().max(1));
+        visual_rows = visual_rows.saturating_add(row_count);
         lines.push(WrappedLine {
             line_index,
             line,
             char_map,
             segments,
             continuation_indent_cols,
+            inline_image,
         });
         line_index = line_index.saturating_add(1);
     }
@@ -2201,7 +2430,20 @@ fn render_buffer_with_view_state(
         let headerline_rows = headerline_lines.len();
         let body_y = layout.body_y + headerline_rows as i32 * line_height;
         let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
-        let wrapped_lines = collect_wrapped_lines(
+        let text_width_px = (wrap_cols as i32 * cell_width).max(1) as u32;
+        let pretty_paint = markdown_pretty_paint_plan(
+            buffer,
+            user_library,
+            view_state.scroll_row,
+            view_state
+                .scroll_row
+                .saturating_add(visible_rows.saturating_add(8)),
+            visual_selection,
+            input_mode,
+            text_width_px,
+            line_height,
+        );
+        let wrapped_lines = collect_wrapped_lines_with_display(
             buffer,
             scroll_row,
             visible_rows,
@@ -2209,6 +2451,8 @@ fn render_buffer_with_view_state(
             indent_size,
             view_state.scroll_col,
             buffer.line_wrap(),
+            Some(&pretty_paint.text_overrides),
+            Some(&pretty_paint.images),
         );
         let mut cursor_row_on_screen = None;
         let mut cursor_col_on_screen = None;
@@ -2239,7 +2483,7 @@ fn render_buffer_with_view_state(
                     };
                 }
             }
-            visual_row = visual_row.saturating_add(wrapped.segments.len());
+            visual_row = visual_row.saturating_add(wrapped.visual_row_count());
             if visual_row >= visible_rows {
                 break;
             }
@@ -2289,6 +2533,55 @@ fn render_buffer_with_view_state(
             let yank_range = yank_flash.and_then(|selection_state| {
                 selection_columns_for_visual(selection_state, line_index, line_len)
             });
+            if let Some(image) = wrapped.inline_image.as_ref() {
+                if visual_row >= visible_rows {
+                    break;
+                }
+                let remaining_rows = visible_rows.saturating_sub(visual_row);
+                let image_rows_draw = image.rows.min(remaining_rows).max(1);
+                let y = body_y + visual_row as i32 * line_height;
+                let text_area_width = rect
+                    .width()
+                    .saturating_sub((text_x - rect.x()).max(0) as u32)
+                    .saturating_sub(12)
+                    .max(1);
+                let image_rect = PixelRectToRect::rect(
+                    text_x,
+                    y,
+                    text_area_width,
+                    (image_rows_draw as i32 * line_height).max(line_height) as u32,
+                );
+                let line_number = if relative_line_numbers {
+                    if line_index == cursor_row {
+                        0
+                    } else {
+                        cursor_row.abs_diff(line_index)
+                    }
+                } else {
+                    line_index + 1
+                };
+                draw_text(
+                    target,
+                    line_number_x,
+                    y,
+                    &format!("{:>4}", line_number),
+                    muted,
+                )?;
+                draw_image(
+                    target,
+                    image_rect,
+                    image.width,
+                    image.height,
+                    Arc::clone(&image.pixels),
+                    Some(image_rect),
+                )?;
+                let _ = &image.alt;
+                visual_row = visual_row.saturating_add(image_rows_draw);
+                if visual_row >= visible_rows {
+                    break;
+                }
+                continue;
+            }
             for (segment_index, segment) in wrapped.segments.iter().enumerate() {
                 if visual_row >= visible_rows {
                     break;
@@ -3935,13 +4228,25 @@ pub(super) fn render_acp_pane(
                     }
                     let segment_text =
                         acp_slice_chars(&line.text, segment.start_col, segment.end_col);
-                    draw_text(
-                        target,
-                        segment_x,
-                        y,
-                        &segment_text,
-                        acp_color(line.text_role, theme_registry, foreground, muted, cursor),
-                    )?;
+                    let default_color =
+                        acp_color(line.text_role, theme_registry, foreground, muted, cursor);
+                    if line.syntax_spans.is_empty() {
+                        draw_text(target, segment_x, y, &segment_text, default_color)?;
+                    } else {
+                        let char_map = LineCharMap::new(&line.text);
+                        draw_buffer_text(
+                            target,
+                            segment_x,
+                            y,
+                            &line.text,
+                            *segment,
+                            &char_map,
+                            Some(line.syntax_spans.as_slice()),
+                            theme_registry,
+                            default_color,
+                            cell_width,
+                        )?;
+                    }
                     drawn_rows = drawn_rows.saturating_add(1);
                     global_visual_row = global_visual_row.saturating_add(1);
                 }

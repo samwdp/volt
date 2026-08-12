@@ -58,6 +58,9 @@ path = "../editor-jobs"
 [dependencies.editor-lsp]
 path = "../editor-lsp"
 
+[dependencies.editor-markdown]
+path = "../editor-markdown"
+
 [dependencies.editor-picker]
 path = "../editor-picker"
 
@@ -99,6 +102,11 @@ features = ["rt", "sync", "process", "io-util"]
 [dependencies.tokio-util]
 version = "0.7.18"
 features = ["compat"]
+
+[dependencies.ureq]
+version = "2.12.1"
+default-features = false
+features = ["tls"]
 
 [dev-dependencies]
 tree-sitter-rust = "0.24.1"
