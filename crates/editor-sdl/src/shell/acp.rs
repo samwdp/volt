@@ -883,19 +883,19 @@ fn open_acp_client_buffer(
     runtime: &mut EditorRuntime,
     client_id: &str,
     reuse_existing: bool,
-    load_session_id: Option<agent_client_protocol::SessionId>,
+    load_session: Option<PendingAcpLoadSession>,
 ) -> Result<BufferId, String> {
     let client = shell_user_library(runtime)
         .acp_client_by_id(client_id)
         .ok_or_else(|| format!("unknown ACP client `{client_id}`"))?;
-    open_acp_client_with_config(runtime, client, reuse_existing, load_session_id)
+    open_acp_client_with_config(runtime, client, reuse_existing, load_session)
 }
 
 fn open_acp_client_with_config(
     runtime: &mut EditorRuntime,
     client: AcpClientConfig,
     reuse_existing: bool,
-    load_session_id: Option<agent_client_protocol::SessionId>,
+    load_session: Option<PendingAcpLoadSession>,
 ) -> Result<BufferId, String> {
     let active_workspace_id = runtime
         .model()
@@ -941,7 +941,7 @@ fn open_acp_client_with_config(
         workspace_root,
         workspace_id,
         buffer_id,
-        load_session_id,
+        load_session,
         workspace_name,
     )?;
     Ok(buffer_id)
@@ -1392,6 +1392,7 @@ pub(super) fn acp_load_session(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
     session_id: &str,
+    session_title: Option<&str>,
 ) -> Result<(), String> {
     let target_session_id = agent_client_protocol::SessionId::new(session_id);
     let manager = runtime
@@ -1417,7 +1418,16 @@ pub(super) fn acp_load_session(
         buffer.append_output_lines(&["ACP session is not connected.".to_owned()]);
         return Ok(());
     };
-    open_acp_client_buffer(runtime, &client_id, false, Some(target_session_id)).map(|_| ())
+    open_acp_client_buffer(
+        runtime,
+        &client_id,
+        false,
+        Some(PendingAcpLoadSession {
+            session_id: target_session_id,
+            title: session_title.map(str::to_owned),
+        }),
+    )
+    .map(|_| ())
 }
 
 fn acp_picker_entries(
@@ -1445,6 +1455,7 @@ fn acp_picker_entry(buffer_id: BufferId, item: AcpPickerItemSpec) -> PickerEntry
         AcpActionSpec::LoadSession { session_id } => PickerAction::AcpLoadSession {
             buffer_id,
             session_id: session_id.to_string(),
+            session_title: item.label().to_string(),
         },
         AcpActionSpec::InsertSlashCommand { command } => PickerAction::AcpInsertSlashCommand {
             buffer_id,
@@ -1840,6 +1851,7 @@ fn apply_acp_notification(
     active: bool,
     action: Option<NotificationAction>,
 ) -> Result<(), String> {
+    let workspace_id = shell_ui(runtime)?.active_workspace();
     shell_ui_mut(runtime)?.apply_notification(
         NotificationUpdate {
             key,
@@ -1849,6 +1861,7 @@ fn apply_acp_notification(
             progress: None,
             active,
             action,
+            workspace_id: Some(workspace_id),
         },
         Instant::now(),
     );
@@ -2110,13 +2123,29 @@ impl AcpManager {
         }
     }
 
+    fn rebind_session_id(
+        &mut self,
+        buffer_id: BufferId,
+        old_session_id: &agent_client_protocol::SessionId,
+        new_session_id: agent_client_protocol::SessionId,
+    ) {
+        if old_session_id == &new_session_id {
+            self.buffers.insert(buffer_id, new_session_id);
+            return;
+        }
+        if let Some(session) = self.sessions.remove(old_session_id) {
+            self.sessions.insert(new_session_id.clone(), session);
+        }
+        self.buffers.insert(buffer_id, new_session_id);
+    }
+
     fn connect(
         &mut self,
         client: AcpClientConfig,
         workspace_root: PathBuf,
         workspace_id: WorkspaceId,
         buffer_id: BufferId,
-        load_session_id: Option<agent_client_protocol::SessionId>,
+        load_session: Option<PendingAcpLoadSession>,
         workspace_name: String,
     ) -> Result<(), String> {
         let client_id = client.id.clone();
@@ -2124,7 +2153,7 @@ impl AcpManager {
             buffer_id,
             PendingAcpClient {
                 client_id: client_id.clone(),
-                load_session_id,
+                load_session,
                 workspace_root: workspace_root.clone(),
                 workspace_id,
                 workspace_name,
@@ -2420,7 +2449,10 @@ impl AcpManager {
                         buffer_id,
                         workspace_id: pending.workspace_id,
                         workspace_name: pending.workspace_name.clone(),
-                        title: None,
+                        title: pending
+                            .load_session
+                            .as_ref()
+                            .and_then(|load| load.title.clone()),
                         available_commands: Vec::new(),
                         mode_state: modes,
                         model_state: models,
@@ -2430,41 +2462,72 @@ impl AcpManager {
                     },
                 );
 
-                // Update buffer name to include session ID for uniqueness
-                let buffer_name = format!("*acp {} [{}]*", client_id, session_id);
-                let _ = runtime.model_mut().set_buffer_name(
-                    pending.workspace_id,
-                    buffer_id,
-                    buffer_name.clone(),
-                );
-                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                    buffer.name = buffer_name;
-                }
+                let label = shell_user_library(runtime)
+                    .acp_client_by_id(&client_id)
+                    .map(|client| client.label)
+                    .unwrap_or_else(|| "ACP".to_owned());
 
-                if let Some(session) = self.sessions.get(&session_id) {
-                    let mode_id = session
-                        .mode_state
-                        .as_ref()
-                        .map(|state| &state.current_mode_id);
-                    let model_id = session
-                        .model_state
-                        .as_ref()
-                        .map(|state| &state.current_model_id);
-                    update_acp_input_hint(
+                if let Some(load_session) = pending.load_session {
+                    let target_session_id = load_session.session_id;
+                    // Bind the loaded id before session/load replay so history updates apply.
+                    self.rebind_session_id(buffer_id, &session_id, target_session_id.clone());
+                    let display_title = load_session
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| target_session_id.to_string());
+                    set_acp_buffer_name(
                         runtime,
+                        pending.workspace_id,
                         buffer_id,
-                        mode_id,
-                        model_id,
-                        &session.available_commands,
+                        acp_session_buffer_name(&display_title),
                     );
-                }
-                if let Some(target_session_id) = pending.load_session_id {
+                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                        buffer.acp_prepare_session_replay(label.as_str());
+                        buffer.acp_set_session_title(load_session.title.clone());
+                    }
+                    if let Some(session) = self.sessions.get(&target_session_id) {
+                        let mode_id = session
+                            .mode_state
+                            .as_ref()
+                            .map(|state| &state.current_mode_id);
+                        let model_id = session
+                            .model_state
+                            .as_ref()
+                            .map(|state| &state.current_model_id);
+                        update_acp_input_hint(
+                            runtime,
+                            buffer_id,
+                            mode_id,
+                            model_id,
+                            &session.available_commands,
+                        );
+                    }
                     self.load_session(
                         session_id,
                         buffer_id,
                         target_session_id,
                         pending.workspace_root,
                     )?;
+                } else {
+                    let buffer_name = format!("*acp {} [{}]*", client_id, session_id);
+                    set_acp_buffer_name(runtime, pending.workspace_id, buffer_id, buffer_name);
+                    if let Some(session) = self.sessions.get(&session_id) {
+                        let mode_id = session
+                            .mode_state
+                            .as_ref()
+                            .map(|state| &state.current_mode_id);
+                        let model_id = session
+                            .model_state
+                            .as_ref()
+                            .map(|state| &state.current_model_id);
+                        update_acp_input_hint(
+                            runtime,
+                            buffer_id,
+                            mode_id,
+                            model_id,
+                            &session.available_commands,
+                        );
+                    }
                 }
             }
             AcpEvent::ClientFailed { buffer_id, message } => {
@@ -2575,8 +2638,21 @@ impl AcpManager {
                     } else if matches!(update.title, agent_client_protocol::MaybeUndefined::Null) {
                         session.title = None;
                     }
-                    if let Ok(buffer) = shell_buffer_mut(runtime, session.buffer_id) {
+                    let workspace_id = session.workspace_id;
+                    let buffer_id = session.buffer_id;
+                    let renamed = session.title.clone().map(|title| {
+                        (
+                            buffer_id,
+                            workspace_id,
+                            acp_session_buffer_name(&title),
+                            title,
+                        )
+                    });
+                    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
                         buffer.acp_set_session_info(&update);
+                    }
+                    if let Some((buffer_id, workspace_id, name, _)) = renamed {
+                        set_acp_buffer_name(runtime, workspace_id, buffer_id, name);
                     }
                 }
             }
@@ -2829,54 +2905,57 @@ impl AcpManager {
                 modes,
                 models,
             } => {
-                if let Some(session) = self.sessions.remove(&old_session_id) {
-                    let client_id = session.client_id.clone();
-                    let workspace_id = session.workspace_id;
-                    let workspace_name = session.workspace_name.clone();
-                    self.buffers.insert(buffer_id, new_session_id.clone());
-                    self.sessions.insert(
-                        new_session_id.clone(),
-                        AcpSessionInfo {
-                            client_id: client_id.clone(),
-                            buffer_id,
-                            workspace_id,
-                            workspace_name,
-                            title: None,
-                            available_commands: Vec::new(),
-                            mode_state: modes,
-                            model_state: models,
-                            config_options: Vec::new(),
-                            mode_config_id: None,
-                            model_config_id: None,
-                        },
+                // May already be rebound to new_session_id before session/load replay.
+                let Some(mut session) = self
+                    .sessions
+                    .remove(&new_session_id)
+                    .or_else(|| self.sessions.remove(&old_session_id))
+                else {
+                    return Ok(());
+                };
+                if modes.is_some() {
+                    session.mode_state = modes;
+                }
+                if models.is_some() {
+                    session.model_state = models;
+                }
+                let workspace_id = session.workspace_id;
+                let title = session.title.clone();
+                self.buffers.insert(buffer_id, new_session_id.clone());
+                self.sessions.insert(new_session_id.clone(), session);
+
+                if let Some(title) = title.as_deref() {
+                    set_acp_buffer_name(
+                        runtime,
+                        workspace_id,
+                        buffer_id,
+                        acp_session_buffer_name(title),
                     );
-                    {
-                        let label = shell_user_library(runtime)
-                            .acp_client_by_id(&client_id)
-                            .map(|client| client.label)
-                            .unwrap_or_else(|| "ACP".to_owned());
-                        if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                            buffer.init_acp_view(label.as_str());
-                            buffer.clear_input();
-                        }
-                    }
-                    if let Some(session) = self.sessions.get(&new_session_id) {
-                        let mode_id = session
-                            .mode_state
-                            .as_ref()
-                            .map(|state| &state.current_mode_id);
-                        let model_id = session
-                            .model_state
-                            .as_ref()
-                            .map(|state| &state.current_model_id);
-                        update_acp_input_hint(
-                            runtime,
-                            buffer_id,
-                            mode_id,
-                            model_id,
-                            &session.available_commands,
-                        );
-                    }
+                } else {
+                    set_acp_buffer_name(
+                        runtime,
+                        workspace_id,
+                        buffer_id,
+                        acp_session_buffer_name(&new_session_id.to_string()),
+                    );
+                }
+
+                if let Some(session) = self.sessions.get(&new_session_id) {
+                    let mode_id = session
+                        .mode_state
+                        .as_ref()
+                        .map(|state| &state.current_mode_id);
+                    let model_id = session
+                        .model_state
+                        .as_ref()
+                        .map(|state| &state.current_model_id);
+                    update_acp_input_hint(
+                        runtime,
+                        buffer_id,
+                        mode_id,
+                        model_id,
+                        &session.available_commands,
+                    );
                 }
             }
             AcpEvent::SessionModeSet {
@@ -3020,10 +3099,15 @@ impl AcpManager {
 
 struct PendingAcpClient {
     client_id: String,
-    load_session_id: Option<agent_client_protocol::SessionId>,
+    load_session: Option<PendingAcpLoadSession>,
     workspace_root: PathBuf,
     workspace_id: WorkspaceId,
     workspace_name: String,
+}
+
+struct PendingAcpLoadSession {
+    session_id: agent_client_protocol::SessionId,
+    title: Option<String>,
 }
 
 struct AcpSessionInfo {
@@ -3177,6 +3261,24 @@ fn refresh_acp_output_markdown(
     follow_output: bool,
 ) -> Result<(), String> {
     super::rebuild_acp_output_markdown(runtime, buffer_id, follow_output)
+}
+
+fn acp_session_buffer_name(session_title: &str) -> String {
+    format!("*acp [{session_title}]*")
+}
+
+fn set_acp_buffer_name(
+    runtime: &mut EditorRuntime,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    name: String,
+) {
+    let _ = runtime
+        .model_mut()
+        .set_buffer_name(workspace_id, buffer_id, name.clone());
+    if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+        buffer.name = name;
+    }
 }
 
 fn drain_acp_event_batch(events: &mpsc::Receiver<AcpEvent>, limit: usize) -> Vec<AcpEvent> {
@@ -3631,25 +3733,30 @@ async fn load_acp_session(
     cwd: PathBuf,
 ) -> Result<(), String> {
     let connection = {
+        let state = state.borrow();
         state
-            .borrow()
             .sessions
             .get(&session_id)
+            .or_else(|| state.sessions.get(&target_session_id))
             .map(|session| session.connection.clone())
     }
     .ok_or_else(|| "ACP session is not connected".to_owned())?;
+    // Rebind before await so mid-load prompts resolve against the loaded id.
+    {
+        let mut state = state.borrow_mut();
+        if session_id != target_session_id
+            && let Some(session) = state.sessions.remove(&session_id)
+        {
+            state.sessions.insert(target_session_id.clone(), session);
+        }
+    }
     let request = LoadSessionRequest::new(target_session_id.clone(), cwd);
     let response = connection
         .load_session(request)
         .await
         .map_err(|error| format!("ACP load session failed: {error}"))?;
-    {
-        let mut state = state.borrow_mut();
-        if let Some(session) = state.sessions.remove(&session_id) {
-            state.sessions.insert(target_session_id.clone(), session);
-        }
-    }
     resolve_all_pending_permissions(&state, &session_id);
+    resolve_all_pending_permissions(&state, &target_session_id);
     let _ = state.borrow().event_tx.send(AcpEvent::SessionLoaded {
         buffer_id,
         old_session_id: session_id,
@@ -4526,6 +4633,107 @@ mod tests {
             session_id: agent_client_protocol::SessionId::new(session_id),
             content: ContentBlock::Text(TextContent::new(text)),
         }
+    }
+
+    #[test]
+    fn acp_session_buffer_name_wraps_title() {
+        assert_eq!(acp_session_buffer_name("Fix login"), "*acp [Fix login]*");
+    }
+
+    #[test]
+    fn session_load_replay_keeps_history_and_names_buffer() -> Result<(), String> {
+        let (mut manager, mut command_rx) = test_acp_manager();
+        let mut state = ShellState::new().map_err(|error| error.to_string())?;
+        let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+        let temp_session_id = agent_client_protocol::SessionId::new("temp-session");
+        let loaded_session_id = agent_client_protocol::SessionId::new("loaded-session");
+
+        manager.pending_clients.insert(
+            buffer_id,
+            PendingAcpClient {
+                client_id: "copilot".to_owned(),
+                load_session: Some(PendingAcpLoadSession {
+                    session_id: loaded_session_id.clone(),
+                    title: Some("Fix login".to_owned()),
+                }),
+                workspace_root: PathBuf::from("."),
+                workspace_id,
+                workspace_name: "project".to_owned(),
+            },
+        );
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::Connected {
+                buffer_id,
+                client_id: "copilot".to_owned(),
+                session_id: temp_session_id.clone(),
+                modes: None,
+                models: None,
+            },
+        )?;
+
+        assert!(
+            manager.sessions.contains_key(&loaded_session_id),
+            "loaded session id should be bound before replay"
+        );
+        assert!(!manager.sessions.contains_key(&temp_session_id));
+        assert_eq!(
+            shell_buffer(&state.runtime, buffer_id)?.name,
+            "*acp [Fix login]*"
+        );
+        assert!(matches!(
+            command_rx.try_recv().expect("load session command"),
+            AcpCommand::LoadSession {
+                target_session_id,
+                ..
+            } if target_session_id == loaded_session_id
+        ));
+
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::SessionUserPrompt {
+                session_id: loaded_session_id.clone(),
+                prompt: "hello from history".to_owned(),
+            },
+        )?;
+        manager.handle_event(
+            &mut state.runtime,
+            text_chunk_event("loaded-session", "prior reply"),
+        )?;
+        manager.handle_event(
+            &mut state.runtime,
+            AcpEvent::SessionLoaded {
+                buffer_id,
+                old_session_id: temp_session_id,
+                new_session_id: loaded_session_id.clone(),
+                modes: None,
+                models: None,
+            },
+        )?;
+
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        assert_eq!(buffer.name, "*acp [Fix login]*");
+        let acp = buffer
+            .acp_state
+            .as_ref()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        assert!(
+            acp.output_items.iter().any(|item| matches!(
+                item,
+                AcpOutputItem::UserPrompt(text) if text == "hello from history"
+            )),
+            "user history should survive SessionLoaded"
+        );
+        assert!(
+            acp.output_items.iter().any(|item| {
+                matches!(item, AcpOutputItem::AgentBlocks(blocks) if blocks.iter().any(|block| {
+                    matches!(block, ContentBlock::Text(text) if text.text == "prior reply")
+                }))
+            }),
+            "agent history should survive SessionLoaded"
+        );
+        Ok(())
     }
 
     #[test]

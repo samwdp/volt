@@ -9,10 +9,16 @@ pub(super) struct MarkdownInlineImageDraw {
     alt: String,
 }
 
+impl MarkdownInlineImageDraw {
+    pub(super) fn rows(&self) -> usize {
+        self.rows
+    }
+}
+
 #[derive(Debug, Default)]
-struct MarkdownPrettyPaintPlan {
+pub(super) struct MarkdownPrettyPaintPlan {
     text_overrides: BTreeMap<usize, String>,
-    images: BTreeMap<usize, MarkdownInlineImageDraw>,
+    pub(super) images: BTreeMap<usize, MarkdownInlineImageDraw>,
 }
 
 fn markdown_inline_image_rows(
@@ -35,7 +41,7 @@ fn markdown_inline_image_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn markdown_pretty_paint_plan(
+pub(super) fn markdown_pretty_paint_plan(
     buffer: &ShellBuffer,
     user_library: &dyn UserLibrary,
     visible_start: usize,
@@ -197,8 +203,25 @@ pub(super) fn render_shell_state(
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
     let pane_active_background = base_background;
-    let pane_inactive_background = adjust_color(base_background, if is_dark { -6 } else { 6 });
-    let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
+    let pane_inactive_background = theme_color(
+        theme_registry,
+        TOKEN_PANE_INACTIVE,
+        adjust_color(base_background, if is_dark { -6 } else { 6 }),
+    );
+    let border_color = theme_color(
+        theme_registry,
+        TOKEN_PANE_BORDER,
+        adjust_color(base_background, if is_dark { 24 } else { -24 }),
+    );
+    let active_border_color = theme_color(
+        theme_registry,
+        TOKEN_PANE_ACTIVE_BORDER,
+        theme_color(
+            theme_registry,
+            TOKEN_STATUSLINE_ACTIVE,
+            Color::RGB(110, 170, 255),
+        ),
+    );
     let git_summary = state.git_summary();
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
@@ -242,6 +265,14 @@ pub(super) fn render_shell_state(
             border_color,
             window_effects,
         )?;
+        if active {
+            fill_window_surface_rect(
+                target,
+                PixelRectToRect::rect(rect.x, rect.y, 2, rect.height),
+                active_border_color,
+                window_effects,
+            )?;
+        }
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
@@ -1737,6 +1768,7 @@ pub(super) fn statusline_icon_colors(
     acp_connected: bool,
     lsp_server_visible: bool,
     lsp_workspace_loaded: bool,
+    theme_registry: Option<&ThemeRegistry>,
     connected_color: Color,
 ) -> Vec<(&'static str, Color)> {
     let acp_icon = editor_icons::symbols::fa::FA_CONNECTDEVELOP;
@@ -1751,15 +1783,212 @@ pub(super) fn statusline_icon_colors(
         icon_colors.push((lsp_icon, connected_color));
     }
     if statusline.contains(error_icon) {
-        icon_colors.push((error_icon, diagnostic_color(LspDiagnosticSeverity::Error)));
+        icon_colors.push((
+            error_icon,
+            diagnostic_color(LspDiagnosticSeverity::Error, theme_registry),
+        ));
     }
     if statusline.contains(warning_icon) {
         icon_colors.push((
             warning_icon,
-            diagnostic_color(LspDiagnosticSeverity::Warning),
+            diagnostic_color(LspDiagnosticSeverity::Warning, theme_registry),
         ));
     }
     icon_colors
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_modeline(
+    target: &mut DrawTarget<'_>,
+    segments: &[ModelineSegment],
+    x: i32,
+    y: i32,
+    max_width: u32,
+    default_color: Color,
+    apply_tokens: bool,
+    theme_registry: Option<&ThemeRegistry>,
+    user_library: &dyn UserLibrary,
+    acp_connected: bool,
+    lsp_server_visible: bool,
+    lsp_workspace_loaded: bool,
+    connected_color: Color,
+    cell_width: i32,
+    line_height: Option<i32>,
+) -> Result<(), ShellError> {
+    let cell_width = cell_width.max(1);
+    let gap_width = monospace_text_width(" ", cell_width);
+    let chip_height = line_height.unwrap_or(cell_width).max(1) as u32;
+
+    let left: Vec<&ModelineSegment> = segments
+        .iter()
+        .filter(|segment| segment.alignment == ModelineAlignment::Left)
+        .collect();
+    let right: Vec<&ModelineSegment> = segments
+        .iter()
+        .filter(|segment| segment.alignment == ModelineAlignment::Right)
+        .collect();
+
+    let right_width = modeline_side_width(&right, gap_width, cell_width);
+    let left_budget = max_width.saturating_sub(right_width.saturating_add(gap_width));
+
+    let joined = flatten_modeline_text(segments);
+    let icon_colors = statusline_icon_colors(
+        &joined,
+        user_library,
+        acp_connected,
+        lsp_server_visible,
+        lsp_workspace_loaded,
+        theme_registry,
+        connected_color,
+    );
+    let highlighted_icons = icon_colors
+        .iter()
+        .map(|(icon, _)| *icon)
+        .collect::<Vec<_>>();
+
+    draw_modeline_side(
+        target,
+        &left,
+        x,
+        y,
+        left_budget,
+        default_color,
+        apply_tokens,
+        theme_registry,
+        &icon_colors,
+        &highlighted_icons,
+        cell_width,
+        gap_width,
+        chip_height,
+        false,
+    )?;
+
+    if right_width > 0 && right_width <= max_width {
+        let right_x = x + max_width.saturating_sub(right_width) as i32;
+        draw_modeline_side(
+            target,
+            &right,
+            right_x,
+            y,
+            right_width,
+            default_color,
+            apply_tokens,
+            theme_registry,
+            &icon_colors,
+            &highlighted_icons,
+            cell_width,
+            gap_width,
+            chip_height,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+fn modeline_side_width(segments: &[&ModelineSegment], gap_width: u32, cell_width: i32) -> u32 {
+    let mut width = 0u32;
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            width = width.saturating_add(gap_width);
+        }
+        for (part_index, part) in segment.parts.iter().enumerate() {
+            if part_index > 0 {
+                width = width.saturating_add(gap_width);
+            }
+            width = width.saturating_add(monospace_text_width(&part.text, cell_width));
+        }
+    }
+    width
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_modeline_side(
+    target: &mut DrawTarget<'_>,
+    segments: &[&ModelineSegment],
+    x: i32,
+    y: i32,
+    max_width: u32,
+    default_color: Color,
+    apply_tokens: bool,
+    theme_registry: Option<&ThemeRegistry>,
+    icon_colors: &[(&str, Color)],
+    highlighted_icons: &[&str],
+    cell_width: i32,
+    gap_width: u32,
+    chip_height: u32,
+    preserve_end: bool,
+) -> Result<(), ShellError> {
+    let mut draw_x = x;
+    let mut remaining_width = max_width;
+    for (index, segment) in segments.iter().enumerate() {
+        if remaining_width == 0 {
+            break;
+        }
+        if index > 0 {
+            if remaining_width < gap_width {
+                break;
+            }
+            draw_x += gap_width as i32;
+            remaining_width = remaining_width.saturating_sub(gap_width);
+        }
+        for (part_index, part) in segment.parts.iter().enumerate() {
+            if remaining_width == 0 {
+                break;
+            }
+            if part_index > 0 {
+                if remaining_width < gap_width {
+                    break;
+                }
+                draw_x += gap_width as i32;
+                remaining_width = remaining_width.saturating_sub(gap_width);
+            }
+            let text = if preserve_end {
+                truncate_text_to_width_preserving_end(&part.text, remaining_width, cell_width)
+            } else {
+                truncate_text_to_width(&part.text, remaining_width, cell_width)
+            };
+            if text.is_empty() {
+                break;
+            }
+            let painted_width = monospace_text_width(&text, cell_width);
+            if let Some(background) = part.background.as_deref().filter(|token| !token.is_empty()) {
+                let bg = theme_color(theme_registry, background, default_color);
+                fill_rect(
+                    target,
+                    PixelRectToRect::rect(draw_x, y, painted_width, chip_height),
+                    bg,
+                )?;
+            }
+            let token_color = (!part.foreground.is_empty() && apply_tokens)
+                .then(|| theme_color(theme_registry, &part.foreground, default_color));
+            for (segment_text, highlighted) in statusline_icon_segments(&text, highlighted_icons) {
+                if remaining_width == 0 {
+                    break;
+                }
+                let piece = if preserve_end {
+                    truncate_text_to_width_preserving_end(segment_text, remaining_width, cell_width)
+                } else {
+                    truncate_text_to_width(segment_text, remaining_width, cell_width)
+                };
+                if piece.is_empty() {
+                    break;
+                }
+                let color = if highlighted {
+                    icon_colors
+                        .iter()
+                        .find_map(|(icon, color)| (*icon == segment_text).then_some(*color))
+                        .unwrap_or(default_color)
+                } else {
+                    token_color.unwrap_or(default_color)
+                };
+                draw_text(target, draw_x, y, &piece, color)?;
+                let piece_width = monospace_text_width(&piece, cell_width);
+                draw_x += piece_width as i32;
+                remaining_width = remaining_width.saturating_sub(piece_width);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn buffer_cursor_screen_anchor(
@@ -1821,7 +2050,7 @@ pub(super) fn buffer_cursor_screen_anchor(
                 };
             }
         }
-        visual_row = visual_row.saturating_add(wrapped.segments.len());
+        visual_row = visual_row.saturating_add(wrapped.visual_row_count());
         if visual_row >= visible_rows {
             break;
         }
@@ -1837,6 +2066,66 @@ pub(super) fn buffer_cursor_screen_anchor(
         y: body_y + cursor_row_on_screen as i32 * line_height,
         pane_bottom: layout.pane_bottom,
     })
+}
+
+#[cfg(test)]
+pub(super) fn pretty_cursor_body_row(
+    buffer: &ShellBuffer,
+    rect: Rect,
+    user_library: &dyn UserLibrary,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+) -> Option<usize> {
+    let cell_width = cell_width.max(1);
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        user_library.commandline_enabled(),
+    );
+    let headerline_rows =
+        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, false).len();
+    let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
+    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
+    let text_width_px = (wrap_cols as i32 * cell_width).max(1) as u32;
+    let pretty_paint = markdown_pretty_paint_plan(
+        buffer,
+        user_library,
+        buffer.scroll_row,
+        buffer
+            .scroll_row
+            .saturating_add(visible_rows.saturating_add(8)),
+        None,
+        InputMode::Normal,
+        text_width_px,
+        line_height,
+    );
+    let wrapped_lines = collect_wrapped_lines_with_display(
+        buffer,
+        buffer.scroll_row,
+        visible_rows,
+        wrap_cols,
+        indent_size,
+        buffer.scroll_col,
+        buffer.line_wrap(),
+        Some(&pretty_paint.text_overrides),
+        Some(&pretty_paint.images),
+    );
+    let cursor_row = buffer.cursor_row();
+    let mut visual_row = 0usize;
+    for wrapped in &wrapped_lines {
+        if wrapped.line_index == cursor_row {
+            return Some(visual_row);
+        }
+        visual_row = visual_row.saturating_add(wrapped.visual_row_count());
+        if visual_row >= visible_rows {
+            break;
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1893,6 +2182,16 @@ pub(super) fn buffer_point_at_screen(
     let mut visual_row = 0usize;
     for wrapped in wrapped_lines {
         let line_len = buffer.line_len_chars(wrapped.line_index);
+        let row_count = wrapped.visual_row_count();
+        if row_count > wrapped.segments.len() {
+            if visual_row_target >= visual_row
+                && visual_row_target < visual_row.saturating_add(row_count)
+            {
+                return Some(TextPoint::new(wrapped.line_index, 0));
+            }
+            visual_row = visual_row.saturating_add(row_count);
+            continue;
+        }
         for (segment_index, segment) in wrapped.segments.iter().enumerate() {
             if visual_row == visual_row_target {
                 let segment_indent_cols = if segment_index == 0 {
@@ -1946,14 +2245,12 @@ pub(super) struct WrappedLine {
     pub(super) segments: Vec<LineWrapSegment>,
     pub(super) continuation_indent_cols: usize,
     pub(super) inline_image: Option<MarkdownInlineImageDraw>,
+    visual_rows: usize,
 }
 
 impl WrappedLine {
     fn visual_row_count(&self) -> usize {
-        self.inline_image
-            .as_ref()
-            .map(|image| image.rows.max(1))
-            .unwrap_or_else(|| self.segments.len().max(1))
+        self.visual_rows.max(1)
     }
 }
 
@@ -2002,7 +2299,9 @@ pub(super) fn collect_wrapped_lines_with_display(
     let line_count = buffer.line_count();
     while line_index < line_count && visual_rows < max_rows {
         let inline_image = inline_images.and_then(|images| images.get(&line_index).cloned());
-        let line = if inline_image.is_some() {
+        let pretty_rows = buffer.pretty_display_rows.get(&line_index).copied();
+        let is_pretty_image = inline_image.is_some() || pretty_rows.is_some();
+        let line = if is_pretty_image {
             String::new()
         } else {
             display_overrides
@@ -2013,7 +2312,7 @@ pub(super) fn collect_wrapped_lines_with_display(
         let char_map = LineCharMap::with_tab_width(&line, tab_width);
         let (leading_indent_cols, _) = leading_whitespace_info(&line, tab_width);
         let continuation_indent_cols = leading_indent_cols.saturating_add(indent_size);
-        let (continuation_indent_cols, segments) = if inline_image.is_some() {
+        let (continuation_indent_cols, segments) = if is_pretty_image {
             (
                 0,
                 vec![LineWrapSegment {
@@ -2046,6 +2345,7 @@ pub(super) fn collect_wrapped_lines_with_display(
         let row_count = inline_image
             .as_ref()
             .map(|image| image.rows.max(1))
+            .or(pretty_rows.map(|rows| rows.max(1)))
             .unwrap_or_else(|| segments.len().max(1));
         visual_rows = visual_rows.saturating_add(row_count);
         lines.push(WrappedLine {
@@ -2055,6 +2355,7 @@ pub(super) fn collect_wrapped_lines_with_display(
             segments,
             continuation_indent_cols,
             inline_image,
+            visual_rows: row_count,
         });
         line_index = line_index.saturating_add(1);
     }
@@ -2165,11 +2466,6 @@ fn render_buffer_with_view_state(
         Color::RGBA(110, 170, 255, 255),
     );
     let statusline_inactive = theme_color(theme_registry, TOKEN_STATUSLINE_INACTIVE, muted);
-    let statusline_accent = if active {
-        statusline_active
-    } else {
-        statusline_inactive
-    };
     let statusline_text_color = if active {
         theme_color(
             theme_registry,
@@ -2188,6 +2484,13 @@ fn render_buffer_with_view_state(
         )
     };
     let text_color = foreground;
+    let line_number_color = theme_color(theme_registry, TOKEN_LINE_NUMBER, muted);
+    let line_number_current_color =
+        theme_color(theme_registry, TOKEN_LINE_NUMBER_CURRENT, foreground);
+    let ghost_text_color = theme_color(theme_registry, TOKEN_GHOST_TEXT, muted);
+    let headerline_color = theme_color(theme_registry, TOKEN_HEADERLINE, statusline_active);
+    let headerline_background =
+        theme_color(theme_registry, TOKEN_HEADERLINE_BACKGROUND, base_background);
     let cursor = theme_color(theme_registry, "ui.cursor", Color::RGB(110, 170, 255));
     let selection = theme_color(theme_registry, "ui.selection", Color::RGBA(55, 71, 99, 255));
     let relative_line_numbers = theme_registry
@@ -2270,8 +2573,9 @@ fn render_buffer_with_view_state(
         git_added,
         git_removed,
     };
+    let modeline_segments = user_library.modeline_segments(&statusline_context);
     let statusline = truncate_text_to_width(
-        &user_library.statusline_render(&statusline_context),
+        &flatten_modeline_text(&modeline_segments),
         rect.width().saturating_sub(24),
         cell_width,
     );
@@ -2565,7 +2869,11 @@ fn render_buffer_with_view_state(
                     line_number_x,
                     y,
                     &format!("{:>4}", line_number),
-                    muted,
+                    if line_index == cursor_row {
+                        line_number_current_color
+                    } else {
+                        line_number_color
+                    },
                 )?;
                 draw_image(
                     target,
@@ -2656,7 +2964,7 @@ fn render_buffer_with_view_state(
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
                     if let Some(severity) = diagnostic_severity {
-                        let color = diagnostic_color(severity);
+                        let color = diagnostic_color(severity, theme_registry);
                         draw_text(
                             target,
                             fringe_x,
@@ -2681,8 +2989,13 @@ fn render_buffer_with_view_state(
                     } else {
                         line_index + 1
                     };
-                    let line_number_color =
-                        diagnostic_severity.map(diagnostic_color).unwrap_or(muted);
+                    let line_number_color = diagnostic_severity
+                        .map(|severity| diagnostic_color(severity, theme_registry))
+                        .unwrap_or(if line_index == cursor_row {
+                            line_number_current_color
+                        } else {
+                            line_number_color
+                        });
                     draw_text(
                         target,
                         line_number_x,
@@ -2732,6 +3045,7 @@ fn render_buffer_with_view_state(
                         *segment,
                         cell_width,
                         line_height,
+                        theme_registry,
                     )?;
                 }
                 draw_line_ghost_text_for_segment(
@@ -2743,7 +3057,7 @@ fn render_buffer_with_view_state(
                         char_map: &wrapped.char_map,
                         line_len,
                         ghost_text: ghost_text_by_line.get(&line_index).map(String::as_str),
-                        color: muted,
+                        color: ghost_text_color,
                         cell_width,
                     },
                 )?;
@@ -2781,7 +3095,7 @@ fn render_buffer_with_view_state(
                         rect.width().saturating_sub(16),
                         line_height.max(1) as u32,
                     ),
-                    base_background,
+                    headerline_background,
                     window_effects,
                 )?;
                 draw_text(
@@ -2793,7 +3107,7 @@ fn render_buffer_with_view_state(
                         headerline_width,
                         cell_width,
                     ),
-                    statusline_active,
+                    headerline_color,
                 )?;
             }
             fill_window_surface_rect(
@@ -2985,33 +3299,23 @@ fn render_buffer_with_view_state(
         window_effects,
     )?;
     let statusline_x = rect.x() + 12;
-    let statusline_icon_colors = statusline_icon_colors(
-        &statusline,
+    draw_modeline(
+        target,
+        &modeline_segments,
+        statusline_x,
+        layout.statusline_y,
+        rect.width().saturating_sub(24),
+        statusline_text_color,
+        active,
+        theme_registry,
         user_library,
         acp_connected,
         lsp_server.is_some(),
         lsp_workspace_loaded,
         git_added_fallback,
-    );
-    let highlighted_statusline_icons = statusline_icon_colors
-        .iter()
-        .map(|(icon, _)| *icon)
-        .collect::<Vec<_>>();
-    let mut draw_x = statusline_x;
-    for (segment, highlighted) in
-        statusline_icon_segments(&statusline, &highlighted_statusline_icons)
-    {
-        let color = if highlighted {
-            statusline_icon_colors
-                .iter()
-                .find_map(|(icon, color)| (*icon == segment).then_some(*color))
-                .unwrap_or(statusline_accent)
-        } else {
-            statusline_text_color
-        };
-        draw_text(target, draw_x, layout.statusline_y, segment, color)?;
-        draw_x += monospace_text_width(segment, cell_width) as i32;
-    }
+        cell_width,
+        Some(line_height),
+    )?;
     if let Some(commandline_y) = layout.commandline_y {
         render_footer_separator(
             target,
@@ -3951,7 +4255,7 @@ pub(super) fn render_acp_buffer_body(
         &state.output_pane,
         active_pane == AcpPane::Output,
         acp_layout.output,
-        "Output",
+        &acp_output_header_title(state),
         active,
         if active_pane == AcpPane::Output {
             visual_selection
@@ -4059,7 +4363,7 @@ pub(super) fn render_acp_pane(
     line_height: i32,
 ) -> Result<(), ShellError> {
     let window_effects = current_window_effect_settings(theme_registry);
-    let corner_radius = shared_corner_radius(theme_registry);
+    let corner_radius = acp_chat_corner_radius(theme_registry);
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
@@ -4128,6 +4432,7 @@ pub(super) fn render_acp_pane(
     let mut global_visual_row = 0usize;
     let mut drawn_rows = 0usize;
     let scroll_top = pane.viewport_scroll_top();
+    let mut painted_bubble_groups: Vec<u32> = Vec::new();
     for (line_index, rendered_line) in pane.render_lines.iter().enumerate() {
         if drawn_rows >= max_draw_rows {
             break;
@@ -4144,6 +4449,9 @@ pub(super) fn render_acp_pane(
                 });
                 let segments = acp_rendered_text_segments(line, pane_layout.wrap_cols);
                 let cursor_segment = segment_index_for_column(&segments, cursor_point.column);
+                let origin_x = acp_chat_origin_x(line, body_x, pane_layout.wrap_cols, cell_width);
+                let bubble_width =
+                    acp_chat_bubble_width_px(line, pane_layout.wrap_cols, cell_width, body_width);
                 for (segment_index, segment) in segments.iter().enumerate() {
                     if global_visual_row < scroll_top {
                         global_visual_row = global_visual_row.saturating_add(1);
@@ -4153,7 +4461,69 @@ pub(super) fn render_acp_pane(
                         break;
                     }
                     let y = body_y + drawn_rows as i32 * line_height;
-                    let segment_x = body_x + (prefix_cols as i32 * cell_width);
+                    if line.bubble
+                        && line.bubble_group != 0
+                        && !painted_bubble_groups.contains(&line.bubble_group)
+                    {
+                        painted_bubble_groups.push(line.bubble_group);
+                        let remaining = acp_bubble_remaining_rows(
+                            pane,
+                            line_index,
+                            segment_index,
+                            line.bubble_group,
+                            pane_layout.wrap_cols,
+                        );
+                        let rows = remaining
+                            .min(max_draw_rows.saturating_sub(drawn_rows))
+                            .max(1);
+                        let fill_role = line.row_fill.unwrap_or(match line.align {
+                            AcpChatAlign::End => AcpColorRole::Accent,
+                            _ => AcpColorRole::Muted,
+                        });
+                        let fill = blend_color(
+                            panel_background,
+                            acp_color(fill_role, theme_registry, foreground, muted, cursor),
+                            match line.align {
+                                AcpChatAlign::End => 0.24,
+                                _ => 0.16,
+                            },
+                        );
+                        fill_overlay_surface_rounded_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                origin_x.saturating_sub(6),
+                                y,
+                                bubble_width.saturating_add(12),
+                                (rows as i32 * line_height).max(line_height) as u32,
+                            ),
+                            corner_radius.min(18),
+                            fill,
+                            window_effects,
+                        )?;
+                    }
+                    let segment_x = origin_x + (prefix_cols as i32 * cell_width);
+                    if let Some(fill_role) = line.row_fill.filter(|_| !line.bubble) {
+                        let fill = blend_color(
+                            panel_background,
+                            acp_color(fill_role, theme_registry, foreground, muted, cursor),
+                            0.22,
+                        );
+                        fill_overlay_surface_rounded_rect(
+                            target,
+                            PixelRectToRect::rect(body_x, y, body_width, line_height.max(1) as u32),
+                            4,
+                            fill,
+                            window_effects,
+                        )?;
+                    }
+                    if line.gutter {
+                        fill_overlay_surface_rect(
+                            target,
+                            PixelRectToRect::rect(origin_x + 2, y, 2, line_height.max(1) as u32),
+                            muted,
+                            window_effects,
+                        )?;
+                    }
                     if let Some((selection_start, selection_end)) = selection_range {
                         let start = selection_start.max(segment.start_col);
                         let end = selection_end.min(segment.end_col);
@@ -4190,7 +4560,7 @@ pub(super) fn render_acp_pane(
                         && cursor_point.line == line_index
                         && cursor_segment == segment_index
                     {
-                        let cursor_x = body_x
+                        let cursor_x = origin_x
                             + (prefix_cols as i32 * cell_width)
                             + (cursor_point.column.saturating_sub(segment.start_col) as i32
                                 * cell_width);
@@ -4215,7 +4585,7 @@ pub(super) fn render_acp_pane(
                     if segment_index == 0 {
                         acp_draw_prefix_segments(
                             target,
-                            body_x,
+                            origin_x,
                             y,
                             &line.prefix,
                             spinner_frame,
@@ -4306,19 +4676,6 @@ pub(super) fn render_acp_pane(
                 drawn_rows = drawn_rows.saturating_add(image_rows_draw);
                 global_visual_row = global_visual_row.saturating_add(image_rows);
             }
-            AcpRenderedLine::ImageContinuation => {
-                if global_visual_row < scroll_top {
-                    global_visual_row = global_visual_row.saturating_add(1);
-                    continue;
-                }
-                if drawn_rows >= max_draw_rows {
-                    break;
-                }
-                let y = body_y + drawn_rows as i32 * line_height;
-                draw_text(target, body_x + 8, y, "image continues…", muted)?;
-                drawn_rows = drawn_rows.saturating_add(1);
-                global_visual_row = global_visual_row.saturating_add(1);
-            }
             AcpRenderedLine::Spacer => {
                 if global_visual_row < scroll_top {
                     global_visual_row = global_visual_row.saturating_add(1);
@@ -4333,6 +4690,77 @@ pub(super) fn render_acp_pane(
         }
     }
     Ok(())
+}
+
+const ACP_CHAT_ROUNDED_OPTION: &str = "acp.chat.rounded";
+
+pub(super) fn acp_chat_rounded(theme_registry: Option<&ThemeRegistry>) -> bool {
+    theme_registry
+        .and_then(|registry| registry.resolve_bool(ACP_CHAT_ROUNDED_OPTION))
+        .unwrap_or(true)
+}
+
+pub(super) fn acp_chat_corner_radius(theme_registry: Option<&ThemeRegistry>) -> u32 {
+    if acp_chat_rounded(theme_registry) {
+        shared_corner_radius(theme_registry)
+    } else {
+        0
+    }
+}
+
+fn acp_chat_origin_x(
+    line: &AcpRenderedTextLine,
+    body_x: i32,
+    wrap_cols: usize,
+    cell_width: i32,
+) -> i32 {
+    match line.align {
+        AcpChatAlign::End => {
+            let bubble_cols = acp_chat_bubble_cols(wrap_cols);
+            let shift = wrap_cols.saturating_sub(bubble_cols) as i32 * cell_width.max(1);
+            body_x + shift
+        }
+        AcpChatAlign::Start | AcpChatAlign::Full => body_x,
+    }
+}
+
+fn acp_chat_bubble_width_px(
+    line: &AcpRenderedTextLine,
+    wrap_cols: usize,
+    cell_width: i32,
+    body_width: u32,
+) -> u32 {
+    match line.align {
+        AcpChatAlign::Full => body_width,
+        AcpChatAlign::Start | AcpChatAlign::End => {
+            (acp_chat_bubble_cols(wrap_cols) as i32 * cell_width.max(1)).max(1) as u32
+        }
+    }
+}
+
+fn acp_bubble_remaining_rows(
+    pane: &AcpPaneState,
+    line_index: usize,
+    segment_index: usize,
+    bubble_group: u32,
+    wrap_cols: usize,
+) -> usize {
+    let mut rows = 0usize;
+    for (index, rendered_line) in pane.render_lines.iter().enumerate().skip(line_index) {
+        let AcpRenderedLine::Text(line) = rendered_line else {
+            break;
+        };
+        if !line.bubble || line.bubble_group != bubble_group {
+            break;
+        }
+        let segments = acp_rendered_text_segments(line, wrap_cols);
+        if index == line_index {
+            rows = rows.saturating_add(segments.len().saturating_sub(segment_index).max(1));
+        } else {
+            rows = rows.saturating_add(segments.len().max(1));
+        }
+    }
+    rows.max(1)
 }
 
 #[allow(clippy::too_many_arguments)]

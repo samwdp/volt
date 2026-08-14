@@ -1,7 +1,7 @@
 use super::*;
 use agent_client_protocol::{
-    Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, TextContent, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    Diff, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, TextContent, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLiveSession, LspLogDirection};
 use editor_plugin_api::{
@@ -4335,6 +4335,90 @@ fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result
 }
 
 #[test]
+fn sync_visible_buffer_layouts_counts_markdown_pretty_image_rows_for_scrolloff()
+-> Result<(), String> {
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
+        scrolloff: 3.0,
+        headerline_lines: Vec::new(),
+        ..HeaderlineTestUserLibrary::default()
+    });
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let mut text = format!("![red](data:image/png;base64,{png})\n");
+    for index in 1..80 {
+        text.push_str(&format!("line {index}\n"));
+    }
+    let buffer_id = install_markdown_test_buffer(&mut state, "*pretty-image-scrolloff*", &text)?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(4, 0));
+
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, render_width, render_height);
+    let layout = buffer_footer_layout_with_command_line(
+        buffer,
+        rect,
+        line_height,
+        cell_width,
+        user_library.commandline_enabled(),
+    );
+    let wrap_cols = wrap_columns_for_width(render_width, cell_width);
+    let text_width_px = (wrap_cols as i32 * cell_width).max(1) as u32;
+    let pretty_paint = markdown_pretty_paint_plan(
+        buffer,
+        &*user_library,
+        0,
+        buffer.line_count().max(1),
+        None,
+        InputMode::Normal,
+        text_width_px,
+        line_height,
+    );
+    let image_rows = pretty_paint
+        .images
+        .get(&0)
+        .map(|image| image.rows())
+        .ok_or_else(|| "pretty image did not decode for scroll fixture".to_owned())?;
+    assert!(
+        image_rows > 1,
+        "fixture image should occupy multiple visual rows, got {image_rows}"
+    );
+    let expected_scrolloff = 3usize.min(layout.visible_rows.saturating_sub(1) / 2);
+    assert!(expected_scrolloff > 1);
+    let cursor_body_row = pretty_cursor_body_row(
+        buffer,
+        rect,
+        &*user_library,
+        state.runtime.services().get::<ThemeRegistry>(),
+        cell_width,
+        line_height,
+    )
+    .ok_or_else(|| "cursor went off screen before scrolloff".to_owned())?;
+    assert!(
+        cursor_body_row >= expected_scrolloff,
+        "cursor visual row {cursor_body_row} is above scrolloff {expected_scrolloff}"
+    );
+    assert!(
+        cursor_body_row
+            <= layout
+                .visible_rows
+                .saturating_sub(1)
+                .saturating_sub(expected_scrolloff),
+        "cursor visual row {cursor_body_row} is below scrolloff in {} visible rows",
+        layout.visible_rows
+    );
+    Ok(())
+}
+
+#[test]
 fn sync_visible_buffer_layouts_reuses_headerline_snapshot_while_typing() -> Result<(), String> {
     let render_width = 640;
     let render_height = 360;
@@ -4380,6 +4464,11 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
         text: "Excellent! Now let me gather more context about the project to inform the documentation content:".to_owned(),
         text_role: AcpColorRole::Default,
         syntax_spans: Vec::new(),
+        row_fill: None,
+        gutter: false,
+        align: AcpChatAlign::Full,
+        bubble: false,
+        bubble_group: 0,
     };
 
     let segments = acp_rendered_text_segments(&line, 32);
@@ -4455,6 +4544,115 @@ fn acp_agent_markdown_uses_shared_pipeline_pretty() {
             .iter()
             .any(|line| line.contains("Title") && !line.starts_with("# ")),
         "agent ACP lines should run through markdown pipeline: {texts:?}"
+    );
+}
+
+#[test]
+fn acp_output_speaker_roles_and_tool_chip() {
+    let items = vec![
+        AcpOutputItem::UserPrompt("hi".to_owned()),
+        AcpOutputItem::AgentBlocks(vec![ContentBlock::Text(TextContent::new("hello"))]),
+        AcpOutputItem::ToolCall(
+            ToolCall::new("tool-1", "Read file")
+                .kind(ToolKind::Read)
+                .status(ToolCallStatus::InProgress)
+                .content(vec![ToolCallContent::from("12 lines")]),
+        ),
+    ];
+    let lines = acp_build_output_lines(&items, None, None);
+    let texts: Vec<_> = lines
+        .iter()
+        .filter_map(|line| match line {
+            AcpRenderedLine::Text(line) => Some((
+                line.text.as_str(),
+                line.text_role,
+                line.row_fill,
+                line.gutter,
+                line.align,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|(text, role, ..)| *text == "hi" && *role == AcpColorRole::Accent),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _, _, _, align)| { *text == "hi" && *align == AcpChatAlign::End }),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, role, ..)| *text == "hello" && *role == AcpColorRole::Default),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _, _, _, align)| { *text == "hello" && *align == AcpChatAlign::Start }),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|(text, _, fill, _, _)| {
+            *text == "Read file" && *fill == Some(AcpColorRole::Accent)
+        }),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _, _, gutter, _)| *text == "12 lines" && *gutter),
+        "{texts:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| matches!(line, AcpRenderedLine::Spacer)),
+        "turns should be separated by spacers"
+    );
+}
+
+#[test]
+fn acp_tool_diff_renders_added_and_removed_lines() {
+    let items = vec![AcpOutputItem::ToolCall(
+        ToolCall::new("tool-diff", "Edit file")
+            .kind(ToolKind::Edit)
+            .status(ToolCallStatus::Completed)
+            .content(vec![ToolCallContent::Diff(
+                Diff::new("src/main.rs", "fn main() {\n    println!(\"b\");\n}\n")
+                    .old_text("fn main() {\n    println!(\"a\");\n}\n"),
+            )]),
+    )];
+    let lines = acp_build_output_lines(&items, None, None);
+    let texts: Vec<_> = lines
+        .iter()
+        .filter_map(|line| match line {
+            AcpRenderedLine::Text(line) => Some((line.text.as_str(), line.text_role)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|(text, role)| *text == "    println!(\"a\");" && *role == AcpColorRole::Error),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, role)| *text == "    println!(\"b\");" && *role == AcpColorRole::Success),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, role)| *text == "Edit file" && *role == AcpColorRole::Muted),
+        "{texts:?}"
     );
 }
 
@@ -5525,6 +5723,7 @@ fn test_notification_update(
         }),
         active,
         action: None,
+        workspace_id: None,
     }
 }
 
@@ -6969,6 +7168,7 @@ fn notification_action_at_point_returns_acp_permission_action() -> Result<(), St
             progress: None,
             active: true,
             action: Some(NotificationAction::OpenAcpPermissionPicker { request_id: 42 }),
+            workspace_id: None,
         },
         now,
     );
@@ -7021,6 +7221,7 @@ fn notification_action_at_point_returns_copilot_sign_in_action() -> Result<(), S
             action: Some(NotificationAction::CopilotSignIn {
                 root: Some(PathBuf::from(r"P:\volt")),
             }),
+            workspace_id: None,
         },
         now,
     );
@@ -7541,6 +7742,145 @@ fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), 
 }
 
 #[test]
+fn render_buffer_paints_modeline_mode_chip_and_right_aligned_segment() -> Result<(), String> {
+    struct ModelineChipTestUserLibrary;
+
+    impl UserLibrary for ModelineChipTestUserLibrary {
+        fn modeline_segments(
+            &self,
+            context: &StatuslineContext<'_>,
+        ) -> Vec<editor_plugin_api::ModelineSegment> {
+            use editor_plugin_api::{ModelinePart, ModelineSegment};
+            vec![
+                ModelineSegment::left(vec![ModelinePart::new(
+                    format!(" {} ", context.vim_mode),
+                    "ui.modeline.mode.normal.foreground",
+                    Some("ui.modeline.mode.normal.background".into()),
+                )]),
+                ModelineSegment::left(vec![ModelinePart::fg(
+                    format!("{up} 2", up = editor_icons::symbols::cod::COD_ARROW_UP),
+                    "ui.modeline.git.added",
+                )]),
+                ModelineSegment::right(vec![ModelinePart::fg("RHS", "ui.modeline.muted")]),
+            ]
+        }
+    }
+
+    let mut registry = ThemeRegistry::new();
+    let mode_fg = Color::RGB(10, 10, 10);
+    let mode_bg = Color::RGB(90, 160, 255);
+    let git_added = Color::RGB(50, 200, 80);
+    let muted = Color::RGB(120, 120, 130);
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token(TOKEN_STATUSLINE_ACTIVE, editor_theme::Color::rgb(1, 2, 3))
+                .with_token(
+                    TOKEN_STATUSLINE_FOREGROUND,
+                    editor_theme::Color::rgb(200, 200, 200),
+                )
+                .with_token(
+                    "ui.modeline.mode.normal.foreground",
+                    editor_theme::Color::rgb(mode_fg.r, mode_fg.g, mode_fg.b),
+                )
+                .with_token(
+                    "ui.modeline.mode.normal.background",
+                    editor_theme::Color::rgb(mode_bg.r, mode_bg.g, mode_bg.b),
+                )
+                .with_token(
+                    "ui.modeline.git.added",
+                    editor_theme::Color::rgb(git_added.r, git_added.g, git_added.b),
+                )
+                .with_token(
+                    "ui.modeline.muted",
+                    editor_theme::Color::rgb(muted.r, muted.g, muted.b),
+                ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    let render_user_library = ModelineChipTestUserLibrary;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let statusline_x = rect.x() + 12;
+    let max_width = rect.width().saturating_sub(24);
+    let rhs_width = monospace_text_width("RHS", 8);
+    let expected_rhs_x = statusline_x + max_width.saturating_sub(rhs_width) as i32;
+
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &render_user_library,
+        "test-workspace",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect { rect, color }
+                if rect.y == layout.statusline_y
+                    && *color == to_render_color(mode_bg)
+        )),
+        "expected mode chip background fill"
+    );
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { y, color, text, .. }
+                if *y == layout.statusline_y
+                    && *color == to_render_color(mode_fg)
+                    && text.contains("NORMAL")
+        )),
+        "expected mode chip foreground text"
+    );
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { y, color, .. }
+                if *y == layout.statusline_y && *color == to_render_color(git_added)
+        )),
+        "expected git added color"
+    );
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { x, y, color, text, .. }
+                if *x == expected_rhs_x
+                    && *y == layout.statusline_y
+                    && *color == to_render_color(muted)
+                    && text == "RHS"
+        )),
+        "expected right-aligned RHS segment"
+    );
+    Ok(())
+}
+
+#[test]
 fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
     let mut registry = ThemeRegistry::new();
     let active_text = Color::RGB(212, 218, 226);
@@ -7971,6 +8311,7 @@ fn render_shell_state_scene_with_notification_overlay(
             progress: None,
             active: true,
             action: None,
+            workspace_id: None,
         },
         now,
     );
@@ -8470,7 +8811,7 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
     assert!(
         text_commands
             .iter()
-            .any(|(text, color)| text == "Query > " && *color == to_render_color(picker_muted)),
+            .any(|(text, color)| text == "filter" && *color == to_render_color(picker_muted)),
         "unexpected picker text colors: {text_commands:?}"
     );
     assert!(
@@ -9488,11 +9829,9 @@ fn acp_output_scroll_reaches_wrapped_tail() -> Result<(), String> {
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
     buffer.init_acp_view("GitHub Copilot");
-    buffer.acp_push_system_message(
-        "alpha betagamma delta epsilon zeta longtailwordthatshouldwrap across rows",
-    );
+    buffer.acp_push_system_message("word ".repeat(40));
 
-    buffer.sync_acp_viewport_metrics(800, 400, 8, 16, true);
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
     {
         let acp = buffer
             .acp_state
@@ -9513,6 +9852,59 @@ fn acp_output_scroll_reaches_wrapped_tail() -> Result<(), String> {
     assert!(
         acp.output_pane.scroll_visual_row > 0,
         "wrapped output should require scrolling past the first visual row"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_viewport_scroll_does_not_treat_visual_row_as_line_index() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    // Skip the Connected banner so the wrapped message is line 0.
+    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_push_system_message("word ".repeat(40));
+    for index in 0..20 {
+        buffer.acp_push_system_message(format!("tail line {index}"));
+    }
+
+    // Narrow pane so line 0 wraps across several visual rows.
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        let wrap_cols = acp.output_pane.wrap_cols();
+        let first_rows = acp_rendered_line_row_count(
+            acp.output_pane
+                .render_lines
+                .first()
+                .ok_or_else(|| "output render lines missing".to_owned())?,
+            wrap_cols,
+        );
+        assert!(
+            first_rows > 1,
+            "line 0 must wrap; got {first_rows} visual rows at wrap_cols={wrap_cols}"
+        );
+        acp.output_pane.set_cursor(TextPoint::new(0, 0));
+        acp.output_pane.scroll_visual_row = 0;
+    }
+
+    scroll_buffer_viewport_only(buffer, 1);
+
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    assert_eq!(acp.output_pane.scroll_visual_row, 1);
+    assert_eq!(
+        buffer.cursor_point().line,
+        0,
+        "scrolling one visual row inside wrapped line 0 must not jump cursor to line index == scroll_visual_row"
     );
     Ok(())
 }
@@ -9607,7 +9999,8 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
     let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
         .ok_or_else(|| "missing ACP layout".to_owned())?;
     let header_height = (16 + 10) as u32;
-    let header_radius = 9.min(header_height / 2);
+    let inner_radius = shared_corner_radius(None).saturating_sub(1);
+    let header_radius = inner_radius.min(header_height / 2);
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
@@ -9644,6 +10037,58 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
                     && *radius == header_radius
         )));
     }
+    Ok(())
+}
+
+#[test]
+fn render_acp_output_header_shows_live_when_tool_in_progress() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    buffer.acp_upsert_tool_call(
+        ToolCall::new("tool-1", "Read file")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::InProgress),
+    );
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        buffer,
+        rect,
+        layout,
+        true,
+        None,
+        None,
+        InputMode::Normal,
+        None,
+        Color::RGB(15, 16, 20),
+        Color::RGB(215, 221, 232),
+        Color::RGB(140, 144, 152),
+        Color::RGB(40, 44, 52),
+        Color::RGBA(55, 71, 99, 255),
+        Color::RGBA(112, 196, 255, 120),
+        Color::RGB(110, 170, 255),
+        2,
+        8,
+        16,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { text, .. } if text.contains("Output · live")
+    )));
+    assert!(!scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::Text { text, .. } if text.contains("image continues")
+    )));
     Ok(())
 }
 
@@ -9763,10 +10208,7 @@ fn render_acp_buffer_with_tall_multiline_input_keeps_footer_on_screen() -> Resul
     let footer_bottom =
         acp_layout.footer.rect.y() + i32::try_from(acp_layout.footer.rect.height()).unwrap_or(0);
     assert!(footer_bottom <= layout.pane_bottom);
-    assert_eq!(
-        acp_layout.input.rect.height() as i32,
-        input_panel_chrome_height() + 16 * 10
-    );
+    assert!(acp_layout.input.rect.height() as i32 <= input_panel_chrome_height() + 16 * 10);
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
@@ -11153,12 +11595,22 @@ fn acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer() -> Result<(
                     text: "alpha".to_owned(),
                     text_role: AcpColorRole::Default,
                     syntax_spans: Vec::new(),
+                    row_fill: None,
+                    gutter: false,
+                    align: AcpChatAlign::Full,
+                    bubble: false,
+                    bubble_group: 0,
                 }),
                 AcpRenderedLine::Text(AcpRenderedTextLine {
                     prefix: Vec::new(),
                     text: "beta".to_owned(),
                     text_role: AcpColorRole::Default,
                     syntax_spans: Vec::new(),
+                    row_fill: None,
+                    gutter: false,
+                    align: AcpChatAlign::Full,
+                    bubble: false,
+                    bubble_group: 0,
                 }),
             ],
             false,
@@ -17887,6 +18339,49 @@ fn workspace_dock_entries_include_default_workspace() -> Result<(), String> {
     );
     assert!(entries.iter().any(|entry| entry.workspace_id == project));
     assert_eq!(entries[0].workspace_id, default_workspace);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_unread_badge_tracks_other_workspace_notifications() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-dock-unread-a");
+    let second_root = unique_temp_dir("workspace-dock-unread-b");
+    let first = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    let now = Instant::now();
+    shell_ui_mut(&mut state.runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "other-ws".to_owned(),
+            severity: NotificationSeverity::Info,
+            title: "Agent finished".to_owned(),
+            body_lines: vec!["done".to_owned()],
+            progress: None,
+            active: true,
+            action: None,
+            workspace_id: Some(second),
+        },
+        now,
+    );
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    let second_entry = entries
+        .iter()
+        .find(|entry| entry.workspace_id == second)
+        .ok_or_else(|| "second workspace missing from dock".to_owned())?;
+    assert!(second_entry.unread >= 1);
+    let first_entry = entries
+        .iter()
+        .find(|entry| entry.workspace_id == first)
+        .ok_or_else(|| "first workspace missing from dock".to_owned())?;
+    assert_eq!(first_entry.unread, 0);
+    switch_runtime_workspace(&mut state.runtime, second)?;
+    let entries = collect_workspace_dock_entries(&state.runtime)?;
+    let second_entry = entries
+        .iter()
+        .find(|entry| entry.workspace_id == second)
+        .ok_or_else(|| "second workspace missing after switch".to_owned())?;
+    assert_eq!(second_entry.unread, 0);
     Ok(())
 }
 

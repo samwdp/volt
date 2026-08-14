@@ -90,6 +90,30 @@ pub fn supervised_command_if_resolved(
     supervised_command(&program, args, mode)
 }
 
+/// Prepends Windows fnm/nvm PATH (and related vars) when available.
+///
+/// GUI-launched hosts often lack a live Node shim on `PATH`. Tree-sitter generate,
+/// npm, and similar tools need that shim even when the parent process never loaded a
+/// shell profile. Non-Windows platforms return `env` unchanged.
+pub fn enrich_env_with_node_manager(
+    cwd: Option<&Path>,
+    env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        if let Some(runtime_env) =
+            windows_fnm_environment(cwd, &env).or_else(|| windows_nvm_environment(cwd, &env))
+        {
+            return merge_windows_explicit_and_runtime_env(&env, &runtime_env);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cwd;
+    }
+    env
+}
+
 /// Wraps a command with Volt's parent-death supervisor when the runtime advertises one.
 pub fn supervised_command(
     program: &str,
@@ -816,27 +840,39 @@ fn apply_windows_runtime_environment(
     env: &[(String, String)],
     runtime_env: &[(String, String)],
 ) {
+    for (key, value) in merge_windows_explicit_and_runtime_env(env, runtime_env) {
+        command.env(key, value);
+    }
+}
+
+#[cfg(windows)]
+fn merge_windows_explicit_and_runtime_env(
+    env: &[(String, String)],
+    runtime_env: &[(String, String)],
+) -> Vec<(String, String)> {
     let explicit_path = explicit_windows_env_value(env, "PATH");
+    let mut merged = Vec::new();
     let mut applied_path = false;
     for (key, value) in runtime_env {
         if key.eq_ignore_ascii_case("PATH") {
             let merged_path = explicit_path
                 .map(|path| format!("{value};{path}"))
                 .unwrap_or_else(|| value.clone());
-            command.env(key, merged_path);
+            merged.push((key.clone(), merged_path));
             applied_path = true;
             continue;
         }
-        command.env(key, value);
+        merged.push((key.clone(), value.clone()));
     }
     for (key, value) in env {
         if !key.eq_ignore_ascii_case("PATH") {
-            command.env(key, value);
+            merged.push((key.clone(), value.clone()));
         }
     }
     if !applied_path && let Some(path) = explicit_path {
-        command.env("PATH", path);
+        merged.push(("PATH".to_owned(), path.clone()));
     }
+    merged
 }
 
 #[cfg(windows)]
@@ -907,6 +943,52 @@ mod tests {
                     "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned()
                 ),
             ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn merge_windows_explicit_and_runtime_env_keeps_runtime_path_first() {
+        let merged = super::merge_windows_explicit_and_runtime_env(
+            &[
+                ("PATH".to_owned(), "C:\\custom".to_owned()),
+                ("NODE_OPTIONS".to_owned(), "--trace-warnings".to_owned()),
+            ],
+            &[
+                ("PATH".to_owned(), "C:\\fnm".to_owned()),
+                (
+                    "FNM_DIR".to_owned(),
+                    "C:\\Users\\sam\\AppData\\Roaming\\fnm".to_owned(),
+                ),
+            ],
+        );
+        let vars = merged
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            vars.get("PATH").map(String::as_str),
+            Some("C:\\fnm;C:\\custom")
+        );
+        assert_eq!(
+            vars.get("FNM_DIR").map(String::as_str),
+            Some("C:\\Users\\sam\\AppData\\Roaming\\fnm")
+        );
+        assert_eq!(
+            vars.get("NODE_OPTIONS").map(String::as_str),
+            Some("--trace-warnings")
+        );
+    }
+
+    #[test]
+    fn enrich_env_with_node_manager_preserves_explicit_vars_when_manager_missing() {
+        let env = vec![("VOLT_TEST_MARKER".to_owned(), "1".to_owned())];
+        let enriched = super::enrich_env_with_node_manager(None, env.clone());
+        // When fnm/nvm cannot be resolved, explicit env is returned as-is. When they
+        // can, the marker must still survive the merge.
+        assert!(
+            enriched
+                .iter()
+                .any(|(key, value)| key == "VOLT_TEST_MARKER" && value == "1")
         );
     }
 

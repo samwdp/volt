@@ -474,6 +474,7 @@ fn apply_tree_sitter_recompile_notification(
             progress: None,
             active: false,
             action: None,
+            workspace_id: None,
         },
         Instant::now(),
     );

@@ -1557,33 +1557,43 @@ impl From<AbiLigatureConfig> for LigatureConfig {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiPaneConfig {
     pub golden_ratio: bool,
     pub workspace_dock_side: AbiWorkspaceDockSide,
     pub workspace_dock_docked: bool,
+    pub markdown_pretty: AbiMarkdownPrettyConfig,
 }
 
 impl AbiPaneConfig {
-    pub fn from_parts(pane: PaneConfig, dock: WorkspaceDockConfig) -> Self {
+    pub fn from_parts(
+        pane: PaneConfig,
+        dock: WorkspaceDockConfig,
+        markdown_pretty: MarkdownPrettyConfig,
+    ) -> Self {
         Self {
             golden_ratio: pane.golden_ratio,
             workspace_dock_side: dock.side.into(),
             workspace_dock_docked: dock.docked,
+            markdown_pretty: markdown_pretty.into(),
         }
     }
 
-    pub fn pane_config(self) -> PaneConfig {
+    pub fn pane_config(&self) -> PaneConfig {
         PaneConfig {
             golden_ratio: self.golden_ratio,
         }
     }
 
-    pub fn workspace_dock_config(self) -> WorkspaceDockConfig {
+    pub fn workspace_dock_config(&self) -> WorkspaceDockConfig {
         WorkspaceDockConfig {
             side: self.workspace_dock_side.into(),
             docked: self.workspace_dock_docked,
         }
+    }
+
+    pub fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
+        self.markdown_pretty.clone().into()
     }
 }
 

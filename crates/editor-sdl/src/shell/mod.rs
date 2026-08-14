@@ -54,7 +54,7 @@ use std::{
 
 use abi_stable::library::RootModule;
 use agent_client_protocol::{
-    ContentBlock, MaybeUndefined, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    ContentBlock, Diff, MaybeUndefined, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
     SessionInfoUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use base64::Engine as _;
@@ -115,18 +115,20 @@ use editor_picker::{
 use editor_plugin_api::{
     AcpActionSpec, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption,
     GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
-    OilDefaults, OilKeyAction, PdfOpenMode, PickerAcpClientContext, PickerActionSpec,
-    PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
-    PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
-    PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
-    PluginBufferSectionUpdate, PluginBufferSections, VimEditAction, WorkspaceDockSide,
+    ModelineAlignment, ModelineSegment, OilDefaults, OilKeyAction, PdfOpenMode,
+    PickerAcpClientContext, PickerActionSpec, PickerBufferContext, PickerCommandContext,
+    PickerIconContext, PickerKeybindingContext, PickerProviderContext, PickerProviderSpec,
+    PickerSource, PickerSyntaxLanguageContext, PickerThemeContext, PickerTruncateStrategy,
+    PickerUndoTreeContext, PickerWorkspaceContext, PluginBufferSectionUpdate, PluginBufferSections,
+    StatuslineSpan, VimEditAction, WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,
     },
-    autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks, git_actions, git_hooks,
-    git_sections, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
-    pdf_hooks, plugin_hooks, terminal_hooks,
+    autocomplete_hooks, browser_hooks, buffer_kinds, db_hooks, decode_modeline,
+    flatten_modeline_text, flatten_modeline_to_spans, git_actions, git_hooks, git_sections,
+    hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks,
+    plugin_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -444,9 +446,23 @@ const TOKEN_STATUSLINE_ACTIVE: &str = "ui.statusline.active";
 const TOKEN_STATUSLINE_FOREGROUND: &str = "ui.statusline.foreground";
 const TOKEN_STATUSLINE_INACTIVE: &str = "ui.statusline.inactive";
 const TOKEN_STATUSLINE_INACTIVE_FOREGROUND: &str = "ui.statusline.inactive.foreground";
+const TOKEN_PICKER_BACKGROUND: &str = "ui.picker.background";
 const TOKEN_PICKER_FOREGROUND: &str = "ui.picker.foreground";
 const TOKEN_PICKER_MUTED: &str = "ui.picker.muted";
 const TOKEN_PICKER_SUBTLE: &str = "ui.picker.subtle";
+const TOKEN_PICKER_BORDER: &str = "ui.picker.border";
+const TOKEN_PICKER_SELECTION: &str = "ui.picker.selection";
+const TOKEN_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
+const TOKEN_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
+const TOKEN_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
+const TOKEN_LINE_NUMBER: &str = "ui.line-number";
+const TOKEN_LINE_NUMBER_CURRENT: &str = "ui.line-number.current";
+const TOKEN_PANE_INACTIVE: &str = "ui.pane.inactive";
+const TOKEN_PANE_BORDER: &str = "ui.pane.border";
+const TOKEN_PANE_ACTIVE_BORDER: &str = "ui.pane.active-border";
+const TOKEN_GHOST_TEXT: &str = "ui.ghost-text";
+const TOKEN_HEADERLINE: &str = "ui.headerline";
+const TOKEN_HEADERLINE_BACKGROUND: &str = "ui.headerline.background";
 const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
@@ -734,8 +750,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn markdown_pretty_config(&self) -> editor_plugin_api::MarkdownPrettyConfig {
-        // Prefix ABI is at capacity; dynamic loads use planner defaults when icons empty.
-        editor_plugin_api::MarkdownPrettyConfig::default()
+        self.module.pane_config_v1()().markdown_pretty_config()
     }
 
     fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {
@@ -914,7 +929,23 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
-        self.module.statusline_render()(AbiStatuslineContext::from(*context)).into()
+        flatten_modeline_text(&self.modeline_segments(context))
+    }
+
+    fn statusline_spans(
+        &self,
+        context: &editor_plugin_api::StatuslineContext<'_>,
+    ) -> Vec<StatuslineSpan> {
+        flatten_modeline_to_spans(&self.modeline_segments(context))
+    }
+
+    fn modeline_segments(
+        &self,
+        context: &editor_plugin_api::StatuslineContext<'_>,
+    ) -> Vec<ModelineSegment> {
+        decode_modeline(
+            &self.module.statusline_render()(AbiStatuslineContext::from(*context)).into_string(),
+        )
     }
 
     fn statusline_lsp_connected_icon(&self) -> &'static str {
@@ -3693,6 +3724,7 @@ pub(crate) struct ShellBuffer {
     scroll_wrap_cols: usize,
     scroll_indent_size: usize,
     wrap_cache: Option<WrapRowCache>,
+    pretty_display_rows: BTreeMap<usize, usize>,
     context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
@@ -3791,7 +3823,6 @@ enum AcpOutputItem {
 enum AcpRenderedLine {
     Text(AcpRenderedTextLine),
     Image(AcpRenderedImageLine),
-    ImageContinuation,
     Spacer,
 }
 
@@ -3802,6 +3833,11 @@ struct AcpRenderedTextLine {
     text_role: AcpColorRole,
     /// Markdown Pipeline spans for agent text (empty = solid `text_role` color).
     syntax_spans: Vec<LineSyntaxSpan>,
+    row_fill: Option<AcpColorRole>,
+    gutter: bool,
+    align: AcpChatAlign,
+    bubble: bool,
+    bubble_group: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -3848,6 +3884,13 @@ struct ImageBufferState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpChatAlign {
+    Full,
+    Start,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AcpColorRole {
     Default,
     Muted,
@@ -3861,6 +3904,10 @@ enum AcpColorRole {
 }
 
 const ACP_IMAGE_ROWS: usize = 12;
+const ACP_DIFF_MAX_LINES: usize = 48;
+const ACP_TOOL_NEST_PAD: &str = "  ";
+const ACP_CHAT_BUBBLE_NUM: usize = 3;
+const ACP_CHAT_BUBBLE_DEN: usize = 4;
 
 impl Default for PluginTextPaneState {
     fn default() -> Self {
@@ -4339,13 +4386,25 @@ impl AcpRenderedLine {
         match self {
             Self::Text(line) => line.text.clone(),
             Self::Image(line) => line.label.clone(),
-            Self::ImageContinuation | Self::Spacer => String::new(),
+            Self::Spacer => String::new(),
         }
     }
 }
 
-fn acp_rendered_text_wrap_cols(line: &AcpRenderedTextLine, wrap_cols: usize) -> usize {
+fn acp_chat_bubble_cols(wrap_cols: usize) -> usize {
     wrap_cols
+        .saturating_mul(ACP_CHAT_BUBBLE_NUM)
+        .saturating_div(ACP_CHAT_BUBBLE_DEN)
+        .max(8)
+        .min(wrap_cols.max(1))
+}
+
+fn acp_rendered_text_wrap_cols(line: &AcpRenderedTextLine, wrap_cols: usize) -> usize {
+    let available = match line.align {
+        AcpChatAlign::Full => wrap_cols,
+        AcpChatAlign::Start | AcpChatAlign::End => acp_chat_bubble_cols(wrap_cols),
+    };
+    available
         .saturating_sub(acp_prefix_columns(&line.prefix, acp_spinner_frame()))
         .max(1)
 }
@@ -4366,7 +4425,7 @@ fn acp_rendered_line_row_count(line: &AcpRenderedLine, wrap_cols: usize) -> usiz
     match line {
         AcpRenderedLine::Text(line) => acp_rendered_text_segments(line, wrap_cols).len().max(1),
         AcpRenderedLine::Image(image) => image.rows.max(1),
-        AcpRenderedLine::ImageContinuation | AcpRenderedLine::Spacer => 1,
+        AcpRenderedLine::Spacer => 1,
     }
 }
 
@@ -4416,8 +4475,7 @@ impl WrapRowCache {
         let mut prefix_rows: Vec<usize> = Vec::with_capacity(line_count + 1);
         prefix_rows.push(0);
         for line_index in 0..line_count {
-            let line = buffer.text.line(line_index).unwrap_or_default();
-            let rows = line_wrap_row_count(&line, wrap_cols, indent_size);
+            let rows = buffer.line_visual_row_count(line_index, wrap_cols, indent_size);
             let next = prefix_rows
                 .last()
                 .copied()
@@ -4537,6 +4595,7 @@ impl ShellBuffer {
             scroll_wrap_cols: 1,
             scroll_indent_size: 1,
             wrap_cache: None,
+            pretty_display_rows: BTreeMap::new(),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -4612,6 +4671,7 @@ impl ShellBuffer {
             scroll_wrap_cols: 1,
             scroll_indent_size: 1,
             wrap_cache: None,
+            pretty_display_rows: BTreeMap::new(),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -4690,6 +4750,7 @@ impl ShellBuffer {
             scroll_wrap_cols: 1,
             scroll_indent_size: 1,
             wrap_cache: None,
+            pretty_display_rows: BTreeMap::new(),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -5222,15 +5283,20 @@ impl ShellBuffer {
     }
 
     pub(crate) fn init_acp_view(&mut self, client_label: &str) {
+        self.acp_prepare_session_replay(client_label);
+        self.acp_push_system_message(format!(
+            "{} Connected to {client_label}.",
+            editor_icons::symbols::cod::COD_ROCKET
+        ));
+    }
+
+    /// Reset ACP panes for `session/load` history replay without a fresh Connected banner.
+    pub(crate) fn acp_prepare_session_replay(&mut self, client_label: &str) {
         self.text = TextBuffer::new();
         self.undo_tree = UndoTree::new(&self.text);
         self.scroll_row = 0;
         self.wrap_cache = None;
         self.acp_state = Some(AcpBufferState::new(client_label.to_owned()));
-        self.acp_push_system_message(format!(
-            "{} Connected to {client_label}.",
-            editor_icons::symbols::cod::COD_ROCKET
-        ));
     }
 
     pub(crate) fn acp_switch_pane(&mut self) -> bool {
@@ -5279,15 +5345,6 @@ impl ShellBuffer {
             AcpPane::Output => &state.output_pane,
             AcpPane::Input | AcpPane::Footer => return None,
         })
-    }
-
-    fn current_scroll_row(&self) -> usize {
-        if let Some(pane) = self.active_aux_text_pane_state() {
-            return pane.scroll_row;
-        }
-        self.acp_active_pane_state()
-            .map(|pane| pane.scroll_visual_row)
-            .unwrap_or(self.scroll_row)
     }
 
     fn acp_active_pane_state_mut(&mut self) -> Option<&mut AcpPaneState> {
@@ -5461,6 +5518,12 @@ impl ShellBuffer {
                 MaybeUndefined::Null => state.session_title = None,
                 MaybeUndefined::Undefined => {}
             }
+        }
+    }
+
+    pub(crate) fn acp_set_session_title(&mut self, title: Option<String>) {
+        if let Some(state) = self.acp_state.as_mut() {
+            state.session_title = title;
         }
     }
 
@@ -6044,10 +6107,16 @@ impl ShellBuffer {
         if !cache.matches(cache.wrap_cols, cache.indent_size, self.line_count()) {
             return None;
         }
-        let line = self.text.line(line_index)?;
+        if line_index >= self.line_count() {
+            return None;
+        }
         Some(WrapCacheInlineEdit {
             line_index,
-            old_row_count: line_wrap_row_count(&line, cache.wrap_cols, cache.indent_size),
+            old_row_count: self.line_visual_row_count(
+                line_index,
+                cache.wrap_cols,
+                cache.indent_size,
+            ),
         })
     }
 
@@ -6063,8 +6132,7 @@ impl ShellBuffer {
             self.wrap_cache = None;
             return;
         }
-        let line = self.text.line(edit.line_index).unwrap_or_default();
-        let new_row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+        let new_row_count = self.line_visual_row_count(edit.line_index, wrap_cols, indent_size);
         if let Some(cache) = self.wrap_cache.as_mut() {
             cache.adjust_for_line_row_delta(edit.line_index, edit.old_row_count, new_row_count);
         }
@@ -7064,6 +7132,71 @@ impl ShellBuffer {
         self.scroll_indent_size = indent_size.max(1);
     }
 
+    fn line_visual_row_count(
+        &self,
+        line_index: usize,
+        wrap_cols: usize,
+        indent_size: usize,
+    ) -> usize {
+        if let Some(&rows) = self.pretty_display_rows.get(&line_index) {
+            return rows.max(1);
+        }
+        if self.line_wrap {
+            line_wrap_row_count(
+                &self.text.line(line_index).unwrap_or_default(),
+                wrap_cols,
+                indent_size,
+            )
+        } else {
+            1
+        }
+    }
+
+    fn refresh_pretty_display_rows(
+        &mut self,
+        user_library: &dyn UserLibrary,
+        pane_width_px: u32,
+        line_height: i32,
+        visual_selection: Option<VisualSelection>,
+        input_mode: InputMode,
+        visible_rows: usize,
+    ) {
+        if self.language_id() != Some("markdown") {
+            if !self.pretty_display_rows.is_empty() {
+                self.pretty_display_rows.clear();
+                self.wrap_cache = None;
+            }
+            return;
+        }
+        let start = self
+            .scroll_row
+            .min(self.cursor_row())
+            .saturating_sub(visible_rows);
+        let end = self
+            .cursor_row()
+            .max(self.scroll_row)
+            .saturating_add(visible_rows.saturating_add(8))
+            .min(self.line_count().max(1));
+        let paint = markdown_pretty_paint_plan(
+            self,
+            user_library,
+            start,
+            end.max(start.saturating_add(1)),
+            visual_selection,
+            input_mode,
+            pane_width_px,
+            line_height,
+        );
+        let mut rows = BTreeMap::new();
+        for (line_index, image) in paint.images {
+            rows.insert(line_index, image.rows().max(1));
+        }
+        if self.pretty_display_rows != rows {
+            self.pretty_display_rows = rows;
+            self.wrap_cache = None;
+        }
+    }
+
     pub(crate) fn set_viewport_lines(&mut self, visible_lines: usize) {
         self.viewport_lines = visible_lines.max(1);
         self.content_viewport_lines = self.viewport_lines;
@@ -7217,8 +7350,7 @@ impl ShellBuffer {
         let visible_rows = visible_rows.max(1);
         let mut rows = 0usize;
         for line_index in (0..line_count).rev() {
-            let line = self.text.line(line_index).unwrap_or_default();
-            let row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+            let row_count = self.line_visual_row_count(line_index, wrap_cols, indent_size);
             if rows.saturating_add(row_count) > visible_rows {
                 return if rows == 0 {
                     line_index
@@ -7243,8 +7375,8 @@ impl ShellBuffer {
         let mut offset = cursor_segment_index;
         while target > 0 && offset < min_cursor_row {
             target = target.saturating_sub(1);
-            let line = self.text.line(target).unwrap_or_default();
-            offset = offset.saturating_add(line_wrap_row_count(&line, wrap_cols, indent_size));
+            offset =
+                offset.saturating_add(self.line_visual_row_count(target, wrap_cols, indent_size));
         }
         target
     }
@@ -7375,8 +7507,7 @@ impl ShellBuffer {
         let mut row_offset = 0usize;
         let mut row_counts = Vec::with_capacity(distance);
         for line_index in self.scroll_row..cursor_row {
-            let line = self.text.line(line_index).unwrap_or_default();
-            let row_count = line_wrap_row_count(&line, wrap_cols, indent_size);
+            let row_count = self.line_visual_row_count(line_index, wrap_cols, indent_size);
             row_offset = row_offset.saturating_add(row_count);
             row_counts.push(row_count);
         }
@@ -7497,6 +7628,7 @@ fn acp_build_output_lines(
     buffer_enabled: Option<bool>,
 ) -> Vec<AcpRenderedLine> {
     let mut lines = Vec::new();
+    let mut bubble_group = 1u32;
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             lines.push(AcpRenderedLine::Spacer);
@@ -7507,10 +7639,10 @@ fn acp_build_output_lines(
                     acp_icon_segment(editor_icons::symbols::cod::COD_PERSON, AcpColorRole::Accent),
                     acp_text_segment(" ", AcpColorRole::Default),
                 ];
-                lines.extend(acp_multiline_text_lines(
-                    prefix,
-                    prompt,
-                    AcpColorRole::Default,
+                lines.extend(acp_mark_chat(
+                    acp_multiline_text_lines(prefix, prompt, AcpColorRole::Accent),
+                    AcpChatAlign::End,
+                    bubble_group,
                 ));
             }
             AcpOutputItem::SystemMessage(message) => {
@@ -7518,13 +7650,14 @@ fn acp_build_output_lines(
                     acp_icon_segment(editor_icons::symbols::cod::COD_INFO, AcpColorRole::Muted),
                     acp_text_segment(" ", AcpColorRole::Default),
                 ];
-                lines.extend(acp_multiline_text_lines(
-                    prefix,
-                    message,
-                    AcpColorRole::Muted,
+                lines.extend(acp_mark_chat(
+                    acp_multiline_text_lines(prefix, message, AcpColorRole::Muted),
+                    AcpChatAlign::Start,
+                    bubble_group,
                 ));
             }
             AcpOutputItem::AgentBlocks(blocks) => {
+                let mut agent_lines = Vec::new();
                 for block in blocks {
                     let prefix = vec![
                         acp_icon_segment(
@@ -7534,7 +7667,7 @@ fn acp_build_output_lines(
                         acp_text_segment(" ", AcpColorRole::Default),
                     ];
                     if let (Some(paint), ContentBlock::Text(text)) = (markdown.as_mut(), block) {
-                        lines.extend(acp_render_markdown_text_block(
+                        agent_lines.extend(acp_render_markdown_text_block(
                             prefix,
                             &text.text,
                             AcpColorRole::Default,
@@ -7542,15 +7675,21 @@ fn acp_build_output_lines(
                             buffer_enabled,
                         ));
                     } else {
-                        lines.extend(acp_render_content_block(
+                        agent_lines.extend(acp_render_content_block(
                             block,
                             prefix,
                             AcpColorRole::Default,
                         ));
                     }
                 }
+                lines.extend(acp_mark_chat(
+                    agent_lines,
+                    AcpChatAlign::Start,
+                    bubble_group,
+                ));
             }
             AcpOutputItem::ToolCall(tool_call) => {
+                let mut tool_lines = Vec::new();
                 let mut prefix = acp_status_segments(tool_call.status);
                 prefix.push(acp_text_segment(" ", AcpColorRole::Default));
                 prefix.push(acp_icon_segment(
@@ -7558,20 +7697,24 @@ fn acp_build_output_lines(
                     AcpColorRole::Accent,
                 ));
                 prefix.push(acp_text_segment(" ", AcpColorRole::Default));
-                lines.push(AcpRenderedLine::Text(acp_text_line(
-                    prefix,
-                    tool_call.title.clone(),
-                    AcpColorRole::Default,
-                )));
+                let title_role = if matches!(tool_call.status, ToolCallStatus::Completed) {
+                    AcpColorRole::Muted
+                } else {
+                    AcpColorRole::Default
+                };
+                tool_lines.push(AcpRenderedLine::Text(
+                    acp_text_line(prefix, tool_call.title.clone(), title_role)
+                        .with_row_fill(acp_tool_status_row_fill(tool_call.status)),
+                ));
                 for content in &tool_call.content {
-                    lines.extend(acp_render_tool_content(content));
+                    tool_lines.extend(acp_render_tool_content(content));
                 }
                 for location in &tool_call.locations {
                     let line = location
                         .line
                         .map(|line| format!("{}:{line}", location.path.display()))
                         .unwrap_or_else(|| location.path.display().to_string());
-                    lines.push(AcpRenderedLine::Text(acp_text_line(
+                    tool_lines.push(AcpRenderedLine::Text(acp_text_line(
                         vec![
                             acp_icon_segment(
                                 editor_icons::symbols::cod::COD_SEARCH,
@@ -7583,27 +7726,34 @@ fn acp_build_output_lines(
                         AcpColorRole::Muted,
                     )));
                 }
+                lines.extend(acp_mark_chat(tool_lines, AcpChatAlign::Start, bubble_group));
             }
         }
+        bubble_group = bubble_group.saturating_add(1);
     }
     if lines.is_empty() {
-        lines.push(AcpRenderedLine::Text(acp_text_line(
-            vec![acp_icon_segment(
-                editor_icons::symbols::cod::COD_HISTORY,
+        lines.extend(acp_mark_chat(
+            vec![AcpRenderedLine::Text(acp_text_line(
+                vec![acp_icon_segment(
+                    editor_icons::symbols::cod::COD_HISTORY,
+                    AcpColorRole::Muted,
+                )],
+                " Waiting for session output...",
                 AcpColorRole::Muted,
-            )],
-            " Waiting for session output...",
-            AcpColorRole::Muted,
-        )));
+            ))],
+            AcpChatAlign::Start,
+            1,
+        ));
     }
     lines
 }
 
 fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
     match content {
-        ToolCallContent::Content(content) => acp_render_content_block(
+        ToolCallContent::Content(content) => acp_mark_gutter(acp_render_content_block(
             &content.content,
             vec![
+                acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
                 acp_icon_segment(
                     editor_icons::symbols::cod::COD_CHEVRON_RIGHT,
                     AcpColorRole::Muted,
@@ -7611,31 +7761,25 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
                 acp_text_segment(" ", AcpColorRole::Default),
             ],
             AcpColorRole::Default,
-        ),
-        ToolCallContent::Diff(diff) => vec![AcpRenderedLine::Text(acp_text_line(
+        )),
+        ToolCallContent::Diff(diff) => acp_render_diff(diff),
+        ToolCallContent::Terminal(terminal) => {
+            acp_mark_gutter(vec![AcpRenderedLine::Text(acp_text_line(
+                vec![
+                    acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
+                    acp_icon_segment(
+                        editor_icons::symbols::cod::COD_TERMINAL,
+                        AcpColorRole::Accent,
+                    ),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ],
+                format!("terminal {}", terminal.terminal_id),
+                AcpColorRole::Default,
+            ))])
+        }
+        _ => acp_mark_gutter(vec![AcpRenderedLine::Text(acp_text_line(
             vec![
-                acp_icon_segment(
-                    editor_icons::symbols::cod::COD_DIFF_MODIFIED,
-                    AcpColorRole::Warning,
-                ),
-                acp_text_segment(" ", AcpColorRole::Default),
-            ],
-            diff.path.display().to_string(),
-            AcpColorRole::Default,
-        ))],
-        ToolCallContent::Terminal(terminal) => vec![AcpRenderedLine::Text(acp_text_line(
-            vec![
-                acp_icon_segment(
-                    editor_icons::symbols::cod::COD_TERMINAL,
-                    AcpColorRole::Accent,
-                ),
-                acp_text_segment(" ", AcpColorRole::Default),
-            ],
-            format!("terminal {}", terminal.terminal_id),
-            AcpColorRole::Default,
-        ))],
-        _ => vec![AcpRenderedLine::Text(acp_text_line(
-            vec![
+                acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
                 acp_icon_segment(
                     editor_icons::symbols::cod::COD_WARNING,
                     AcpColorRole::Warning,
@@ -7644,7 +7788,7 @@ fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {
             ],
             "Unsupported tool content",
             AcpColorRole::Warning,
-        ))],
+        ))]),
     }
 }
 
@@ -7656,22 +7800,15 @@ fn acp_render_content_block(
     match block {
         ContentBlock::Text(text) => acp_multiline_text_lines(prefix, &text.text, text_role),
         ContentBlock::Image(image) => match acp_decode_image(image) {
-            Ok(decoded) => {
-                let mut lines = vec![AcpRenderedLine::Image(AcpRenderedImageLine {
-                    label: format!(
-                        "{} {}",
-                        editor_icons::symbols::fa::FA_IMAGE,
-                        image.mime_type
-                    ),
-                    image: Some(decoded),
-                    rows: ACP_IMAGE_ROWS,
-                })];
-                lines.extend(std::iter::repeat_n(
-                    AcpRenderedLine::ImageContinuation,
-                    ACP_IMAGE_ROWS.saturating_sub(1),
-                ));
-                lines
-            }
+            Ok(decoded) => vec![AcpRenderedLine::Image(AcpRenderedImageLine {
+                label: format!(
+                    "{} {}",
+                    editor_icons::symbols::fa::FA_IMAGE,
+                    image.mime_type
+                ),
+                image: Some(decoded),
+                rows: ACP_IMAGE_ROWS,
+            })],
             Err(error) => acp_multiline_text_lines(
                 vec![
                     acp_icon_segment(
@@ -7721,7 +7858,176 @@ fn acp_text_line(
         text: text.into(),
         text_role,
         syntax_spans: Vec::new(),
+        row_fill: None,
+        gutter: false,
+        align: AcpChatAlign::Full,
+        bubble: false,
+        bubble_group: 0,
     }
+}
+
+impl AcpRenderedTextLine {
+    fn with_row_fill(mut self, role: AcpColorRole) -> Self {
+        self.row_fill = Some(role);
+        self
+    }
+
+    fn with_gutter(mut self) -> Self {
+        self.gutter = true;
+        self
+    }
+}
+
+fn acp_mark_chat(
+    mut lines: Vec<AcpRenderedLine>,
+    align: AcpChatAlign,
+    bubble_group: u32,
+) -> Vec<AcpRenderedLine> {
+    for line in &mut lines {
+        if let AcpRenderedLine::Text(text) = line {
+            text.align = align;
+            text.bubble = true;
+            text.bubble_group = bubble_group;
+        }
+    }
+    lines
+}
+
+fn acp_mark_gutter(mut lines: Vec<AcpRenderedLine>) -> Vec<AcpRenderedLine> {
+    for line in &mut lines {
+        if let AcpRenderedLine::Text(text) = line {
+            text.gutter = true;
+        }
+    }
+    lines
+}
+
+fn acp_tool_status_row_fill(status: ToolCallStatus) -> AcpColorRole {
+    match status {
+        ToolCallStatus::InProgress => AcpColorRole::Accent,
+        ToolCallStatus::Completed => AcpColorRole::Success,
+        ToolCallStatus::Failed => AcpColorRole::Error,
+        _ => AcpColorRole::Muted,
+    }
+}
+
+fn acp_output_header_title(state: &AcpBufferState) -> String {
+    let live = state.output_items.iter().any(|item| {
+        matches!(
+            item,
+            AcpOutputItem::ToolCall(tool_call)
+                if matches!(
+                    tool_call.status,
+                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                )
+        )
+    });
+    let follow = state
+        .output_pane
+        .should_follow_output(state.output_pane.visible_rows());
+    let count = state.output_items.len();
+    if live {
+        "Output · live".to_owned()
+    } else if !follow {
+        "Output · paused".to_owned()
+    } else if count > 0 {
+        format!("Output · {count}")
+    } else {
+        "Output".to_owned()
+    }
+}
+
+fn acp_render_diff(diff: &Diff) -> Vec<AcpRenderedLine> {
+    let mut lines = acp_mark_gutter(vec![AcpRenderedLine::Text(acp_text_line(
+        vec![
+            acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
+            acp_icon_segment(
+                editor_icons::symbols::cod::COD_DIFF_MODIFIED,
+                AcpColorRole::Warning,
+            ),
+            acp_text_segment(" ", AcpColorRole::Default),
+        ],
+        diff.path.display().to_string(),
+        AcpColorRole::Muted,
+    ))]);
+    let hunks = acp_diff_display_lines(diff.old_text.as_deref(), &diff.new_text);
+    let truncated = hunks.len() > ACP_DIFF_MAX_LINES;
+    for (role, marker, text) in hunks.into_iter().take(ACP_DIFF_MAX_LINES) {
+        lines.push(AcpRenderedLine::Text(
+            acp_text_line(
+                vec![
+                    acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
+                    acp_text_segment(marker, role),
+                    acp_text_segment(" ", AcpColorRole::Default),
+                ],
+                text,
+                role,
+            )
+            .with_gutter(),
+        ));
+    }
+    if truncated {
+        lines.push(AcpRenderedLine::Text(
+            acp_text_line(
+                vec![acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted)],
+                "… truncated diff".to_owned(),
+                AcpColorRole::Muted,
+            )
+            .with_gutter(),
+        ));
+    }
+    lines
+}
+
+fn acp_diff_display_lines(
+    old_text: Option<&str>,
+    new_text: &str,
+) -> Vec<(AcpColorRole, &'static str, String)> {
+    let old_lines = old_text
+        .unwrap_or("")
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect::<Vec<_>>();
+    let new_lines = new_text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect::<Vec<_>>();
+    if old_text.is_none() || old_lines.iter().all(|line| line.is_empty()) {
+        return new_lines
+            .into_iter()
+            .map(|line| (AcpColorRole::Success, "+", line.to_owned()))
+            .collect();
+    }
+    let mut prefix = 0usize;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix = prefix.saturating_add(1);
+    }
+    let mut old_end = old_lines.len();
+    let mut new_end = new_lines.len();
+    while old_end > prefix && new_end > prefix && old_lines[old_end - 1] == new_lines[new_end - 1] {
+        old_end = old_end.saturating_sub(1);
+        new_end = new_end.saturating_sub(1);
+    }
+    const CONTEXT: usize = 2;
+    let mut out = Vec::new();
+    let context_start = prefix.saturating_sub(CONTEXT);
+    for line in &old_lines[context_start..prefix] {
+        out.push((AcpColorRole::Muted, " ", (*line).to_owned()));
+    }
+    for line in &old_lines[prefix..old_end] {
+        out.push((AcpColorRole::Error, "-", (*line).to_owned()));
+    }
+    for line in &new_lines[prefix..new_end] {
+        out.push((AcpColorRole::Success, "+", (*line).to_owned()));
+    }
+    let context_end = (old_end.saturating_add(CONTEXT)).min(old_lines.len());
+    for line in &old_lines[old_end..context_end] {
+        out.push((AcpColorRole::Muted, " ", (*line).to_owned()));
+    }
+    out
 }
 
 fn acp_render_markdown_text_block(
@@ -7753,6 +8059,11 @@ fn acp_render_markdown_text_block(
                 text: line,
                 text_role,
                 syntax_spans,
+                row_fill: None,
+                gutter: false,
+                align: AcpChatAlign::Full,
+                bubble: false,
+                bubble_group: 0,
             })
         })
         .collect()
@@ -8088,6 +8399,7 @@ enum PickerAction {
     AcpLoadSession {
         buffer_id: BufferId,
         session_id: String,
+        session_title: String,
     },
     AcpSetMode {
         buffer_id: BufferId,
@@ -8653,6 +8965,7 @@ pub(crate) struct ShellUiState {
     autocomplete: Option<AutocompleteOverlay>,
     hover: Option<HoverOverlay>,
     notifications: NotificationCenter,
+    workspace_unread: BTreeMap<WorkspaceId, u32>,
     last_lsp_notification_revision: u64,
     popup_focus: bool,
     popup_buffer_id: Option<BufferId>,
@@ -8722,6 +9035,7 @@ impl ShellUiState {
             autocomplete: None,
             hover: None,
             notifications: NotificationCenter::default(),
+            workspace_unread: BTreeMap::new(),
             last_lsp_notification_revision: 0,
             popup_focus: false,
             popup_buffer_id: None,
@@ -9084,6 +9398,7 @@ impl ShellUiState {
             self.previous_workspace = Some(self.active_workspace);
             self.active_workspace = workspace_id;
         }
+        self.workspace_unread.remove(&workspace_id);
         self.restore_active_pane_view_state();
         self.restore_active_buffer_vim_state();
         self.close_picker();
@@ -9474,7 +9789,26 @@ impl ShellUiState {
     }
 
     fn apply_notification(&mut self, update: NotificationUpdate, now: Instant) -> bool {
+        let is_new = !self
+            .notifications
+            .entries
+            .iter()
+            .any(|entry| entry.key == update.key);
+        if is_new
+            && let Some(workspace_id) = update.workspace_id
+            && workspace_id != self.active_workspace
+        {
+            let count = self.workspace_unread.entry(workspace_id).or_insert(0);
+            *count = count.saturating_add(1);
+        }
         self.notifications.apply(update, now)
+    }
+
+    fn workspace_unread_count(&self, workspace_id: WorkspaceId) -> u32 {
+        self.workspace_unread
+            .get(&workspace_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn prune_notifications(&mut self, now: Instant) -> bool {
@@ -14179,11 +14513,16 @@ impl ShellState {
                 has_plugin_sections,
                 scrolloff,
                 reserved_top_rows,
+                input_mode,
+                visual_selection,
             ) = {
                 let theme_registry = self.runtime.services().get::<ThemeRegistry>();
-                let buffer = self.ui()?.buffer(buffer_id).ok_or_else(|| {
+                let ui = self.ui()?;
+                let buffer = ui.buffer(buffer_id).ok_or_else(|| {
                     ShellError::Runtime(format!("buffer `{buffer_id}` is missing"))
                 })?;
+                let input_mode = ui.input_mode_for_buffer(buffer_id, active);
+                let visual_selection = ui.visual_selection_for_buffer(buffer, active);
                 let visible_rows = buffer_visible_rows_for_height(
                     buffer,
                     height,
@@ -14212,6 +14551,8 @@ impl ShellState {
                         0
                     },
                     reserved_top_rows,
+                    input_mode,
+                    visual_selection,
                 )
             };
             let wrap_cols = wrap_columns_for_width(width, cell_width);
@@ -14243,6 +14584,15 @@ impl ShellState {
                 buffer.set_viewport_lines(visible_rows);
                 let content_rows = visible_rows.saturating_sub(reserved_top_rows).max(1);
                 buffer.set_scroll_layout(content_rows, wrap_cols, indent_size);
+                let text_width_px = (wrap_cols as i32 * cell_width).max(1) as u32;
+                buffer.refresh_pretty_display_rows(
+                    &*user_library,
+                    text_width_px,
+                    line_height,
+                    visual_selection,
+                    input_mode,
+                    content_rows,
+                );
             }
             buffer.ensure_visible(
                 visible_rows,
@@ -18585,8 +18935,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 PickerAction::AcpLoadSession {
                     buffer_id,
                     session_id,
+                    session_title,
                 } => {
-                    acp::acp_load_session(runtime, buffer_id, &session_id)?;
+                    acp::acp_load_session(runtime, buffer_id, &session_id, Some(&session_title))?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::AcpSetMode { buffer_id, mode_id } => {
@@ -18932,6 +19283,7 @@ fn apply_copilot_auth_notification(
             progress: None,
             active,
             action: None,
+            workspace_id: None,
         },
         Instant::now(),
     );
@@ -27658,7 +28010,10 @@ fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
 
 fn scroll_buffer_viewport_only(buffer: &mut ShellBuffer, delta: i32) {
     buffer.scroll_by(delta);
-    let top = buffer.current_scroll_row();
+    // Always resolve viewport edges through line_at_viewport_offset. ACP panes scroll
+    // by visual row, so comparing cursor_row() to current_scroll_row() wrongly treats a
+    // visual offset as a line index and teleports the cursor (and any visual selection).
+    let top = buffer.line_at_viewport_offset(0);
     let bottom = buffer.line_at_viewport_offset(buffer.viewport_lines().saturating_sub(1));
     if buffer.cursor_row() < top {
         let _ = buffer.goto_line(top);
@@ -29606,7 +29961,11 @@ fn run_shell_command_in_buffer(
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut args = terminal_config.args;
     let shell_program = terminal_config.program;
-    args.push(shell_command_eval_flag(&shell_program).to_owned());
+    args.extend(
+        shell_command_eval_args(&shell_program)
+            .into_iter()
+            .map(str::to_owned),
+    );
     args.push(command.clone());
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
@@ -29640,21 +29999,30 @@ fn run_shell_command_in_buffer(
     Ok(())
 }
 
-pub(super) fn shell_command_eval_flag(program: &str) -> &'static str {
+/// Flags that make `program` evaluate a one-shot shell command string.
+///
+/// Nushell's bare `-c` skips `config.nu` (where users often wire fnm/nvm). Login
+/// (`-l -c`) loads that config so tools like `node` resolve the same way as an
+/// interactive nu / profile-backed pwsh session.
+pub(super) fn shell_command_eval_args(program: &str) -> Vec<&'static str> {
     let shell = Path::new(program)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
     if cfg!(target_os = "windows") {
         if shell.eq_ignore_ascii_case("cmd") {
-            "/C"
+            vec!["/C"]
         } else if shell.eq_ignore_ascii_case("powershell") || shell.eq_ignore_ascii_case("pwsh") {
-            "-Command"
+            vec!["-Command"]
+        } else if shell.eq_ignore_ascii_case("nu") {
+            vec!["-l", "-c"]
         } else {
-            "-c"
+            vec!["-c"]
         }
+    } else if shell.eq_ignore_ascii_case("nu") {
+        vec!["-l", "-c"]
     } else {
-        "-c"
+        vec!["-c"]
     }
 }
 
@@ -30465,6 +30833,7 @@ fn apply_lsp_notifications(
 ) -> Result<bool, String> {
     let mut changed = false;
     let last_seen = shell_ui(runtime)?.last_lsp_notification_revision();
+    let workspace_id = shell_ui(runtime)?.active_workspace();
     for entry in snapshot.entries() {
         if entry.revision() <= last_seen {
             continue;
@@ -30490,6 +30859,7 @@ fn apply_lsp_notifications(
                 progress,
                 active: notification.active(),
                 action,
+                workspace_id: Some(workspace_id),
             },
             now,
         );
@@ -30890,6 +31260,7 @@ fn collect_workspace_dock_entries(
                 buffer_count: workspace.buffer_count(),
                 branch: None,
                 active: workspace.id() == active,
+                unread: ui.workspace_unread_count(workspace.id()),
             });
             break;
         }
@@ -30907,6 +31278,7 @@ fn collect_workspace_dock_entries(
             buffer_count: workspace.buffer_count(),
             branch,
             active: workspace.id() == active,
+            unread: ui.workspace_unread_count(workspace.id()),
         });
     }
     Ok(entries)
@@ -31086,6 +31458,7 @@ fn notify_default_workspace_has_no_project_root(runtime: &mut EditorRuntime) -> 
             progress: None,
             active: false,
             action: None,
+            workspace_id: None,
         },
         Instant::now(),
     );
@@ -31161,6 +31534,7 @@ fn notify_marked_workspace_missing(runtime: &mut EditorRuntime, root: &Path) -> 
             progress: None,
             active: false,
             action: None,
+            workspace_id: None,
         },
         Instant::now(),
     );

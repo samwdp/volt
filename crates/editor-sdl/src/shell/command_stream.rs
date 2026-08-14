@@ -5,7 +5,9 @@ use super::{
     },
     *,
 };
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
+use editor_jobs::{
+    ProcessSupervisionMode, enrich_env_with_node_manager, supervised_command_if_resolved,
+};
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -325,7 +327,11 @@ pub(super) fn resolve_external_invocation(
             let terminal_config = shell_user_library(runtime).terminal_config();
             let shell_program = terminal_config.program.clone();
             let mut args = terminal_config.args.clone();
-            args.push(shell_command_eval_flag(&shell_program).to_owned());
+            args.extend(
+                shell_command_eval_args(&shell_program)
+                    .into_iter()
+                    .map(str::to_owned),
+            );
             args.push(command.clone());
             Ok((shell_program, args, command.clone()))
         }
@@ -344,17 +350,18 @@ fn run_silent_external_command(
     notify_on_success: bool,
     notify_on_failure: bool,
 ) -> Result<ExternalCommandResult, String> {
+    let env = enrich_env_with_node_manager(Some(cwd), env.to_vec());
     let (program, args) = supervised_command_if_resolved(
         program,
         args,
-        &[],
+        &env,
         None,
         ProcessSupervisionMode::Background,
     );
     let mut command = Command::new(&program);
     command
         .args(&args)
-        .envs(env.iter().cloned())
+        .envs(env)
         .current_dir(cwd)
         .stdin(Stdio::null());
     configure_background_command(&mut command);
@@ -403,6 +410,7 @@ fn run_silent_external_command(
                 progress: None,
                 active: false,
                 action: None,
+                workspace_id: None,
             },
             Instant::now(),
         );
@@ -686,6 +694,7 @@ fn streamed_command_notification(
         progress: None,
         active: false,
         action: None,
+        workspace_id: None,
     }
 }
 
@@ -743,10 +752,11 @@ fn run_streamed_command(
         notify_on_success,
         notify_on_failure,
     } = request;
+    let env = enrich_env_with_node_manager(Some(&cwd), env);
     let (program, args) = supervised_command_if_resolved(
         &program,
         &args,
-        &[],
+        &env,
         None,
         ProcessSupervisionMode::Background,
     );
@@ -965,11 +975,32 @@ fn push_streamed_command_update(
 
 #[cfg(test)]
 mod tests {
+    use super::super::shell_command_eval_args;
     use super::detect_build_command;
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn nushell_command_eval_uses_login_flag() {
+        assert_eq!(shell_command_eval_args("nu"), vec!["-l", "-c"]);
+        assert_eq!(
+            shell_command_eval_args(r"C:\Program Files\nu\bin\nu.exe"),
+            vec!["-l", "-c"]
+        );
+    }
+
+    #[test]
+    fn windows_shell_command_eval_flags_unchanged() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert_eq!(shell_command_eval_args("cmd"), vec!["/C"]);
+        assert_eq!(shell_command_eval_args("cmd.exe"), vec!["/C"]);
+        assert_eq!(shell_command_eval_args("powershell"), vec!["-Command"]);
+        assert_eq!(shell_command_eval_args("pwsh.exe"), vec!["-Command"]);
+    }
 
     struct TempDir {
         path: std::path::PathBuf,

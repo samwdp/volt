@@ -61,6 +61,8 @@ pub mod lang;
 pub mod ligatures;
 /// Language server integration hooks and commands.
 pub mod lsp;
+/// User-editable doom-style modeline composition.
+pub mod modeline;
 /// Multiple cursor workflows.
 pub mod multicursor;
 /// Directory editing and navigation workflows.
@@ -71,7 +73,7 @@ pub mod pane;
 pub mod pdf;
 /// Generic picker UI bindings and popup controls.
 pub mod picker;
-/// User-editable statusline segment composition.
+/// Compatibility alias for [`modeline`].
 pub mod statusline;
 /// Builtin terminal package surface.
 pub mod terminal;
@@ -189,10 +191,37 @@ use editor_plugin_api::{
     AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, BrowserFeatureSpec,
     ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec, GhostTextContext,
     GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
-    MarkdownPrettyConfig, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings, PaneConfig,
-    PickerItemSpec, PickerProviderContext, PickerProviderSpec, StatuslineContext, TerminalConfig,
-    TerminalFeatureSpec, UserLibrary, WorkspaceDockConfig, WorkspaceRoot,
+    MarkdownPrettyConfig, ModelineSegment, OilDefaults, OilFeatureSpec, OilKeyAction,
+    OilKeybindings, PaneConfig, PickerItemSpec, PickerProviderContext, PickerProviderSpec,
+    StatuslineContext, StatuslineSpan, TerminalConfig, TerminalFeatureSpec, UserLibrary,
+    WorkspaceDockConfig, WorkspaceRoot, flatten_modeline_to_spans,
 };
+
+fn user_modeline_context<'a>(context: &StatuslineContext<'a>) -> modeline::ModelineContext<'a> {
+    modeline::ModelineContext {
+        vim_mode: context.vim_mode,
+        recording_macro: context.recording_macro,
+        workspace_name: context.workspace_name,
+        buffer_name: context.buffer_name,
+        buffer_modified: context.buffer_modified,
+        language_id: context.language_id,
+        line: context.line,
+        column: context.column,
+        lsp_server: context.lsp_server,
+        lsp_diagnostics: context
+            .lsp_diagnostics
+            .map(|diagnostics| modeline::LspDiagnosticsInfo {
+                errors: diagnostics.errors,
+                warnings: diagnostics.warnings,
+            }),
+        acp_connected: context.acp_connected,
+        git: context.git_branch.map(|branch| modeline::GitModelineInfo {
+            branch,
+            added: context.git_added,
+            removed: context.git_removed,
+        }),
+    }
+}
 
 impl UserLibrary for UserLibraryImpl {
     fn packages(&self) -> Vec<PluginPackage> {
@@ -470,43 +499,27 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
-        statusline::compose(&statusline::StatuslineContext {
-            vim_mode: context.vim_mode,
-            recording_macro: context.recording_macro,
-            workspace_name: context.workspace_name,
-            buffer_name: context.buffer_name,
-            buffer_modified: context.buffer_modified,
-            language_id: context.language_id,
-            line: context.line,
-            column: context.column,
-            lsp_server: context.lsp_server,
-            lsp_diagnostics: context
-                .lsp_diagnostics
-                .map(|d| statusline::LspDiagnosticsInfo {
-                    errors: d.errors,
-                    warnings: d.warnings,
-                }),
-            acp_connected: context.acp_connected,
-            git: context
-                .git_branch
-                .map(|branch| statusline::GitStatuslineInfo {
-                    branch,
-                    added: context.git_added,
-                    removed: context.git_removed,
-                }),
-        })
+        modeline::compose(&user_modeline_context(context))
+    }
+
+    fn statusline_spans(&self, context: &StatuslineContext<'_>) -> Vec<StatuslineSpan> {
+        flatten_modeline_to_spans(&self.modeline_segments(context))
+    }
+
+    fn modeline_segments(&self, context: &StatuslineContext<'_>) -> Vec<ModelineSegment> {
+        modeline::compose_modeline(&user_modeline_context(context))
     }
 
     fn statusline_lsp_connected_icon(&self) -> &'static str {
-        statusline::LSP_CONNECTED_ICON
+        modeline::LSP_CONNECTED_ICON
     }
 
     fn statusline_lsp_error_icon(&self) -> &'static str {
-        statusline::LSP_ERROR_ICON
+        modeline::LSP_ERROR_ICON
     }
 
     fn statusline_lsp_warning_icon(&self) -> &'static str {
-        statusline::LSP_WARNING_ICON
+        modeline::LSP_WARNING_ICON
     }
 
     fn lsp_diagnostic_icon(&self) -> &'static str {
@@ -691,6 +704,7 @@ extern "C" fn exported_pane_config() -> AbiPaneConfig {
     AbiPaneConfig::from_parts(
         UserLibraryImpl.pane_config(),
         UserLibraryImpl.workspace_dock_config(),
+        UserLibraryImpl.markdown_pretty_config(),
     )
 }
 
@@ -894,8 +908,8 @@ extern "C" fn exported_headerline_lines(context: AbiGhostTextContext) -> RVec<RS
         .into()
 }
 
-extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RString {
-    let context = StatuslineContext {
+fn statusline_context_from_abi(context: &AbiStatuslineContext) -> StatuslineContext<'_> {
+    StatuslineContext {
         vim_mode: context.vim_mode.as_str(),
         recording_macro: context
             .recording_macro
@@ -925,8 +939,14 @@ extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RStri
             .map(|value| value.as_str()),
         git_added: context.git_added,
         git_removed: context.git_removed,
-    };
-    UserLibraryImpl.statusline_render(&context).into()
+    }
+}
+
+extern "C" fn exported_statusline_render(context: AbiStatuslineContext) -> RString {
+    editor_plugin_api::encode_modeline(
+        &UserLibraryImpl.modeline_segments(&statusline_context_from_abi(&context)),
+    )
+    .into()
 }
 
 extern "C" fn exported_statusline_lsp_connected_icon() -> RStr<'static> {
@@ -1473,6 +1493,41 @@ mod tests {
             "ui.workspace-dock.muted",
             "ui.workspace-dock.selection",
             "ui.workspace-dock.accent",
+            "ui.statusline.foreground",
+            "ui.statusline.inactive.foreground",
+            "ui.statusline.mode",
+            "ui.statusline.muted",
+            "ui.modeline.foreground",
+            "ui.modeline.muted",
+            "ui.modeline.mode.normal.foreground",
+            "ui.modeline.mode.normal.background",
+            "ui.modeline.mode.insert.foreground",
+            "ui.modeline.mode.insert.background",
+            "ui.modeline.mode.replace.foreground",
+            "ui.modeline.mode.replace.background",
+            "ui.modeline.mode.visual.foreground",
+            "ui.modeline.mode.visual.background",
+            "ui.modeline.git.branch",
+            "ui.modeline.git.added",
+            "ui.modeline.git.removed",
+            "ui.picker.background",
+            "ui.picker.foreground",
+            "ui.picker.muted",
+            "ui.picker.subtle",
+            "ui.picker.border",
+            "ui.picker.selection",
+            "ui.diagnostic.error",
+            "ui.diagnostic.warning",
+            "ui.diagnostic.info",
+            "ui.line-number",
+            "ui.line-number.current",
+            "ui.pane.inactive",
+            "ui.pane.border",
+            "ui.pane.active-border",
+            "ui.ghost-text",
+            "ui.headerline",
+            "ui.headerline.background",
+            "ui.modal.scrim",
         ];
         for theme in themes {
             for token in TOKENS {

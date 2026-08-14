@@ -23,12 +23,16 @@ pub(super) const fn diagnostic_severity_rank(severity: LspDiagnosticSeverity) ->
     }
 }
 
-pub(super) const fn diagnostic_color(severity: LspDiagnosticSeverity) -> Color {
-    match severity {
-        LspDiagnosticSeverity::Error => Color::RGB(224, 107, 117),
-        LspDiagnosticSeverity::Warning => Color::RGB(209, 154, 102),
-        LspDiagnosticSeverity::Information => Color::RGB(110, 170, 255),
-    }
+pub(super) fn diagnostic_color(
+    severity: LspDiagnosticSeverity,
+    theme_registry: Option<&ThemeRegistry>,
+) -> Color {
+    let (token, fallback) = match severity {
+        LspDiagnosticSeverity::Error => (TOKEN_DIAGNOSTIC_ERROR, Color::RGB(224, 107, 117)),
+        LspDiagnosticSeverity::Warning => (TOKEN_DIAGNOSTIC_WARNING, Color::RGB(209, 154, 102)),
+        LspDiagnosticSeverity::Information => (TOKEN_DIAGNOSTIC_INFO, Color::RGB(110, 170, 255)),
+    };
+    theme_color(theme_registry, token, fallback)
 }
 
 pub(super) fn statusline_lsp_diagnostics(
@@ -157,6 +161,7 @@ pub(super) fn draw_diagnostic_underlines_for_segment(
     segment: LineWrapSegment,
     cell_width: i32,
     line_height: i32,
+    theme_registry: Option<&ThemeRegistry>,
 ) -> Result<(), ShellError> {
     for severity in [
         LspDiagnosticSeverity::Information,
@@ -186,7 +191,7 @@ pub(super) fn draw_diagnostic_underlines_for_segment(
                 (char_map.display_cols_between(clipped_start, clipped_end) as i32 * cell_width)
                     .max(1),
                 line_height,
-                diagnostic_color(severity),
+                diagnostic_color(severity, theme_registry),
             )?;
         }
     }

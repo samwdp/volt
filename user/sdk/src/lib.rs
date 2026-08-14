@@ -26,12 +26,12 @@ pub use abi::{
     AbiGitCommandBinding, AbiGitFeatureSpec, AbiGitLogEntry, AbiGitPrefixBinding, AbiGitStashEntry,
     AbiGitStatusPrefix, AbiGitStatusSnapshot, AbiHoverProvider, AbiIconFontCategory,
     AbiIconFontSymbol, AbiKeymapConfig, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
-    AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiOilDefaults,
-    AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode, AbiPaneConfig,
-    AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSection, AbiSectionAction, AbiSectionItem,
-    AbiSectionTree, AbiStatusEntry, AbiStatuslineContext, AbiStringPair, AbiTerminalConfig,
-    AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken,
-    AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiMarkdownPrettyConfig,
+    AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
+    AbiPaneConfig, AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSection, AbiSectionAction,
+    AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext, AbiStringPair,
+    AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption, AbiThemeOptionEntry,
+    AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -330,6 +330,289 @@ pub struct StatuslineContext<'a> {
     pub git_branch: Option<&'a str>,
     pub git_added: usize,
     pub git_removed: usize,
+}
+
+/// One painted run of statusline text, optionally themed by token name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatuslineSpan {
+    pub text: String,
+    pub token: Option<String>,
+}
+
+impl StatuslineSpan {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            token: None,
+        }
+    }
+
+    pub fn themed(text: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            token: Some(token.into()),
+        }
+    }
+}
+
+/// Left or right placement for a modeline segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelineAlignment {
+    Left,
+    Right,
+}
+
+/// One painted subsection inside a modeline segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelinePart {
+    pub text: String,
+    pub foreground: String,
+    pub background: Option<String>,
+}
+
+impl ModelinePart {
+    pub fn new(
+        text: impl Into<String>,
+        foreground: impl Into<String>,
+        background: Option<String>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            foreground: foreground.into(),
+            background,
+        }
+    }
+
+    pub fn fg(text: impl Into<String>, foreground: impl Into<String>) -> Self {
+        Self::new(text, foreground, None)
+    }
+}
+
+/// Ordered group of modeline parts with left/right alignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelineSegment {
+    pub alignment: ModelineAlignment,
+    pub parts: Vec<ModelinePart>,
+}
+
+impl ModelineSegment {
+    pub fn left(parts: Vec<ModelinePart>) -> Self {
+        Self {
+            alignment: ModelineAlignment::Left,
+            parts,
+        }
+    }
+
+    pub fn right(parts: Vec<ModelinePart>) -> Self {
+        Self {
+            alignment: ModelineAlignment::Right,
+            parts,
+        }
+    }
+}
+
+const STATUSLINE_SPAN_MARK: &str = "\u{0002}SL1\u{0003}";
+const MODELINE_MARK: &str = "\u{0002}SL2\u{0003}";
+const STATUSLINE_SPAN_SEP: char = '\u{001E}';
+const STATUSLINE_TOKEN_SEP: char = '\u{001F}';
+const MODELINE_SEG_SEP: char = '\u{001D}';
+const MODELINE_PART_SEP: char = '\u{001E}';
+const MODELINE_FIELD_SEP: char = '\u{001F}';
+
+/// Packs themed statusline spans into the existing `statusline_render` ABI string.
+pub fn encode_statusline_spans(spans: &[StatuslineSpan]) -> String {
+    let mut encoded = String::from(STATUSLINE_SPAN_MARK);
+    for (index, span) in spans.iter().enumerate() {
+        if index > 0 {
+            encoded.push(STATUSLINE_SPAN_SEP);
+        }
+        if let Some(token) = &span.token {
+            encoded.push_str(&sanitize_modeline_field(token));
+        }
+        encoded.push(STATUSLINE_TOKEN_SEP);
+        encoded.push_str(&sanitize_modeline_field(&span.text));
+    }
+    encoded
+}
+
+/// Unpacks a `statusline_render` ABI string into themed spans.
+pub fn decode_statusline_spans(raw: &str) -> Vec<StatuslineSpan> {
+    if raw.starts_with(MODELINE_MARK) {
+        return flatten_modeline_to_spans(&decode_modeline(raw));
+    }
+    let Some(payload) = raw.strip_prefix(STATUSLINE_SPAN_MARK) else {
+        return vec![StatuslineSpan::plain(raw)];
+    };
+    if payload.is_empty() {
+        return Vec::new();
+    }
+    payload
+        .split(STATUSLINE_SPAN_SEP)
+        .map(|part| match part.split_once(STATUSLINE_TOKEN_SEP) {
+            Some(("", text)) => StatuslineSpan::plain(text),
+            Some((token, text)) => StatuslineSpan::themed(text, token),
+            None => StatuslineSpan::plain(part),
+        })
+        .collect()
+}
+
+/// Packs modeline segments into the existing `statusline_render` ABI string.
+pub fn encode_modeline(segments: &[ModelineSegment]) -> String {
+    let mut encoded = String::from(MODELINE_MARK);
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            encoded.push(MODELINE_SEG_SEP);
+        }
+        encoded.push(match segment.alignment {
+            ModelineAlignment::Left => 'L',
+            ModelineAlignment::Right => 'R',
+        });
+        for (part_index, part) in segment.parts.iter().enumerate() {
+            if part_index > 0 {
+                encoded.push(MODELINE_PART_SEP);
+            }
+            encoded.push_str(&sanitize_modeline_field(&part.foreground));
+            encoded.push(MODELINE_FIELD_SEP);
+            if let Some(background) = &part.background {
+                encoded.push_str(&sanitize_modeline_field(background));
+            }
+            encoded.push(MODELINE_FIELD_SEP);
+            encoded.push_str(&sanitize_modeline_field(&part.text));
+        }
+    }
+    encoded
+}
+
+/// Unpacks a `statusline_render` ABI string into modeline segments.
+pub fn decode_modeline(raw: &str) -> Vec<ModelineSegment> {
+    if let Some(payload) = raw.strip_prefix(MODELINE_MARK) {
+        if payload.is_empty() {
+            return Vec::new();
+        }
+        return payload
+            .split(MODELINE_SEG_SEP)
+            .filter_map(decode_modeline_segment)
+            .collect();
+    }
+    if raw.starts_with(STATUSLINE_SPAN_MARK) {
+        let spans = decode_statusline_spans_sl1(raw);
+        if spans.is_empty() {
+            return Vec::new();
+        }
+        return vec![ModelineSegment::left(
+            spans
+                .into_iter()
+                .map(|span| ModelinePart {
+                    text: span.text,
+                    foreground: span.token.unwrap_or_default(),
+                    background: None,
+                })
+                .collect(),
+        )];
+    }
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    vec![ModelineSegment::left(vec![ModelinePart::fg(
+        raw,
+        String::new(),
+    )])]
+}
+
+fn decode_statusline_spans_sl1(raw: &str) -> Vec<StatuslineSpan> {
+    let Some(payload) = raw.strip_prefix(STATUSLINE_SPAN_MARK) else {
+        return vec![StatuslineSpan::plain(raw)];
+    };
+    if payload.is_empty() {
+        return Vec::new();
+    }
+    payload
+        .split(STATUSLINE_SPAN_SEP)
+        .map(|part| match part.split_once(STATUSLINE_TOKEN_SEP) {
+            Some(("", text)) => StatuslineSpan::plain(text),
+            Some((token, text)) => StatuslineSpan::themed(text, token),
+            None => StatuslineSpan::plain(part),
+        })
+        .collect()
+}
+
+fn decode_modeline_segment(raw: &str) -> Option<ModelineSegment> {
+    let (alignment_char, parts_raw) = raw.split_at(raw.len().min(1));
+    let alignment = match alignment_char {
+        "L" => ModelineAlignment::Left,
+        "R" => ModelineAlignment::Right,
+        _ => return None,
+    };
+    if parts_raw.is_empty() {
+        return Some(ModelineSegment {
+            alignment,
+            parts: Vec::new(),
+        });
+    }
+    let parts = parts_raw
+        .split(MODELINE_PART_SEP)
+        .filter_map(|part| {
+            let mut fields = part.splitn(3, MODELINE_FIELD_SEP);
+            let foreground = fields.next()?.to_string();
+            let background = fields.next()?;
+            let text = fields.next()?.to_string();
+            Some(ModelinePart {
+                text,
+                foreground,
+                background: (!background.is_empty()).then(|| background.to_string()),
+            })
+        })
+        .collect();
+    Some(ModelineSegment { alignment, parts })
+}
+
+/// Flattens modeline segments into legacy statusline spans (foreground token only).
+pub fn flatten_modeline_to_spans(segments: &[ModelineSegment]) -> Vec<StatuslineSpan> {
+    let mut spans = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            spans.push(StatuslineSpan::plain(" "));
+        }
+        for (part_index, part) in segment.parts.iter().enumerate() {
+            if part_index > 0 {
+                spans.push(StatuslineSpan::plain(" "));
+            }
+            if part.foreground.is_empty() {
+                spans.push(StatuslineSpan::plain(&part.text));
+            } else {
+                spans.push(StatuslineSpan::themed(&part.text, &part.foreground));
+            }
+        }
+    }
+    spans
+}
+
+/// Joins modeline part texts into a single display string.
+pub fn flatten_modeline_text(segments: &[ModelineSegment]) -> String {
+    let mut text = String::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 && !text.is_empty() {
+            text.push(' ');
+        }
+        for (part_index, part) in segment.parts.iter().enumerate() {
+            if part_index > 0 {
+                text.push(' ');
+            }
+            text.push_str(&part.text);
+        }
+    }
+    text
+}
+
+fn sanitize_modeline_field(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            *character != MODELINE_SEG_SEP
+                && *character != MODELINE_PART_SEP
+                && *character != MODELINE_FIELD_SEP
+        })
+        .collect()
 }
 
 /// Context passed to the user library when producing inline ghost-text annotations.
@@ -1554,6 +1837,12 @@ pub trait UserLibrary: Send + Sync {
             " {} | {}:{} ",
             context.buffer_name, context.line, context.column
         )
+    }
+    fn statusline_spans(&self, context: &StatuslineContext<'_>) -> Vec<StatuslineSpan> {
+        flatten_modeline_to_spans(&self.modeline_segments(context))
+    }
+    fn modeline_segments(&self, context: &StatuslineContext<'_>) -> Vec<ModelineSegment> {
+        decode_modeline(&self.statusline_render(context))
     }
     fn statusline_lsp_connected_icon(&self) -> &'static str {
         editor_icons::symbols::md::MD_LAN_CONNECT
@@ -3102,11 +3391,12 @@ impl PluginPackage {
 #[cfg(test)]
 mod tests {
     use super::{
-        OilKeyAction, PickerExtraKeybindSpec, PickerProviderSpec, PickerSource, PluginAction,
-        PluginBuffer, PluginBufferSection, PluginBufferSectionUpdate, PluginBufferSections,
-        PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginKeyBinding,
-        PluginKeymapScope, PluginPackage, PluginVimMode, VimActionContext, VimActionSpec,
-        VimEditAction,
+        ModelineAlignment, ModelinePart, ModelineSegment, OilKeyAction, PickerExtraKeybindSpec,
+        PickerProviderSpec, PickerSource, PluginAction, PluginBuffer, PluginBufferSection,
+        PluginBufferSectionUpdate, PluginBufferSections, PluginCommand, PluginHookBinding,
+        PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+        StatuslineSpan, VimActionContext, VimActionSpec, VimEditAction, decode_modeline,
+        decode_statusline_spans, encode_modeline, encode_statusline_spans,
     };
 
     #[test]
@@ -3134,6 +3424,53 @@ mod tests {
         )]);
         assert_eq!(replaced.extra_keybinds().len(), 1);
         assert_eq!(replaced.extra_keybinds()[0].chord(), "Ctrl+x");
+    }
+
+    #[test]
+    fn statusline_span_encoding_round_trips_themed_and_plain_runs() {
+        let spans = vec![
+            StatuslineSpan::themed("NORMAL", "ui.statusline.mode"),
+            StatuslineSpan::plain(" │ "),
+            StatuslineSpan::themed("main.rs", "ui.statusline.foreground"),
+        ];
+        let decoded = decode_statusline_spans(&encode_statusline_spans(&spans));
+        assert_eq!(decoded, spans);
+        assert_eq!(
+            decode_statusline_spans("plain statusline"),
+            vec![StatuslineSpan::plain("plain statusline")]
+        );
+    }
+
+    #[test]
+    fn modeline_encoding_round_trips_alignment_parts_and_backgrounds() {
+        let segments = vec![
+            ModelineSegment::left(vec![ModelinePart::new(
+                " NORMAL ",
+                "ui.modeline.mode.normal.foreground",
+                Some("ui.modeline.mode.normal.background".into()),
+            )]),
+            ModelineSegment::left(vec![
+                ModelinePart::fg("main", "ui.modeline.git.branch"),
+                ModelinePart::fg("+12", "ui.modeline.git.added"),
+                ModelinePart::fg("-3", "ui.modeline.git.removed"),
+            ]),
+            ModelineSegment::right(vec![ModelinePart::fg("Ln 1, Col 1", "ui.modeline.muted")]),
+        ];
+        let encoded = encode_modeline(&segments);
+        assert!(encoded.starts_with('\u{0002}'));
+        assert_eq!(decode_modeline(&encoded), segments);
+        assert_eq!(
+            decode_modeline(&encoded)
+                .into_iter()
+                .filter(|segment| segment.alignment == ModelineAlignment::Right)
+                .count(),
+            1
+        );
+        let spans = decode_statusline_spans(&encoded);
+        assert!(spans.iter().any(|span| span.text == " NORMAL "));
+        assert!(spans.iter().any(|span| {
+            span.token.as_deref() == Some("ui.modeline.git.added") && span.text == "+12"
+        }));
     }
 
     #[test]

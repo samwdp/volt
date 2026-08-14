@@ -576,17 +576,17 @@ pub(super) fn render_picker_overlay(
         Color::RGBA(215, 221, 232, 255),
     );
     let is_dark = is_dark_color(base_background);
-    let popup_background = theme_color(theme_registry, "ui.picker.background", base_background);
+    let popup_background = theme_color(theme_registry, TOKEN_PICKER_BACKGROUND, base_background);
     let foreground = theme_color(theme_registry, TOKEN_PICKER_FOREGROUND, base_foreground);
-    let highlight_background = adjust_color(popup_background, if is_dark { 16 } else { -16 });
-    let picker_highlight = theme_color(
+    let highlight_background = theme_color(
         theme_registry,
-        "ui.picker.highlight",
-        theme_color(
-            theme_registry,
-            "ui.statusline.active",
-            Color::RGB(110, 170, 255),
-        ),
+        TOKEN_PICKER_SELECTION,
+        adjust_color(popup_background, if is_dark { 16 } else { -16 }),
+    );
+    let border = theme_color(
+        theme_registry,
+        TOKEN_PICKER_BORDER,
+        adjust_color(popup_background, if is_dark { 24 } else { -24 }),
     );
     let muted = theme_color(
         theme_registry,
@@ -599,7 +599,6 @@ pub(super) fn render_picker_overlay(
         TOKEN_PICKER_SUBTLE,
         blend_color(foreground, popup_background, 0.4),
     );
-    // Border using two rounded rectangles (outer border color, inner background)
     fill_overlay_surface_rounded_rect(
         target,
         PixelRectToRect::rect(
@@ -609,7 +608,7 @@ pub(super) fn render_picker_overlay(
             popup_rect.height,
         ),
         corner_radius,
-        picker_highlight,
+        border,
         window_effects,
     )?;
     let inner_rect = PixelRectToRect::rect(
@@ -635,13 +634,27 @@ pub(super) fn render_picker_overlay(
         foreground,
     )?;
 
-    let query = format!("Query > {}", picker.session().query());
+    let query = picker.session().query();
+    let query_y = popup_rect.y + line_height + 20;
+    let query_rect = PixelRectToRect::rect(
+        popup_rect.x + 12,
+        query_y - 2,
+        popup_rect.width.saturating_sub(24),
+        (line_height + 8).max(20) as u32,
+    );
+    let input_background = theme_color(
+        theme_registry,
+        "ui.input.background",
+        adjust_color(popup_background, if is_dark { 10 } else { -10 }),
+    );
+    fill_overlay_surface_rounded_rect(target, query_rect, 6, input_background, window_effects)?;
+    let query_text = if query.is_empty() { "filter" } else { query };
     draw_text(
         target,
-        popup_rect.x + 16,
-        popup_rect.y + line_height + 24,
-        &query,
-        muted,
+        popup_rect.x + 20,
+        query_y,
+        query_text,
+        if query.is_empty() { muted } else { foreground },
     )?;
 
     let summary = format!(

@@ -998,6 +998,7 @@ fn notify_issues(
             progress: None,
             active: false,
             action: None,
+            workspace_id: None,
         },
         Instant::now(),
     );

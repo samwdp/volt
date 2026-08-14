@@ -27,6 +27,7 @@ pub(super) struct WorkspaceDockEntry {
     pub(super) buffer_count: usize,
     pub(super) branch: Option<String>,
     pub(super) active: bool,
+    pub(super) unread: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +303,7 @@ pub(super) fn render_workspace_dock(
             fill_overlay_surface_rect(target, card_rect, selection, window_effects)?;
             fill_overlay_surface_rect(
                 target,
-                PixelRectToRect::rect(layout.dock_rect.x, card_y, 3, card_height.max(0) as u32),
+                PixelRectToRect::rect(layout.dock_rect.x, card_y, 4, card_height.max(0) as u32),
                 accent,
                 window_effects,
             )?;
@@ -321,6 +322,26 @@ pub(super) fn render_workspace_dock(
         draw_text(target, text_x, baseline, &name, foreground)?;
         draw_text(target, text_x, baseline + line_height, &buffers, muted)?;
         draw_text(target, text_x, baseline + line_height * 2, &branch, muted)?;
+        if entry.unread > 0 {
+            let badge = entry.unread.min(9);
+            let label = if entry.unread > 9 {
+                "9+".to_owned()
+            } else {
+                badge.to_string()
+            };
+            let badge_size = (line_height.max(12) as u32).saturating_sub(2);
+            let badge_x =
+                layout.dock_rect.x + layout.dock_rect.width as i32 - cell_width.max(1) * 2 - 4;
+            let badge_y = card_y + 4;
+            fill_overlay_surface_rounded_rect(
+                target,
+                PixelRectToRect::rect(badge_x, badge_y, badge_size, badge_size),
+                badge_size / 2,
+                accent,
+                window_effects,
+            )?;
+            draw_text(target, badge_x + 3, badge_y + 1, &label, dock_background)?;
+        }
         let separator_y = card_y + card_height - 1;
         if separator_y < layout.dock_rect.y + layout.dock_rect.height as i32 {
             fill_overlay_surface_rect(

@@ -381,6 +381,7 @@ pub(super) struct NotificationUpdate {
     pub(super) progress: Option<NotificationProgress>,
     pub(super) active: bool,
     pub(super) action: Option<NotificationAction>,
+    pub(super) workspace_id: Option<WorkspaceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

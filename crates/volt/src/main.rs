@@ -27,7 +27,7 @@ use editor_plugin_api::abi::{
 };
 use editor_plugin_api::{
     BrowserFeatureSpec, ContextHelpSpec, DbFeatureSpec, GitFeatureSpec, OilFeatureSpec, PaneConfig,
-    PdfOpenMode, TerminalFeatureSpec,
+    PdfOpenMode, StatuslineSpan, TerminalFeatureSpec,
 };
 use editor_plugin_host::{UserLibrary, bootstrap, load_auto_loaded_packages};
 use editor_sdl::{ShellConfig, run_demo_shell};
@@ -276,7 +276,7 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn markdown_pretty_config(&self) -> editor_plugin_api::MarkdownPrettyConfig {
-        editor_plugin_api::MarkdownPrettyConfig::default()
+        self.module.pane_config_v1()().markdown_pretty_config()
     }
 
     fn keymap_config(&self) -> editor_plugin_api::KeymapConfig {
@@ -456,7 +456,23 @@ impl UserLibrary for DynamicUserLibrary {
     }
 
     fn statusline_render(&self, context: &editor_plugin_api::StatuslineContext<'_>) -> String {
-        self.module.statusline_render()(AbiStatuslineContext::from(*context)).into()
+        editor_plugin_api::flatten_modeline_text(&self.modeline_segments(context))
+    }
+
+    fn statusline_spans(
+        &self,
+        context: &editor_plugin_api::StatuslineContext<'_>,
+    ) -> Vec<StatuslineSpan> {
+        editor_plugin_api::flatten_modeline_to_spans(&self.modeline_segments(context))
+    }
+
+    fn modeline_segments(
+        &self,
+        context: &editor_plugin_api::StatuslineContext<'_>,
+    ) -> Vec<editor_plugin_api::ModelineSegment> {
+        editor_plugin_api::decode_modeline(
+            &self.module.statusline_render()(AbiStatuslineContext::from(*context)).into_string(),
+        )
     }
 
     fn statusline_lsp_connected_icon(&self) -> &'static str {
