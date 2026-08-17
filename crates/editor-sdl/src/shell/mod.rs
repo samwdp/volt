@@ -372,7 +372,8 @@ const HOOK_LSP_CODE_ACTIONS: &str = lsp_hooks::CODE_ACTIONS;
 const HOOK_LSP_COPILOT_SIGN_IN: &str = lsp_hooks::COPILOT_SIGN_IN;
 const HOOK_LSP_COPILOT_SIGN_OUT: &str = lsp_hooks::COPILOT_SIGN_OUT;
 const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
-const ACP_INPUT_PLACEHOLDER: &str = "Type / for commands. Press M-x and `acp.` for other commands";
+const ACP_INPUT_PLACEHOLDER: &str =
+    "Type @ to link files, / for commands. Paste images with Ctrl+Shift+V";
 const QUICKFIX_BUFFER_NAME: &str = "*quickfix*";
 const QUICKFIX_POPUP_TITLE: &str = "Quickfix";
 const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
@@ -3807,6 +3808,13 @@ struct PluginTextPaneState {
 }
 
 #[derive(Debug, Clone)]
+struct AcpPendingImage {
+    mime_type: String,
+    data_base64: String,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
 struct AcpBufferState {
     session_title: Option<String>,
     active_pane: AcpPane,
@@ -3816,6 +3824,7 @@ struct AcpBufferState {
     plan_pane: AcpPaneState,
     output_pane: AcpPaneState,
     input: InputField,
+    pending_images: Vec<AcpPendingImage>,
     footer_pane: PluginTextPaneState,
 }
 
@@ -4062,6 +4071,7 @@ impl AcpBufferState {
             plan_pane: AcpPaneState::default(),
             output_pane: AcpPaneState::default(),
             input,
+            pending_images: Vec::new(),
             footer_pane: PluginTextPaneState {
                 min_rows: Some(1),
                 ..PluginTextPaneState::default()
@@ -5655,11 +5665,36 @@ impl ShellBuffer {
     }
 
     fn clear_input(&mut self) -> bool {
+        if let Some(state) = self.acp_state.as_mut() {
+            state.pending_images.clear();
+        }
         if let Some(input) = self.input_field_mut() {
             input.clear();
             return true;
         }
         false
+    }
+
+    fn acp_pending_images(&self) -> &[AcpPendingImage] {
+        self.acp_state
+            .as_ref()
+            .map(|state| state.pending_images.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn acp_take_pending_images(&mut self) -> Vec<AcpPendingImage> {
+        self.acp_state
+            .as_mut()
+            .map(|state| std::mem::take(&mut state.pending_images))
+            .unwrap_or_default()
+    }
+
+    fn acp_push_pending_image(&mut self, image: AcpPendingImage) -> bool {
+        let Some(state) = self.acp_state.as_mut() else {
+            return false;
+        };
+        state.pending_images.push(image);
+        true
     }
 
     fn section_state(&self) -> Option<&SectionedBufferState> {
@@ -8425,6 +8460,10 @@ enum PickerAction {
         buffer_id: BufferId,
         command: String,
     },
+    AcpInsertFileMention {
+        buffer_id: BufferId,
+        path: String,
+    },
     AcpLoadSession {
         buffer_id: BufferId,
         session_id: String,
@@ -8457,6 +8496,7 @@ enum PickerAction {
 enum PickerKind {
     Generic,
     AcpSlash { buffer_id: BufferId },
+    AcpMention { buffer_id: BufferId },
     AcpPermission { request_id: u64 },
 }
 
@@ -11546,7 +11586,10 @@ impl ShellState {
                     && active_buffer.has_input
                     && input_field_paste_shortcut_requested(keycode, keymod)
                 {
-                    if let Some(text) = read_system_clipboard() {
+                    if active_buffer.is_acp {
+                        paste_into_active_acp_input(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?;
+                    } else if let Some(text) = read_system_clipboard() {
                         paste_text_into_active_input_buffer(&mut self.runtime, &text)
                             .map_err(ShellError::Runtime)?;
                     }
@@ -11590,13 +11633,13 @@ impl ShellState {
                     return Ok(true);
                 }
 
-                let acp_slash_picker_active = matches!(
+                let acp_inline_picker_active = matches!(
                     self.ui()?.picker_kind(),
-                    Some(PickerKind::AcpSlash { buffer_id })
+                    Some(PickerKind::AcpSlash { buffer_id } | PickerKind::AcpMention { buffer_id })
                         if buffer_id == active_buffer.buffer_id
                 );
                 if picker_visible
-                    && acp_slash_picker_active
+                    && acp_inline_picker_active
                     && matches!(
                         keycode,
                         Keycode::Return | Keycode::KpEnter | Keycode::Return2
@@ -11608,7 +11651,7 @@ impl ShellState {
                     self.sync_active_buffer().map_err(ShellError::Runtime)?;
                     return Ok(false);
                 }
-                if picker_visible && !acp_slash_picker_active {
+                if picker_visible && !acp_inline_picker_active {
                     if matches!(
                         keycode,
                         Keycode::Return | Keycode::KpEnter | Keycode::Return2
@@ -11628,11 +11671,11 @@ impl ShellState {
                     return Ok(false);
                 }
                 if picker_visible
-                    && acp_slash_picker_active
+                    && acp_inline_picker_active
                     && matches!(keycode, Keycode::Backspace | Keycode::Delete)
                 {
                     self.ui_mut()?.close_picker();
-                } else if picker_visible && acp_slash_picker_active {
+                } else if picker_visible && acp_inline_picker_active {
                     return Ok(false);
                 }
 
@@ -12987,9 +13030,11 @@ impl ShellState {
             }
             return Ok(());
         }
-        let acp_slash_picker_active =
-            matches!(self.ui()?.picker_kind(), Some(PickerKind::AcpSlash { .. }));
-        if self.picker_visible()? && !acp_slash_picker_active {
+        let acp_inline_picker_active = matches!(
+            self.ui()?.picker_kind(),
+            Some(PickerKind::AcpSlash { .. } | PickerKind::AcpMention { .. })
+        );
+        if self.picker_visible()? && !acp_inline_picker_active {
             clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
             if let Some(picker) = self.ui_mut()?.picker_mut() {
                 picker.append_query(text);
@@ -12997,7 +13042,7 @@ impl ShellState {
             self.schedule_picker_search_refresh()?;
             return Ok(());
         }
-        if acp_slash_picker_active {
+        if acp_inline_picker_active {
             self.ui_mut()?.close_picker();
         }
         let active_buffer =
@@ -13032,6 +13077,8 @@ impl ShellState {
                     };
                     if handled {
                         acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                        acp::maybe_open_mention_completion(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
                         acp::refresh_acp_input_hint(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
@@ -13108,6 +13155,8 @@ impl ShellState {
                     };
                     if handled {
                         acp::maybe_open_slash_completion(&mut self.runtime, buffer_id)
+                            .map_err(ShellError::Runtime)?;
+                        acp::maybe_open_mention_completion(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
                         acp::refresh_acp_input_hint(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
@@ -18977,6 +19026,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     acp::acp_insert_slash_command(runtime, buffer_id, &command)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::AcpInsertFileMention { buffer_id, path } => {
+                    acp::acp_insert_file_mention(runtime, buffer_id, &path)?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::AcpLoadSession {
                     buffer_id,
                     session_id,
@@ -24588,14 +24641,16 @@ fn paste_text_into_active_input_buffer(
         let buffer = shell_buffer(runtime, buffer_id)?;
         buffer_is_acp(&buffer.kind)
     };
-    let close_acp_slash_picker_first = is_acp
+    let close_acp_inline_picker_first = is_acp
         && matches!(
             shell_ui(runtime)?.picker_kind(),
             Some(PickerKind::AcpSlash {
                 buffer_id: picker_buffer_id,
+            } | PickerKind::AcpMention {
+                buffer_id: picker_buffer_id,
             }) if picker_buffer_id == buffer_id
         );
-    if close_acp_slash_picker_first {
+    if close_acp_inline_picker_first {
         shell_ui_mut(runtime)?.close_picker();
     }
     let handled = {
@@ -24610,9 +24665,22 @@ fn paste_text_into_active_input_buffer(
     if handled && is_acp {
         shell_ui_mut(runtime)?.close_picker();
         acp::maybe_open_slash_completion(runtime, buffer_id)?;
+        acp::maybe_open_mention_completion(runtime, buffer_id)?;
         acp::refresh_acp_input_hint(runtime, buffer_id)?;
     }
     Ok(handled)
+}
+
+fn paste_into_active_acp_input(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    // Prefer clipboard images (Zed / ACP): attach as Image content blocks.
+    // Fall back to text when the clipboard does not expose image data.
+    if acp::paste_clipboard_image_into_acp_input(runtime)? {
+        return Ok(true);
+    }
+    if let Some(text) = read_system_clipboard() {
+        return paste_text_into_active_input_buffer(runtime, &text);
+    }
+    Ok(false)
 }
 
 fn motion_is_inclusive(motion: ShellMotion) -> bool {
@@ -26133,7 +26201,7 @@ fn emit_workspace_format(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (prompt, text, kind, name) = {
+    let (prompt, text, kind, name, has_pending_images) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         let Some(input) = buffer.input_field() else {
             return Ok(());
@@ -26143,9 +26211,10 @@ fn submit_input_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
             input.text().to_owned(),
             buffer.kind.clone(),
             buffer.display_name().to_owned(),
+            !buffer.acp_pending_images().is_empty(),
         )
     };
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && !has_pending_images {
         return Ok(());
     }
     if buffer_is_acp(&kind) {

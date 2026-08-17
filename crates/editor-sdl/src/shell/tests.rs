@@ -11882,6 +11882,48 @@ fn paste_text_into_active_input_buffer_updates_acp_input() -> Result<(), String>
 }
 
 #[test]
+fn attach_clipboard_image_marks_pending_acp_context() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let image = encode_rgba_image_png(&[0, 128, 255, 255], 1, 1, "Image")
+        .ok_or_else(|| "failed to encode clipboard image".to_owned())?;
+
+    assert!(acp::attach_clipboard_image_to_acp_input(
+        &mut state.runtime,
+        buffer_id,
+        image
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(buffer.acp_pending_images().len(), 1);
+    assert_eq!(buffer.acp_pending_images()[0].mime_type, "image/png");
+    assert_eq!(buffer.acp_pending_images()[0].label, "Image");
+    Ok(())
+}
+
+#[test]
+fn acp_insert_file_mention_replaces_active_at_token() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "check @ma", None)?;
+
+    acp::acp_insert_file_mention(&mut state.runtime, buffer_id, "src/main.rs")?;
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "check @src/main.rs "
+    );
+    Ok(())
+}
+
+#[test]
 fn paste_text_into_active_input_buffer_closes_acp_picker_for_multiline_text() -> Result<(), String>
 {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;

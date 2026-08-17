@@ -1208,6 +1208,7 @@ pub enum AcpPickerKind {
     Models,
     Sessions,
     SlashCommands,
+    FileMentions,
 }
 
 /// Host-provided ACP picker option data.
@@ -1273,6 +1274,7 @@ pub enum AcpActionSpec {
     SetModel { model_id: RString },
     LoadSession { session_id: RString },
     InsertSlashCommand { command: RString },
+    InsertFileMention { path: RString },
 }
 
 impl AcpActionSpec {
@@ -1297,6 +1299,12 @@ impl AcpActionSpec {
     pub fn insert_slash_command(command: impl Into<RString>) -> Self {
         Self::InsertSlashCommand {
             command: command.into(),
+        }
+    }
+
+    pub fn insert_file_mention(path: impl Into<RString>) -> Self {
+        Self::InsertFileMention {
+            path: path.into(),
         }
     }
 }
@@ -1693,6 +1701,9 @@ pub trait UserLibrary: Send + Sync {
                     AcpPickerKind::Sessions => AcpActionSpec::load_session(option.id.clone()),
                     AcpPickerKind::SlashCommands => {
                         AcpActionSpec::insert_slash_command(option.id.clone())
+                    }
+                    AcpPickerKind::FileMentions => {
+                        AcpActionSpec::insert_file_mention(option.id.clone())
                     }
                 };
                 AcpPickerItemSpec::new(

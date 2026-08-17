@@ -11,20 +11,24 @@ use std::{
 use agent_client_protocol::{Agent, Client, ClientSideConnection};
 use agent_client_protocol::{
     AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, Error, FileSystemCapabilities, Implementation, InitializeRequest,
-    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, Meta,
-    ModelId, ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionId,
-    PermissionOptionKind, Plan, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource, Error,
+    FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
+    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, Meta, ModelId, ModelInfo,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
+    PromptCapabilities, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionInfo,
     SessionInfoUpdate, SessionMode, SessionModeId, SessionModeState, SessionModelState,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
     SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    TerminalOutputResponse, TextResourceContents, ToolCall, ToolCallUpdate,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
+use base64::Engine as _;
+use editor_git::list_repository_files;
 use async_trait::async_trait;
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use editor_picker::PickerResultOrder;
@@ -1035,11 +1039,22 @@ pub(super) fn submit_acp_prompt(
         .get::<Arc<Mutex<AcpManager>>>()
         .ok_or_else(|| "acp manager service missing".to_owned())?
         .clone();
-    let session_id = {
+    let (session_id, prompt_capabilities, workspace_root) = {
         let manager = manager
             .lock()
             .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-        manager.session_for_buffer(buffer_id)
+        let session_id = manager.session_for_buffer(buffer_id);
+        let (capabilities, root) = session_id
+            .as_ref()
+            .and_then(|session_id| manager.sessions.get(session_id))
+            .map(|session| {
+                (
+                    session.prompt_capabilities.clone(),
+                    session.workspace_root.clone(),
+                )
+            })
+            .unwrap_or_else(|| (PromptCapabilities::default(), PathBuf::new()));
+        (session_id, capabilities, root)
     };
     let Some(session_id) = session_id else {
         let follow = {
@@ -1052,9 +1067,27 @@ pub(super) fn submit_acp_prompt(
         refresh_acp_input_hint(runtime, buffer_id)?;
         return Ok(());
     };
+    let pending_images = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.acp_take_pending_images()
+    };
+    let content_blocks = build_acp_prompt_content_blocks(
+        text,
+        &pending_images,
+        &workspace_root,
+        &prompt_capabilities,
+    );
+    if content_blocks.is_empty() {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        for image in pending_images {
+            let _ = buffer.acp_push_pending_image(image);
+        }
+        return Ok(());
+    }
+    let display = format_acp_user_prompt_display(prompt, text, &pending_images);
     let follow = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        let follow = buffer.acp_push_user_prompt(format!("{prompt}{text}"));
+        let follow = buffer.acp_push_user_prompt(display);
         buffer.clear_input();
         follow
     };
@@ -1063,7 +1096,7 @@ pub(super) fn submit_acp_prompt(
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.prompt(session_id, text.to_owned())
+    manager.prompt(session_id, content_blocks)
 }
 
 pub(super) fn acp_complete_slash(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -1154,6 +1187,252 @@ pub(super) fn acp_insert_slash_command(
     Ok(())
 }
 
+pub(super) fn acp_insert_file_mention(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    path: &str,
+) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let Some(input) = buffer.input_field_mut() else {
+        return Err("ACP buffer has no input field".to_owned());
+    };
+    let existing = input.text().to_owned();
+    let next = replace_active_mention_token(&existing, path);
+    input.set_text(&next);
+    refresh_acp_input_hint(runtime, buffer_id)?;
+    Ok(())
+}
+
+pub(super) fn maybe_open_mention_completion(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let Some(text) = ({
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
+        ) {
+            return Ok(());
+        }
+        buffer.input_field().map(|input| input.text().to_owned())
+    }) else {
+        return Ok(());
+    };
+    let picker_kind = shell_ui(runtime)?.picker_kind();
+    let mention_picker_active = matches!(
+        picker_kind,
+        Some(PickerKind::AcpMention {
+            buffer_id: picker_buffer_id,
+        }) if picker_buffer_id == buffer_id
+    );
+    let Some(query) = acp_mention_completion_query(&text) else {
+        if mention_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        }
+        return Ok(());
+    };
+    if shell_ui(runtime)?.picker_visible() {
+        if mention_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        } else {
+            return Ok(());
+        }
+    }
+    open_file_mention_picker(runtime, buffer_id, CompletionTrigger::Auto(query.to_owned()))
+}
+
+pub(super) fn paste_clipboard_image_into_acp_input(
+    runtime: &mut EditorRuntime,
+) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let is_acp = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
+        )
+    };
+    if !is_acp {
+        return Ok(false);
+    }
+    let Some(image) = read_system_clipboard_image() else {
+        return Ok(false);
+    };
+    attach_clipboard_image_to_acp_input(runtime, buffer_id, image)
+}
+
+pub(super) fn attach_clipboard_image_to_acp_input(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    image: ClipboardImage,
+) -> Result<bool, String> {
+    let supports_image = match runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() {
+        None => true,
+        Some(manager) => {
+            let manager = manager
+                .lock()
+                .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+            manager
+                .session_for_buffer(buffer_id)
+                .and_then(|session_id| manager.sessions.get(&session_id))
+                .map(|session| session.prompt_capabilities.image)
+                .unwrap_or(true)
+        }
+    };
+    if !supports_image {
+        let follow = {
+            let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            buffer.acp_push_system_message(
+                "Connected ACP agent does not advertise image prompt support.",
+            )
+        };
+        refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+        return Ok(true);
+    }
+    let pending = AcpPendingImage {
+        mime_type: image.mime_type,
+        data_base64: base64::engine::general_purpose::STANDARD.encode(image.bytes),
+        label: image.label,
+    };
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        if !buffer.acp_push_pending_image(pending) {
+            return Ok(false);
+        }
+    }
+    refresh_acp_input_hint(runtime, buffer_id)?;
+    Ok(true)
+}
+
+fn replace_active_mention_token(text: &str, path: &str) -> String {
+    if let Some(at) = mention_token_start(text) {
+        let prefix = &text[..at];
+        format!("{prefix}@{path} ")
+    } else if text.is_empty() || text.ends_with(|c: char| c.is_whitespace()) {
+        format!("{text}@{path} ")
+    } else {
+        format!("{text} @{path} ")
+    }
+}
+
+fn mention_token_start(text: &str) -> Option<usize> {
+    let at = text.rfind('@')?;
+    if at > 0 {
+        let previous = text[..at].chars().next_back()?;
+        if !previous.is_whitespace() {
+            return None;
+        }
+    }
+    let rest = &text[at + 1..];
+    if rest.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(at)
+}
+
+fn acp_mention_completion_query(text: &str) -> Option<&str> {
+    let at = mention_token_start(text)?;
+    Some(&text[at + 1..])
+}
+
+fn format_acp_user_prompt_display(
+    prompt: &str,
+    text: &str,
+    pending_images: &[AcpPendingImage],
+) -> String {
+    let mut display = format!("{prompt}{text}");
+    if !pending_images.is_empty() {
+        let labels = pending_images
+            .iter()
+            .map(|image| image.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if display.trim().is_empty() {
+            display = format!("{prompt}[{labels}]");
+        } else {
+            display.push_str(&format!("\n[{labels}]"));
+        }
+    }
+    display
+}
+
+fn file_uri_for_path(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| format!("file://{}", path.display()))
+}
+
+fn build_acp_prompt_content_blocks(
+    text: &str,
+    pending_images: &[AcpPendingImage],
+    workspace_root: &Path,
+    capabilities: &PromptCapabilities,
+) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let Some(relative_at) = rest.find('@') else {
+            let trailing = text[cursor..].trim_end();
+            if !trailing.is_empty() {
+                blocks.push(ContentBlock::from(trailing.to_owned()));
+            }
+            break;
+        };
+        let at = cursor + relative_at;
+        if at > cursor {
+            let before = &text[cursor..at];
+            if !before.is_empty() {
+                blocks.push(ContentBlock::from(before.to_owned()));
+            }
+        }
+        let after_at = &text[at + 1..];
+        let path_len = after_at
+            .chars()
+            .take_while(|character| !character.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if path_len == 0 {
+            blocks.push(ContentBlock::from("@".to_owned()));
+            cursor = at + 1;
+            continue;
+        }
+        let relative = &after_at[..path_len];
+        let absolute = if Path::new(relative).is_absolute() {
+            PathBuf::from(relative)
+        } else {
+            workspace_root.join(relative)
+        };
+        let uri = file_uri_for_path(&absolute);
+        let name = Path::new(relative)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(relative)
+            .to_owned();
+        if capabilities.embedded_context
+            && let Ok(contents) = std::fs::read_to_string(&absolute)
+        {
+            blocks.push(ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                    contents, uri,
+                )),
+            )));
+        } else {
+            blocks.push(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
+        }
+        cursor = at + 1 + path_len;
+    }
+    if capabilities.image {
+        for image in pending_images {
+            blocks.push(ContentBlock::Image(
+                ImageContent::new(image.data_base64.clone(), image.mime_type.clone()),
+            ));
+        }
+    }
+    blocks
+}
+
 fn format_acp_mode_label(mode_id: &SessionModeId) -> String {
     let raw = mode_id.to_string();
     if let Some((_, suffix)) = raw.rsplit_once('#')
@@ -1200,6 +1479,7 @@ fn build_acp_input_hint(
     mode_id: Option<&SessionModeId>,
     model_id: Option<&ModelId>,
     command_hint: Option<&str>,
+    image_count: usize,
 ) -> Option<String> {
     let mut segments = Vec::new();
     if let Some(mode_id) = mode_id {
@@ -1210,6 +1490,14 @@ fn build_acp_input_hint(
     }
     if let Some(command_hint) = command_hint.filter(|hint| !hint.trim().is_empty()) {
         segments.push(command_hint.to_owned());
+    }
+    if image_count > 0 {
+        let label = if image_count == 1 {
+            "1 image attached".to_owned()
+        } else {
+            format!("{image_count} images attached")
+        };
+        segments.push(label);
     }
     if mode_id.is_some() {
         segments.push("shift+tab switch mode".to_owned());
@@ -1228,12 +1516,25 @@ fn update_acp_input_hint(
     model_id: Option<&ModelId>,
     available_commands: &[AvailableCommand],
 ) {
-    let input_text = shell_buffer(runtime, buffer_id)
+    let (input_text, image_count) = shell_buffer(runtime, buffer_id)
         .ok()
-        .and_then(|buffer| buffer.input_field().map(|input| input.text().to_owned()))
+        .map(|buffer| {
+            (
+                buffer
+                    .input_field()
+                    .map(|input| input.text().to_owned())
+                    .unwrap_or_default(),
+                buffer.acp_pending_images().len(),
+            )
+        })
         .unwrap_or_default();
     let command_hint = active_command_input_hint(available_commands, &input_text);
-    let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref());
+    let hint = build_acp_input_hint(
+        mode_id,
+        model_id,
+        command_hint.as_deref(),
+        image_count,
+    );
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
         && let Some(footer) = buffer.acp_footer_pane_mut()
     {
@@ -1460,6 +1761,10 @@ fn acp_picker_entry(buffer_id: BufferId, item: AcpPickerItemSpec) -> PickerEntry
         AcpActionSpec::InsertSlashCommand { command } => PickerAction::AcpInsertSlashCommand {
             buffer_id,
             command: command.to_string(),
+        },
+        AcpActionSpec::InsertFileMention { path } => PickerAction::AcpInsertFileMention {
+            buffer_id,
+            path: path.to_string(),
         },
     };
     PickerEntry {
@@ -1986,6 +2291,43 @@ fn open_slash_command_picker(
     Ok(())
 }
 
+fn open_file_mention_picker(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    trigger: CompletionTrigger,
+) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let workspace_root = active_workspace_root(runtime)?.unwrap_or_default();
+    let files = if workspace_root.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        list_repository_files(&workspace_root).unwrap_or_default()
+    };
+    let options = files
+        .into_iter()
+        .map(|relative_path| {
+            let label = relative_path.display().to_string();
+            AcpPickerOption::new(label.clone(), format!("@{label}"))
+        })
+        .collect::<Vec<_>>();
+    let context = AcpPickerContext::new(AcpPickerKind::FileMentions, "ACP File Mentions")
+        .with_options(options);
+    let entries = acp_picker_entries(runtime, buffer_id, &context);
+    let mut picker = PickerOverlay::from_entries("ACP File Mentions", entries);
+    match trigger {
+        CompletionTrigger::Auto(query) => {
+            if !query.is_empty() {
+                picker.append_query(&query);
+            }
+        }
+        CompletionTrigger::Manual => {}
+    }
+    shell_ui_mut(runtime)?.set_picker(picker.with_kind(PickerKind::AcpMention { buffer_id }));
+    Ok(())
+}
+
 struct AcpManager {
     runtime: AcpRuntime,
     events: mpsc::Receiver<AcpEvent>,
@@ -2176,7 +2518,7 @@ impl AcpManager {
     fn prompt(
         &mut self,
         session_id: agent_client_protocol::SessionId,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
     ) -> Result<(), String> {
         self.runtime.send(AcpCommand::Prompt { session_id, prompt })
     }
@@ -2436,6 +2778,8 @@ impl AcpManager {
                 session_id,
                 modes,
                 models,
+                prompt_capabilities,
+                workspace_root,
             } => {
                 let Some(pending) = self.pending_clients.remove(&buffer_id) else {
                     self.disconnect(session_id);
@@ -2449,6 +2793,7 @@ impl AcpManager {
                         buffer_id,
                         workspace_id: pending.workspace_id,
                         workspace_name: pending.workspace_name.clone(),
+                        workspace_root,
                         title: pending
                             .load_session
                             .as_ref()
@@ -2459,6 +2804,7 @@ impl AcpManager {
                         config_options: Vec::new(),
                         mode_config_id: None,
                         model_config_id: None,
+                        prompt_capabilities,
                     },
                 );
 
@@ -3115,6 +3461,7 @@ struct AcpSessionInfo {
     buffer_id: BufferId,
     workspace_id: WorkspaceId,
     workspace_name: String,
+    workspace_root: PathBuf,
     title: Option<String>,
     available_commands: Vec<AvailableCommand>,
     mode_state: Option<SessionModeState>,
@@ -3122,6 +3469,7 @@ struct AcpSessionInfo {
     config_options: Vec<SessionConfigOption>,
     mode_config_id: Option<SessionConfigId>,
     model_config_id: Option<SessionConfigId>,
+    prompt_capabilities: PromptCapabilities,
 }
 
 #[derive(Debug, Clone)]
@@ -3162,6 +3510,8 @@ enum AcpEvent {
         session_id: agent_client_protocol::SessionId,
         modes: Option<SessionModeState>,
         models: Option<SessionModelState>,
+        prompt_capabilities: PromptCapabilities,
+        workspace_root: PathBuf,
     },
     ClientFailed {
         buffer_id: BufferId,
@@ -3355,7 +3705,7 @@ enum AcpCommand {
     },
     Prompt {
         session_id: agent_client_protocol::SessionId,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
     },
     ListSessions {
         session_id: agent_client_protocol::SessionId,
@@ -3640,12 +3990,13 @@ async fn connect_acp_client(
         .client_info(
             Implementation::new("volt", env!("CARGO_PKG_VERSION")).title("Volt SDL shell"),
         );
-    connection
+    let init_response = connection
         .initialize(init_request)
         .await
         .map_err(|error| format!("ACP initialize failed: {error}"))?;
+    let prompt_capabilities = init_response.agent_capabilities.prompt_capabilities;
     let session = connection
-        .new_session(NewSessionRequest::new(workspace_root))
+        .new_session(NewSessionRequest::new(workspace_root.clone()))
         .await
         .map_err(|error| format!("ACP new session failed: {error}"))?;
     let session_id = session.session_id.clone();
@@ -3665,6 +4016,8 @@ async fn connect_acp_client(
         session_id,
         modes,
         models,
+        prompt_capabilities,
+        workspace_root,
     });
     Ok(())
 }
@@ -3672,7 +4025,7 @@ async fn connect_acp_client(
 async fn send_acp_prompt(
     state: Rc<RefCell<AcpRuntimeState>>,
     session_id: agent_client_protocol::SessionId,
-    prompt: String,
+    prompt: Vec<ContentBlock>,
 ) -> Result<(), String> {
     let connection = {
         state
@@ -3682,10 +4035,7 @@ async fn send_acp_prompt(
             .map(|session| session.connection.clone())
     }
     .ok_or_else(|| "ACP session is not connected".to_owned())?;
-    let request = agent_client_protocol::PromptRequest::new(
-        session_id.clone(),
-        vec![ContentBlock::from(prompt)],
-    );
+    let request = agent_client_protocol::PromptRequest::new(session_id.clone(), prompt);
     let response = connection
         .prompt(request)
         .await
@@ -4670,6 +5020,8 @@ mod tests {
                 session_id: temp_session_id.clone(),
                 modes: None,
                 models: None,
+                prompt_capabilities: PromptCapabilities::default(),
+                workspace_root: PathBuf::from("."),
             },
         )?;
 
@@ -4830,6 +5182,7 @@ mod tests {
                 buffer_id,
                 workspace_id,
                 workspace_name: "project".to_owned(),
+                workspace_root: PathBuf::new(),
                 title: Some("Plan run".to_owned()),
                 available_commands: Vec::new(),
                 mode_state: None,
@@ -4837,6 +5190,7 @@ mod tests {
                 config_options: Vec::new(),
                 mode_config_id: None,
                 model_config_id: None,
+                prompt_capabilities: PromptCapabilities::default(),
             },
         );
 
@@ -5100,6 +5454,7 @@ mod tests {
                 buffer_id,
                 workspace_id,
                 workspace_name: "project".to_owned(),
+                workspace_root: PathBuf::new(),
                 title: None,
                 available_commands: Vec::new(),
                 mode_state: None,
@@ -5107,6 +5462,7 @@ mod tests {
                 config_options: Vec::new(),
                 mode_config_id: None,
                 model_config_id: None,
+                prompt_capabilities: PromptCapabilities::default(),
             },
         );
         manager.buffers.insert(buffer_id, session_id.clone());
@@ -5153,6 +5509,8 @@ mod tests {
                 session_id: session_id.clone(),
                 modes: None,
                 models: None,
+                prompt_capabilities: PromptCapabilities::default(),
+                workspace_root: PathBuf::new(),
             },
         )?;
 
@@ -5181,6 +5539,7 @@ mod tests {
                 buffer_id,
                 workspace_id,
                 workspace_name: "project".to_owned(),
+                workspace_root: PathBuf::new(),
                 title: None,
                 available_commands: Vec::new(),
                 mode_state: None,
@@ -5188,6 +5547,7 @@ mod tests {
                 config_options: Vec::new(),
                 mode_config_id: None,
                 model_config_id: None,
+                prompt_capabilities: PromptCapabilities::default(),
             },
         );
 
@@ -5267,6 +5627,7 @@ mod tests {
                 buffer_id,
                 workspace_id,
                 workspace_name: "project".to_owned(),
+                workspace_root: PathBuf::new(),
                 title: Some("Plan run".to_owned()),
                 available_commands: Vec::new(),
                 mode_state: None,
@@ -5274,6 +5635,7 @@ mod tests {
                 config_options: Vec::new(),
                 mode_config_id: None,
                 model_config_id: None,
+                prompt_capabilities: PromptCapabilities::default(),
             },
         );
 
@@ -5452,5 +5814,90 @@ mod tests {
         assert!(acp_slash_completion_query("/fix\nmore").is_none());
         assert!(acp_slash_completion_query("i have this code //").is_none());
         assert!(acp_slash_completion_query(" //").is_none());
+    }
+
+    #[test]
+    fn acp_mention_completion_query_tracks_active_at_token() {
+        assert_eq!(acp_mention_completion_query("@"), Some(""));
+        assert_eq!(acp_mention_completion_query("@src/"), Some("src/"));
+        assert_eq!(
+            acp_mention_completion_query("look at @main"),
+            Some("main")
+        );
+        assert!(acp_mention_completion_query("@src/main.rs more").is_none());
+        assert!(acp_mention_completion_query("email@example.com").is_none());
+        assert!(acp_mention_completion_query("no mention").is_none());
+    }
+
+    #[test]
+    fn replace_active_mention_token_swaps_incomplete_path() {
+        assert_eq!(
+            replace_active_mention_token("look at @ma", "src/main.rs"),
+            "look at @src/main.rs "
+        );
+        assert_eq!(
+            replace_active_mention_token("@", "README.md"),
+            "@README.md "
+        );
+        assert_eq!(
+            replace_active_mention_token("hello", "lib.rs"),
+            "hello @lib.rs "
+        );
+    }
+
+    #[test]
+    fn build_acp_prompt_content_blocks_emits_resource_links_and_images() {
+        let root = std::env::temp_dir().join("volt-acp-mention-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let file_path = root.join("note.txt");
+        std::fs::write(&file_path, "hello context").expect("write file");
+
+        let capabilities = PromptCapabilities::new().image(true);
+        let blocks = build_acp_prompt_content_blocks(
+            "see @note.txt please",
+            &[AcpPendingImage {
+                mime_type: "image/png".to_owned(),
+                data_base64: "Zm9v".to_owned(),
+                label: "Image".to_owned(),
+            }],
+            &root,
+            &capabilities,
+        );
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Text(text) if text.text == "see "
+        ));
+        assert!(matches!(&blocks[1], ContentBlock::ResourceLink(_)));
+        assert!(matches!(
+            &blocks[2],
+            ContentBlock::Text(text) if text.text == " please"
+        ));
+        assert!(matches!(
+            &blocks[3],
+            ContentBlock::Image(image) if image.mime_type == "image/png" && image.data == "Zm9v"
+        ));
+
+        let embedded = PromptCapabilities::new().embedded_context(true);
+        let blocks = build_acp_prompt_content_blocks("@note.txt", &[], &root, &embedded);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Resource(EmbeddedResource {
+                resource: EmbeddedResourceResource::TextResourceContents(contents),
+                ..
+            }) if contents.text == "hello context"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn encode_rgba_image_png_round_trips_clipboard_image() {
+        let pixels = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let image =
+            encode_rgba_image_png(&pixels, 2, 1, "Image").expect("png encode should succeed");
+        assert_eq!(image.mime_type, "image/png");
+        assert!(!image.bytes.is_empty());
+        assert_eq!(image.label, "Image");
     }
 }

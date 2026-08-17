@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+use std::io::Cursor;
 
 struct ClipboardContext {
     video: sdl3::VideoSubsystem,
@@ -51,6 +52,54 @@ pub(super) fn read_system_clipboard() -> Option<String> {
     })
     .flatten()
     .filter(|text| !text.is_empty())
+}
+
+/// Image bytes taken from the OS clipboard for ACP prompt context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClipboardImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+    pub label: String,
+}
+
+/// Read an image from the system clipboard when present.
+///
+/// Matches Zed / ACP clients: clipboard images become `ContentBlock::Image`
+/// (base64 + mime) on prompt submit when the agent advertises `prompt.image`.
+/// Prefer image payloads when available; callers should fall back to text paste
+/// when this returns `None`.
+pub(super) fn read_system_clipboard_image() -> Option<ClipboardImage> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    // Prefer encoded image entries when the platform exposes them via arboard.
+    let image = clipboard.get_image().ok()?;
+    encode_rgba_image_png(&image.bytes, image.width, image.height, "Image")
+}
+
+pub(super) fn encode_rgba_image_png(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    label: impl Into<String>,
+) -> Option<ClipboardImage> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let expected = width.checked_mul(height)?.checked_mul(4)?;
+    if rgba.len() < expected {
+        return None;
+    }
+    let width_u32 = u32::try_from(width).ok()?;
+    let height_u32 = u32::try_from(height).ok()?;
+    let buffer = image::RgbaImage::from_raw(width_u32, height_u32, rgba[..expected].to_vec())?;
+    let mut encoded = Vec::new();
+    buffer
+        .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
+        .ok()?;
+    Some(ClipboardImage {
+        bytes: encoded,
+        mime_type: "image/png".to_owned(),
+        label: label.into(),
+    })
 }
 
 pub(super) fn yank_to_clipboard_text(yank: &YankRegister) -> Cow<'_, str> {

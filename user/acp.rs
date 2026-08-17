@@ -80,6 +80,9 @@ pub fn picker_items(context: &AcpPickerContext) -> Vec<AcpPickerItemSpec> {
                 AcpPickerKind::SlashCommands => {
                     AcpActionSpec::insert_slash_command(option.id.clone())
                 }
+                AcpPickerKind::FileMentions => {
+                    AcpActionSpec::insert_file_mention(option.id.clone())
+                }
             };
             AcpPickerItemSpec::new(option.id.clone(), option.label.clone(), detail, action)
         })
