@@ -40,6 +40,30 @@ pub fn truncate_strategy() -> PickerTruncateStrategy {
     crate::config::load().ui.picker_truncate_strategy.into()
 }
 
+/// Fraction of the window width occupied by the picker card.
+pub const WIDTH_FRACTION: f32 = 0.52;
+
+/// Fraction of the window height occupied by the picker card.
+pub const HEIGHT_FRACTION: f32 = 0.48;
+
+/// Returns the picker card size as window fractions.
+pub fn layout() -> editor_plugin_api::PickerLayout {
+    editor_plugin_api::PickerLayout {
+        width_fraction: width_fraction(),
+        height_fraction: height_fraction(),
+    }
+}
+
+/// Returns [`WIDTH_FRACTION`].
+pub fn width_fraction() -> f32 {
+    WIDTH_FRACTION
+}
+
+/// Returns [`HEIGHT_FRACTION`].
+pub fn height_fraction() -> f32 {
+    HEIGHT_FRACTION
+}
+
 /// Returns the metadata for the generic picker UI package.
 pub fn package() -> PluginPackage {
     PluginPackage::new(
@@ -518,6 +542,15 @@ mod tests {
     #[test]
     fn truncate_strategy_defaults_to_auto() {
         assert_eq!(truncate_strategy(), PickerTruncateStrategy::Auto);
+    }
+
+    #[test]
+    fn layout_exposes_window_fractions() {
+        assert_eq!(width_fraction(), WIDTH_FRACTION);
+        assert_eq!(height_fraction(), HEIGHT_FRACTION);
+        let layout = layout();
+        assert_eq!(layout.width_fraction, WIDTH_FRACTION);
+        assert_eq!(layout.height_fraction, HEIGHT_FRACTION);
     }
 
     #[test]

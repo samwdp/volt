@@ -18,7 +18,7 @@ impl Default for BrowserBufferState {
             active_pane: BrowserPane::Input,
             input,
             footer_pane: PluginTextPaneState {
-                min_rows: Some(1),
+                min_rows: Some(0),
                 ..PluginTextPaneState::default()
             },
         }
@@ -331,10 +331,10 @@ fn refresh_browser_buffer_text(
     if clear_input {
         state.input.clear();
     }
-    state.footer_pane.replace_lines(
-        vec![user_library.browser_input_hint(display_url.as_deref())],
-        true,
-    );
+    state.input.set_hint(Some(
+        user_library.browser_input_hint(display_url.as_deref()),
+    ));
+    state.footer_pane.replace_lines(Vec::new(), true);
 }
 
 pub(super) fn browser_buffer_display_name(
@@ -561,8 +561,8 @@ pub(super) fn browser_state_for_kind(
         .input
         .set_placeholder(Some(user_library.browser_url_placeholder()));
     state
-        .footer_pane
-        .replace_lines(vec![user_library.browser_input_hint(None)], true);
+        .input
+        .set_hint(Some(user_library.browser_input_hint(None)));
     Some(state)
 }
 
@@ -686,7 +686,7 @@ pub(super) fn browser_sync_plan(
             ),
             cell_width,
             line_height,
-            user_library.commandline_enabled(),
+            state.command_line().is_some() || state.input_prompt_visible(),
         ) else {
             continue;
         };
@@ -706,15 +706,15 @@ pub(super) fn browser_sync_plan(
         && buffer_uses_browser_host_surface(buffer)
         && let Some(rect) = browser_host_viewport_rect(
             buffer,
-            PixelRectToRect::rect(
+            popup_content_rect(PixelRectToRect::rect(
                 dock.content_x,
                 pane_height as i32,
                 dock.content_width,
                 popup_height,
-            ),
+            )),
             cell_width,
             line_height,
-            user_library.commandline_enabled(),
+            false,
         )
         && !notification_rects
             .iter()
@@ -815,18 +815,36 @@ pub(super) fn browser_buffer_layout(
     } else {
         1
     };
-    let footer_line_count = state.footer_pane.line_count().max(1);
-    let footer_rows = state
-        .footer_pane
-        .min_rows
-        .unwrap_or(footer_line_count)
-        .max(footer_line_count);
-    let footer_chrome = text_panel_chrome_height("", line_height);
+    let footer_line_count = state.footer_pane.line_count();
+    let show_footer = footer_line_count > 0;
+    let footer_rows = if show_footer {
+        state
+            .footer_pane
+            .min_rows
+            .unwrap_or(footer_line_count)
+            .max(footer_line_count)
+            .max(1)
+    } else {
+        0
+    };
+    let footer_chrome = if show_footer {
+        text_panel_chrome_height("", line_height)
+    } else {
+        0
+    };
     let input_chrome = input_panel_chrome_height();
-    let footer_height = footer_chrome + footer_rows as i32 * line_height;
+    let footer_height = if show_footer {
+        footer_chrome + footer_rows as i32 * line_height
+    } else {
+        0
+    };
     let input_height = input_chrome + input_rows as i32 * line_height;
-    let footer_y = layout.pane_bottom.saturating_sub(footer_height);
-    let input_y = footer_y.saturating_sub(gap + input_height);
+    let footer_y = layout.pane_bottom.saturating_sub(footer_height.max(0));
+    let input_y = if show_footer {
+        footer_y.saturating_sub(gap + input_height)
+    } else {
+        layout.pane_bottom.saturating_sub(input_height)
+    };
     let viewport_y = layout.body_y.saturating_sub(2);
     let viewport_height = input_y.saturating_sub(gap).saturating_sub(viewport_y);
     if panel_width == 0 || viewport_height <= 0 {
@@ -888,9 +906,10 @@ pub(super) fn render_browser_buffer_body(
     );
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let corner_radius = shared_corner_radius(theme_registry);
-    fill_window_surface_rect(
+    fill_window_surface_rounded_rect(
         target,
         browser_layout.viewport,
+        corner_radius,
         panel_background,
         window_effects,
     )?;
@@ -913,30 +932,47 @@ pub(super) fn render_browser_buffer_body(
         cell_width,
         line_height,
     )?;
-    render_text_panel(
-        target,
-        &state.footer_pane.text,
-        state.footer_pane.scroll_row,
-        (active && state.active_pane == BrowserPane::Footer).then_some(state.footer_pane.cursor()),
-        active && state.active_pane == BrowserPane::Footer,
-        browser_layout.footer,
-        "",
-        None,
-        None,
-        InputMode::Normal,
-        theme_registry,
-        panel_background,
-        panel_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        selection,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
-    )?;
+    if state.is_loading {
+        let input_rect = browser_layout.input.rect;
+        fill_window_surface_rect(
+            target,
+            PixelRectToRect::rect(
+                input_rect.x() + 8,
+                input_rect.y() + input_rect.height() as i32 - 3,
+                input_rect.width().saturating_sub(16),
+                2,
+            ),
+            active_border,
+            window_effects,
+        )?;
+    }
+    if browser_layout.footer.rect.height() > 0 {
+        render_text_panel(
+            target,
+            &state.footer_pane.text,
+            state.footer_pane.scroll_row,
+            (active && state.active_pane == BrowserPane::Footer)
+                .then_some(state.footer_pane.cursor()),
+            active && state.active_pane == BrowserPane::Footer,
+            browser_layout.footer,
+            "",
+            None,
+            None,
+            InputMode::Normal,
+            theme_registry,
+            panel_background,
+            panel_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            selection,
+            cursor,
+            cursor_roundness,
+            cell_width,
+            line_height,
+        )?;
+    }
     Ok(())
 }

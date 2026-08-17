@@ -8,7 +8,8 @@ use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, MarkdownPrettyConfig, OilDefaults,
     OilKeyAction, OilKeybindings, PaneConfig, PdfOpenMode, PluginBuffer, PluginBufferSections,
-    TerminalConfig, Theme, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
+    RainbowParensConfig, TerminalConfig, Theme, WorkspaceDockConfig, WorkspaceDockSide,
+    WorkspaceRoot,
 };
 use editor_plugin_host::StatuslineContext;
 use editor_render::{horizontal_pane_rects, vertical_pane_rects};
@@ -22,7 +23,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Default)]
@@ -329,6 +330,10 @@ impl UserLibrary for HeaderlineTestUserLibrary {
 
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
+    }
+
+    fn rainbow_parens_config(&self) -> RainbowParensConfig {
+        RainbowParensConfig { enabled: true }
     }
 
     fn oil_defaults(&self) -> OilDefaults {
@@ -7604,6 +7609,9 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
 
+    let mut command_line = CommandLineOverlay::new();
+    command_line.append_text("w");
+    let command_line_input = command_line.input();
     render_buffer(
         &mut target,
         buffer,
@@ -7615,7 +7623,7 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
         InputMode::Normal,
         false,
         None,
-        None,
+        Some(command_line_input),
         true,
         &NullUserLibrary,
         "test-theme",
@@ -7633,7 +7641,7 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { rect, color }
+        DrawCommand::FillRoundedRect { rect, color, .. }
             if rect.x == 8
                 && rect.y == commandline_y
                 && rect.width == 304
@@ -7842,7 +7850,7 @@ fn render_buffer_paints_modeline_mode_chip_and_right_aligned_segment() -> Result
     assert!(
         scene.iter().any(|command| matches!(
             command,
-            DrawCommand::FillRect { rect, color }
+            DrawCommand::FillRoundedRect { rect, color, .. }
                 if rect.y == layout.statusline_y
                     && *color == to_render_color(mode_bg)
         )),
@@ -8248,7 +8256,7 @@ fn render_shell_state_uses_theme_background_for_docked_runtime_popup_surface() -
     let popup_surface_fills = scene
         .iter()
         .filter_map(|command| match command {
-            DrawCommand::FillRect { rect, color }
+            DrawCommand::FillRoundedRect { rect, color, .. }
                 if rect.x == popup_rect.x()
                     && rect.y == popup_rect.y()
                     && rect.width == popup_rect.width()
@@ -8278,7 +8286,7 @@ fn render_shell_state_uses_opaque_overlay_chrome_for_docked_runtime_popup_surfac
     let popup_surface_fills = scene
         .iter()
         .filter_map(|command| match command {
-            DrawCommand::FillRect { rect, color }
+            DrawCommand::FillRoundedRect { rect, color, .. }
                 if rect.x == popup_rect.x()
                     && rect.y == popup_rect.y()
                     && rect.width == popup_rect.width()
@@ -8389,13 +8397,18 @@ fn render_shell_state_uses_opaque_overlay_chrome_for_notification_surface() -> R
         .unwrap_or_else(|error| panic!("unexpected error: {error}"));
     let (scene, notification_rect) =
         render_shell_state_scene_with_notification_overlay(Some(&registry))?;
+    let body_x = notification_rect.x + 1 + OVERLAY_ACCENT_BAR_WIDTH as i32;
     let notification_surface_fills = scene
         .iter()
         .filter_map(|command| match command {
             DrawCommand::FillRoundedRect { rect, color, .. }
-                if rect.x == notification_rect.x + 1
+                if rect.x == body_x
                     && rect.y == notification_rect.y + 1
-                    && rect.width == notification_rect.width().saturating_sub(2)
+                    && rect.width
+                        == notification_rect
+                            .width()
+                            .saturating_sub(2)
+                            .saturating_sub(OVERLAY_ACCENT_BAR_WIDTH)
                     && rect.height == notification_rect.height().saturating_sub(2) =>
             {
                 Some(*color)
@@ -8487,18 +8500,26 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
         180,
         16,
         Some(&registry),
+        editor_plugin_api::PickerLayout::default(),
         editor_plugin_api::PickerTruncateStrategy::Auto,
     )
     .map_err(|error| error.to_string())?;
 
-    let popup_rect = centered_rect(320, 180, 320 * 2 / 3, 180 * 3 / 5);
+    let popup_rect = picker_card_rect(320, 180, editor_plugin_api::PickerLayout::default());
+    let inner_x = popup_rect.x + 1;
+    let inner_y = popup_rect.y + 1;
+    let inner_height = popup_rect.height.saturating_sub(2);
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
-            if rect.x == popup_rect.x + 2
-                && rect.y == popup_rect.y + 2
-                && rect.width == popup_rect.width.saturating_sub(4)
-                && rect.height == popup_rect.height.saturating_sub(4)
+            if rect.x == inner_x + OVERLAY_ACCENT_BAR_WIDTH as i32
+                && rect.y == inner_y
+                && rect.width
+                    == popup_rect
+                        .width
+                        .saturating_sub(2)
+                        .saturating_sub(OVERLAY_ACCENT_BAR_WIDTH)
+                && rect.height == inner_height
                 && *color == to_render_color(Color::RGBA(15, 16, 20, 255))
     )));
     assert!(scene.iter().any(|command| matches!(
@@ -8594,7 +8615,7 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { color, .. }
+        DrawCommand::FillRoundedRect { color, .. }
             if *color
                 == to_render_color(Color::RGBA(
                     selected_background.r,
@@ -8685,7 +8706,7 @@ fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { color, .. }
+        DrawCommand::FillRoundedRect { color, .. }
             if *color
                 == to_render_color(Color::RGBA(
                     header_background.r,
@@ -8777,6 +8798,7 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
         360,
         16,
         Some(&registry),
+        editor_plugin_api::PickerLayout::default(),
         editor_plugin_api::PickerTruncateStrategy::Auto,
     )
     .map_err(|error| error.to_string())?;
@@ -11236,6 +11258,136 @@ fn index_syntax_lines_converts_byte_columns_after_variation_selector() {
         syntax_span_segments(line, lines.get(&0).expect("expected line spans")),
         vec![("syntax.string".to_owned(), "Built".to_owned())]
     );
+}
+
+#[test]
+fn line_color_segments_colors_opening_brace_from_rust_highlight_pipeline() {
+    let line = "use crate::{";
+    let text = editor_buffer::TextBuffer::from_text(line);
+    let mut registry = editor_syntax::SyntaxRegistry::new();
+    registry
+        .register(
+            editor_syntax::LanguageConfiguration::new(
+                "rust-rainbow-render-test",
+                ["__rainbow_render_test__"],
+                rust_test_language,
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                [editor_syntax::CaptureThemeMapping::new(
+                    "punctuation.bracket",
+                    "syntax.punctuation.bracket",
+                )],
+            )
+            .with_extra_highlight_query(
+                r#"
+[
+  "(" ")" "[" "]" "{" "}"
+] @punctuation.bracket
+"#,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error:?}"));
+
+    let mut snapshot = registry
+        .highlight_buffer_for_extension("__rainbow_render_test__", &text)
+        .unwrap_or_else(|error| panic!("unexpected error: {error:?}"));
+    editor_syntax::apply_rainbow_delimiter_spans(&mut snapshot, line, true);
+    let syntax_lines = index_syntax_lines(snapshot, &text);
+    let spans = syntax_lines
+        .get(&0)
+        .unwrap_or_else(|| panic!("expected syntax spans for line 0: {syntax_lines:?}"));
+    let brace_col = line
+        .char_indices()
+        .find_map(|(byte, character)| (character == '{').then_some(byte))
+        .map(|byte| line[..byte].chars().count())
+        .expect("opening brace column");
+    let overlapping: Vec<_> = spans
+        .iter()
+        .filter(|span| brace_col >= span.start && brace_col < span.end)
+        .collect();
+    assert!(
+        overlapping
+            .iter()
+            .any(|span| span.theme_token.starts_with("rainbow.paren.")),
+        "expected rainbow span at opening brace column {brace_col}, spans={overlapping:?}, all={spans:?}"
+    );
+    assert!(
+        overlapping
+            .iter()
+            .all(|span| span.theme_token == "rainbow.paren.depth.1"),
+        "opening brace captures should all share depth 1, got {overlapping:?}"
+    );
+
+    let mut theme_registry = editor_theme::ThemeRegistry::new();
+    theme_registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token(
+                    "syntax.punctuation.bracket",
+                    editor_theme::Color::rgb(1, 2, 3),
+                )
+                .with_token("rainbow.paren.depth.1", editor_theme::Color::rgb(4, 5, 6)),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    let char_map = LineCharMap::new(line);
+    let byte_offsets = &char_map.bytes[..=char_map.len()];
+    let colored = line_color_segments(
+        line,
+        Some(spans),
+        Some(&theme_registry),
+        Color::RGB(240, 240, 240),
+        byte_offsets,
+        0,
+    );
+    let brace_segment = colored
+        .iter()
+        .find(|(text, _, _)| text == "{")
+        .unwrap_or_else(|| panic!("expected colored segment for '{{', got {colored:?}"));
+    assert_eq!(
+        brace_segment.1,
+        Color::RGB(4, 5, 6),
+        "opening brace should use rainbow token color, got {colored:?}"
+    );
+}
+
+#[test]
+fn line_color_segments_prefers_rainbow_paren_token_for_equal_width_spans() {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token("syntax.type", editor_theme::Color::rgb(1, 2, 3))
+                .with_token("rainbow.paren.depth.2", editor_theme::Color::rgb(4, 5, 6)),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+
+    let spans = vec![
+        LineSyntaxSpan {
+            start: 0,
+            end: 1,
+            capture_name: "type".to_owned(),
+            theme_token: "syntax.type".to_owned(),
+        },
+        LineSyntaxSpan {
+            start: 0,
+            end: 1,
+            capture_name: "rainbow.paren.open.2".to_owned(),
+            theme_token: "rainbow.paren.depth.2".to_owned(),
+        },
+    ];
+
+    let segments = line_color_segments(
+        "(",
+        Some(&spans),
+        Some(&registry),
+        Color::RGB(0, 0, 0),
+        &[0, 1],
+        0,
+    );
+
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].0, "(".to_owned());
+    assert_eq!(segments[0].1, Color::RGB(4, 5, 6));
 }
 
 #[test]

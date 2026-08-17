@@ -309,6 +309,8 @@ pub struct UiSection {
     pub picker_truncate_strategy: ConfigPickerTruncateStrategy,
     #[serde(default = "default_ligatures_enabled")]
     pub ligatures_enabled: bool,
+    #[serde(default = "default_rainbow_parens_enabled")]
+    pub rainbow_parens_enabled: bool,
     #[serde(default)]
     pub pane: PaneSection,
     #[serde(default)]
@@ -324,6 +326,7 @@ impl Default for UiSection {
         Self {
             picker_truncate_strategy: default_picker_truncate_strategy(),
             ligatures_enabled: default_ligatures_enabled(),
+            rainbow_parens_enabled: default_rainbow_parens_enabled(),
             pane: PaneSection::default(),
             workspace_dock: WorkspaceDockSection::default(),
             terminal: TerminalSection::default(),
@@ -357,6 +360,10 @@ fn default_picker_truncate_strategy() -> ConfigPickerTruncateStrategy {
 }
 
 const fn default_ligatures_enabled() -> bool {
+    true
+}
+
+const fn default_rainbow_parens_enabled() -> bool {
     true
 }
 

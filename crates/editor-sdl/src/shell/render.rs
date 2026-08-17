@@ -208,27 +208,12 @@ pub(super) fn render_shell_state(
         TOKEN_PANE_INACTIVE,
         adjust_color(base_background, if is_dark { -6 } else { 6 }),
     );
-    let border_color = theme_color(
-        theme_registry,
-        TOKEN_PANE_BORDER,
-        adjust_color(base_background, if is_dark { 24 } else { -24 }),
-    );
-    let active_border_color = theme_color(
-        theme_registry,
-        TOKEN_PANE_ACTIVE_BORDER,
-        theme_color(
-            theme_registry,
-            TOKEN_STATUSLINE_ACTIVE,
-            Color::RGB(110, 170, 255),
-        ),
-    );
     let git_summary = state.git_summary();
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
     let dock_focus = state.workspace_dock_focus_active(user_library);
-    let command_line_row_visible =
-        user_library.commandline_enabled() || state.input_prompt_visible();
+    let command_line_row_visible = state.command_line().is_some() || state.input_prompt_visible();
 
     clear_window_surface(target, base_background, window_effects);
 
@@ -259,20 +244,6 @@ pub(super) fn render_shell_state(
             background,
             window_effects,
         )?;
-        fill_window_surface_rect(
-            target,
-            PixelRectToRect::rect(rect.x, rect.y, rect.width, 1),
-            border_color,
-            window_effects,
-        )?;
-        if active {
-            fill_window_surface_rect(
-                target,
-                PixelRectToRect::rect(rect.x, rect.y, 2, rect.height),
-                active_border_color,
-                window_effects,
-            )?;
-        }
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
@@ -353,6 +324,44 @@ pub(super) fn render_shell_state(
         )?;
     }
 
+    if let Some(pane) = panes.get(state.active_pane_index())
+        && let Some(buffer) = state.buffer(pane.buffer_id)
+        && let Some((matches, selected_index)) = state
+            .command_line()
+            .and_then(CommandLineOverlay::completion_list)
+        && let Some(active_rect) = pane_rects.get(state.active_pane_index())
+    {
+        let layout = buffer_footer_layout_with_command_line(
+            buffer,
+            PixelRectToRect::rect(
+                active_rect.x,
+                active_rect.y,
+                active_rect.width,
+                active_rect.height,
+            ),
+            line_height,
+            cell_width,
+            true,
+        );
+        if let Some(commandline_y) = layout.commandline_y {
+            render_command_line_completion_popup(
+                target,
+                matches,
+                selected_index,
+                PixelRectToRect::rect(
+                    active_rect.x,
+                    active_rect.y,
+                    active_rect.width,
+                    active_rect.height,
+                ),
+                commandline_y,
+                theme_registry,
+                cell_width,
+                line_height,
+            )?;
+        }
+    }
+
     if let Some(autocomplete) = state
         .autocomplete()
         .filter(|autocomplete| autocomplete.is_visible())
@@ -406,6 +415,7 @@ pub(super) fn render_shell_state(
             height,
             line_height,
             theme_registry,
+            user_library.picker_layout(),
             user_library.picker_truncate_strategy(),
         )?;
     }
@@ -502,25 +512,16 @@ fn render_fps_overlay(
         panel_width,
         panel_height,
     );
-    let inner_rect = PixelRectToRect::rect(
-        rect.x() + 1,
-        rect.y() + 1,
-        rect.width().saturating_sub(2),
-        rect.height().saturating_sub(2),
-    );
-    fill_overlay_surface_rounded_rect(target, rect, 10, border, window_effects)?;
-    fill_overlay_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
-    fill_overlay_surface_rounded_rect(
+    let radius = overlay_radius(theme_registry);
+    paint_overlay_card(
         target,
-        PixelRectToRect::rect(
-            rect.x() + 1,
-            rect.y() + 1,
-            5,
-            rect.height().saturating_sub(2),
-        ),
-        4,
-        accent,
+        rect,
+        radius,
+        border,
+        background,
         window_effects,
+        Some(accent),
+        false,
     )?;
     draw_text(target, rect.x() + 14, rect.y() + 8, &text, base_foreground)?;
     Ok(())
@@ -533,11 +534,172 @@ pub(super) fn shared_corner_radius(theme_registry: Option<&ThemeRegistry>) -> u3
         .unwrap_or(16)
 }
 
+pub(super) fn overlay_radius(theme_registry: Option<&ThemeRegistry>) -> u32 {
+    shared_corner_radius(theme_registry)
+}
+
+pub(super) fn picker_card_rect(
+    window_width: u32,
+    window_height: u32,
+    layout: editor_plugin_api::PickerLayout,
+) -> PixelRect {
+    let width_fraction = layout.width_fraction.clamp(0.15, 1.0);
+    let height_fraction = layout.height_fraction.clamp(0.15, 1.0);
+    let width = ((window_width as f32) * width_fraction).round() as u32;
+    let height = ((window_height as f32) * height_fraction).round() as u32;
+    centered_rect(window_width, window_height, width.max(1), height.max(1))
+}
+
+fn paint_overlay_shadow(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_overlay_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + OVERLAY_SHADOW_OFFSET,
+            rect.y() + OVERLAY_SHADOW_OFFSET,
+            rect.width(),
+            rect.height(),
+        ),
+        radius,
+        Color::RGBA(0, 0, 0, 72),
+        window_effects,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_overlay_card(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    border: Color,
+    background: Color,
+    window_effects: WindowEffects,
+    accent: Option<Color>,
+    shadow: bool,
+) -> Result<(), ShellError> {
+    if shadow {
+        paint_overlay_shadow(target, rect, radius, window_effects)?;
+    }
+    fill_overlay_surface_rounded_rect(target, rect, radius, border, window_effects)?;
+    let inner = PixelRectToRect::rect(
+        rect.x() + 1,
+        rect.y() + 1,
+        rect.width().saturating_sub(2),
+        rect.height().saturating_sub(2),
+    );
+    let inner_radius = radius.saturating_sub(1);
+    match accent {
+        Some(accent) => fill_rounded_rect_with_left_accent(
+            target,
+            inner,
+            inner_radius,
+            background,
+            accent,
+            window_effects,
+        )?,
+        None => fill_overlay_surface_rounded_rect(
+            target,
+            inner,
+            inner_radius,
+            background,
+            window_effects,
+        )?,
+    }
+    Ok(())
+}
+
+pub(super) fn fill_rounded_rect_with_left_accent(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    fill: Color,
+    accent: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_overlay_surface_rounded_rect(target, rect, radius, accent, window_effects)?;
+    let body_width = rect.width().saturating_sub(OVERLAY_ACCENT_BAR_WIDTH);
+    if body_width == 0 {
+        return Ok(());
+    }
+    fill_overlay_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + OVERLAY_ACCENT_BAR_WIDTH as i32,
+            rect.y(),
+            body_width,
+            rect.height(),
+        ),
+        radius,
+        fill,
+        window_effects,
+    )
+}
+
+fn fill_overlay_right_band(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    let radius = radius.min(rect.width() / 2).min(rect.height() / 2);
+    fill_overlay_surface_rounded_rect(target, rect, radius, color, window_effects)?;
+    if rect.width() > radius {
+        fill_overlay_surface_rect(
+            target,
+            PixelRectToRect::rect(rect.x(), rect.y(), radius, rect.height()),
+            color,
+            window_effects,
+        )?;
+    }
+    Ok(())
+}
+
+fn fill_overlay_top_header_band(
+    target: &mut DrawTarget<'_>,
+    header_rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    let radius = radius
+        .min(header_rect.width() / 2)
+        .min(header_rect.height() / 2);
+    fill_overlay_surface_rounded_rect(target, header_rect, radius, color, window_effects)?;
+    if header_rect.height() > radius {
+        fill_overlay_surface_rect(
+            target,
+            PixelRectToRect::rect(
+                header_rect.x(),
+                header_rect.y() + radius as i32,
+                header_rect.width(),
+                header_rect.height().saturating_sub(radius),
+            ),
+            color,
+            window_effects,
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CursorScreenAnchor {
     pub(super) x: i32,
     pub(super) y: i32,
     pub(super) pane_bottom: i32,
+}
+
+pub(super) fn popup_content_rect(popup_rect: Rect) -> Rect {
+    PixelRectToRect::rect(
+        popup_rect.x() + 6,
+        popup_rect.y() + 14,
+        popup_rect.width().saturating_sub(12),
+        popup_rect.height().saturating_sub(20),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,10 +727,23 @@ pub(super) fn render_runtime_popup_overlay(
     let popup_background = base_background;
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
-    fill_overlay_surface_rect(target, popup_rect, popup_background, window_effects)?;
-    fill_overlay_surface_rect(
+    let popup_radius = overlay_radius(theme_registry);
+    fill_overlay_surface_rounded_rect(
         target,
-        PixelRectToRect::rect(popup_rect.x(), popup_rect.y(), popup_rect.width(), 1),
+        popup_rect,
+        popup_radius,
+        popup_background,
+        window_effects,
+    )?;
+    fill_overlay_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            popup_rect.x() + popup_rect.width() as i32 / 2 - 16,
+            popup_rect.y() + 6,
+            32,
+            4,
+        ),
+        2,
         border_color,
         window_effects,
     )?;
@@ -587,7 +762,7 @@ pub(super) fn render_runtime_popup_overlay(
             target,
             buffer,
             view_state,
-            popup_rect,
+            popup_content_rect(popup_rect),
             popup_focus,
             visual_range,
             multicursor.as_ref(),
@@ -596,7 +771,7 @@ pub(super) fn render_runtime_popup_overlay(
             vim_targets_input,
             state.vim().recording_macro,
             None,
-            user_library.commandline_enabled(),
+            false,
             user_library,
             workspace_name,
             lsp_server,
@@ -719,21 +894,24 @@ pub(super) fn render_autocomplete_overlay(
         above_y.max(pane_rect.y() + 8)
     };
     let outer_rect = PixelRectToRect::rect(x, y, width, height);
-    let inner_rect = PixelRectToRect::rect(
-        x + 1,
-        y + 1,
-        width.saturating_sub(2),
-        height.saturating_sub(2),
-    );
-    fill_overlay_surface_rounded_rect(target, outer_rect, 8, border, window_effects)?;
-    fill_overlay_surface_rounded_rect(target, inner_rect, 7, panel_background, window_effects)?;
+    let radius = overlay_radius(theme_registry);
+    paint_overlay_card(
+        target,
+        outer_rect,
+        radius,
+        border,
+        panel_background,
+        window_effects,
+        None,
+        false,
+    )?;
     fill_overlay_surface_rect(
         target,
         PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
         border,
         window_effects,
     )?;
-    fill_overlay_surface_rect(
+    fill_overlay_right_band(
         target,
         PixelRectToRect::rect(
             x + list_width as i32 + 1,
@@ -741,6 +919,7 @@ pub(super) fn render_autocomplete_overlay(
             docs_width.saturating_sub(1),
             height.saturating_sub(2),
         ),
+        radius.saturating_sub(1),
         docs_background,
         window_effects,
     )?;
@@ -763,7 +942,7 @@ pub(super) fn render_autocomplete_overlay(
         let index = row_index - visible_start;
         let row_y = y + 8 + index as i32 * row_height;
         if row_index == autocomplete.selected_index {
-            fill_overlay_surface_rect(
+            fill_rounded_rect_with_left_accent(
                 target,
                 PixelRectToRect::rect(
                     x + 6,
@@ -771,7 +950,9 @@ pub(super) fn render_autocomplete_overlay(
                     list_width.saturating_sub(12),
                     row_height as u32,
                 ),
+                overlay_radius(theme_registry).min(8),
                 selected_background,
+                accent,
                 window_effects,
             )?;
         }
@@ -925,17 +1106,21 @@ pub(super) fn render_hover_overlay(
         below_y
     };
     let outer_rect = PixelRectToRect::rect(x, y, width, height);
-    let inner_rect = PixelRectToRect::rect(
-        x + 1,
-        y + 1,
-        width.saturating_sub(2),
-        height.saturating_sub(2),
-    );
-    fill_overlay_surface_rounded_rect(target, outer_rect, 8, focus_border, window_effects)?;
-    fill_overlay_surface_rounded_rect(target, inner_rect, 7, background, window_effects)?;
-    fill_overlay_surface_rect(
+    let radius = overlay_radius(theme_registry);
+    paint_overlay_card(
+        target,
+        outer_rect,
+        radius,
+        focus_border,
+        background,
+        window_effects,
+        None,
+        false,
+    )?;
+    fill_overlay_top_header_band(
         target,
         PixelRectToRect::rect(x + 1, y + 1, width.saturating_sub(2), tabs_height),
+        radius.saturating_sub(1),
         header_background,
         window_effects,
     )?;
@@ -1222,25 +1407,16 @@ pub(super) fn render_notification_overlay(
     for layout in layouts {
         let accent = notification_accent_color(theme_registry, layout.severity, default_info);
         let outer_rect = layout.rect;
-        let inner_rect = PixelRectToRect::rect(
-            layout.rect.x() + 1,
-            layout.rect.y() + 1,
-            layout.rect.width().saturating_sub(2),
-            layout.rect.height().saturating_sub(2),
-        );
-        fill_overlay_surface_rounded_rect(target, outer_rect, 10, border, window_effects)?;
-        fill_overlay_surface_rounded_rect(target, inner_rect, 9, background, window_effects)?;
-        fill_overlay_surface_rounded_rect(
+        let radius = overlay_radius(theme_registry);
+        paint_overlay_card(
             target,
-            PixelRectToRect::rect(
-                layout.rect.x() + 1,
-                layout.rect.y() + 1,
-                5,
-                layout.rect.height().saturating_sub(2),
-            ),
-            4,
-            accent,
+            outer_rect,
+            radius,
+            border,
+            background,
             window_effects,
+            Some(accent),
+            false,
         )?;
 
         let title_y = layout.rect.y() + 10;
@@ -1953,9 +2129,10 @@ fn draw_modeline_side(
             let painted_width = monospace_text_width(&text, cell_width);
             if let Some(background) = part.background.as_deref().filter(|token| !token.is_empty()) {
                 let bg = theme_color(theme_registry, background, default_color);
-                fill_rect(
+                fill_rounded_rect(
                     target,
                     PixelRectToRect::rect(draw_x, y, painted_width, chip_height),
+                    chip_height / 4,
                     bg,
                 )?;
             }
@@ -2493,6 +2670,11 @@ fn render_buffer_with_view_state(
         theme_color(theme_registry, TOKEN_HEADERLINE_BACKGROUND, base_background);
     let cursor = theme_color(theme_registry, "ui.cursor", Color::RGB(110, 170, 255));
     let selection = theme_color(theme_registry, "ui.selection", Color::RGBA(55, 71, 99, 255));
+    let current_line_wash = theme_color(
+        theme_registry,
+        TOKEN_CURRENT_LINE,
+        adjust_color(base_background, if is_dark { 12 } else { -12 }),
+    );
     let relative_line_numbers = theme_registry
         .and_then(|registry| registry.resolve_bool(OPTION_LINE_NUMBER_RELATIVE))
         .unwrap_or(false);
@@ -2634,6 +2816,8 @@ fn render_buffer_with_view_state(
             text_color,
             muted,
             cursor,
+            cursor_roundness,
+            overlay_radius(theme_registry).min(8),
             cell_width,
             line_height,
         )?;
@@ -2895,6 +3079,19 @@ fn render_buffer_with_view_state(
                     break;
                 }
                 let y = body_y + visual_row as i32 * line_height;
+                if active && line_index == cursor_row && !matches!(input_mode, InputMode::Visual) {
+                    fill_window_surface_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            gutter_x,
+                            y,
+                            rect.width().saturating_sub(24),
+                            line_height.max(1) as u32,
+                        ),
+                        current_line_wash,
+                        window_effects,
+                    )?;
+                }
                 let segment_indent_cols = if segment_index == 0 {
                     0
                 } else {
@@ -2978,7 +3175,17 @@ fn render_buffer_with_view_state(
                             GitFringeKind::Modified => git_fringe_modified,
                             GitFringeKind::Removed => git_fringe_removed,
                         };
-                        draw_text(target, fringe_x, y, user_library.gitfringe_symbol(), color)?;
+                        fill_window_surface_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                rect.x() + 8,
+                                y,
+                                GIT_FRINGE_BAR_WIDTH,
+                                line_height.max(1) as u32,
+                            ),
+                            color,
+                            window_effects,
+                        )?;
                     }
                     let line_number = if relative_line_numbers {
                         if line_index == cursor_row {
@@ -3087,14 +3294,15 @@ fn render_buffer_with_view_state(
         if headerline_rows > 0 {
             for (index, headerline) in headerline_lines.iter().enumerate() {
                 let y = layout.body_y + index as i32 * line_height;
-                fill_window_surface_rect(
+                fill_window_surface_rounded_rect(
                     target,
                     PixelRectToRect::rect(
                         rect.x() + 8,
-                        y,
+                        y + 1,
                         rect.width().saturating_sub(16),
-                        line_height.max(1) as u32,
+                        line_height.saturating_sub(2).max(1) as u32,
                     ),
+                    overlay_radius(theme_registry).min(8),
                     headerline_background,
                     window_effects,
                 )?;
@@ -3131,6 +3339,17 @@ fn render_buffer_with_view_state(
         if let Some((y, overlay)) = primary_cursor_text_overlay {
             draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
         }
+        paint_buffer_scrollbar(
+            target,
+            rect,
+            body_y,
+            visible_rows,
+            line_height,
+            view_state.scroll_row,
+            buffer.max_scroll_row_for_wrapped_rows(visible_rows, wrap_cols, indent_size),
+            muted,
+            window_effects,
+        )?;
     }
 
     if let Some(input) = buffer.standalone_input_field() {
@@ -3337,6 +3556,8 @@ fn render_buffer_with_view_state(
         foreground,
         muted,
         cursor,
+        cursor_roundness,
+        overlay_radius(theme_registry).min(8),
         cell_width,
         line_height,
     )?;
@@ -3369,28 +3590,34 @@ pub(super) fn render_command_line_overlay(
     foreground: Color,
     muted: Color,
     cursor: Color,
+    cursor_roundness: u32,
+    chip_radius: u32,
     cell_width: i32,
     line_height: i32,
 ) -> Result<(), ShellError> {
     let Some(commandline_y) = layout.commandline_y else {
         return Ok(());
     };
-    if background.a > 0 {
-        fill_window_surface_rect(
-            target,
-            PixelRectToRect::rect(
-                rect.x() + 8,
-                commandline_y,
-                rect.width().saturating_sub(16),
-                line_height.max(1) as u32,
-            ),
-            background,
-            window_effects,
-        )?;
-    }
     let Some(input) = command_line_input else {
         return Ok(());
     };
+    let chip_background = if background.a == 0 {
+        Color::RGBA(foreground.r, foreground.g, foreground.b, 18)
+    } else {
+        background
+    };
+    fill_window_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x() + 8,
+            commandline_y,
+            rect.width().saturating_sub(16),
+            line_height.max(1) as u32,
+        ),
+        chip_radius,
+        chip_background,
+        window_effects,
+    )?;
     let text_x = rect.x() + 12;
     let prompt = input.prompt();
     let rendered = if input.text().is_empty() {
@@ -3415,7 +3642,7 @@ pub(super) fn render_command_line_overlay(
         };
         let cursor_col = prompt.chars().count() + input.cursor;
         let cursor_width = (cell_width / 4).max(2) as u32;
-        fill_rect(
+        fill_rounded_rect(
             target,
             PixelRectToRect::rect(
                 text_x + cursor_col as i32 * cell_width.max(1),
@@ -3423,7 +3650,82 @@ pub(super) fn render_command_line_overlay(
                 cursor_width,
                 line_height.max(2) as u32,
             ),
+            cursor_roundness,
             cursor_color,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_command_line_completion_popup(
+    target: &mut DrawTarget<'_>,
+    matches: &[String],
+    selected_index: usize,
+    pane_rect: Rect,
+    commandline_y: i32,
+    theme_registry: Option<&ThemeRegistry>,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), ShellError> {
+    if matches.is_empty() {
+        return Ok(());
+    }
+    let window_effects = current_window_effect_settings(theme_registry);
+    let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
+    let foreground = theme_color(
+        theme_registry,
+        "ui.foreground",
+        Color::RGBA(215, 221, 232, 255),
+    );
+    let is_dark = is_dark_color(base_background);
+    let background = adjust_color(base_background, if is_dark { 14 } else { -14 });
+    let selection = theme_color(
+        theme_registry,
+        "ui.selection",
+        adjust_color(base_background, if is_dark { 36 } else { -36 }),
+    );
+    let visible = matches.len().min(8);
+    let row_height = line_height.max(1);
+    let height = row_height as u32 * visible as u32 + 10;
+    let width = pane_rect.width().saturating_sub(16);
+    let y = (commandline_y - height as i32 - 6).max(pane_rect.y() + 8);
+    let x = pane_rect.x() + 8;
+    let radius = overlay_radius(theme_registry).min(8);
+    paint_overlay_card(
+        target,
+        PixelRectToRect::rect(x, y, width, height),
+        radius,
+        adjust_color(background, if is_dark { 24 } else { -24 }),
+        background,
+        window_effects,
+        None,
+        false,
+    )?;
+    let start = selected_index.saturating_sub(visible.saturating_sub(1));
+    for (row, (index, label)) in matches
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .enumerate()
+    {
+        let row_y = y + 5 + row as i32 * row_height;
+        if index == selected_index {
+            fill_overlay_surface_rounded_rect(
+                target,
+                PixelRectToRect::rect(x + 4, row_y - 1, width.saturating_sub(8), row_height as u32),
+                4,
+                selection,
+                window_effects,
+            )?;
+        }
+        draw_text(
+            target,
+            x + 10,
+            row_y,
+            &truncate_text_to_width(label, width.saturating_sub(20), cell_width),
+            foreground,
         )?;
     }
     Ok(())
@@ -3794,27 +4096,13 @@ pub(super) fn render_text_panel(
             header_height as u32,
         );
         let header_color = header_background;
-        let header_radius = inner_radius.min(header_rect.height() / 2);
-        fill_overlay_surface_rounded_rect(
+        fill_overlay_top_header_band(
             target,
             header_rect,
-            header_radius,
+            inner_radius,
             header_color,
             window_effects,
         )?;
-        if header_rect.height() > header_radius {
-            fill_overlay_surface_rect(
-                target,
-                PixelRectToRect::rect(
-                    header_rect.x(),
-                    header_rect.y() + header_radius as i32,
-                    header_rect.width(),
-                    header_rect.height().saturating_sub(header_radius),
-                ),
-                header_color,
-                window_effects,
-            )?;
-        }
         draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
     }
     let body_x = rect.x() + 10;
@@ -4397,27 +4685,13 @@ pub(super) fn render_acp_pane(
     } else {
         header_background
     };
-    let header_radius = inner_radius.min(header_rect.height() / 2);
-    fill_overlay_surface_rounded_rect(
+    fill_overlay_top_header_band(
         target,
         header_rect,
-        header_radius,
+        inner_radius,
         header_color,
         window_effects,
     )?;
-    if header_rect.height() > header_radius {
-        fill_overlay_surface_rect(
-            target,
-            PixelRectToRect::rect(
-                header_rect.x(),
-                header_rect.y() + header_radius as i32,
-                header_rect.width(),
-                header_rect.height().saturating_sub(header_radius),
-            ),
-            header_color,
-            window_effects,
-        )?;
-    }
     draw_text(target, rect.x() + 12, rect.y() + 6, title, foreground)?;
     let body_x = rect.x() + 10;
     let body_y = rect.y() + header_height + 4;
@@ -5098,7 +5372,12 @@ pub(super) fn line_color_segments(
         let token_style = relevant_spans
             .iter()
             .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
-            .min_by_key(|(span_start, span_end, _)| span_end.saturating_sub(*span_start))
+            .min_by_key(|(span_start, span_end, token)| {
+                (
+                    span_end.saturating_sub(*span_start),
+                    usize::from(!theme_token_has_render_priority(token)),
+                )
+            })
             .and_then(|(_, _, token)| {
                 theme_registry.and_then(|registry| registry.resolve_style(token))
             });
@@ -5116,6 +5395,10 @@ pub(super) fn line_color_segments(
     } else {
         segments
     }
+}
+
+fn theme_token_has_render_priority(token: &str) -> bool {
+    token.starts_with("rainbow.paren.")
 }
 
 pub(super) fn column_to_relative_byte_offset(
@@ -7279,6 +7562,41 @@ pub(super) fn fill_overlay_surface_rect(
         target,
         rect,
         overlay_window_surface_color(color, window_effects),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_buffer_scrollbar(
+    target: &mut DrawTarget<'_>,
+    pane_rect: Rect,
+    body_y: i32,
+    visible_rows: usize,
+    line_height: i32,
+    scroll_row: usize,
+    max_scroll: usize,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    if max_scroll == 0 {
+        return Ok(());
+    }
+    let track_height = (visible_rows as i32 * line_height.max(1)).max(1) as u32;
+    let thumb_height = ((track_height as u64 * visible_rows as u64)
+        / (visible_rows as u64 + max_scroll as u64))
+        .clamp(12, u64::from(track_height)) as u32;
+    let travel = track_height.saturating_sub(thumb_height);
+    let thumb_y = body_y + ((travel as u64 * scroll_row as u64) / max_scroll.max(1) as u64) as i32;
+    fill_window_surface_rounded_rect(
+        target,
+        PixelRectToRect::rect(
+            pane_rect.x() + pane_rect.width() as i32 - 8,
+            thumb_y,
+            4,
+            thumb_height,
+        ),
+        2,
+        Color::RGBA(color.r, color.g, color.b, 120),
+        window_effects,
     )
 }
 

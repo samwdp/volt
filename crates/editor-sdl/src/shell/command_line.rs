@@ -189,4 +189,10 @@ impl CommandLineOverlay {
             });
         }
     }
+
+    pub(super) fn completion_list(&self) -> Option<(&[String], usize)> {
+        self.completion
+            .as_ref()
+            .map(|state| (state.matches.as_slice(), state.index))
+    }
 }

@@ -558,9 +558,10 @@ pub(super) fn render_picker_overlay(
     height: u32,
     line_height: i32,
     theme_registry: Option<&ThemeRegistry>,
+    picker_layout: editor_plugin_api::PickerLayout,
     truncate_strategy: PickerTruncateStrategy,
 ) -> Result<(), ShellError> {
-    let popup_rect = centered_rect(width, height, width * 2 / 3, height * 3 / 5);
+    let popup_rect = picker_card_rect(width, height, picker_layout);
     let window_effects = current_window_effect_settings(theme_registry);
     let cell_width = fonts
         .primary()
@@ -568,7 +569,7 @@ pub(super) fn render_picker_overlay(
         .map_err(|error| ShellError::Sdl(error.to_string()))?
         .0
         .max(1) as i32;
-    let corner_radius = shared_corner_radius(theme_registry);
+    let corner_radius = overlay_radius(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let base_foreground = theme_color(
         theme_registry,
@@ -582,6 +583,15 @@ pub(super) fn render_picker_overlay(
         theme_registry,
         TOKEN_PICKER_SELECTION,
         adjust_color(popup_background, if is_dark { 16 } else { -16 }),
+    );
+    let accent = theme_color(
+        theme_registry,
+        "ui.picker.highlight",
+        theme_color(
+            theme_registry,
+            TOKEN_STATUSLINE_ACTIVE,
+            Color::RGB(110, 170, 255),
+        ),
     );
     let border = theme_color(
         theme_registry,
@@ -599,31 +609,21 @@ pub(super) fn render_picker_overlay(
         TOKEN_PICKER_SUBTLE,
         blend_color(foreground, popup_background, 0.4),
     );
-    fill_overlay_surface_rounded_rect(
+    let card_rect = PixelRectToRect::rect(
+        popup_rect.x,
+        popup_rect.y,
+        popup_rect.width,
+        popup_rect.height,
+    );
+    paint_overlay_card(
         target,
-        PixelRectToRect::rect(
-            popup_rect.x,
-            popup_rect.y,
-            popup_rect.width,
-            popup_rect.height,
-        ),
+        card_rect,
         corner_radius,
         border,
-        window_effects,
-    )?;
-    let inner_rect = PixelRectToRect::rect(
-        popup_rect.x + 2,
-        popup_rect.y + 2,
-        popup_rect.width.saturating_sub(4),
-        popup_rect.height.saturating_sub(4),
-    );
-    let inner_radius = corner_radius.saturating_sub(2);
-    fill_overlay_surface_rounded_rect(
-        target,
-        inner_rect,
-        inner_radius,
         popup_background,
         window_effects,
+        Some(accent),
+        false,
     )?;
 
     draw_text(
@@ -647,7 +647,13 @@ pub(super) fn render_picker_overlay(
         "ui.input.background",
         adjust_color(popup_background, if is_dark { 10 } else { -10 }),
     );
-    fill_overlay_surface_rounded_rect(target, query_rect, 6, input_background, window_effects)?;
+    fill_overlay_surface_rounded_rect(
+        target,
+        query_rect,
+        corner_radius.min(8),
+        input_background,
+        window_effects,
+    )?;
     let query_text = if query.is_empty() { "filter" } else { query };
     draw_text(
         target,
@@ -754,7 +760,7 @@ pub(super) fn render_picker_overlay(
         let label_x = content_left + fringe_width as i32;
         let text_width = list_content_width.saturating_sub(fringe_width);
         if selected {
-            fill_overlay_surface_rect(
+            fill_rounded_rect_with_left_accent(
                 target,
                 PixelRectToRect::rect(
                     popup_rect.x + 12,
@@ -762,7 +768,9 @@ pub(super) fn render_picker_overlay(
                     list_content_width.saturating_add(12),
                     row_height as u32,
                 ),
+                corner_radius.min(8),
                 highlight_background,
+                accent,
                 window_effects,
             )?;
         }

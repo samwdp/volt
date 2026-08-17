@@ -1,5 +1,11 @@
 #![doc = r#"Tree-sitter language registration, installation, parsing, highlighting, and indentation."#]
 
+mod rainbow_paren;
+
+pub use rainbow_paren::{
+    MAX_DEPTH, TOKEN_MISMATCHED, TOKEN_UNMATCHED, apply_rainbow_delimiter_spans, depth_theme_token,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,

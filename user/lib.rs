@@ -73,6 +73,8 @@ pub mod pane;
 pub mod pdf;
 /// Generic picker UI bindings and popup controls.
 pub mod picker;
+/// Rainbow delimiter highlighting for nested brackets.
+pub mod rainbow_parens;
 /// Compatibility alias for [`modeline`].
 pub mod statusline;
 /// Builtin terminal package surface.
@@ -138,6 +140,7 @@ pub fn packages() -> Vec<PluginPackage> {
         oil::package(),
         multicursor::package(),
         picker::package(),
+        rainbow_parens::package(),
         treesitter::package(),
         undotree::package(),
         workspace::package(),
@@ -193,8 +196,8 @@ use editor_plugin_api::{
     GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
     MarkdownPrettyConfig, ModelineSegment, OilDefaults, OilFeatureSpec, OilKeyAction,
     OilKeybindings, PaneConfig, PickerItemSpec, PickerProviderContext, PickerProviderSpec,
-    StatuslineContext, StatuslineSpan, TerminalConfig, TerminalFeatureSpec, UserLibrary,
-    WorkspaceDockConfig, WorkspaceRoot, flatten_modeline_to_spans,
+    RainbowParensConfig, StatuslineContext, StatuslineSpan, TerminalConfig, TerminalFeatureSpec,
+    UserLibrary, WorkspaceDockConfig, WorkspaceRoot, flatten_modeline_to_spans,
 };
 
 fn user_modeline_context<'a>(context: &StatuslineContext<'a>) -> modeline::ModelineContext<'a> {
@@ -308,6 +311,10 @@ impl UserLibrary for UserLibraryImpl {
         picker::truncate_strategy()
     }
 
+    fn picker_layout(&self) -> editor_plugin_api::PickerLayout {
+        picker::layout()
+    }
+
     fn acp_clients(&self) -> Vec<AcpClient> {
         acp::clients()
             .into_iter()
@@ -380,6 +387,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn ligature_config(&self) -> LigatureConfig {
         ligatures::config()
+    }
+
+    fn rainbow_parens_config(&self) -> RainbowParensConfig {
+        rainbow_parens::config()
     }
 
     fn oil_defaults(&self) -> OilDefaults {
@@ -705,6 +716,8 @@ extern "C" fn exported_pane_config() -> AbiPaneConfig {
         UserLibraryImpl.pane_config(),
         UserLibraryImpl.workspace_dock_config(),
         UserLibraryImpl.markdown_pretty_config(),
+        UserLibraryImpl.picker_layout(),
+        UserLibraryImpl.rainbow_parens_config(),
     )
 }
 
@@ -1476,6 +1489,7 @@ mod tests {
         const TOKENS: &[&str] = &[
             "ui.cursor",
             "ui.selection",
+            "ui.current-line",
             "ui.yank-flash",
             "ui.notification.background",
             "ui.notification.foreground",
@@ -1528,6 +1542,33 @@ mod tests {
             "ui.headerline",
             "ui.headerline.background",
             "ui.modal.scrim",
+        ];
+        for theme in themes {
+            for token in TOKENS {
+                assert!(
+                    theme.color(token).is_some(),
+                    "theme `{}` is missing `{token}`",
+                    theme.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_library_themes_cover_rainbow_paren_tokens() {
+        let themes = themes();
+        const TOKENS: &[&str] = &[
+            "rainbow.paren.depth.1",
+            "rainbow.paren.depth.2",
+            "rainbow.paren.depth.3",
+            "rainbow.paren.depth.4",
+            "rainbow.paren.depth.5",
+            "rainbow.paren.depth.6",
+            "rainbow.paren.depth.7",
+            "rainbow.paren.depth.8",
+            "rainbow.paren.depth.9",
+            "rainbow.paren.unmatched",
+            "rainbow.paren.mismatched",
         ];
         for theme in themes {
             for token in TOKENS {

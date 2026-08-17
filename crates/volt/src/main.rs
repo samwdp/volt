@@ -221,6 +221,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.picker_truncate_strategy_v1()().into()
     }
 
+    fn picker_layout(&self) -> editor_plugin_api::PickerLayout {
+        self.module.pane_config_v1()().picker_layout()
+    }
+
     fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
         self.module.acp_clients()()
             .into_iter()
@@ -285,6 +289,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
         self.module.ligature_config_v1()().into()
+    }
+
+    fn rainbow_parens_config(&self) -> editor_plugin_api::RainbowParensConfig {
+        self.module.pane_config_v1()().rainbow_parens_config()
     }
 
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {

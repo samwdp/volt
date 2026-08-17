@@ -23,9 +23,9 @@ use crate::{
     GhostTextLine, GitCommandBinding, GitFeatureSpec, GitPrefixBinding, GitStatusPrefix,
     HoverProvider, HoverProviderTopic, KeymapConfig, LigatureConfig, LspDiagnosticsInfo,
     MarkdownPrettyConfig, MarkdownPrettyIcon, OilDefaults, OilFeatureSpec, OilKeyAction,
-    OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, PickerProviderContext,
-    PickerProviderSpec, PickerTruncateStrategy, StatuslineContext, TerminalConfig,
-    TerminalFeatureSpec, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
+    OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, PickerLayout, PickerProviderContext,
+    PickerProviderSpec, PickerTruncateStrategy, RainbowParensConfig, StatuslineContext,
+    TerminalConfig, TerminalFeatureSpec, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -816,6 +816,31 @@ impl From<PickerTruncateStrategy> for AbiPickerTruncateStrategy {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, StableAbi)]
+pub struct AbiPickerLayout {
+    pub width_fraction: f32,
+    pub height_fraction: f32,
+}
+
+impl From<PickerLayout> for AbiPickerLayout {
+    fn from(value: PickerLayout) -> Self {
+        Self {
+            width_fraction: value.width_fraction,
+            height_fraction: value.height_fraction,
+        }
+    }
+}
+
+impl From<AbiPickerLayout> for PickerLayout {
+    fn from(value: AbiPickerLayout) -> Self {
+        Self {
+            width_fraction: value.width_fraction,
+            height_fraction: value.height_fraction,
+        }
+    }
+}
+
 impl From<AbiPickerTruncateStrategy> for PickerTruncateStrategy {
     fn from(value: AbiPickerTruncateStrategy) -> Self {
         match value {
@@ -1556,6 +1581,14 @@ impl From<AbiLigatureConfig> for LigatureConfig {
     }
 }
 
+fn fraction_to_hundredths(value: f32) -> u16 {
+    (value.clamp(0.0, 1.0) * 100.0).round() as u16
+}
+
+fn hundredths_to_fraction(value: u16) -> f32 {
+    f32::from(value) / 100.0
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiPaneConfig {
@@ -1563,6 +1596,9 @@ pub struct AbiPaneConfig {
     pub workspace_dock_side: AbiWorkspaceDockSide,
     pub workspace_dock_docked: bool,
     pub markdown_pretty: AbiMarkdownPrettyConfig,
+    pub picker_width_hundredths: u16,
+    pub picker_height_hundredths: u16,
+    pub rainbow_parens_enabled: bool,
 }
 
 impl AbiPaneConfig {
@@ -1570,12 +1606,17 @@ impl AbiPaneConfig {
         pane: PaneConfig,
         dock: WorkspaceDockConfig,
         markdown_pretty: MarkdownPrettyConfig,
+        picker: PickerLayout,
+        rainbow_parens: RainbowParensConfig,
     ) -> Self {
         Self {
             golden_ratio: pane.golden_ratio,
             workspace_dock_side: dock.side.into(),
             workspace_dock_docked: dock.docked,
             markdown_pretty: markdown_pretty.into(),
+            picker_width_hundredths: fraction_to_hundredths(picker.width_fraction),
+            picker_height_hundredths: fraction_to_hundredths(picker.height_fraction),
+            rainbow_parens_enabled: rainbow_parens.enabled,
         }
     }
 
@@ -1594,6 +1635,19 @@ impl AbiPaneConfig {
 
     pub fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
         self.markdown_pretty.clone().into()
+    }
+
+    pub fn picker_layout(&self) -> PickerLayout {
+        PickerLayout {
+            width_fraction: hundredths_to_fraction(self.picker_width_hundredths),
+            height_fraction: hundredths_to_fraction(self.picker_height_hundredths),
+        }
+    }
+
+    pub fn rainbow_parens_config(&self) -> RainbowParensConfig {
+        RainbowParensConfig {
+            enabled: self.rainbow_parens_enabled,
+        }
     }
 }
 

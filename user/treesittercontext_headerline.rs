@@ -9,6 +9,9 @@ const HEADERLINE_SEPARATOR: &str = "  >  ";
 
 /// Returns sticky headerline breadcrumbs derived from tree-sitter contexts.
 pub fn headerline_lines(context: &GhostTextContext<'_>) -> Vec<String> {
+    if let Some(line) = special_buffer_headerline(context) {
+        return vec![line];
+    }
     let contexts = treesitter::ancestor_contexts_for_cursor(
         &crate::syntax_languages(),
         context.language_id,
@@ -63,6 +66,23 @@ fn build_headerline_lines(
     }
     let start = breadcrumbs.len().saturating_sub(MAX_HEADERLINE_CONTEXTS);
     vec![breadcrumbs[start..].join(HEADERLINE_SEPARATOR)]
+}
+
+fn special_buffer_headerline(context: &GhostTextContext<'_>) -> Option<String> {
+    let name = context.buffer_name;
+    if name.contains("oil") {
+        let path = context
+            .buffer_text
+            .lines()
+            .find_map(|line| line.strip_prefix("Directory "))
+            .and_then(|rest| rest.split(" (hidden:").next())
+            .unwrap_or(name);
+        return Some(format!("../  {path}"));
+    }
+    if name.contains("terminal") {
+        return Some(name.to_owned());
+    }
+    None
 }
 
 #[cfg(test)]

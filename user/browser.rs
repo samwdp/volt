@@ -7,7 +7,7 @@ use editor_plugin_api::{
 
 pub const BROWSER_KIND: &str = buffer_kinds::BROWSER;
 pub const BUFFER_NAME: &str = "*browser*";
-pub const URL_PROMPT: &str = "URL > ";
+pub const URL_PROMPT: &str = "";
 pub const URL_PLACEHOLDER: &str = "https://example.com";
 pub const INPUT_HINT: &str = "Enter/Ctrl+Enter navigate · F12 devtools · click page to browse";
 

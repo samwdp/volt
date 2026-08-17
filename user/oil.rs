@@ -326,16 +326,21 @@ pub fn directory_sections(
         sort_mode.label(),
         if trash_enabled { "on" } else { "off" },
     );
-    let items = entries
-        .iter()
-        .map(|entry| {
-            let label = directory_entry_display_label(entry);
-            SectionItem::new(label).with_action(
-                SectionAction::new(ACTION_OIL_ENTRY)
-                    .with_detail(entry.path().display().to_string()),
-            )
-        })
-        .collect();
+    let mut items = Vec::new();
+    if let Some(parent) = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        items.push(SectionItem::new("../").with_action(
+            SectionAction::new(ACTION_OIL_ENTRY).with_detail(parent.display().to_string()),
+        ));
+    }
+    items.extend(entries.iter().map(|entry| {
+        let label = directory_entry_display_label(entry);
+        SectionItem::new(label).with_action(
+            SectionAction::new(ACTION_OIL_ENTRY).with_detail(entry.path().display().to_string()),
+        )
+    }));
     SectionTree::new(vec![
         Section::new(SECTION_OIL_DIRECTORY, header).with_items(items),
     ])

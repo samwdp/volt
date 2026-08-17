@@ -84,11 +84,12 @@ If the path does not exist on the current machine, it is filtered out automatica
 `user\theme.rs` keeps the default theme first by matching `DEFAULT_THEME_ID`:
 
 ```rust
-const DEFAULT_THEME_ID: &str = "gruvbox-dark";
+const DEFAULT_THEME_ID: &str = "volt-arc";
 ```
 
 Change that value to the theme id you want to use by default. The bundled ids currently include:
 
+- `volt-arc` (default)
 - `gruvbox-dark`
 - `gruvbox-light`
 - `rosepine-dark`

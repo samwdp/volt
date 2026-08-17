@@ -28,10 +28,11 @@ pub use abi::{
     AbiIconFontSymbol, AbiKeymapConfig, AbiLanguageConfiguration, AbiLanguageServerRootStrategy,
     AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiMarkdownPrettyConfig,
     AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
-    AbiPaneConfig, AbiPdfOpenMode, AbiPickerTruncateStrategy, AbiSection, AbiSectionAction,
-    AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext, AbiStringPair,
-    AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption, AbiThemeOptionEntry,
-    AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule, UserLibraryModuleRef,
+    AbiPaneConfig, AbiPdfOpenMode, AbiPickerLayout, AbiPickerTruncateStrategy, AbiSection,
+    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
+    AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption,
+    AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule,
+    UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -935,6 +936,24 @@ pub enum PickerTruncateStrategy {
     Auto,
 }
 
+/// Picker card size as fractions of the editor window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PickerLayout {
+    /// Horizontal fraction of the window (clamped by the shell to `0.15..=1.0`).
+    pub width_fraction: f32,
+    /// Vertical fraction of the window (clamped by the shell to `0.15..=1.0`).
+    pub height_fraction: f32,
+}
+
+impl Default for PickerLayout {
+    fn default() -> Self {
+        Self {
+            width_fraction: 2.0 / 3.0,
+            height_fraction: 3.0 / 5.0,
+        }
+    }
+}
+
 /// One picker-instance extra keybind (chord → command) declared on a provider.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
@@ -1654,6 +1673,9 @@ pub trait UserLibrary: Send + Sync {
     fn picker_truncate_strategy(&self) -> PickerTruncateStrategy {
         PickerTruncateStrategy::Auto
     }
+    fn picker_layout(&self) -> PickerLayout {
+        PickerLayout::default()
+    }
     fn acp_clients(&self) -> Vec<AcpClient> {
         Vec::new()
     }
@@ -1728,6 +1750,9 @@ pub trait UserLibrary: Send + Sync {
     }
     fn ligature_config(&self) -> LigatureConfig {
         LigatureConfig { enabled: false }
+    }
+    fn rainbow_parens_config(&self) -> RainbowParensConfig {
+        RainbowParensConfig { enabled: true }
     }
     fn oil_defaults(&self) -> OilDefaults {
         OilDefaults::default()
@@ -2795,6 +2820,12 @@ pub enum PdfOpenMode {
 /// Text ligature configuration exported by the user library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LigatureConfig {
+    pub enabled: bool,
+}
+
+/// Rainbow delimiter configuration exported by the user library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RainbowParensConfig {
     pub enabled: bool,
 }
 

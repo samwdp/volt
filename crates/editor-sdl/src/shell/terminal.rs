@@ -358,7 +358,7 @@ pub(super) fn active_terminal_dimensions(
         buffer,
         height,
         line_height,
-        shell_user_library(runtime).commandline_enabled(),
+        shell_ui(runtime)?.command_line().is_some() || shell_ui(runtime)?.input_prompt_visible(),
     )
     .max(1);
     let cols = wrap_columns_for_width(width, cell_width).max(1);

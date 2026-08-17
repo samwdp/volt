@@ -269,23 +269,12 @@ pub(super) fn render_workspace_dock(
         layout.dock_rect.height,
     );
     fill_window_surface_rect(target, dock_rect, dock_background, window_effects)?;
-    let border_x = match layout.side {
-        WorkspaceDockSide::Left => layout
-            .dock_rect
-            .x
-            .saturating_add(layout.dock_rect.width.saturating_sub(1) as i32),
-        WorkspaceDockSide::Right => layout.dock_rect.x,
-    };
-    fill_window_surface_rect(
-        target,
-        PixelRectToRect::rect(border_x, layout.dock_rect.y, 1, layout.dock_rect.height),
-        border,
-        window_effects,
-    )?;
 
+    let card_inset = 6i32;
     let card_height = workspace_dock_card_height(line_height) as i32;
-    let text_x = layout.dock_rect.x + cell_width.max(1);
-    let max_chars = ((layout.dock_rect.width as i32).saturating_sub(cell_width.max(1) * 2)
+    let text_x = layout.dock_rect.x + cell_width.max(1) + card_inset;
+    let max_chars = ((layout.dock_rect.width as i32)
+        .saturating_sub(cell_width.max(1) * 2 + card_inset * 2)
         / cell_width.max(1))
     .max(4) as usize;
     for (index, entry) in entries.iter().enumerate() {
@@ -294,16 +283,20 @@ pub(super) fn render_workspace_dock(
             break;
         }
         let card_rect = PixelRectToRect::rect(
-            layout.dock_rect.x,
-            card_y,
-            layout.dock_rect.width,
-            card_height.max(0) as u32,
+            layout.dock_rect.x + card_inset,
+            card_y + 2,
+            layout
+                .dock_rect
+                .width
+                .saturating_sub((card_inset * 2) as u32),
+            (card_height - 4).max(0) as u32,
         );
         if entry.active {
-            fill_overlay_surface_rect(target, card_rect, selection, window_effects)?;
-            fill_overlay_surface_rect(
+            fill_rounded_rect_with_left_accent(
                 target,
-                PixelRectToRect::rect(layout.dock_rect.x, card_y, 4, card_height.max(0) as u32),
+                card_rect,
+                shared_corner_radius(theme_registry).min(10),
+                selection,
                 accent,
                 window_effects,
             )?;

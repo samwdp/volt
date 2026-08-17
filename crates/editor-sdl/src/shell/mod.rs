@@ -141,7 +141,7 @@ use editor_render::{
 };
 use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
-    SyntaxSnapshot,
+    SyntaxSnapshot, apply_rainbow_delimiter_spans,
 };
 use editor_terminal::{
     LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalRenderSnapshot,
@@ -348,6 +348,7 @@ const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;
 const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
 const HOOK_IMAGE_TOGGLE_MODE: &str = image_hooks::TOGGLE_MODE;
 const HOOK_MARKDOWN_PRETTY_TOGGLE: &str = "markdown.pretty.toggle";
+const HOOK_RAINBOW_PARENS_TOGGLE: &str = "rainbow.parens.toggle";
 const HOOK_PDF_NEXT_PAGE: &str = pdf_hooks::NEXT_PAGE;
 const HOOK_PDF_PREVIOUS_PAGE: &str = pdf_hooks::PREVIOUS_PAGE;
 const HOOK_PDF_ROTATE_CLOCKWISE: &str = pdf_hooks::ROTATE_CLOCKWISE;
@@ -457,12 +458,14 @@ const TOKEN_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
 const TOKEN_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
 const TOKEN_LINE_NUMBER: &str = "ui.line-number";
 const TOKEN_LINE_NUMBER_CURRENT: &str = "ui.line-number.current";
+const TOKEN_CURRENT_LINE: &str = "ui.current-line";
 const TOKEN_PANE_INACTIVE: &str = "ui.pane.inactive";
-const TOKEN_PANE_BORDER: &str = "ui.pane.border";
-const TOKEN_PANE_ACTIVE_BORDER: &str = "ui.pane.active-border";
 const TOKEN_GHOST_TEXT: &str = "ui.ghost-text";
 const TOKEN_HEADERLINE: &str = "ui.headerline";
 const TOKEN_HEADERLINE_BACKGROUND: &str = "ui.headerline.background";
+const GIT_FRINGE_BAR_WIDTH: u32 = 3;
+const OVERLAY_SHADOW_OFFSET: i32 = 8;
+const OVERLAY_ACCENT_BAR_WIDTH: u32 = 5;
 const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";
@@ -695,6 +698,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.picker_truncate_strategy_v1()().into()
     }
 
+    fn picker_layout(&self) -> editor_plugin_api::PickerLayout {
+        self.module.pane_config_v1()().picker_layout()
+    }
+
     fn acp_clients(&self) -> Vec<editor_plugin_api::AcpClient> {
         self.module.acp_clients()()
             .into_iter()
@@ -759,6 +766,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn ligature_config(&self) -> editor_plugin_api::LigatureConfig {
         self.module.ligature_config_v1()().into()
+    }
+
+    fn rainbow_parens_config(&self) -> editor_plugin_api::RainbowParensConfig {
+        self.module.pane_config_v1()().rainbow_parens_config()
     }
 
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
@@ -3065,6 +3076,10 @@ impl InputField {
         self.placeholder = placeholder;
     }
 
+    fn set_hint(&mut self, hint: Option<String>) {
+        self.hint = hint;
+    }
+
     fn text_line_count(&self) -> usize {
         self.line_starts().len().max(1)
     }
@@ -3716,6 +3731,8 @@ pub(crate) struct ShellBuffer {
     forced_language: bool,
     /// Per-buffer Markdown Pretty override (`None` = use user config default).
     markdown_pretty_enabled: Option<bool>,
+    /// Per-buffer rainbow delimiter override (`None` = use user config default).
+    rainbow_parens_enabled: Option<bool>,
     pub(crate) scroll_row: usize,
     scroll_col: usize,
     line_wrap: bool,
@@ -4587,6 +4604,7 @@ impl ShellBuffer {
             language_id: None,
             forced_language: false,
             markdown_pretty_enabled: None,
+            rainbow_parens_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4663,6 +4681,7 @@ impl ShellBuffer {
             language_id: None,
             forced_language: false,
             markdown_pretty_enabled: None,
+            rainbow_parens_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4742,6 +4761,7 @@ impl ShellBuffer {
             language_id: None,
             forced_language: false,
             markdown_pretty_enabled: None,
+            rainbow_parens_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap,
@@ -6052,6 +6072,15 @@ impl ShellBuffer {
         self.markdown_pretty_enabled = Some(!current);
     }
 
+    fn rainbow_parens_enabled(&self, default_enabled: bool) -> bool {
+        self.rainbow_parens_enabled.unwrap_or(default_enabled)
+    }
+
+    fn toggle_rainbow_parens(&mut self, default_enabled: bool) {
+        let current = self.rainbow_parens_enabled(default_enabled);
+        self.rainbow_parens_enabled = Some(!current);
+    }
+
     fn lsp_diagnostics(&self) -> &[LspDiagnostic] {
         &self.lsp_diagnostics
     }
@@ -7337,7 +7366,7 @@ impl ShellBuffer {
         self.move_to_viewport_offset(middle)
     }
 
-    fn max_scroll_row_for_wrapped_rows(
+    pub(crate) fn max_scroll_row_for_wrapped_rows(
         &self,
         visible_rows: usize,
         wrap_cols: usize,
@@ -14384,7 +14413,8 @@ impl ShellState {
         line_height: i32,
     ) -> Result<(), ShellError> {
         let buffer_id = active_shell_buffer_id(&self.runtime).map_err(ShellError::Runtime)?;
-        let command_line_visible = shell_user_library(&self.runtime).commandline_enabled();
+        let command_line_visible =
+            self.ui()?.command_line().is_some() || self.ui()?.input_prompt_visible();
         let visible_rows = {
             let buffer = shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
             buffer_visible_rows_for_height(
@@ -14456,9 +14486,9 @@ impl ShellState {
         line_height: i32,
     ) -> Result<(), ShellError> {
         let typing_active = self.typing_refresh_budget_active(Instant::now());
-        let command_line_visible = shell_user_library(&self.runtime).commandline_enabled();
         let runtime_popup = self.runtime_popup()?;
         let ui = self.ui()?;
+        let command_line_visible = ui.command_line().is_some() || ui.input_prompt_visible();
         let popup_height = runtime_popup
             .as_ref()
             .map(|_| popup_window_height(render_height, line_height))
@@ -16709,6 +16739,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_RAINBOW_PARENS_TOGGLE,
+        "Toggles rainbow delimiter highlighting for the active buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PDF_PREVIOUS_PAGE,
         "Moves the active PDF buffer to the previous page.",
     )?;
@@ -18645,6 +18680,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_RAINBOW_PARENS_TOGGLE,
+            "shell.rainbow-parens-toggle",
+            |_, runtime| {
+                toggle_active_rainbow_parens(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_PDF_PREVIOUS_PAGE,
             "shell.pdf-previous-page",
             |_, runtime| {
@@ -20506,6 +20551,17 @@ fn toggle_active_markdown_pretty(runtime: &mut EditorRuntime) -> Result<(), Stri
         }
     }
     buffer.toggle_markdown_pretty(default_enabled);
+    Ok(())
+}
+
+fn toggle_active_rainbow_parens(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let default_enabled = shell_user_library(runtime).rainbow_parens_config().enabled;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.toggle_rainbow_parens(default_enabled);
+    }
+    queue_buffer_syntax_refresh(runtime, buffer_id)?;
     Ok(())
 }
 
@@ -23280,6 +23336,7 @@ struct SyntaxRefreshWorkerRequest {
     path: Option<PathBuf>,
     buffer_language_id: Option<String>,
     syntax_window: Option<SyntaxLineWindow>,
+    rainbow_parens_enabled: bool,
     text: TextBuffer,
 }
 
@@ -23529,7 +23586,11 @@ fn process_syntax_refresh_request(
             let highlight_span_count = snapshot.highlight_spans.len();
             (
                 highlight_span_count,
-                Some(Ok(index_syntax_lines(snapshot, &request.text))),
+                Some(Ok(index_syntax_lines_with_rainbow_parens(
+                    snapshot,
+                    &request.text,
+                    request.rainbow_parens_enabled,
+                ))),
             )
         }
         Some(Err(error)) => (0, Some(Err(error.to_string()))),
@@ -30517,6 +30578,8 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
     }
 
     let now = Instant::now();
+    let default_rainbow_parens_enabled =
+        shell_user_library(runtime).rainbow_parens_config().enabled;
     let requests = {
         let ui = shell_ui(runtime)?;
         ui.buffers
@@ -30530,6 +30593,8 @@ fn refresh_pending_syntax(runtime: &mut EditorRuntime) -> Result<SyntaxRefreshSt
                 // Prefer visible-window highlighting so first paint lands fast, then expand on
                 // demand as scrolling changes the requested window.
                 syntax_window: buffer.worker_syntax_window(),
+                rainbow_parens_enabled: buffer
+                    .rainbow_parens_enabled(default_rainbow_parens_enabled),
                 text: buffer.text.clone(),
             })
             .collect::<Vec<_>>()
@@ -32303,7 +32368,9 @@ fn install_optional_runtime_services(
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
-    let (path, text, buffer_language_id, syntax_window) = {
+    let default_rainbow_parens_enabled =
+        shell_user_library(runtime).rainbow_parens_config().enabled;
+    let (path, text, buffer_language_id, syntax_window, rainbow_parens_enabled) = {
         let Some(buffer) = shell_ui(runtime)?.buffer(buffer_id) else {
             return Ok(());
         };
@@ -32314,6 +32381,7 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
                 .language_id()
                 .map(|language_id| language_id.to_owned()),
             buffer.desired_syntax_window(),
+            buffer.rainbow_parens_enabled(default_rainbow_parens_enabled),
         )
     };
 
@@ -32333,7 +32401,11 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
             Some(Ok(snapshot)) => {
                 buffer.set_language_id(language_id.clone());
                 buffer.set_indexed_syntax_lines(
-                    Some(index_syntax_lines(snapshot, &text)),
+                    Some(index_syntax_lines_with_rainbow_parens(
+                        snapshot,
+                        &text,
+                        rainbow_parens_enabled,
+                    )),
                     syntax_window,
                 );
                 buffer.set_syntax_error(None);
@@ -32358,6 +32430,16 @@ fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Re
     }
 
     Ok(())
+}
+
+fn index_syntax_lines_with_rainbow_parens(
+    snapshot: SyntaxSnapshot,
+    text: &TextBuffer,
+    rainbow_parens_enabled: bool,
+) -> IndexedSyntaxLines {
+    let mut snapshot = snapshot;
+    apply_rainbow_delimiter_spans(&mut snapshot, text.text().as_str(), rainbow_parens_enabled);
+    index_syntax_lines(snapshot, text)
 }
 
 fn compute_buffer_syntax(
