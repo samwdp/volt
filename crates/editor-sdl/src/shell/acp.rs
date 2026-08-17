@@ -10,22 +10,25 @@ use std::{
 
 use agent_client_protocol::{Agent, Client, ClientSideConnection};
 use agent_client_protocol::{
-    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, Error, FileSystemCapabilities, Implementation, InitializeRequest,
+    AuthCapabilities, AvailableCommand, BlobResourceContents, ClientCapabilities, ContentBlock,
+    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
+    Error, FileSystemCapabilities, Implementation, InitializeRequest,
     KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, Meta,
     ModelId, ModelInfo, NewSessionRequest, PermissionOption, PermissionOptionId,
     PermissionOptionKind, Plan, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionInfo,
     SessionInfoUpdate, SessionMode, SessionModeId, SessionModeState, SessionModelState,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
     SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    TerminalOutputResponse, TextContent, TextResourceContents, ToolCall, ToolCallUpdate,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
@@ -1027,8 +1030,9 @@ fn active_acp_client(runtime: &EditorRuntime) -> Result<AcpClientConfig, String>
 pub(super) fn submit_acp_prompt(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
-    prompt: &str,
+    _prompt: &str,
     text: &str,
+    pending_images: Vec<AcpPendingImage>,
 ) -> Result<(), String> {
     let manager = runtime
         .services()
@@ -1041,9 +1045,14 @@ pub(super) fn submit_acp_prompt(
             .map_err(|_| "acp manager lock was poisoned".to_owned())?;
         manager.session_for_buffer(buffer_id)
     };
+    let workspace_root = active_workspace_root(runtime)?;
+    let prompt_blocks =
+        build_acp_prompt_blocks(text, &pending_images, workspace_root.as_deref())?;
+    let display_blocks = prompt_blocks.clone();
     let Some(session_id) = session_id else {
         let follow = {
             let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            let _ = buffer.acp_push_user_message(display_blocks);
             let follow = buffer.acp_push_system_message("ACP session is not connected.");
             buffer.clear_input();
             follow
@@ -1054,7 +1063,7 @@ pub(super) fn submit_acp_prompt(
     };
     let follow = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        let follow = buffer.acp_push_user_prompt(format!("{prompt}{text}"));
+        let follow = buffer.acp_push_user_message(display_blocks);
         buffer.clear_input();
         follow
     };
@@ -1063,7 +1072,7 @@ pub(super) fn submit_acp_prompt(
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.prompt(session_id, text.to_owned())
+    manager.prompt(session_id, prompt_blocks)
 }
 
 pub(super) fn acp_complete_slash(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -1154,6 +1163,226 @@ pub(super) fn acp_insert_slash_command(
     Ok(())
 }
 
+pub(super) fn maybe_open_file_completion(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let Some(text) = ({
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if !matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
+        ) {
+            return Ok(());
+        }
+        buffer.input_field().map(|input| input.text().to_owned())
+    }) else {
+        return Ok(());
+    };
+    let picker_kind = shell_ui(runtime)?.picker_kind();
+    let file_picker_active = matches!(
+        picker_kind,
+        Some(PickerKind::AcpFile {
+            buffer_id: picker_buffer_id,
+        }) if picker_buffer_id == buffer_id
+    );
+    let Some(trimmed) = acp_file_completion_query(&text) else {
+        if file_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        }
+        return Ok(());
+    };
+    if shell_ui(runtime)?.picker_visible() {
+        if file_picker_active {
+            shell_ui_mut(runtime)?.close_picker();
+        } else {
+            return Ok(());
+        }
+    }
+    open_file_reference_picker(
+        runtime,
+        buffer_id,
+        CompletionTrigger::Auto(trimmed.to_owned()),
+    )
+}
+
+pub(super) fn acp_insert_file_reference(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    path: &str,
+) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let Some(input) = buffer.input_field_mut() else {
+        return Err("ACP buffer has no input field".to_owned());
+    };
+    let existing = input.text().to_owned();
+    let Some(at_index) = existing.rfind('@') else {
+        let next = if existing.is_empty() {
+            format!("@{path} ")
+        } else if existing.ends_with(' ') {
+            format!("{existing}@{path} ")
+        } else {
+            format!("{existing} @{path} ")
+        };
+        input.set_text(&next);
+        refresh_acp_input_hint(runtime, buffer_id)?;
+        return Ok(());
+    };
+    let prefix = &existing[..=at_index];
+    let next = format!("{prefix}{path} ");
+    input.set_text(&next);
+    refresh_acp_input_hint(runtime, buffer_id)?;
+    Ok(())
+}
+
+fn acp_file_completion_query(text: &str) -> Option<&str> {
+    let at_index = text.rfind('@')?;
+    let after = &text[at_index + 1..];
+    if after.contains('\n') || after.contains(' ') {
+        return None;
+    }
+    Some(after)
+}
+
+fn open_file_reference_picker(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    trigger: CompletionTrigger,
+) -> Result<(), String> {
+    if shell_ui(runtime)?.picker_visible() {
+        return Ok(());
+    }
+    let workspace_root = active_workspace_root(runtime)?;
+    let Some(root) = workspace_root else {
+        return Ok(());
+    };
+    let files = list_repository_files(&root).unwrap_or_default();
+    if files.is_empty() {
+        return Ok(());
+    }
+    let entries = files
+        .into_iter()
+        .map(|relative_path| {
+            let display = relative_path.display().to_string();
+            let absolute = root.join(&relative_path);
+            PickerEntry {
+                item: PickerItem::new(
+                    display.clone(),
+                    display.clone(),
+                    String::new(),
+                    None::<String>,
+                )
+                .with_search_text(display.clone())
+                .with_fringe(editor_icons::seti_file_icon(&absolute)),
+                action: PickerAction::AcpInsertFileReference {
+                    buffer_id,
+                    path: display,
+                },
+                quickfix: None,
+            }
+        })
+        .collect();
+    let mut picker = PickerOverlay::from_entries("ACP Files", entries);
+    match trigger {
+        CompletionTrigger::Auto(query) => {
+            if !query.is_empty() {
+                picker.append_query(&query);
+            }
+        }
+        CompletionTrigger::Manual => {}
+    }
+    shell_ui_mut(runtime)?.set_picker(picker.with_kind(PickerKind::AcpFile { buffer_id }));
+    Ok(())
+}
+
+fn parse_at_mentions(text: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(at_index) = text[search_from..].find('@') {
+        let start = search_from + at_index + 1;
+        let rest = &text[start..];
+        let end = rest
+            .find(|character: char| character.is_whitespace())
+            .unwrap_or(rest.len());
+        let mention = rest[..end].trim();
+        if !mention.is_empty() && !mentions.iter().any(|existing| existing == mention) {
+            mentions.push(mention.to_owned());
+        }
+        search_from = start.saturating_add(end.max(1));
+    }
+    mentions
+}
+
+fn acp_file_uri(root: &Path, relative: &str) -> String {
+    let path = root.join(relative);
+    format!("file://{}", path.display())
+}
+
+fn acp_guess_text_mime_type(path: &str) -> Option<String> {
+    match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "rs" => Some("text/x-rust".to_owned()),
+        "md" => Some("text/markdown".to_owned()),
+        "json" => Some("application/json".to_owned()),
+        "yaml" | "yml" => Some("application/yaml".to_owned()),
+        "toml" => Some("application/toml".to_owned()),
+        "html" => Some("text/html".to_owned()),
+        "css" => Some("text/css".to_owned()),
+        "js" => Some("text/javascript".to_owned()),
+        "ts" => Some("text/typescript".to_owned()),
+        "py" => Some("text/x-python".to_owned()),
+        "sh" => Some("text/x-shellscript".to_owned()),
+        _ => Some("text/plain".to_owned()),
+    }
+}
+
+fn acp_embed_file_reference(root: &Path, relative: &str) -> ContentBlock {
+    let path = root.join(relative);
+    let uri = acp_file_uri(root, relative);
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let mut resource = TextResourceContents::new(content, uri);
+        if let Some(mime_type) = acp_guess_text_mime_type(relative) {
+            resource = resource.mime_type(mime_type);
+        }
+        return ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(resource),
+        ));
+    }
+    if let Ok(bytes) = std::fs::read(&path) {
+        let blob = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut resource = BlobResourceContents::new(blob, uri);
+        if let Some(mime_type) = acp_guess_text_mime_type(relative) {
+            resource = resource.mime_type(mime_type);
+        }
+        return ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(resource),
+        ));
+    }
+    ContentBlock::ResourceLink(ResourceLink::new(relative, acp_file_uri(root, relative)))
+}
+
+fn build_acp_prompt_blocks(
+    text: &str,
+    pending_images: &[AcpPendingImage],
+    workspace_root: Option<&Path>,
+) -> Result<Vec<ContentBlock>, String> {
+    let mut blocks = Vec::new();
+    if !text.trim().is_empty() {
+        blocks.push(ContentBlock::Text(TextContent::new(text)));
+    }
+    if let Some(root) = workspace_root {
+        for mention in parse_at_mentions(text) {
+            blocks.push(acp_embed_file_reference(root, &mention));
+        }
+    }
+    for image in pending_images {
+        blocks.push(image.to_content_block());
+    }
+    if blocks.is_empty() {
+        return Err("ACP prompt is empty".to_owned());
+    }
+    Ok(blocks)
+}
+
 fn format_acp_mode_label(mode_id: &SessionModeId) -> String {
     let raw = mode_id.to_string();
     if let Some((_, suffix)) = raw.rsplit_once('#')
@@ -1200,6 +1429,7 @@ fn build_acp_input_hint(
     mode_id: Option<&SessionModeId>,
     model_id: Option<&ModelId>,
     command_hint: Option<&str>,
+    pending_images: usize,
 ) -> Option<String> {
     let mut segments = Vec::new();
     if let Some(mode_id) = mode_id {
@@ -1210,6 +1440,14 @@ fn build_acp_input_hint(
     }
     if let Some(command_hint) = command_hint.filter(|hint| !hint.trim().is_empty()) {
         segments.push(command_hint.to_owned());
+    }
+    if pending_images > 0 {
+        let label = if pending_images == 1 {
+            "1 image attached".to_owned()
+        } else {
+            format!("{pending_images} images attached")
+        };
+        segments.push(label);
     }
     if mode_id.is_some() {
         segments.push("shift+tab switch mode".to_owned());
@@ -1233,7 +1471,16 @@ fn update_acp_input_hint(
         .and_then(|buffer| buffer.input_field().map(|input| input.text().to_owned()))
         .unwrap_or_default();
     let command_hint = active_command_input_hint(available_commands, &input_text);
-    let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref());
+    let pending_images = shell_buffer(runtime, buffer_id)
+        .ok()
+        .map(|buffer| buffer.acp_pending_image_count())
+        .unwrap_or(0);
+    let hint = build_acp_input_hint(
+        mode_id,
+        model_id,
+        command_hint.as_deref(),
+        pending_images,
+    );
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
         && let Some(footer) = buffer.acp_footer_pane_mut()
     {
@@ -2176,9 +2423,10 @@ impl AcpManager {
     fn prompt(
         &mut self,
         session_id: agent_client_protocol::SessionId,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
     ) -> Result<(), String> {
-        self.runtime.send(AcpCommand::Prompt { session_id, prompt })
+        self.runtime
+            .send(AcpCommand::Prompt { session_id, prompt })
     }
 
     fn list_sessions(
@@ -3355,7 +3603,7 @@ enum AcpCommand {
     },
     Prompt {
         session_id: agent_client_protocol::SessionId,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
     },
     ListSessions {
         session_id: agent_client_protocol::SessionId,
@@ -3672,7 +3920,7 @@ async fn connect_acp_client(
 async fn send_acp_prompt(
     state: Rc<RefCell<AcpRuntimeState>>,
     session_id: agent_client_protocol::SessionId,
-    prompt: String,
+    prompt: Vec<ContentBlock>,
 ) -> Result<(), String> {
     let connection = {
         state
@@ -3682,10 +3930,7 @@ async fn send_acp_prompt(
             .map(|session| session.connection.clone())
     }
     .ok_or_else(|| "ACP session is not connected".to_owned())?;
-    let request = agent_client_protocol::PromptRequest::new(
-        session_id.clone(),
-        vec![ContentBlock::from(prompt)],
-    );
+    let request = agent_client_protocol::PromptRequest::new(session_id.clone(), prompt);
     let response = connection
         .prompt(request)
         .await
@@ -5452,5 +5697,52 @@ mod tests {
         assert!(acp_slash_completion_query("/fix\nmore").is_none());
         assert!(acp_slash_completion_query("i have this code //").is_none());
         assert!(acp_slash_completion_query(" //").is_none());
+    }
+
+    #[test]
+    fn acp_file_completion_query_detects_trailing_at_mention_token() {
+        assert_eq!(acp_file_completion_query("@"), Some(""));
+        assert_eq!(acp_file_completion_query("look at @src"), Some("src"));
+        assert_eq!(
+            acp_file_completion_query("compare @crates/editor-sdl/src/lib.rs"),
+            Some("crates/editor-sdl/src/lib.rs")
+        );
+        assert!(acp_file_completion_query("look at @src/foo and bar").is_none());
+        assert!(acp_file_completion_query("@src\nmore").is_none());
+    }
+
+    #[test]
+    fn parse_at_mentions_collects_unique_paths() {
+        assert_eq!(
+            parse_at_mentions("review @src/lib.rs and @src/main.rs"),
+            vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()]
+        );
+        assert_eq!(parse_at_mentions("no mentions here"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn build_acp_prompt_blocks_embeds_text_files_and_images() {
+        let root = std::env::temp_dir().join(format!("volt-acp-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(root.join("note.txt"), "hello").expect("write note");
+
+        let image = AcpPendingImage {
+            mime_type: "image/png".to_owned(),
+            data_base64: "aGVsbG8=".to_owned(),
+        };
+        let blocks = build_acp_prompt_blocks(
+            "please review @note.txt",
+            &[image],
+            Some(root.as_path()),
+        )
+        .expect("prompt blocks");
+
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], ContentBlock::Text(_)));
+        assert!(matches!(blocks[1], ContentBlock::Resource(_)));
+        assert!(matches!(blocks[2], ContentBlock::Image(_)));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
