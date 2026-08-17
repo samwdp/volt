@@ -7,17 +7,67 @@ use serde::Deserialize;
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
 };
 
 const CONFIG_FILE_NAME: &str = "config.yaml";
 const CONFIG_DIRECTORY_PARTS: [&str; 1] = ["user"];
 const CONFIG_SEARCH_DEPTH: usize = 6;
 
+type ConfigFingerprint = Vec<(PathBuf, u64, Option<SystemTime>)>;
+
+struct CachedUserConfig {
+    files: Vec<PathBuf>,
+    fingerprint: ConfigFingerprint,
+    config: UserConfig,
+}
+
+fn config_cache() -> &'static Mutex<Option<CachedUserConfig>> {
+    static CACHE: OnceLock<Mutex<Option<CachedUserConfig>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 pub fn load() -> UserConfig {
-    let Some(root_dir) = config_root_dir() else {
-        return UserConfig::default();
+    let mut cache = config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.as_ref()
+        && !cached.files.is_empty()
+    {
+        let fingerprint = config_fingerprint_for_files(&cached.files);
+        if fingerprint == cached.fingerprint {
+            return cached.config.clone();
+        }
+    }
+    let root_dir = config_root_dir();
+    let files = root_dir
+        .as_ref()
+        .map(|root| config_source_files_from_root(root))
+        .unwrap_or_default();
+    let fingerprint = config_fingerprint_for_files(&files);
+    let config = match root_dir.as_ref() {
+        Some(root_dir) => load_from_root(root_dir),
+        None => UserConfig::default(),
     };
-    load_from_root(&root_dir)
+    *cache = Some(CachedUserConfig {
+        files,
+        fingerprint,
+        config: config.clone(),
+    });
+    config
+}
+
+fn config_fingerprint_for_files(files: &[PathBuf]) -> ConfigFingerprint {
+    files
+        .iter()
+        .map(|path| {
+            let metadata = fs::metadata(path).ok();
+            let len = metadata.as_ref().map(fs::Metadata::len).unwrap_or(0);
+            let modified = metadata.and_then(|value| value.modified().ok());
+            (path.clone(), len, modified)
+        })
+        .collect()
 }
 
 fn load_from_root(root_dir: &Path) -> UserConfig {

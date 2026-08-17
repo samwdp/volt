@@ -4263,6 +4263,37 @@ fn worker_syntax_window_matches_visible_window() -> Result<(), String> {
 }
 
 #[test]
+fn one_line_scroll_marks_visible_syntax_window_dirty() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*scroll-syntax-window*",
+        (0..600).map(|index| format!("line {index}")).collect(),
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.set_language_id(Some("rust".to_owned()));
+    buffer.set_viewport_lines(40);
+    buffer.scroll_row = 200;
+    let window = buffer
+        .desired_syntax_window()
+        .ok_or_else(|| "visible syntax window should exist".to_owned())?;
+    buffer.set_indexed_syntax_lines(Some(BTreeMap::new()), Some(window));
+    buffer.ensure_visible_syntax_window();
+    assert!(
+        !buffer.syntax_dirty,
+        "applied window should cover the current visible window"
+    );
+
+    buffer.scroll_row = 201;
+    buffer.ensure_visible_syntax_window();
+    assert!(
+        buffer.syntax_dirty,
+        "one-line j/k scroll should request a new syntax window"
+    );
+    Ok(())
+}
+
+#[test]
 fn single_line_insert_updates_wrap_cache_prefix_rows() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_text_test_buffer(

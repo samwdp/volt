@@ -3,7 +3,8 @@
 mod rainbow_paren;
 
 pub use rainbow_paren::{
-    MAX_DEPTH, TOKEN_MISMATCHED, TOKEN_UNMATCHED, apply_rainbow_delimiter_spans, depth_theme_token,
+    MAX_DEPTH, TOKEN_MISMATCHED, TOKEN_UNMATCHED, apply_rainbow_delimiter_spans,
+    apply_rainbow_delimiter_spans_for_buffer, depth_theme_token,
 };
 
 use std::{

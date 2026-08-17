@@ -69,4 +69,27 @@ mod tests {
     fn config_defaults_to_enabled() {
         assert!(config().enabled);
     }
+
+    #[test]
+    fn rainbow_config_load_stays_cheap_for_frame_budget() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let _ = config();
+        const ITERATIONS: u32 = 50;
+        let started = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(config().enabled);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "rainbow config load: total={elapsed:?} per_call={:?}",
+            elapsed / ITERATIONS
+        );
+        assert!(
+            elapsed / ITERATIONS < Duration::from_millis(2),
+            "rainbow_parens::config() too slow for per-frame j/k path: {:?}",
+            elapsed / ITERATIONS
+        );
+    }
 }

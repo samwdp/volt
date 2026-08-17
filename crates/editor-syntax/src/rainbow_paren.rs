@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
-
 use crate::{HighlightSpan, SyntaxSnapshot};
+use editor_buffer::TextBuffer;
 
 /// Maximum rainbow depth with a dedicated theme token (cycles after this).
 pub const MAX_DEPTH: usize = 9;
@@ -12,10 +11,55 @@ pub const TOKEN_UNMATCHED: &str = "rainbow.paren.unmatched";
 /// Theme token for mismatched closing delimiters.
 pub const TOKEN_MISMATCHED: &str = "rainbow.paren.mismatched";
 
+const DEPTH_THEME_TOKENS: [&str; MAX_DEPTH] = [
+    "rainbow.paren.depth.1",
+    "rainbow.paren.depth.2",
+    "rainbow.paren.depth.3",
+    "rainbow.paren.depth.4",
+    "rainbow.paren.depth.5",
+    "rainbow.paren.depth.6",
+    "rainbow.paren.depth.7",
+    "rainbow.paren.depth.8",
+    "rainbow.paren.depth.9",
+];
+const DEPTH_OPEN_CAPTURES: [&str; MAX_DEPTH] = [
+    "rainbow.paren.open.1",
+    "rainbow.paren.open.2",
+    "rainbow.paren.open.3",
+    "rainbow.paren.open.4",
+    "rainbow.paren.open.5",
+    "rainbow.paren.open.6",
+    "rainbow.paren.open.7",
+    "rainbow.paren.open.8",
+    "rainbow.paren.open.9",
+];
+const DEPTH_CLOSE_CAPTURES: [&str; MAX_DEPTH] = [
+    "rainbow.paren.close.1",
+    "rainbow.paren.close.2",
+    "rainbow.paren.close.3",
+    "rainbow.paren.close.4",
+    "rainbow.paren.close.5",
+    "rainbow.paren.close.6",
+    "rainbow.paren.close.7",
+    "rainbow.paren.close.8",
+    "rainbow.paren.close.9",
+];
+
 /// Returns the theme token for a nesting depth (1-based, cycles at [`MAX_DEPTH`]).
 pub fn depth_theme_token(depth: usize) -> String {
-    let face = depth_face_index(depth);
-    format!("rainbow.paren.depth.{face}")
+    depth_theme_token_str(depth).to_owned()
+}
+
+fn depth_theme_token_str(depth: usize) -> &'static str {
+    DEPTH_THEME_TOKENS[depth_face_index(depth) - 1]
+}
+
+fn depth_open_capture(depth: usize) -> &'static str {
+    DEPTH_OPEN_CAPTURES[depth_face_index(depth) - 1]
+}
+
+fn depth_close_capture(depth: usize) -> &'static str {
+    DEPTH_CLOSE_CAPTURES[depth_face_index(depth) - 1]
 }
 
 /// Applies rainbow delimiter coloring to bracket highlight spans in `snapshot`.
@@ -27,88 +71,115 @@ pub fn apply_rainbow_delimiter_spans(
     if !enabled {
         return;
     }
-
     let buffer_bytes = buffer_text.as_bytes();
+    apply_rainbow_delimiter_spans_inner(snapshot, |span| {
+        delimiter_kind(buffer_bytes.get(span.start_byte..span.end_byte)?)
+    });
+}
+
+/// Applies rainbow delimiter coloring without flattening the rope into a `String`.
+pub fn apply_rainbow_delimiter_spans_for_buffer(
+    snapshot: &mut SyntaxSnapshot,
+    buffer: &TextBuffer,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    let mut current_chunk: Option<(&str, usize)> = None;
+    apply_rainbow_delimiter_spans_inner(snapshot, |span| {
+        let mut current = current_chunk;
+        let span_end = span.end_byte;
+        let needs_refresh = match current {
+            Some((chunk, chunk_start)) => {
+                span.start_byte < chunk_start || span_end > chunk_start.saturating_add(chunk.len())
+            }
+            None => true,
+        };
+        if needs_refresh {
+            current = buffer.chunk_at_byte(span.start_byte);
+            current_chunk = current;
+        }
+        let (chunk, chunk_start) = current?;
+        let offset = span.start_byte.saturating_sub(chunk_start);
+        let len = span_end.saturating_sub(span.start_byte);
+        delimiter_kind(chunk.as_bytes().get(offset..offset.saturating_add(len))?)
+    });
+}
+
+fn apply_rainbow_delimiter_spans_inner(
+    snapshot: &mut SyntaxSnapshot,
+    mut delimiter_at: impl FnMut(&HighlightSpan) -> Option<(bool, DelimiterFamily)>,
+) {
     let mut bracket_spans = snapshot
         .highlight_spans
         .iter()
         .enumerate()
-        .filter_map(|(index, span)| {
-            if span.capture_name != BRACKET_CAPTURE {
-                return None;
-            }
-            let text = delimiter_text(buffer_bytes, span)?;
-            let family = delimiter_family(&text)?;
-            Some(BracketSpan {
-                index,
-                start_byte: span.start_byte,
-                is_open: family.open == text,
-                family,
-            })
-        })
+        .filter(|(_, span)| span.capture_name == BRACKET_CAPTURE)
+        .map(|(index, span)| (index, span.start_byte))
         .collect::<Vec<_>>();
 
     if bracket_spans.is_empty() {
         return;
     }
 
-    bracket_spans.sort_by_key(|span| (span.start_byte, !span.is_open));
+    bracket_spans.sort_by_key(|(_, start_byte)| *start_byte);
 
-    let mut groups = BTreeMap::<usize, Vec<BracketSpan>>::new();
-    for bracket in bracket_spans {
-        groups.entry(bracket.start_byte).or_default().push(bracket);
+    let mut resolved = Vec::with_capacity(bracket_spans.len());
+    for (index, start_byte) in bracket_spans {
+        let Some(span) = snapshot.highlight_spans.get(index) else {
+            continue;
+        };
+        let Some((is_open, family)) = delimiter_at(span) else {
+            continue;
+        };
+        resolved.push(BracketSpan {
+            index,
+            start_byte,
+            is_open,
+            family,
+        });
     }
+
+    if resolved.is_empty() {
+        return;
+    }
+
+    resolved.sort_by_key(|span| (span.start_byte, !span.is_open));
 
     let mut stack = Vec::<DelimiterFamily>::new();
-    let mut replacements = Vec::new();
-
-    for group in groups.into_values() {
-        let Some(representative) = group.first().copied() else {
-            continue;
-        };
-        let indices = group.iter().map(|span| span.index).collect::<Vec<_>>();
-
-        if representative.is_open {
+    let mut group_start = 0;
+    while group_start < resolved.len() {
+        let start_byte = resolved[group_start].start_byte;
+        let mut group_end = group_start + 1;
+        while group_end < resolved.len() && resolved[group_end].start_byte == start_byte {
+            group_end += 1;
+        }
+        let representative = resolved[group_start];
+        let (theme_token, capture_name) = if representative.is_open {
             stack.push(representative.family);
             let depth = stack.len();
-            let theme_token = depth_theme_token(depth);
-            let capture_name = format!("rainbow.paren.open.{depth}");
-            for index in indices {
-                replacements.push((index, theme_token.clone(), capture_name.clone()));
-            }
-            continue;
-        }
-
-        let depth = stack.len();
-        let (theme_token, capture_name) = if depth == 0 {
-            (
-                TOKEN_UNMATCHED.to_owned(),
-                "rainbow.paren.unmatched".to_owned(),
-            )
-        } else if stack.last().copied() != Some(representative.family) {
-            let _ = stack.pop();
-            (
-                TOKEN_MISMATCHED.to_owned(),
-                "rainbow.paren.mismatched".to_owned(),
-            )
+            (depth_theme_token_str(depth), depth_open_capture(depth))
         } else {
-            let _ = stack.pop();
-            (
-                depth_theme_token(depth),
-                format!("rainbow.paren.close.{depth}"),
-            )
+            let depth = stack.len();
+            if depth == 0 {
+                (TOKEN_UNMATCHED, TOKEN_UNMATCHED)
+            } else if stack.last().copied() != Some(representative.family) {
+                let _ = stack.pop();
+                (TOKEN_MISMATCHED, TOKEN_MISMATCHED)
+            } else {
+                let _ = stack.pop();
+                (depth_theme_token_str(depth), depth_close_capture(depth))
+            }
         };
-        for index in indices {
-            replacements.push((index, theme_token.clone(), capture_name.clone()));
+        for bracket in &resolved[group_start..group_end] {
+            let Some(span) = snapshot.highlight_spans.get_mut(bracket.index) else {
+                continue;
+            };
+            span.theme_token = theme_token.to_owned();
+            span.capture_name = capture_name.to_owned();
         }
-    }
-
-    for (index, theme_token, capture_name) in replacements {
-        let Some(span) = snapshot.highlight_spans.get_mut(index) else {
-            continue;
-        };
-        span.theme_token = theme_token;
-        span.capture_name = capture_name;
+        group_start = group_end;
     }
 }
 
@@ -124,28 +195,12 @@ fn depth_face_index(depth: usize) -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DelimiterFamily {
-    index: usize,
-    open: &'static str,
-    close: &'static str,
+    index: u8,
 }
 
-const DELIMITER_FAMILIES: [DelimiterFamily; 3] = [
-    DelimiterFamily {
-        index: 0,
-        open: "(",
-        close: ")",
-    },
-    DelimiterFamily {
-        index: 1,
-        open: "[",
-        close: "]",
-    },
-    DelimiterFamily {
-        index: 2,
-        open: "{",
-        close: "}",
-    },
-];
+const FAMILY_PAREN: DelimiterFamily = DelimiterFamily { index: 0 };
+const FAMILY_BRACKET: DelimiterFamily = DelimiterFamily { index: 1 };
+const FAMILY_BRACE: DelimiterFamily = DelimiterFamily { index: 2 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BracketSpan {
@@ -155,16 +210,16 @@ struct BracketSpan {
     family: DelimiterFamily,
 }
 
-fn delimiter_family(text: &str) -> Option<DelimiterFamily> {
-    DELIMITER_FAMILIES
-        .iter()
-        .copied()
-        .find(|family| family.open == text || family.close == text)
-}
-
-fn delimiter_text(buffer_bytes: &[u8], span: &HighlightSpan) -> Option<String> {
-    let bytes = buffer_bytes.get(span.start_byte..span.end_byte)?;
-    std::str::from_utf8(bytes).ok().map(str::to_owned)
+fn delimiter_kind(bytes: &[u8]) -> Option<(bool, DelimiterFamily)> {
+    match bytes {
+        b"(" => Some((true, FAMILY_PAREN)),
+        b")" => Some((false, FAMILY_PAREN)),
+        b"[" => Some((true, FAMILY_BRACKET)),
+        b"]" => Some((false, FAMILY_BRACKET)),
+        b"{" => Some((true, FAMILY_BRACE)),
+        b"}" => Some((false, FAMILY_BRACE)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -172,7 +227,9 @@ mod tests {
     use super::{
         TOKEN_MISMATCHED, TOKEN_UNMATCHED, apply_rainbow_delimiter_spans, depth_theme_token,
     };
-    use crate::{CaptureThemeMapping, LanguageConfiguration, SyntaxRegistry, SyntaxSnapshot};
+    use crate::{
+        CaptureThemeMapping, HighlightWindow, LanguageConfiguration, SyntaxRegistry, SyntaxSnapshot,
+    };
     use editor_buffer::TextBuffer;
 
     fn rust_language() -> tree_sitter::Language {
@@ -215,6 +272,20 @@ mod tests {
         );
         apply_rainbow_delimiter_spans(&mut snapshot, source, true);
         snapshot
+    }
+
+    #[test]
+    fn buffer_apply_matches_contiguous_text_apply() {
+        let source = "fn main() { if true { () } }";
+        let text = TextBuffer::from_text(source);
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rainbow_test_configuration()));
+        let mut from_text =
+            must(registry.highlight_buffer_for_extension("__rainbow_test__", &text));
+        let mut from_buffer = from_text.clone();
+        apply_rainbow_delimiter_spans(&mut from_text, source, true);
+        super::apply_rainbow_delimiter_spans_for_buffer(&mut from_buffer, &text, true);
+        assert_eq!(bracket_tokens(&from_text), bracket_tokens(&from_buffer));
     }
 
     fn bracket_tokens(snapshot: &SyntaxSnapshot) -> Vec<String> {
@@ -301,6 +372,75 @@ mod tests {
                 .iter()
                 .filter(|span| span.capture_name == "punctuation.bracket")
                 .all(|span| span.theme_token == "syntax.punctuation.bracket")
+        );
+    }
+
+    #[test]
+    fn rainbow_apply_on_large_buffer_stays_within_scroll_budget() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let line = "fn f() { if true { let x = vec![(1, 2, { 3 })]; } }\n";
+        let source = line.repeat(30_000);
+        let text = TextBuffer::from_text(&source);
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rainbow_test_configuration()));
+        let snapshot = must(registry.highlight_buffer_for_extension_window(
+            "__rainbow_test__",
+            &text,
+            HighlightWindow::new(0, 256),
+        ));
+        let bracket_spans = snapshot
+            .highlight_spans
+            .iter()
+            .filter(|span| span.capture_name == "punctuation.bracket")
+            .count();
+
+        const ITERATIONS: u32 = 20;
+        let clone_started = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(text.text());
+        }
+        let clone_elapsed = clone_started.elapsed();
+
+        let mut apply_snapshots = (0..ITERATIONS)
+            .map(|_| snapshot.clone())
+            .collect::<Vec<_>>();
+        let apply_started = Instant::now();
+        for apply_snapshot in &mut apply_snapshots {
+            apply_rainbow_delimiter_spans(apply_snapshot, source.as_str(), true);
+            black_box(apply_snapshot.highlight_spans.len());
+        }
+        let apply_elapsed = apply_started.elapsed();
+
+        let mut buffer_snapshots = (0..ITERATIONS)
+            .map(|_| snapshot.clone())
+            .collect::<Vec<_>>();
+        let buffer_started = Instant::now();
+        for apply_snapshot in &mut buffer_snapshots {
+            super::apply_rainbow_delimiter_spans_for_buffer(apply_snapshot, &text, true);
+            black_box(apply_snapshot.highlight_spans.len());
+        }
+        let buffer_elapsed = buffer_started.elapsed();
+
+        let per_clone = clone_elapsed / ITERATIONS;
+        let per_apply = apply_elapsed / ITERATIONS;
+        let per_buffer_apply = buffer_elapsed / ITERATIONS;
+        eprintln!(
+            "rainbow large-buffer cost: bytes={} spans={} brackets={} clone={clone_elapsed:?} apply={apply_elapsed:?} buffer_apply={buffer_elapsed:?} per_clone={per_clone:?} per_apply={per_apply:?} per_buffer_apply={per_buffer_apply:?}",
+            source.len(),
+            snapshot.highlight_spans.len(),
+            bracket_spans,
+        );
+
+        assert!(
+            per_apply < Duration::from_millis(8),
+            "rainbow apply per syntax refresh too slow for j/k scroll: {per_apply:?} (clone {per_clone:?}, buffer-apply {per_buffer_apply:?}, spans {}, brackets {bracket_spans})",
+            snapshot.highlight_spans.len(),
+        );
+        assert!(
+            per_buffer_apply < Duration::from_millis(8),
+            "rainbow buffer apply per syntax refresh too slow for j/k scroll: {per_buffer_apply:?}"
         );
     }
 }

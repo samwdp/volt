@@ -141,7 +141,7 @@ use editor_render::{
 };
 use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
-    SyntaxSnapshot, apply_rainbow_delimiter_spans,
+    SyntaxSnapshot, apply_rainbow_delimiter_spans_for_buffer,
 };
 use editor_terminal::{
     LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalRenderSnapshot,
@@ -32438,7 +32438,7 @@ fn index_syntax_lines_with_rainbow_parens(
     rainbow_parens_enabled: bool,
 ) -> IndexedSyntaxLines {
     let mut snapshot = snapshot;
-    apply_rainbow_delimiter_spans(&mut snapshot, text.text().as_str(), rainbow_parens_enabled);
+    apply_rainbow_delimiter_spans_for_buffer(&mut snapshot, text, rainbow_parens_enabled);
     index_syntax_lines(snapshot, text)
 }
 

@@ -5131,6 +5131,18 @@ mod tests {
         std::env::temp_dir().join(format!("volt-fnm-lsp-{unique}"))
     }
 
+    /// Drive-letter root on Windows, `/name` on Unix so `Path::starts_with` sees real components.
+    fn sample_root(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"P:\").join(name)
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/").join(name)
+        }
+    }
+
     #[test]
     fn completion_parser_handles_lists_and_docs() {
         let response = json!({
@@ -6897,52 +6909,57 @@ mod tests {
 
     #[test]
     fn session_in_scope_when_open_buffer_is_tracked() {
-        let tracked = [PathBuf::from(r"P:\volt\src\main.rs")];
-        let open = [PathBuf::from(r"P:\volt\src\main.rs")];
+        let workspace = sample_root("volt");
+        let nested = workspace.join("crates").join("editor-lsp");
+        let tracked = [workspace.join("src").join("main.rs")];
         assert!(language_server_session_in_workspace_scope(
-            Some(Path::new(r"P:\volt")),
+            Some(workspace.as_path()),
             &tracked,
-            &open,
-            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+            &tracked,
+            Some(nested.as_path()),
         ));
     }
 
     #[test]
     fn session_in_scope_when_root_under_project_workspace_without_open_buffer() {
-        let tracked = [PathBuf::from(r"P:\volt\src\lib.rs")];
+        let workspace = sample_root("volt");
+        let session_root = workspace.join("crates").join("editor-lsp");
+        let tracked = [workspace.join("src").join("lib.rs")];
         let open: [PathBuf; 0] = [];
         assert!(language_server_session_in_workspace_scope(
-            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+            Some(session_root.as_path()),
             &tracked,
             &open,
-            Some(Path::new(r"P:\volt")),
+            Some(workspace.as_path()),
         ));
     }
 
     #[test]
     fn session_out_of_scope_when_parent_root_and_no_open_buffer() {
-        let tracked = [PathBuf::from(r"P:\volt\src\main.rs")];
+        let workspace = sample_root("volt");
+        let nested = workspace.join("crates").join("editor-lsp");
+        let tracked = [workspace.join("src").join("main.rs")];
         let open: [PathBuf; 0] = [];
         assert!(!language_server_session_in_workspace_scope(
-            Some(Path::new(r"P:\volt")),
+            Some(workspace.as_path()),
             &tracked,
             &open,
-            Some(Path::new(r"P:\volt\crates\editor-lsp")),
+            Some(nested.as_path()),
         ));
     }
 
     #[test]
     fn default_workspace_lists_only_sessions_serving_open_buffers() {
-        let tracked = [PathBuf::from(r"P:\scratch\main.rs")];
-        let open = [PathBuf::from(r"P:\scratch\main.rs")];
+        let root = sample_root("scratch");
+        let tracked = [root.join("main.rs")];
         assert!(language_server_session_in_workspace_scope(
-            Some(Path::new(r"P:\scratch")),
+            Some(root.as_path()),
             &tracked,
-            &open,
+            &tracked,
             None,
         ));
         assert!(!language_server_session_in_workspace_scope(
-            Some(Path::new(r"P:\scratch")),
+            Some(root.as_path()),
             &tracked,
             &[],
             None,
@@ -6972,7 +6989,7 @@ mod tests {
 
     #[test]
     fn live_sessions_for_workspace_includes_root_scoped_and_buffer_served() {
-        let workspace = PathBuf::from(r"P:\volt");
+        let workspace = sample_root("volt");
         let nested_open = workspace.join("crates").join("editor-lsp").join("lib.rs");
         let under_root_path = workspace.join("src").join("main.rs");
         let nested_root = workspace.join("crates").join("editor-lsp");
