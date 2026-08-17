@@ -1303,9 +1303,7 @@ impl AcpActionSpec {
     }
 
     pub fn insert_file_mention(path: impl Into<RString>) -> Self {
-        Self::InsertFileMention {
-            path: path.into(),
-        }
+        Self::InsertFileMention { path: path.into() }
     }
 }
 

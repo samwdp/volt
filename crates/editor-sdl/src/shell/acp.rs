@@ -27,9 +27,9 @@ use agent_client_protocol::{
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
+use async_trait::async_trait;
 use base64::Engine as _;
 use editor_git::list_repository_files;
-use async_trait::async_trait;
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
@@ -1239,7 +1239,11 @@ pub(super) fn maybe_open_mention_completion(
             return Ok(());
         }
     }
-    open_file_mention_picker(runtime, buffer_id, CompletionTrigger::Auto(query.to_owned()))
+    open_file_mention_picker(
+        runtime,
+        buffer_id,
+        CompletionTrigger::Auto(query.to_owned()),
+    )
 }
 
 pub(super) fn paste_clipboard_image_into_acp_input(
@@ -1425,9 +1429,10 @@ fn build_acp_prompt_content_blocks(
     }
     if capabilities.image {
         for image in pending_images {
-            blocks.push(ContentBlock::Image(
-                ImageContent::new(image.data_base64.clone(), image.mime_type.clone()),
-            ));
+            blocks.push(ContentBlock::Image(ImageContent::new(
+                image.data_base64.clone(),
+                image.mime_type.clone(),
+            )));
         }
     }
     blocks
@@ -1529,12 +1534,7 @@ fn update_acp_input_hint(
         })
         .unwrap_or_default();
     let command_hint = active_command_input_hint(available_commands, &input_text);
-    let hint = build_acp_input_hint(
-        mode_id,
-        model_id,
-        command_hint.as_deref(),
-        image_count,
-    );
+    let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref(), image_count);
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
         && let Some(footer) = buffer.acp_footer_pane_mut()
     {
@@ -5820,10 +5820,7 @@ mod tests {
     fn acp_mention_completion_query_tracks_active_at_token() {
         assert_eq!(acp_mention_completion_query("@"), Some(""));
         assert_eq!(acp_mention_completion_query("@src/"), Some("src/"));
-        assert_eq!(
-            acp_mention_completion_query("look at @main"),
-            Some("main")
-        );
+        assert_eq!(acp_mention_completion_query("look at @main"), Some("main"));
         assert!(acp_mention_completion_query("@src/main.rs more").is_none());
         assert!(acp_mention_completion_query("email@example.com").is_none());
         assert!(acp_mention_completion_query("no mention").is_none());
