@@ -12206,6 +12206,134 @@ fn acp_paste_code_with_inline_double_slash_comments_closes_slash_picker() -> Res
 }
 
 #[test]
+fn acp_at_symbol_opens_git_file_picker_and_return_inserts_mention() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = init_git_repo("acp-files")?;
+    fs::create_dir_all(root.join("src")).map_err(|error| error.to_string())?;
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n")
+        .map_err(|error| error.to_string())?;
+    run_git_in_dir(&root, &["add", "src/main.rs"])?;
+    open_workspace_from_project(&mut state.runtime, "acp-files", &root)
+        .map_err(|error| error.to_string())?;
+
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "look at ", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    state
+        .handle_text_input("@")
+        .map_err(|error| error.to_string())?;
+
+    {
+        let ui = shell_ui(&state.runtime)?;
+        let picker = ui
+            .picker()
+            .ok_or_else(|| "ACP file picker should open for @".to_owned())?;
+        assert_eq!(picker.session().title(), "ACP Files");
+        assert!(
+            picker
+                .session()
+                .matches()
+                .iter()
+                .any(|matched| matched.item().label() == "src/main.rs"),
+            "git file picker should list src/main.rs"
+        );
+        assert_eq!(ui.picker_kind(), Some(PickerKind::AcpFile { buffer_id }));
+    }
+
+    state
+        .handle_text_input("main.rs")
+        .map_err(|error| error.to_string())?;
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+    state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ui = shell_ui(&state.runtime)?;
+    assert!(!ui.picker_visible());
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "look at @src/main.rs "
+    );
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn acp_paste_image_inserts_mention_token_and_stores_bytes() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "see", None)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let _ = buffer.focus_acp_input();
+    }
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_active_vim_target(VimTarget::Input);
+        ui.enter_insert_mode();
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let image = normalize_clipboard_image(TINY_PNG.to_vec(), Some("image/png"), "Image")
+        .ok_or_else(|| "png should normalize".to_owned())?;
+    assert!(paste_image_into_active_input_buffer(
+        &mut state.runtime,
+        image
+    )?);
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    assert_eq!(
+        buffer
+            .input_field()
+            .ok_or_else(|| "ACP input field missing".to_owned())?
+            .text(),
+        "see ![Image](acp-image:1) "
+    );
+    let images = buffer.acp_pasted_images();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].id, 1);
+    assert_eq!(images[0].mime_type, "image/png");
+    assert!(!images[0].data.is_empty());
+    Ok(())
+}
+
+#[test]
 fn paste_text_into_active_input_buffer_updates_browser_input() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;
