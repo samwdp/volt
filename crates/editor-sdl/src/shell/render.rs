@@ -188,13 +188,12 @@ pub(super) fn render_shell_state(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let mut pane_rects = runtime_pane_rects(
+    let mut pane_rects = workspace_pane_rects(
         user_library,
-        state.pane_split_direction(),
+        state,
         dock.content_width,
         pane_height,
         panes.len(),
-        state.active_pane_index(),
     );
     for rect in &mut pane_rects {
         rect.x = rect.x.saturating_add(dock.content_x);
@@ -3864,25 +3863,30 @@ pub(super) fn plugin_section_buffer_layout(
     let state = buffer.plugin_sections()?;
     let section_count = state.section_count();
     let line_height = line_height.max(1);
-    let panel_x = rect.x() + 8;
-    let panel_width = rect.width().saturating_sub(16);
     let gap = 8i32;
+    let panel_x = rect.x() + 8;
+    let panel_y = layout.body_y;
+    let panel_width = rect.width().saturating_sub(16);
+    let panel_height = layout.pane_bottom.saturating_sub(layout.body_y).max(1);
+    if let Some(tree) = state.layout.as_ref() {
+        return plugin_section_tree_layout(
+            state,
+            tree,
+            PixelRect::new(panel_x, panel_y, panel_width, panel_height as u32),
+            cell_width,
+            line_height,
+            gap,
+        );
+    }
     let total_gap = gap.saturating_mul(section_count.saturating_sub(1) as i32);
-    let titles = std::iter::once(state.base_title.as_str())
-        .chain(
-            state
-                .attached_sections
-                .iter()
-                .map(|pane| pane.title.as_str()),
-        )
+    let titles = (0..section_count)
+        .map(|index| state.section_title(index))
         .collect::<Vec<_>>();
     let pane_chrome = titles
         .iter()
         .map(|title| plugin_section_panel_chrome_height(title, line_height))
         .collect::<Vec<_>>();
-    let total_height = layout
-        .pane_bottom
-        .saturating_sub(layout.body_y)
+    let total_height = panel_height
         .max(pane_chrome.iter().sum::<i32>() + total_gap + line_height * section_count as i32);
     let body_width = panel_width.saturating_sub(20);
     let wrap_cols = overlay_text_columns(body_width, 0, cell_width);
@@ -3890,15 +3894,15 @@ pub(super) fn plugin_section_buffer_layout(
         .max(line_height * section_count as i32)
         / line_height)
         .max(section_count as i32) as usize;
-    let min_rows = std::iter::once(state.base_min_rows)
-        .chain(state.attached_sections.iter().map(|pane| pane.min_rows))
+    let min_rows = (0..section_count)
+        .map(|index| state.section_min_rows(index))
         .collect::<Vec<_>>();
     let row_budget = plugin_section_row_budget(&min_rows, total_row_budget);
     let used_height = pane_chrome.iter().sum::<i32>()
         + total_gap
         + row_budget.iter().sum::<usize>() as i32 * line_height;
     let extra_height = total_height.saturating_sub(used_height);
-    let mut pane_y = layout.body_y;
+    let mut pane_y = panel_y;
     let mut panes = Vec::with_capacity(section_count);
     for (index, rows) in row_budget.into_iter().enumerate() {
         let extra = if index == 0 { extra_height } else { 0 };
@@ -3911,6 +3915,100 @@ pub(super) fn plugin_section_buffer_layout(
         pane_y += pane_height + gap;
     }
     Some(PluginSectionLayout { panes })
+}
+
+fn plugin_section_tree_layout(
+    state: &PluginSectionBufferState,
+    tree: &PluginBufferLayout,
+    bounds: PixelRect,
+    cell_width: i32,
+    line_height: i32,
+    gap: i32,
+) -> Option<PluginSectionLayout> {
+    let line_height = line_height.max(1);
+    let split = plugin_layout_to_split_node(state, tree, line_height)?;
+    let leaves = layout_split_tree(bounds, &split, gap.max(0) as u32);
+    let mut panes = vec![
+        TextPaneLayout {
+            rect: Rect::new(bounds.x, bounds.y, 0, 0),
+            visible_rows: 1,
+            wrap_cols: 1,
+        };
+        state.section_count()
+    ];
+    for (index, leaf) in leaves {
+        let Some(pane) = panes.get_mut(index) else {
+            continue;
+        };
+        let chrome = plugin_section_panel_chrome_height(state.section_title(index), line_height);
+        let inner_height = (leaf.height as i32).saturating_sub(chrome).max(line_height);
+        let wrap_cols = overlay_text_columns(leaf.width.saturating_sub(20), 0, cell_width);
+        *pane = TextPaneLayout {
+            rect: Rect::new(leaf.x, leaf.y, leaf.width, leaf.height),
+            visible_rows: (inner_height / line_height).max(1) as usize,
+            wrap_cols,
+        };
+    }
+    Some(PluginSectionLayout { panes })
+}
+
+fn plugin_layout_to_split_node(
+    state: &PluginSectionBufferState,
+    layout: &PluginBufferLayout,
+    line_height: i32,
+) -> Option<SplitNode> {
+    let children = layout
+        .children()
+        .iter()
+        .filter_map(|child| plugin_layout_node_to_child(state, child, line_height))
+        .collect::<Vec<_>>();
+    (!children.is_empty()).then_some(SplitNode::new(plugin_layout_axis(layout.axis()), children))
+}
+
+fn plugin_layout_node_to_child(
+    state: &PluginSectionBufferState,
+    node: &PluginBufferLayoutNode,
+    line_height: i32,
+) -> Option<SplitChild> {
+    match node {
+        PluginBufferLayoutNode::Section { name, weight } => {
+            let index = state.section_index_by_name(name.as_str())?;
+            let chrome =
+                plugin_section_panel_chrome_height(state.section_title(index), line_height);
+            let min_rows = state.section_min_rows(index).unwrap_or(1).max(1) as i32;
+            Some(SplitChild::leaf(
+                index,
+                (*weight).max(1),
+                (chrome + min_rows * line_height).max(1) as u32,
+            ))
+        }
+        PluginBufferLayoutNode::Split {
+            axis,
+            weight,
+            children,
+        } => {
+            let mapped = children
+                .iter()
+                .filter_map(|child| plugin_layout_node_to_child(state, child, line_height))
+                .collect::<Vec<_>>();
+            if mapped.is_empty() {
+                return None;
+            }
+            let min_px = mapped.iter().map(|child| child.min_px).sum::<u32>();
+            Some(SplitChild::node(
+                SplitNode::new(plugin_layout_axis(*axis), mapped),
+                (*weight).max(1),
+                min_px.max(1),
+            ))
+        }
+    }
+}
+
+fn plugin_layout_axis(axis: PluginBufferLayoutAxis) -> SplitAxis {
+    match axis {
+        PluginBufferLayoutAxis::Rows => SplitAxis::Rows,
+        PluginBufferLayoutAxis::Columns => SplitAxis::Columns,
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

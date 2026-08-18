@@ -172,6 +172,7 @@ fn filetype_symbol(language_id: Option<&str>) -> Option<&'static str> {
         "python" => crate::icon_font::symbols::seti::SETI_PYTHON,
         "markdown" | "markdown-inline" => crate::icon_font::symbols::seti::SETI_MARKDOWN,
         "toml" => crate::icon_font::symbols::seti::CUSTOM_TOML,
+        "sql" => crate::icon_font::symbols::cod::COD_DATABASE,
         "typescript" | "tsx" => crate::icon_font::symbols::seti::SETI_TYPESCRIPT,
         "zig" => crate::icon_font::symbols::seti::SETI_ZIG,
         "gitcommit" => crate::icon_font::symbols::cod::COD_GIT_COMMIT,

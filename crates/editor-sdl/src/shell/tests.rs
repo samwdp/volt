@@ -5134,6 +5134,26 @@ fn install_plugin_sections_test_buffer_with_update(
     Ok(buffer_id)
 }
 
+fn plugin_section_lines(buffer: &ShellBuffer, name: &str) -> Result<Vec<String>, String> {
+    let state = buffer
+        .plugin_sections()
+        .ok_or_else(|| "plugin section state missing".to_owned())?;
+    let index = state
+        .section_index_by_name(name)
+        .ok_or_else(|| format!("section `{name}` missing"))?;
+    if index == 0 {
+        return Ok((0..buffer.text.line_count())
+            .filter_map(|line_index| buffer.text.line(line_index))
+            .collect());
+    }
+    let pane = state
+        .attached_section(index)
+        .ok_or_else(|| format!("attached section `{name}` missing"))?;
+    Ok((0..pane.line_count())
+        .map(|line_index| pane.text.line(line_index).unwrap_or_default())
+        .collect())
+}
+
 fn install_user_acp_test_buffer(
     state: &mut ShellState,
     input_text: &str,
@@ -15235,6 +15255,194 @@ fn opened_sql_file_survives_layout_and_syntax_refresh() -> Result<(), String> {
                 .any(|span| span.theme_token.starts_with("syntax.keyword"))
         }),
         "opened SQL file should receive keyword highlight spans"
+    );
+    Ok(())
+}
+
+#[test]
+fn db_dashboard_layout_places_sidebar_left_and_editor_output_right() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    open_db_dashboard(&mut state.runtime)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let panes = plugin_section_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "dashboard section layout missing".to_owned())?;
+    assert_eq!(panes.panes.len(), 4);
+    let editor = panes.panes[0].rect;
+    let connections = panes.panes[1].rect;
+    let tables = panes.panes[2].rect;
+    let output = panes.panes[3].rect;
+    assert!(
+        connections.x() < editor.x(),
+        "Connections should sit left of Editor"
+    );
+    assert!(tables.x() < output.x(), "Tables should sit left of Output");
+    assert!(
+        tables.y() > connections.y(),
+        "Tables should sit below Connections"
+    );
+    assert!(output.y() > editor.y(), "Output should sit below Editor");
+    Ok(())
+}
+
+#[test]
+fn db_dashboard_execute_replaces_output_and_concatenates_multiple_queries() -> Result<(), String> {
+    let state_dir = TempTestDir::new("db-dashboard-execute");
+    fs::create_dir_all(state_dir.path()).map_err(|error| error.to_string())?;
+    let db_path = state_dir.path().join("dashboard.sqlite3");
+    let mut state = state_with_user_library()?;
+    let connection_string = format!("sqlite://{}", db_path.display());
+    db_service_mut(&mut state.runtime)?
+        .connect_raw(&connection_string, Some("dashboard"))
+        .map_err(|error| error.to_string())?;
+    db_service_mut(&mut state.runtime)?
+        .attach_query_buffer(99, None, None)
+        .map_err(|error| error.to_string())?;
+    db_service_mut(&mut state.runtime)?
+        .execute_sql_for_buffer(
+            99,
+            "CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .map_err(|error| error.to_string())?;
+    db_service_mut(&mut state.runtime)?
+        .execute_sql_for_buffer(99, "INSERT INTO widgets(name) VALUES ('Ada'), ('Grace');")
+        .map_err(|error| error.to_string())?;
+
+    open_db_dashboard(&mut state.runtime)?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec!["SELECT name FROM widgets WHERE id = 1;".to_owned()]);
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+    }
+    state
+        .runtime
+        .execute_command("db.execute-sql")
+        .map_err(|error| error.to_string())?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let output = plugin_section_lines(buffer, DB_OUTPUT_SECTION)?;
+        assert!(
+            output.iter().any(|line| line.contains("Ada")),
+            "first execute should write Ada into Output: {output:?}"
+        );
+        assert!(
+            !output.iter().any(|line| line.contains("Grace")),
+            "first execute should not include Grace: {output:?}"
+        );
+        assert_eq!(buffer.plugin_active_section_name(), Some(DB_EDITOR_SECTION));
+    }
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec!["SELECT name FROM widgets WHERE id = 2;".to_owned()]);
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+    }
+    state
+        .runtime
+        .execute_command("db.execute-sql")
+        .map_err(|error| error.to_string())?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let output = plugin_section_lines(buffer, DB_OUTPUT_SECTION)?;
+        assert!(
+            output.iter().any(|line| line.contains("Grace")),
+            "second execute should replace Output with Grace: {output:?}"
+        );
+        assert!(
+            !output.iter().any(|line| line.contains("Ada")),
+            "second execute should overwrite Ada: {output:?}"
+        );
+    }
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec![
+            "SELECT name FROM widgets WHERE id = 1;".to_owned(),
+            "SELECT name FROM widgets WHERE id = 2;".to_owned(),
+        ]);
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+    }
+    state
+        .runtime
+        .execute_command("db.execute-sql")
+        .map_err(|error| error.to_string())?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let output = plugin_section_lines(buffer, DB_OUTPUT_SECTION)?;
+    assert!(
+        output.iter().any(|line| line.contains("-- Query 1")),
+        "batch execute should label first query: {output:?}"
+    );
+    assert!(
+        output.iter().any(|line| line.contains("-- Query 2")),
+        "batch execute should label second query: {output:?}"
+    );
+    assert!(output.iter().any(|line| line.contains("Ada")));
+    assert!(output.iter().any(|line| line.contains("Grace")));
+    Ok(())
+}
+
+#[test]
+fn db_dashboard_opens_and_writes_files_through_editor_section() -> Result<(), String> {
+    let root = TempTestDir::new("db-dashboard-file-open");
+    fs::create_dir_all(root.path()).map_err(|error| error.to_string())?;
+    let path = root.path().join("query.sql");
+    fs::write(&path, "SELECT 1;\n").map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
+    open_db_dashboard(&mut state.runtime)?;
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        assert!(buffer_is_db_dashboard(&buffer.kind));
+        assert_eq!(buffer.text.text().trim(), "SELECT 1;");
+        assert_eq!(buffer.plugin_active_section_name(), Some(DB_EDITOR_SECTION));
+        assert_eq!(buffer.path(), Some(path.as_path()));
+    }
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec!["SELECT 2;".to_owned()]);
+    }
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    save_buffer(&mut state.runtime, workspace_id, buffer_id)?;
+    let saved = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    assert_eq!(saved.trim(), "SELECT 2;");
+    Ok(())
+}
+
+#[test]
+fn db_multiview_disables_golden_ratio_and_narrows_left_sidebar() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    open_db_multiview(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    let view = ui
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?;
+    assert_eq!(view.golden_ratio_override, Some(false));
+    assert_eq!(
+        view.pane_size_weights.as_deref(),
+        Some([DB_MULTIVIEW_LEFT_WEIGHT, DB_MULTIVIEW_RIGHT_WEIGHT].as_slice())
+    );
+    assert_eq!(view.panes.len(), 2);
+    let left = ui
+        .buffer(view.panes[0].buffer_id)
+        .ok_or_else(|| "left pane buffer missing".to_owned())?;
+    let right = ui
+        .buffer(view.panes[1].buffer_id)
+        .ok_or_else(|| "right pane buffer missing".to_owned())?;
+    assert!(buffer_is_db_sidebar(&left.kind));
+    assert!(buffer_is_db_query(&right.kind));
+    assert!(!buffer_is_db_dashboard(&right.kind));
+    let rects = workspace_pane_rects(&*shell_user_library(&state.runtime), ui, 400, 200, 2);
+    assert!(
+        rects[0].width < rects[1].width,
+        "multiview left split should be narrower: {rects:?}"
     );
     Ok(())
 }

@@ -3,6 +3,7 @@ mod browser;
 mod clipboard;
 mod command_line;
 mod command_stream;
+mod db;
 mod diagnostics;
 mod directory;
 mod git;
@@ -21,6 +22,7 @@ mod workspace_search;
 use browser::*;
 use command_line::*;
 use command_stream::*;
+use db::*;
 use diagnostics::*;
 use directory::*;
 use git::*;
@@ -93,7 +95,7 @@ use editor_core::{
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
-    DbSessionId, QualifiedName, parse_db_connect_prompt, sql_scope_from_text,
+    DbSessionId, QualifiedName, parse_db_connect_prompt, split_sql_statements, sql_scope_from_text,
 };
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
@@ -114,13 +116,14 @@ use editor_picker::{
 };
 use editor_plugin_api::{
     AcpActionSpec, AcpPickerContext, AcpPickerItemSpec, AcpPickerKind, AcpPickerOption,
-    GhostTextContext as HostGhostTextContext, LspDiagnosticsInfo as PluginLspDiagnosticsInfo,
-    ModelineAlignment, ModelineSegment, OilDefaults, OilKeyAction, PdfOpenMode,
-    PickerAcpClientContext, PickerActionSpec, PickerBufferContext, PickerCommandContext,
-    PickerIconContext, PickerKeybindingContext, PickerProviderContext, PickerProviderSpec,
-    PickerSource, PickerSyntaxLanguageContext, PickerThemeContext, PickerTruncateStrategy,
-    PickerUndoTreeContext, PickerWorkspaceContext, PluginBufferSectionUpdate, PluginBufferSections,
-    StatuslineSpan, VimEditAction, WorkspaceDockSide,
+    DbBrowserKind, GhostTextContext as HostGhostTextContext,
+    LspDiagnosticsInfo as PluginLspDiagnosticsInfo, ModelineAlignment, ModelineSegment,
+    OilDefaults, OilKeyAction, PdfOpenMode, PickerAcpClientContext, PickerActionSpec,
+    PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
+    PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
+    PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
+    PluginBufferLayout, PluginBufferLayoutAxis, PluginBufferLayoutNode, PluginBufferSectionUpdate,
+    PluginBufferSections, StatuslineSpan, VimEditAction, WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,
@@ -135,8 +138,9 @@ use editor_plugin_host::{
     load_auto_loaded_packages, reload_user_packages,
 };
 use editor_render::{
-    DrawCommand, PixelRect, RenderBackend, RenderColor, TextStyle, centered_rect,
-    find_font_by_name, find_system_monospace_font, horizontal_pane_rects_for_active,
+    DrawCommand, PixelRect, RenderBackend, RenderColor, SplitAxis, SplitChild, SplitNode,
+    TextStyle, centered_rect, find_font_by_name, find_system_monospace_font,
+    horizontal_pane_rects_for_active, layout_split_tree, pane_rects_with_weights,
     vertical_pane_rects_for_active,
 };
 use editor_syntax::{
@@ -194,14 +198,21 @@ impl StartupTrace {
 }
 
 fn runtime_pane_rects(
-    user_library: &dyn UserLibrary,
     split_direction: PaneSplitDirection,
     width: u32,
     pane_height: u32,
     pane_count: usize,
     active_pane_index: usize,
+    golden_ratio: bool,
+    pane_size_weights: Option<&[u32]>,
 ) -> Vec<PixelRect> {
-    let golden_ratio = user_library.pane_config().golden_ratio;
+    if let Some(weights) = pane_size_weights.filter(|weights| !weights.is_empty()) {
+        let axis = match split_direction {
+            PaneSplitDirection::Vertical => SplitAxis::Columns,
+            PaneSplitDirection::Horizontal => SplitAxis::Rows,
+        };
+        return pane_rects_with_weights(width, pane_height, pane_count, axis, weights);
+    }
     match split_direction {
         PaneSplitDirection::Vertical => vertical_pane_rects_for_active(
             width,
@@ -218,6 +229,24 @@ fn runtime_pane_rects(
             golden_ratio,
         ),
     }
+}
+
+fn workspace_pane_rects(
+    user_library: &dyn UserLibrary,
+    ui: &ShellUiState,
+    width: u32,
+    pane_height: u32,
+    pane_count: usize,
+) -> Vec<PixelRect> {
+    runtime_pane_rects(
+        ui.pane_split_direction(),
+        width,
+        pane_height,
+        pane_count,
+        ui.active_pane_index(),
+        ui.effective_golden_ratio(user_library),
+        ui.pane_size_weights(),
+    )
 }
 
 const HOOK_MOVE_LEFT: &str = "editor.cursor.move-left";
@@ -330,12 +359,22 @@ const DB_SCHEMA_KIND: &str = buffer_kinds::DB_SCHEMA;
 const DB_HISTORY_KIND: &str = buffer_kinds::DB_HISTORY;
 const DB_SNIPPETS_KIND: &str = buffer_kinds::DB_SNIPPETS;
 const DB_RESULTS_KIND: &str = buffer_kinds::DB_RESULTS;
+const DB_DASHBOARD_KIND: &str = buffer_kinds::DB_DASHBOARD;
+const DB_SIDEBAR_KIND: &str = buffer_kinds::DB_SIDEBAR;
 const DB_CONNECT_BUFFER_NAME: &str = "*db-connect*";
 const DB_CONNECTIONS_BUFFER_NAME: &str = "*db-connections*";
 const DB_SCHEMA_BUFFER_NAME: &str = "*db-schema*";
 const DB_HISTORY_BUFFER_NAME: &str = "*db-history*";
 const DB_SNIPPETS_BUFFER_NAME: &str = "*db-snippets*";
 const DB_RESULTS_BUFFER_NAME: &str = "*db-results*";
+const DB_DASHBOARD_BUFFER_NAME: &str = "*db-dashboard*";
+const DB_SIDEBAR_BUFFER_NAME: &str = "*db-sidebar*";
+const DB_EDITOR_SECTION: &str = "Editor";
+const DB_CONNECTIONS_SECTION: &str = "Connections";
+const DB_TABLES_SECTION: &str = "Tables";
+const DB_OUTPUT_SECTION: &str = "Output";
+const DB_MULTIVIEW_LEFT_WEIGHT: u32 = 1;
+const DB_MULTIVIEW_RIGHT_WEIGHT: u32 = 3;
 const HOOK_BROWSER_OPEN: &str = browser_hooks::OPEN;
 const HOOK_BROWSER_OPEN_BUFFER: &str = browser_hooks::OPEN_BUFFER;
 const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
@@ -408,6 +447,8 @@ const HOOK_DB_SHOW_SNIPPETS: &str = db_hooks::SHOW_SNIPPETS;
 const HOOK_DB_SAVE_SNIPPET: &str = db_hooks::SAVE_SNIPPET;
 const HOOK_DB_REFRESH_SCHEMA: &str = db_hooks::REFRESH_SCHEMA;
 const HOOK_DB_ACTIVATE_LINE: &str = db_hooks::ACTIVATE_LINE;
+const HOOK_DB_DASHBOARD: &str = db_hooks::DASHBOARD;
+const HOOK_DB_MULTIVIEW: &str = db_hooks::MULTIVIEW;
 const GIT_ACTION_STAGE_FILE: &str = git_actions::STAGE_FILE;
 const GIT_ACTION_UNSTAGE_FILE: &str = git_actions::UNSTAGE_FILE;
 const GIT_ACTION_SHOW_COMMIT: &str = git_actions::SHOW_COMMIT;
@@ -3799,8 +3840,10 @@ struct PluginSectionBufferState {
     base_writable: bool,
     base_min_rows: Option<usize>,
     base_update: PluginBufferSectionUpdate,
+    base_browser_kind: Option<DbBrowserKind>,
     active_section: usize,
     evaluate_target_section: usize,
+    layout: Option<PluginBufferLayout>,
     attached_sections: Vec<PluginTextPaneState>,
 }
 
@@ -3810,6 +3853,7 @@ struct PluginTextPaneState {
     writable: bool,
     min_rows: Option<usize>,
     update: PluginBufferSectionUpdate,
+    browser_kind: Option<DbBrowserKind>,
     text: TextBuffer,
     scroll_row: usize,
     viewport_rows: usize,
@@ -3953,6 +3997,7 @@ impl Default for PluginTextPaneState {
             writable: false,
             min_rows: None,
             update: PluginBufferSectionUpdate::Replace,
+            browser_kind: None,
             text: TextBuffer::new(),
             scroll_row: 0,
             viewport_rows: 1,
@@ -3972,6 +4017,7 @@ impl PluginSectionBufferState {
                     writable: section.writable(),
                     min_rows: section.min_lines(),
                     update: section.update(),
+                    browser_kind: section.browser_kind(),
                     ..PluginTextPaneState::default()
                 };
                 pane.replace_lines(
@@ -4006,8 +4052,10 @@ impl PluginSectionBufferState {
             base_writable: base.writable(),
             base_min_rows: base.min_lines(),
             base_update: base.update(),
+            base_browser_kind: base.browser_kind(),
             active_section: 0,
             evaluate_target_section,
+            layout: config.layout().cloned(),
             attached_sections,
         })
     }
@@ -4053,6 +4101,59 @@ impl PluginSectionBufferState {
         section_index
             .checked_sub(1)
             .and_then(|index| self.attached_sections.get_mut(index))
+    }
+
+    fn section_title(&self, index: usize) -> &str {
+        if index == 0 {
+            self.base_title.as_str()
+        } else {
+            self.attached_sections
+                .get(index.saturating_sub(1))
+                .map(|pane| pane.title.as_str())
+                .unwrap_or("")
+        }
+    }
+
+    fn section_min_rows(&self, index: usize) -> Option<usize> {
+        if index == 0 {
+            self.base_min_rows
+        } else {
+            self.attached_sections
+                .get(index.saturating_sub(1))
+                .and_then(|pane| pane.min_rows)
+        }
+    }
+
+    fn section_index_by_name(&self, name: &str) -> Option<usize> {
+        if self.base_title == name {
+            return Some(0);
+        }
+        self.attached_sections
+            .iter()
+            .position(|pane| pane.title == name)
+            .map(|index| index.saturating_add(1))
+    }
+
+    fn active_section_name(&self) -> &str {
+        self.section_title(self.active_section)
+    }
+
+    fn focus_section_named(&mut self, name: &str) -> bool {
+        let Some(index) = self.section_index_by_name(name) else {
+            return false;
+        };
+        self.active_section = index;
+        true
+    }
+
+    fn browser_kind_for_section(&self, index: usize) -> Option<DbBrowserKind> {
+        if index == 0 {
+            self.base_browser_kind
+        } else {
+            self.attached_sections
+                .get(index.saturating_sub(1))
+                .and_then(|pane| pane.browser_kind)
+        }
     }
 }
 
@@ -5004,6 +5105,48 @@ impl ShellBuffer {
             return false;
         }
         state.active_section = (state.active_section + 1) % state.section_count();
+        true
+    }
+
+    fn plugin_focus_section_named(&mut self, name: &str) -> bool {
+        self.plugin_section_state
+            .as_mut()
+            .is_some_and(|state| state.focus_section_named(name))
+    }
+
+    fn plugin_active_section_name(&self) -> Option<&str> {
+        self.plugin_section_state
+            .as_ref()
+            .map(PluginSectionBufferState::active_section_name)
+    }
+
+    fn plugin_section_index_at_point(
+        &self,
+        rect: Rect,
+        layout: BufferFooterLayout,
+        cell_width: i32,
+        line_height: i32,
+        x: i32,
+        y: i32,
+    ) -> Option<usize> {
+        let section_layout =
+            plugin_section_buffer_layout(self, rect, layout, cell_width, line_height)?;
+        section_layout.panes.iter().position(|pane| {
+            x >= pane.rect.x()
+                && y >= pane.rect.y()
+                && x < pane.rect.x() + pane.rect.width() as i32
+                && y < pane.rect.y() + pane.rect.height() as i32
+        })
+    }
+
+    fn plugin_focus_section_index(&mut self, index: usize) -> bool {
+        let Some(state) = self.plugin_section_state.as_mut() else {
+            return false;
+        };
+        if index >= state.section_count() {
+            return false;
+        }
+        state.active_section = index;
         true
     }
 
@@ -8983,6 +9126,8 @@ struct ShellWorkspaceView {
     active_pane: usize,
     split_buffer_id: BufferId,
     split_direction: Option<PaneSplitDirection>,
+    golden_ratio_override: Option<bool>,
+    pane_size_weights: Option<Vec<u32>>,
 }
 
 impl ShellWorkspaceView {
@@ -9003,6 +9148,8 @@ impl ShellWorkspaceView {
             active_pane: 0,
             split_buffer_id,
             split_direction: None,
+            golden_ratio_override: None,
+            pane_size_weights: None,
         }
     }
 }
@@ -9664,6 +9811,31 @@ impl ShellUiState {
             .unwrap_or(PaneSplitDirection::Horizontal)
     }
 
+    fn effective_golden_ratio(&self, user_library: &dyn UserLibrary) -> bool {
+        self.workspace_view()
+            .and_then(|view| view.golden_ratio_override)
+            .unwrap_or_else(|| user_library.pane_config().golden_ratio)
+    }
+
+    fn pane_size_weights(&self) -> Option<&[u32]> {
+        self.workspace_view()
+            .and_then(|view| view.pane_size_weights.as_deref())
+    }
+
+    fn set_db_multiview_layout(&mut self, enabled: bool) {
+        let Some(view) = self.workspace_view_mut() else {
+            return;
+        };
+        if enabled {
+            view.golden_ratio_override = Some(false);
+            view.pane_size_weights =
+                Some(vec![DB_MULTIVIEW_LEFT_WEIGHT, DB_MULTIVIEW_RIGHT_WEIGHT]);
+        } else {
+            view.golden_ratio_override = None;
+            view.pane_size_weights = None;
+        }
+    }
+
     fn active_workspace_buffer_ids(&self) -> Option<&[BufferId]> {
         self.workspace_view().map(|view| view.buffer_ids.as_slice())
     }
@@ -10107,6 +10279,8 @@ impl ShellUiState {
             view.panes.remove(index);
             if view.panes.len() == 1 {
                 view.split_direction = None;
+                view.golden_ratio_override = None;
+                view.pane_size_weights = None;
             }
             if index < view.active_pane {
                 view.active_pane = view.active_pane.saturating_sub(1);
@@ -12049,13 +12223,12 @@ impl ShellState {
         };
         let user_library = shell_user_library(&self.runtime);
         let dock = workspace_dock_layout(&*user_library, ui, width, height, cell_width);
-        let mut pane_rects = runtime_pane_rects(
+        let mut pane_rects = workspace_pane_rects(
             &*user_library,
-            ui.pane_split_direction(),
+            ui,
             dock.content_width,
             pane_height,
             panes.len(),
-            ui.active_pane_index(),
         );
         for rect in &mut pane_rects {
             rect.x = rect.x.saturating_add(dock.content_x);
@@ -12100,6 +12273,39 @@ impl ShellState {
         cell_width: i32,
         line_height: i32,
     ) -> Result<(), ShellError> {
+        {
+            let has_sections = shell_buffer(&self.runtime, buffer_id)
+                .map_err(ShellError::Runtime)?
+                .has_plugin_sections();
+            if has_sections {
+                let sdl_rect = PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height);
+                let index = {
+                    let buffer =
+                        shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
+                    let command_line_visible = self.command_line_visible().unwrap_or(false);
+                    let layout = buffer_footer_layout_with_command_line(
+                        buffer,
+                        sdl_rect,
+                        line_height,
+                        cell_width,
+                        command_line_visible,
+                    );
+                    buffer.plugin_section_index_at_point(
+                        sdl_rect,
+                        layout,
+                        cell_width,
+                        line_height,
+                        mouse_x,
+                        mouse_y,
+                    )
+                };
+                if let Some(index) = index {
+                    shell_buffer_mut(&mut self.runtime, buffer_id)
+                        .map_err(ShellError::Runtime)?
+                        .plugin_focus_section_index(index);
+                }
+            }
+        }
         let point = {
             let theme_registry = self.runtime.services().get::<ThemeRegistry>();
             let buffer = shell_buffer(&self.runtime, buffer_id).map_err(ShellError::Runtime)?;
@@ -14529,13 +14735,12 @@ impl ShellState {
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-        let pane_rects = runtime_pane_rects(
+        let pane_rects = workspace_pane_rects(
             &*user_library,
-            ui.pane_split_direction(),
+            ui,
             dock.content_width,
             pane_height,
             panes.len(),
-            ui.active_pane_index(),
         );
         let rect = pane_rects
             .get(ui.active_pane_index())
@@ -14577,13 +14782,12 @@ impl ShellState {
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-        let pane_rects = runtime_pane_rects(
+        let pane_rects = workspace_pane_rects(
             &*user_library,
-            ui.pane_split_direction(),
+            ui,
             dock.content_width,
             pane_height,
             panes.len(),
-            ui.active_pane_index(),
         );
         let mut visible_buffers = panes
             .iter()
@@ -17067,6 +17271,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_DB_DASHBOARD,
+        "Opens the database dashboard buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_DB_MULTIVIEW,
+        "Opens the database sidebar and query buffers.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PLUGIN_EVALUATE,
         "Evaluates the active plugin buffer's input section and writes the output section.",
     )?;
@@ -18623,6 +18837,18 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 Ok(())
             },
         )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_DB_DASHBOARD, "shell.db-dashboard", |_, runtime| {
+            open_db_dashboard(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_DB_MULTIVIEW, "shell.db-multiview", |_, runtime| {
+            open_db_multiview(runtime)?;
+            Ok(())
+        })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_ACP_DISCONNECT, "shell.acp-disconnect", |_, runtime| {
@@ -20907,7 +21133,19 @@ fn buffer_is_db_connect(kind: &BufferKind) -> bool {
 }
 
 fn buffer_is_db_query(kind: &BufferKind) -> bool {
-    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == DB_QUERY_KIND)
+    matches!(
+        kind,
+        BufferKind::Plugin(plugin_kind)
+            if plugin_kind == DB_QUERY_KIND || plugin_kind == DB_DASHBOARD_KIND
+    )
+}
+
+fn buffer_is_db_dashboard(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == DB_DASHBOARD_KIND)
+}
+
+fn buffer_is_db_sidebar(kind: &BufferKind) -> bool {
+    matches!(kind, BufferKind::Plugin(plugin_kind) if plugin_kind == DB_SIDEBAR_KIND)
 }
 
 fn buffer_is_db_browser(kind: &BufferKind) -> bool {
@@ -20916,7 +21154,12 @@ fn buffer_is_db_browser(kind: &BufferKind) -> bool {
         BufferKind::Plugin(plugin_kind)
             if matches!(
                 plugin_kind.as_str(),
-                DB_CONNECTIONS_KIND | DB_SCHEMA_KIND | DB_HISTORY_KIND | DB_SNIPPETS_KIND
+                DB_CONNECTIONS_KIND
+                    | DB_SCHEMA_KIND
+                    | DB_HISTORY_KIND
+                    | DB_SNIPPETS_KIND
+                    | DB_DASHBOARD_KIND
+                    | DB_SIDEBAR_KIND
             )
     )
 }
@@ -26390,8 +26633,36 @@ fn apply_db_browser_view(
     buffer_id: BufferId,
     view: DbBrowserBufferView,
 ) -> Result<(), String> {
+    apply_db_browser_view_to_section(runtime, buffer_id, 0, view)
+}
+
+fn apply_db_browser_view_to_section(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    section_index: usize,
+    view: DbBrowserBufferView,
+) -> Result<(), String> {
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    buffer.replace_with_lines_preserve_view(view.lines);
+    let syntax_lines = view
+        .lines
+        .iter()
+        .zip(view.kinds_by_line.iter())
+        .enumerate()
+        .filter_map(|(index, (line, kind))| {
+            let spans = db_browser_line_spans(line, *kind);
+            (!spans.is_empty()).then_some((index, spans))
+        })
+        .collect();
+    if section_index == 0 {
+        buffer.replace_with_lines_preserve_view(view.lines);
+        buffer.set_indexed_syntax_lines(Some(syntax_lines), None);
+    } else if let Some(pane) = buffer
+        .plugin_section_state
+        .as_mut()
+        .and_then(|state| state.attached_section_mut(section_index))
+    {
+        pane.replace_lines(view.lines, false);
+    }
     Ok(())
 }
 
@@ -26416,7 +26687,50 @@ fn refresh_all_db_browser_buffers(runtime: &mut EditorRuntime) -> Result<(), Str
             .collect::<Vec<_>>()
     };
     for buffer_id in buffer_ids {
-        let _ = refresh_db_browser_buffer(runtime, buffer_id);
+        let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+        if buffer_is_db_dashboard(&kind) || buffer_is_db_sidebar(&kind) {
+            let _ = refresh_db_layout_browsers(runtime, buffer_id);
+        } else {
+            let _ = refresh_db_browser_buffer(runtime, buffer_id);
+        }
+    }
+    Ok(())
+}
+
+fn refresh_db_layout_browsers(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let sections = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(state) = buffer.plugin_sections() else {
+            return Ok(());
+        };
+        (0..state.section_count())
+            .filter_map(|index| {
+                state
+                    .browser_kind_for_section(index)
+                    .map(|kind| (index, state.section_title(index).to_owned(), kind))
+            })
+            .collect::<Vec<_>>()
+    };
+    let user_library = shell_user_library(runtime);
+    for (index, name, kind) in sections {
+        let view = match kind {
+            editor_plugin_api::DbBrowserKind::Connections => db_service_mut(runtime)?
+                .render_connections_section_with(buffer_id.get(), &name, &|context| {
+                    user_library.db_browser_items(context)
+                })?,
+            editor_plugin_api::DbBrowserKind::Schema => db_service_mut(runtime)?
+                .render_schema_section_with(buffer_id.get(), &name, None, &|context| {
+                    user_library.db_browser_items(context)
+                })?,
+            editor_plugin_api::DbBrowserKind::History
+            | editor_plugin_api::DbBrowserKind::Snippets => {
+                continue;
+            }
+        };
+        apply_db_browser_view_to_section(runtime, buffer_id, index, view)?;
     }
     Ok(())
 }
@@ -26523,36 +26837,166 @@ fn create_db_query_buffer(
     sql: Option<&str>,
     requested_name: Option<&str>,
 ) -> Result<BufferId, String> {
+    create_db_query_like_buffer(
+        runtime,
+        requested_name.unwrap_or("*db-query*"),
+        DB_QUERY_KIND,
+        session_id,
+        sql,
+        requested_name,
+    )
+}
+
+fn open_db_query_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if active_shell_buffer_id(runtime)
+        .ok()
+        .and_then(|buffer_id| shell_buffer(runtime, buffer_id).ok())
+        .is_some_and(|buffer| buffer_is_db_dashboard(&buffer.kind))
+    {
+        return reset_db_dashboard_editor(runtime);
+    }
+    create_db_query_buffer(runtime, None, None, None).map(|_| ())
+}
+
+fn open_db_dashboard(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = create_db_query_like_buffer(
+        runtime,
+        DB_DASHBOARD_BUFFER_NAME,
+        DB_DASHBOARD_KIND,
+        None,
+        None,
+        Some(DB_DASHBOARD_BUFFER_NAME),
+    )?;
+    focus_db_editor_section(runtime, buffer_id)?;
+    refresh_db_layout_browsers(runtime, buffer_id)
+}
+
+fn open_db_multiview(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let sidebar_id =
+        open_or_focus_workspace_plugin_buffer(runtime, DB_SIDEBAR_BUFFER_NAME, DB_SIDEBAR_KIND)?;
+    refresh_db_layout_browsers(runtime, sidebar_id)?;
+    let query_id = if let Some(existing) = first_db_query_buffer(runtime, sidebar_id) {
+        existing
+    } else {
+        create_db_query_buffer(runtime, None, None, None)?
+    };
+    ensure_vertical_split_with_sidebar(runtime, sidebar_id, query_id)?;
+    shell_ui_mut(runtime)?.set_db_multiview_layout(true);
+    Ok(())
+}
+
+fn first_db_query_buffer(runtime: &EditorRuntime, exclude: BufferId) -> Option<BufferId> {
+    shell_ui(runtime).ok()?.buffers.iter().find_map(|buffer| {
+        (buffer.id() != exclude
+            && buffer_is_db_query(&buffer.kind)
+            && !buffer_is_db_dashboard(&buffer.kind))
+        .then_some(buffer.id())
+    })
+}
+
+fn ensure_vertical_split_with_sidebar(
+    runtime: &mut EditorRuntime,
+    sidebar_id: BufferId,
+    query_id: BufferId,
+) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let initial_name = requested_name.unwrap_or("*db-query*");
+    let pane_count = shell_ui(runtime)?
+        .workspace_view()
+        .map(|view| view.panes.len())
+        .unwrap_or(1);
+    if pane_count < 2 {
+        split_runtime_pane(runtime, PaneSplitDirection::Vertical)?;
+    }
+    let (left_pane, right_pane) = {
+        let ui = shell_ui(runtime)?;
+        let view = ui
+            .workspace_view()
+            .ok_or_else(|| "workspace view is missing".to_owned())?;
+        let left = view
+            .panes
+            .first()
+            .map(|pane| pane.pane_id)
+            .ok_or_else(|| "left pane is missing".to_owned())?;
+        let right = view
+            .panes
+            .get(1)
+            .map(|pane| pane.pane_id)
+            .ok_or_else(|| "right pane is missing".to_owned())?;
+        (left, right)
+    };
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, left_pane)
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, sidebar_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(sidebar_id);
+    if let Some(view) = shell_ui_mut(runtime)?.workspace_view_mut()
+        && let Some(pane) = view.panes.get_mut(0)
+    {
+        pane.buffer_id = sidebar_id;
+    }
+    runtime
+        .model_mut()
+        .focus_pane(workspace_id, right_pane)
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, query_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(query_id);
+    if let Some(view) = shell_ui_mut(runtime)?.workspace_view_mut()
+        && let Some(pane) = view.panes.get_mut(1)
+    {
+        pane.buffer_id = query_id;
+    }
+    Ok(())
+}
+
+fn create_db_query_like_buffer(
+    runtime: &mut EditorRuntime,
+    initial_name: &str,
+    kind: &str,
+    session_id: Option<DbSessionId>,
+    sql: Option<&str>,
+    requested_name: Option<&str>,
+) -> Result<BufferId, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let buffer_id = runtime
         .model_mut()
         .create_buffer(
             workspace_id,
             initial_name,
-            BufferKind::Plugin(DB_QUERY_KIND.to_owned()),
+            BufferKind::Plugin(kind.to_owned()),
             None,
         )
         .map_err(|error| error.to_string())?;
-    let meta = db_service_mut(runtime)?.attach_query_buffer(
-        buffer_id.get(),
-        session_id,
-        requested_name,
-    )?;
-    if let Some(sql) = sql {
-        fs::write(&meta.temp_path, sql).map_err(|error| {
+    let meta = db_service_mut(runtime)?
+        .attach_query_buffer(buffer_id.get(), session_id, requested_name)
+        .ok();
+    if let Some((sql, path)) = sql.zip(meta.as_ref().map(|meta| meta.temp_path.clone())) {
+        fs::write(&path, sql).map_err(|error| {
             format!(
                 "failed to seed DB query buffer `{}`: {error}",
-                meta.temp_path.display()
+                path.display()
             )
         })?;
     }
+    let title = meta
+        .as_ref()
+        .map(|meta| meta.title.clone())
+        .unwrap_or_else(|| requested_name.unwrap_or(initial_name).to_owned());
     runtime
         .model_mut()
-        .set_buffer_name(workspace_id, buffer_id, meta.title.clone())
+        .set_buffer_name(workspace_id, buffer_id, title)
         .map_err(|error| error.to_string())?;
     let buffer = runtime
         .model()
@@ -26562,12 +27006,21 @@ fn create_db_query_buffer(
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let text = sql
         .map(TextBuffer::from_text)
-        .unwrap_or_else(|| TextBuffer::from_text("-- SQL query buffer\n\nSELECT *\nFROM ;\n"));
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| fs::read_to_string(&meta.temp_path).ok())
+                .map(TextBuffer::from_text)
+        })
+        .unwrap_or_else(|| TextBuffer::from_text(query_starter_sql()));
     let user_library = shell_user_library(runtime);
     let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
-    shell_buffer.set_language_id(Some(meta.dialect_id.clone()));
-    shell_buffer.set_lsp_path(Some(meta.temp_path.clone()));
-    shell_buffer.set_lsp_enabled(true);
+    if let Some(meta) = meta {
+        shell_buffer.set_language_id(Some(meta.dialect_id));
+        shell_buffer.set_lsp_path(Some(meta.temp_path));
+        shell_buffer.set_lsp_enabled(true);
+    } else {
+        shell_buffer.set_language_id(Some("sql".to_owned()));
+    }
     shell_buffer.force_syntax_refresh();
     {
         let ui = shell_ui_mut(runtime)?;
@@ -26577,8 +27030,32 @@ fn create_db_query_buffer(
     Ok(buffer_id)
 }
 
-fn open_db_query_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
-    create_db_query_buffer(runtime, None, None, None).map(|_| ())
+fn query_starter_sql() -> &'static str {
+    "-- SQL query\n-- Ctrl+c Ctrl+c  execute statement or selection\n\nSELECT *\nFROM ;\n"
+}
+
+fn reset_db_dashboard_editor(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.replace_with_lines(query_starter_sql().lines().map(str::to_owned).collect());
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+    }
+    runtime
+        .model_mut()
+        .set_buffer_path(workspace_id, buffer_id, None)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn focus_db_editor_section(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+    Ok(())
 }
 
 fn open_db_query_from_sql(
@@ -26587,7 +27064,59 @@ fn open_db_query_from_sql(
     sql: &str,
     requested_name: Option<&str>,
 ) -> Result<(), String> {
+    if let Some(dashboard_id) = active_or_open_dashboard_buffer(runtime) {
+        load_sql_into_db_editor(runtime, dashboard_id, session_id, sql, requested_name)?;
+        return Ok(());
+    }
     create_db_query_buffer(runtime, Some(session_id), Some(sql), requested_name).map(|_| ())
+}
+
+fn active_or_open_dashboard_buffer(runtime: &EditorRuntime) -> Option<BufferId> {
+    let ui = shell_ui(runtime).ok()?;
+    ui.buffers
+        .iter()
+        .find_map(|buffer| buffer_is_db_dashboard(&buffer.kind).then_some(buffer.id()))
+}
+
+fn load_sql_into_db_editor(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    session_id: DbSessionId,
+    sql: &str,
+    requested_name: Option<&str>,
+) -> Result<(), String> {
+    if db_service(runtime)?
+        .query_buffer_session_id(buffer_id.get())
+        .is_none()
+    {
+        db_service_mut(runtime)?.attach_query_buffer(
+            buffer_id.get(),
+            Some(session_id),
+            requested_name,
+        )?;
+    }
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    if let Some(name) = requested_name {
+        runtime
+            .model_mut()
+            .set_buffer_name(workspace_id, buffer_id, name.to_owned())
+            .map_err(|error| error.to_string())?;
+    }
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.replace_with_lines(sql.lines().map(str::to_owned).collect());
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+        buffer.force_syntax_refresh();
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(buffer_id);
+    Ok(())
 }
 
 fn open_db_query_for_table_preview(
@@ -26595,6 +27124,16 @@ fn open_db_query_for_table_preview(
     session_id: DbSessionId,
     table: &QualifiedName,
 ) -> Result<(), String> {
+    if let Some(dashboard_id) = active_or_open_dashboard_buffer(runtime) {
+        let sql = db_service(runtime)?.preview_sql_for_table(session_id, table)?;
+        return load_sql_into_db_editor(
+            runtime,
+            dashboard_id,
+            session_id,
+            &sql,
+            Some(&format!("*db-query {}*", table.display())),
+        );
+    }
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -26665,8 +27204,19 @@ fn db_query_scope_sql(runtime: &EditorRuntime, buffer_id: BufferId) -> Result<St
                 Ok(sql)
             }
         }
-        None => sql_scope_from_text(&text, cursor_char_index, None)
-            .ok_or_else(|| "no SQL selected for execution".to_owned()),
+        None => {
+            if buffer_is_db_dashboard(&buffer.kind) {
+                let sql = text.trim().to_owned();
+                if sql.is_empty() {
+                    Err("no SQL selected for execution".to_owned())
+                } else {
+                    Ok(sql)
+                }
+            } else {
+                sql_scope_from_text(&text, cursor_char_index, None)
+                    .ok_or_else(|| "no SQL selected for execution".to_owned())
+            }
+        }
     }
 }
 
@@ -26680,6 +27230,73 @@ fn open_db_results_popup(
         DB_RESULTS_KIND,
         "DB Results",
     )?;
+    let (lines, is_error) = match output {
+        Ok(output) => {
+            let mut lines = vec![output.title];
+            if !output.lines.is_empty() {
+                lines.push(String::new());
+                lines.extend(output.lines);
+            }
+            (lines, false)
+        }
+        Err(error) => (vec!["Query failed".to_owned(), String::new(), error], true),
+    };
+    let syntax_lines = db_results_syntax_lines(&lines, is_error);
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.replace_with_lines_preserve_view(lines);
+        buffer.set_indexed_syntax_lines(Some(syntax_lines), None);
+    }
+    Ok(())
+}
+
+fn execute_db_sql(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if !buffer_is_db_query(&kind) {
+        return Err("db.execute-sql requires an active DB query buffer".to_owned());
+    }
+    if buffer_is_db_dashboard(&kind) {
+        let section = shell_buffer(runtime, buffer_id)?
+            .plugin_active_section_name()
+            .unwrap_or(DB_EDITOR_SECTION)
+            .to_owned();
+        if section != DB_EDITOR_SECTION {
+            return Err("db.execute-sql requires the Editor section".to_owned());
+        }
+    }
+    let sql = db_query_scope_sql(runtime, buffer_id)?;
+    if db_service(runtime)?
+        .query_buffer_session_id(buffer_id.get())
+        .is_none()
+    {
+        match db_service_mut(runtime)?.attach_query_buffer(buffer_id.get(), None, None) {
+            Ok(_) => {}
+            Err(error) if buffer_is_db_dashboard(&kind) => {
+                apply_db_results_to_output_section(runtime, buffer_id, Err(error))?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let output = if buffer_is_db_dashboard(&kind) && split_sql_statements(&sql).len() > 1 {
+        db_service_mut(runtime)?.execute_sql_batch_for_buffer(buffer_id.get(), &sql)
+    } else {
+        db_service_mut(runtime)?.execute_sql_for_buffer(buffer_id.get(), &sql)
+    };
+    if buffer_is_db_dashboard(&kind) {
+        apply_db_results_to_output_section(runtime, buffer_id, output)?;
+    } else {
+        open_db_results_popup(runtime, output)?;
+    }
+    refresh_all_db_browser_buffers(runtime)
+}
+
+fn apply_db_results_to_output_section(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    output: Result<DbExecutionOutput, String>,
+) -> Result<(), String> {
     let lines = match output {
         Ok(output) => {
             let mut lines = vec![output.title];
@@ -26691,20 +27308,11 @@ fn open_db_results_popup(
         }
         Err(error) => vec!["Query failed".to_owned(), String::new(), error],
     };
-    shell_buffer_mut(runtime, buffer_id)?.replace_with_lines_preserve_view(lines);
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let _ = buffer.plugin_focus_section_named(DB_OUTPUT_SECTION);
+    buffer.set_plugin_output_lines(lines);
+    let _ = buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
     Ok(())
-}
-
-fn execute_db_sql(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
-    if !buffer_is_db_query(&kind) {
-        return Err("db.execute-sql requires an active DB query buffer".to_owned());
-    }
-    let sql = db_query_scope_sql(runtime, buffer_id)?;
-    let output = db_service_mut(runtime)?.execute_sql_for_buffer(buffer_id.get(), &sql);
-    open_db_results_popup(runtime, output)?;
-    refresh_all_db_browser_buffers(runtime)
 }
 
 fn snippet_name_from_sql(sql: &str) -> String {
@@ -26746,22 +27354,37 @@ fn refresh_db_schema(runtime: &mut EditorRuntime) -> Result<(), String> {
 
 fn activate_db_browser_line(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let line_index = shell_buffer(runtime, buffer_id)?.cursor_row();
     let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
     if !buffer_is_db_browser(&kind) {
         return Err("db.activate-line requires an active DB browser buffer".to_owned());
     }
+    let (section, line_index) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        if buffer_is_db_dashboard(&kind) || buffer_is_db_sidebar(&kind) {
+            let section = buffer.plugin_active_section_name().unwrap_or("").to_owned();
+            if section != DB_CONNECTIONS_SECTION && section != DB_TABLES_SECTION {
+                return Err("db.activate-line requires a Connections or Tables section".to_owned());
+            }
+            let line_index = buffer
+                .plugin_attached_pane_state()
+                .map(|pane| pane.cursor().line)
+                .unwrap_or_else(|| buffer.cursor_row());
+            (section, line_index)
+        } else {
+            (String::new(), buffer.cursor_row())
+        }
+    };
     let action = db_service(runtime)?
-        .browser_action(buffer_id.get(), line_index)
+        .browser_action_in(buffer_id.get(), &section, line_index)
         .ok_or_else(|| "no action is attached to the current database browser line".to_owned())?;
     match db_service_mut(runtime)?.activate_browser_action(action)? {
         DbActionOutcome::ActivatedSession(_) => {
             refresh_all_db_browser_buffers(runtime)?;
-            refresh_db_browser_buffer(runtime, buffer_id)
+            refresh_db_browser_surface(runtime, buffer_id)
         }
         DbActionOutcome::Disconnected => {
             refresh_all_db_browser_buffers(runtime)?;
-            refresh_db_browser_buffer(runtime, buffer_id)
+            refresh_db_browser_surface(runtime, buffer_id)
         }
         DbActionOutcome::OpenPreviewQuery { session_id, table } => {
             open_db_query_for_table_preview(runtime, session_id, &table)
@@ -26769,14 +27392,26 @@ fn activate_db_browser_line(runtime: &mut EditorRuntime) -> Result<(), String> {
         DbActionOutcome::ExploreRows { session_id, table } => {
             open_db_query_for_table_preview(runtime, session_id, &table)
         }
-        DbActionOutcome::SchemaRefreshed(_) => refresh_db_browser_buffer(runtime, buffer_id),
+        DbActionOutcome::SchemaRefreshed(_) => refresh_db_browser_surface(runtime, buffer_id),
         DbActionOutcome::OpenSql { session_id, sql } => {
             open_db_query_from_sql(runtime, session_id, &sql, None)
         }
         DbActionOutcome::SnippetDeleted | DbActionOutcome::RememberedDeleted => {
             refresh_all_db_browser_buffers(runtime)?;
-            refresh_db_browser_buffer(runtime, buffer_id)
+            refresh_db_browser_surface(runtime, buffer_id)
         }
+    }
+}
+
+fn refresh_db_browser_surface(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if buffer_is_db_dashboard(&kind) || buffer_is_db_sidebar(&kind) {
+        refresh_db_layout_browsers(runtime, buffer_id)
+    } else {
+        refresh_db_browser_buffer(runtime, buffer_id)
     }
 }
 
@@ -32792,6 +33427,9 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
     if is_pdf_path(path) {
         return open_pdf_workspace_file(runtime, workspace_id, display_name.as_str(), path);
     }
+    if let Some(dashboard_id) = active_dashboard_editor_buffer(runtime) {
+        return load_workspace_file_into_db_editor(runtime, dashboard_id, path, &display_name);
+    }
     let text = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
     let buffer_id = runtime
@@ -32831,6 +33469,53 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
     }
     queue_buffer_syntax_refresh(runtime, buffer_id)?;
 
+    Ok(buffer_id)
+}
+
+fn active_dashboard_editor_buffer(runtime: &EditorRuntime) -> Option<BufferId> {
+    let buffer_id = active_shell_buffer_id(runtime).ok()?;
+    let buffer = shell_buffer(runtime, buffer_id).ok()?;
+    buffer_is_db_dashboard(&buffer.kind).then_some(buffer_id)
+}
+
+fn load_workspace_file_into_db_editor(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    path: &Path,
+    display_name: &str,
+) -> Result<BufferId, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
+    let language_id = language_id_for_path(runtime, path).ok();
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .set_buffer_name(workspace_id, buffer_id, display_name.to_owned())
+        .map_err(|error| error.to_string())?;
+    runtime
+        .model_mut()
+        .set_buffer_path(workspace_id, buffer_id, Some(path.to_path_buf()))
+        .map_err(|error| error.to_string())?;
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.replace_with_lines(contents.lines().map(str::to_owned).collect());
+        buffer.text.set_path(path.to_path_buf());
+        buffer.text.mark_clean();
+        buffer.plugin_focus_section_named(DB_EDITOR_SECTION);
+        if let Some(language_id) = language_id {
+            buffer.set_language_id(Some(language_id));
+        }
+        buffer.set_lsp_path(Some(path.to_path_buf()));
+        buffer.force_syntax_refresh();
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(buffer_id);
     Ok(buffer_id)
 }
 
@@ -33765,6 +34450,8 @@ fn buffer_interaction(
         BufferKind::Plugin(plugin_kind) if plugin_kind == DB_HISTORY_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == DB_SNIPPETS_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == DB_RESULTS_KIND => (true, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_DASHBOARD_KIND => (false, None),
+        BufferKind::Plugin(plugin_kind) if plugin_kind == DB_SIDEBAR_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == BROWSER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == PDF_BUFFER_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => (true, None),

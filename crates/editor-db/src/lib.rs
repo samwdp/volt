@@ -178,6 +178,7 @@ pub struct DbBrowserBufferView {
     pub title: String,
     pub lines: Vec<String>,
     pub actions_by_line: Vec<Option<DbBrowserAction>>,
+    pub kinds_by_line: Vec<DbBrowserItemKind>,
 }
 
 pub type DbBrowserItemRenderer<'a> = dyn Fn(&DbBrowserContext) -> Vec<DbBrowserItemSpec> + 'a;
@@ -215,6 +216,30 @@ fn default_db_browser_line(item: &DbBrowserItemContext) -> String {
     }
 }
 
+fn section_count_label(label: &str, count: usize) -> String {
+    format!("{label} ({count})")
+}
+
+fn push_schema_column_items(items: &mut Vec<DbBrowserItemContext>, columns: &[DbColumn]) {
+    let name_width = columns
+        .iter()
+        .map(|column| column.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for column in columns {
+        let nullable = if column.nullable { "  · nullable" } else { "" };
+        items.push(DbBrowserItemContext::new(
+            DbBrowserItemKind::Header,
+            format!(
+                "      {:<width$}  {}{nullable}",
+                column.name,
+                column.data_type,
+                width = name_width
+            ),
+        ));
+    }
+}
+
 /// Stored snippet metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbSnippet {
@@ -243,7 +268,7 @@ struct PersistedDbState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DbBrowserBufferKind {
     Connections,
-    Schema { session_id: DbSessionId },
+    Schema { session_id: Option<DbSessionId> },
     History,
     Snippets,
 }
@@ -322,7 +347,8 @@ impl QualifiedName {
         }
     }
 
-    fn display(&self) -> String {
+    /// Human-readable `schema.name` form used in titles and autocomplete.
+    pub fn display(&self) -> String {
         match &self.schema {
             Some(schema) => format!("{schema}.{}", self.name),
             None => self.name.clone(),
@@ -501,7 +527,7 @@ pub struct DbService {
     next_session_id: u64,
     prompt_buffers: HashSet<u64>,
     query_buffers: HashMap<u64, DbQueryBufferMeta>,
-    browser_buffers: HashMap<u64, DbBrowserBufferState>,
+    browser_buffers: HashMap<(u64, String), DbBrowserBufferState>,
 }
 
 impl DbService {
@@ -581,9 +607,10 @@ impl DbService {
         self.prompt_buffers.insert(buffer_key);
     }
 
-    fn render_db_browser_context(
+    fn render_db_browser_section(
         &mut self,
         buffer_key: u64,
+        section: &str,
         kind: DbBrowserBufferKind,
         context: DbBrowserContext,
         renderer: &DbBrowserItemRenderer<'_>,
@@ -602,13 +629,15 @@ impl DbService {
             lines.push(spec.line().to_owned());
             actions.push(spec.action().map(db_browser_action_from_spec).transpose()?);
         }
+        let kinds_by_line = context.items.iter().map(|item| item.kind).collect();
         let view = DbBrowserBufferView {
             title: context.title.to_string(),
             lines,
             actions_by_line: actions.clone(),
+            kinds_by_line,
         };
         self.browser_buffers.insert(
-            buffer_key,
+            (buffer_key, section.to_owned()),
             DbBrowserBufferState {
                 kind,
                 title: view.title.clone(),
@@ -616,6 +645,16 @@ impl DbService {
             },
         );
         Ok(view)
+    }
+
+    fn render_db_browser_context(
+        &mut self,
+        buffer_key: u64,
+        kind: DbBrowserBufferKind,
+        context: DbBrowserContext,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
+        self.render_db_browser_section(buffer_key, "", kind, context, renderer)
     }
 
     /// Returns whether `buffer_key` is the DB connect prompt.
@@ -627,7 +666,8 @@ impl DbService {
     pub fn detach_buffer(&mut self, buffer_key: u64) {
         self.prompt_buffers.remove(&buffer_key);
         self.query_buffers.remove(&buffer_key);
-        self.browser_buffers.remove(&buffer_key);
+        self.browser_buffers
+            .retain(|(key, _), _| *key != buffer_key);
     }
 
     /// Returns whether secure remembered-connection persistence is available.
@@ -808,9 +848,9 @@ impl DbService {
         })?;
         let temp_path = session_query_dir.join(file_name);
         let starter = format!(
-            "-- {}\n-- {}\n\nSELECT *\nFROM ;\n",
+            "-- {} · {}\n-- Ctrl+c Ctrl+c  execute statement or selection\n-- Ctrl+s         save snippet\n\nSELECT *\nFROM ;\n",
             session.engine.label(),
-            session.display_label
+            session.alias
         );
         fs::write(&temp_path, starter.as_bytes()).map_err(|error| {
             format!(
@@ -830,6 +870,19 @@ impl DbService {
         };
         self.query_buffers.insert(buffer_key, meta.clone());
         Ok(meta)
+    }
+
+    /// Returns the engine-specific preview query for `table`.
+    pub fn preview_sql_for_table(
+        &self,
+        session_id: DbSessionId,
+        table: &QualifiedName,
+    ) -> Result<String, String> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("session `{}` is not active", session_id.get()))?;
+        Ok(session.engine.preview_sql(table))
     }
 
     /// Builds a query buffer pre-filled with a preview query for `table`.
@@ -872,11 +925,24 @@ impl DbService {
         buffer_key: u64,
         renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
+        self.render_connections_section_with(buffer_key, "", renderer)
+    }
+
+    /// Renders the connections browser into a named section of `buffer_key`.
+    pub fn render_connections_section_with(
+        &mut self,
+        buffer_key: u64,
+        section: &str,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
         let active = self.session_summaries();
         let mut items = vec![
             DbBrowserItemContext::new(DbBrowserItemKind::Header, "Database connections"),
             DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
-            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Active sessions"),
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                section_count_label("Active sessions", active.len()),
+            ),
         ];
         if active.is_empty() {
             items.push(DbBrowserItemContext::new(
@@ -897,7 +963,7 @@ impl DbService {
         items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
         items.push(DbBrowserItemContext::new(
             DbBrowserItemKind::Header,
-            "Remembered connections",
+            section_count_label("Remembered connections", self.persisted.remembered.len()),
         ));
         if self.persisted.remembered.is_empty() {
             items.push(DbBrowserItemContext::new(
@@ -924,8 +990,9 @@ impl DbService {
                 );
             }
         }
-        self.render_db_browser_context(
+        self.render_db_browser_section(
             buffer_key,
+            section,
             DbBrowserBufferKind::Connections,
             DbBrowserContext::new(DbBrowserKind::Connections, "*db-connections*").with_items(items),
             renderer,
@@ -947,9 +1014,30 @@ impl DbService {
         session_id: Option<DbSessionId>,
         renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
-        let session_id = session_id
-            .or(self.active_session_id)
-            .ok_or_else(|| "no active database session".to_owned())?;
+        self.render_schema_section_with(buffer_key, "", session_id, renderer)
+    }
+
+    /// Renders the schema browser into a named section of `buffer_key`.
+    pub fn render_schema_section_with(
+        &mut self,
+        buffer_key: u64,
+        section: &str,
+        session_id: Option<DbSessionId>,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
+        let Some(session_id) = session_id.or(self.active_session_id) else {
+            return self.render_db_browser_section(
+                buffer_key,
+                section,
+                DbBrowserBufferKind::Schema { session_id: None },
+                DbBrowserContext::new(DbBrowserKind::Schema, "*db-schema*").with_items(vec![
+                    DbBrowserItemContext::new(DbBrowserItemKind::Header, "Schema explorer"),
+                    DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
+                    DbBrowserItemContext::new(DbBrowserItemKind::Empty, "(no active session)"),
+                ]),
+                renderer,
+            );
+        };
         self.refresh_schema_cache(session_id)?;
         let session = self
             .sessions
@@ -965,7 +1053,10 @@ impl DbService {
                 format!("Engine: {}", session.engine.label()),
             ),
             DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
-            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Tables"),
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                section_count_label("Tables", session.schema_cache.tables.len()),
+            ),
         ];
         if session.schema_cache.tables.is_empty() {
             items.push(DbBrowserItemContext::new(
@@ -984,23 +1075,13 @@ impl DbService {
                             table.name.name.clone(),
                         )),
                 );
-                for column in &table.columns {
-                    items.push(DbBrowserItemContext::new(
-                        DbBrowserItemKind::Header,
-                        format!(
-                            "  - {}: {}{}",
-                            column.name,
-                            column.data_type,
-                            if column.nullable { " nullable" } else { "" }
-                        ),
-                    ));
-                }
+                push_schema_column_items(&mut items, &table.columns);
             }
         }
         items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
         items.push(DbBrowserItemContext::new(
             DbBrowserItemKind::Header,
-            "Views",
+            section_count_label("Views", session.schema_cache.views.len()),
         ));
         if session.schema_cache.views.is_empty() {
             items.push(DbBrowserItemContext::new(
@@ -1019,23 +1100,13 @@ impl DbService {
                             view.name.name.clone(),
                         )),
                 );
-                for column in &view.columns {
-                    items.push(DbBrowserItemContext::new(
-                        DbBrowserItemKind::Header,
-                        format!(
-                            "  - {}: {}{}",
-                            column.name,
-                            column.data_type,
-                            if column.nullable { " nullable" } else { "" }
-                        ),
-                    ));
-                }
+                push_schema_column_items(&mut items, &view.columns);
             }
         }
         items.push(DbBrowserItemContext::new(DbBrowserItemKind::Header, ""));
         items.push(DbBrowserItemContext::new(
             DbBrowserItemKind::Header,
-            "Indexes",
+            section_count_label("Indexes", session.schema_cache.indexes.len()),
         ));
         if session.schema_cache.indexes.is_empty() {
             items.push(DbBrowserItemContext::new(
@@ -1050,9 +1121,12 @@ impl DbService {
                 ));
             }
         }
-        self.render_db_browser_context(
+        self.render_db_browser_section(
             buffer_key,
-            DbBrowserBufferKind::Schema { session_id },
+            section,
+            DbBrowserBufferKind::Schema {
+                session_id: Some(session_id),
+            },
             DbBrowserContext::new(
                 DbBrowserKind::Schema,
                 format!("*db-schema {}*", session.alias),
@@ -1076,7 +1150,10 @@ impl DbService {
         renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
         let mut items = vec![
-            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Query history"),
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                section_count_label("Query history", self.persisted.history.len()),
+            ),
             DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
         ];
         if self.persisted.history.is_empty() {
@@ -1128,7 +1205,10 @@ impl DbService {
         renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
         let mut items = vec![
-            DbBrowserItemContext::new(DbBrowserItemKind::Header, "Saved query snippets"),
+            DbBrowserItemContext::new(
+                DbBrowserItemKind::Header,
+                section_count_label("Saved query snippets", self.persisted.snippets.len()),
+            ),
             DbBrowserItemContext::new(DbBrowserItemKind::Header, ""),
         ];
         if self.persisted.snippets.is_empty() {
@@ -1169,17 +1249,27 @@ impl DbService {
         buffer_key: u64,
         renderer: &DbBrowserItemRenderer<'_>,
     ) -> Result<DbBrowserBufferView, String> {
+        self.rerender_browser_section_with(buffer_key, "", renderer)
+    }
+
+    /// Re-renders one named browser section for `buffer_key`.
+    pub fn rerender_browser_section_with(
+        &mut self,
+        buffer_key: u64,
+        section: &str,
+        renderer: &DbBrowserItemRenderer<'_>,
+    ) -> Result<DbBrowserBufferView, String> {
         let state = self
             .browser_buffers
-            .get(&buffer_key)
+            .get(&(buffer_key, section.to_owned()))
             .cloned()
             .ok_or_else(|| format!("buffer `{buffer_key}` is not an attached DB browser buffer"))?;
         match state.kind {
             DbBrowserBufferKind::Connections => {
-                self.render_connections_buffer_with(buffer_key, renderer)
+                self.render_connections_section_with(buffer_key, section, renderer)
             }
             DbBrowserBufferKind::Schema { session_id } => {
-                self.render_schema_buffer_with(buffer_key, Some(session_id), renderer)
+                self.render_schema_section_with(buffer_key, section, session_id, renderer)
             }
             DbBrowserBufferKind::History => self.render_history_buffer_with(buffer_key, renderer),
             DbBrowserBufferKind::Snippets => self.render_snippets_buffer_with(buffer_key, renderer),
@@ -1188,8 +1278,18 @@ impl DbService {
 
     /// Returns the action attached to `line_index` for an open browser buffer.
     pub fn browser_action(&self, buffer_key: u64, line_index: usize) -> Option<DbBrowserAction> {
+        self.browser_action_in(buffer_key, "", line_index)
+    }
+
+    /// Returns the action attached to `line_index` in a named browser section.
+    pub fn browser_action_in(
+        &self,
+        buffer_key: u64,
+        section: &str,
+        line_index: usize,
+    ) -> Option<DbBrowserAction> {
         self.browser_buffers
-            .get(&buffer_key)
+            .get(&(buffer_key, section.to_owned()))
             .and_then(|state| state.actions_by_line.get(line_index))
             .cloned()
             .flatten()
@@ -1303,6 +1403,53 @@ impl DbService {
         Ok(output)
     }
 
+    /// Executes every SQL statement in `sql` and concatenates the results.
+    pub fn execute_sql_batch_for_buffer(
+        &mut self,
+        buffer_key: u64,
+        sql: &str,
+    ) -> Result<DbExecutionOutput, String> {
+        let statements = split_sql_statements(sql);
+        if statements.is_empty() {
+            return Err("no SQL selected for execution".to_owned());
+        }
+        if statements.len() == 1 {
+            return self.execute_sql_for_buffer(buffer_key, &statements[0]);
+        }
+        let mut lines = Vec::new();
+        let mut row_count = 0usize;
+        let mut first_title = None;
+        for (index, statement) in statements.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
+            lines.push(format!("-- Query {}", index.saturating_add(1)));
+            match self.execute_sql_for_buffer(buffer_key, statement) {
+                Ok(output) => {
+                    if first_title.is_none() {
+                        first_title = Some(output.title.clone());
+                    }
+                    lines.push(output.title);
+                    if !output.lines.is_empty() {
+                        lines.push(String::new());
+                        lines.extend(output.lines);
+                    }
+                    row_count = row_count.saturating_add(output.row_count);
+                }
+                Err(error) => {
+                    lines.push("Query failed".to_owned());
+                    lines.push(String::new());
+                    lines.push(error);
+                }
+            }
+        }
+        Ok(DbExecutionOutput {
+            title: first_title.unwrap_or_else(|| format!("{} queries", statements.len())),
+            lines,
+            row_count,
+        })
+    }
+
     /// Returns schema-derived autocomplete candidates for a DB query buffer.
     pub fn autocomplete_candidates_for_buffer(
         &self,
@@ -1408,7 +1555,7 @@ impl DbService {
     /// Returns the current browser buffer kind for `buffer_key`.
     pub fn browser_buffer_kind(&self, buffer_key: u64) -> Option<&str> {
         self.browser_buffers
-            .get(&buffer_key)
+            .get(&(buffer_key, String::new()))
             .map(|state| match state.kind {
                 DbBrowserBufferKind::Connections => "connections",
                 DbBrowserBufferKind::Schema { .. } => "schema",
@@ -1770,13 +1917,11 @@ fn execute_sqlite(connection_string: &str, sql: &str) -> Result<DbExecutionOutpu
         let changed = connection
             .execute(sql, [])
             .map_err(|error| format!("failed to execute SQLite statement: {error}"))?;
-        return Ok(DbExecutionOutput {
-            title: "SQLite result".to_owned(),
-            lines: vec![format!(
-                "Statement executed successfully. Rows affected: {changed}."
-            )],
-            row_count: changed,
-        });
+        return Ok(execution_notice(
+            "SQLite result",
+            rows_affected_line(changed),
+            changed,
+        ));
     }
     let headers = statement
         .column_names()
@@ -1910,9 +2055,7 @@ fn execute_postgres(connection_string: &str, sql: &str) -> Result<DbExecutionOut
                 );
             }
             SimpleQueryMessage::CommandComplete(count) => {
-                status_lines.push(format!(
-                    "Statement executed successfully. Rows affected: {count}."
-                ));
+                status_lines.push(rows_affected_line(count as usize));
             }
             _ => {}
         }
@@ -1921,7 +2064,7 @@ fn execute_postgres(connection_string: &str, sql: &str) -> Result<DbExecutionOut
         return Ok(render_rows("PostgreSQL result", &headers, &rows));
     }
     if status_lines.is_empty() {
-        status_lines.push("Statement executed successfully.".to_owned());
+        status_lines.push("Statement completed.".to_owned());
     }
     Ok(DbExecutionOutput {
         title: "PostgreSQL result".to_owned(),
@@ -2039,11 +2182,11 @@ fn execute_sql_server(connection_string: &str, sql: &str) -> Result<DbExecutionO
             .await
             .map_err(|error| format!("failed to read SQL Server results: {error}"))?;
         let Some(first_non_empty) = results.iter().find(|rows| !rows.is_empty()) else {
-            return Ok(DbExecutionOutput {
-                title: "SQL Server result".to_owned(),
-                lines: vec!["Statement executed successfully.".to_owned()],
-                row_count: 0,
-            });
+            return Ok(execution_notice(
+                "SQL Server result",
+                "Statement completed.",
+                0,
+            ));
         };
         let headers = first_non_empty[0]
             .columns()
@@ -2079,57 +2222,185 @@ fn build_tokio_runtime() -> Result<Runtime, String> {
 
 fn render_rows(title: &str, headers: &[String], rows: &[Vec<String>]) -> DbExecutionOutput {
     if headers.is_empty() {
-        return DbExecutionOutput {
-            title: title.to_owned(),
-            lines: vec!["Query returned no columns.".to_owned()],
-            row_count: 0,
-        };
+        return execution_notice(title, "No columns returned.", 0);
     }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            (0..headers.len())
+                .map(|index| display_cell(row.get(index).map(String::as_str).unwrap_or("")))
+                .collect()
+        })
+        .collect();
+    let headers = headers
+        .iter()
+        .map(|header| display_cell(header))
+        .collect::<Vec<_>>();
     let mut widths = headers
         .iter()
         .map(|header| header.chars().count())
         .collect::<Vec<_>>();
-    for row in rows {
+    for row in &cells {
         for (index, value) in row.iter().enumerate() {
             if let Some(width) = widths.get_mut(index) {
                 *width = (*width).max(value.chars().count());
             }
         }
     }
+    let aligns = (0..headers.len())
+        .map(|index| {
+            if column_is_numeric(&cells, index) {
+                CellAlign::Right
+            } else {
+                CellAlign::Left
+            }
+        })
+        .collect::<Vec<_>>();
     let mut lines = Vec::new();
-    lines.push(pad_row(headers, &widths));
-    lines.push(
-        widths
-            .iter()
-            .map(|width| "-".repeat(*width))
-            .collect::<Vec<_>>()
-            .join("-+-"),
-    );
-    for row in rows {
-        lines.push(pad_row(row, &widths));
+    lines.push(box_rule(&widths, BoxRuleKind::Top));
+    lines.push(box_row(
+        &headers,
+        &widths,
+        &vec![CellAlign::Left; headers.len()],
+    ));
+    lines.push(box_rule(&widths, BoxRuleKind::Middle));
+    for row in &cells {
+        lines.push(box_row(row, &widths, &aligns));
     }
+    lines.push(box_rule(&widths, BoxRuleKind::Bottom));
     lines.push(String::new());
-    lines.push(format!("Rows: {}", rows.len()));
+    lines.push(row_count_footer(cells.len(), headers.len()));
     DbExecutionOutput {
         title: title.to_owned(),
         lines,
-        row_count: rows.len(),
+        row_count: cells.len(),
     }
 }
 
-fn pad_row(values: &[String], widths: &[usize]) -> String {
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let width = widths
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| value.chars().count());
-            format!("{value:<width$}")
+fn execution_notice(
+    title: &str,
+    message: impl Into<String>,
+    row_count: usize,
+) -> DbExecutionOutput {
+    DbExecutionOutput {
+        title: title.to_owned(),
+        lines: vec![message.into()],
+        row_count,
+    }
+}
+
+fn rows_affected_line(count: usize) -> String {
+    match count {
+        0 => "No rows affected.".to_owned(),
+        1 => "1 row affected.".to_owned(),
+        n => format!("{n} rows affected."),
+    }
+}
+
+fn row_count_footer(rows: usize, columns: usize) -> String {
+    let row_label = match rows {
+        1 => "1 row".to_owned(),
+        n => format!("{n} rows"),
+    };
+    let column_label = match columns {
+        1 => "1 column".to_owned(),
+        n => format!("{n} columns"),
+    };
+    format!("{row_label}  ·  {column_label}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellAlign {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoxRuleKind {
+    Top,
+    Middle,
+    Bottom,
+}
+
+fn box_rule(widths: &[usize], kind: BoxRuleKind) -> String {
+    let (left, join, right) = match kind {
+        BoxRuleKind::Top => ('┌', '┬', '┐'),
+        BoxRuleKind::Middle => ('├', '┼', '┤'),
+        BoxRuleKind::Bottom => ('└', '┴', '┘'),
+    };
+    let mut line = String::new();
+    line.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            line.push(join);
+        }
+        line.push_str(&"─".repeat(width.saturating_add(2)));
+    }
+    line.push(right);
+    line
+}
+
+fn box_row(values: &[String], widths: &[usize], aligns: &[CellAlign]) -> String {
+    let mut line = String::from("│");
+    for (index, width) in widths.iter().enumerate() {
+        let value = values.get(index).map(String::as_str).unwrap_or("");
+        let align = aligns.get(index).copied().unwrap_or(CellAlign::Left);
+        line.push(' ');
+        line.push_str(&pad_cell(value, *width, align));
+        line.push(' ');
+        line.push('│');
+    }
+    line
+}
+
+fn pad_cell(value: &str, width: usize, align: CellAlign) -> String {
+    let pad = width.saturating_sub(value.chars().count());
+    match align {
+        CellAlign::Left => format!("{value}{}", " ".repeat(pad)),
+        CellAlign::Right => format!("{}{value}", " ".repeat(pad)),
+    }
+}
+
+fn display_cell(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => ' ',
+            other => other,
         })
-        .collect::<Vec<_>>()
-        .join(" | ")
+        .collect()
+}
+
+fn column_is_numeric(rows: &[Vec<String>], index: usize) -> bool {
+    let mut saw_number = false;
+    for row in rows {
+        let Some(value) = row.get(index) else {
+            continue;
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == "NULL" {
+            continue;
+        }
+        if !is_numeric_cell(trimmed) {
+            return false;
+        }
+        saw_number = true;
+    }
+    saw_number
+}
+
+fn is_numeric_cell(value: &str) -> bool {
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    for (index, character) in value.chars().enumerate() {
+        match character {
+            '0'..='9' => seen_digit = true,
+            '+' | '-' if index == 0 => {}
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    seen_digit
 }
 
 fn sql_server_row_values(row: &SqlServerRow) -> Vec<String> {
@@ -2295,6 +2566,78 @@ fn current_statement(text: &str, cursor_char_index: usize) -> Option<String> {
         .trim()
         .to_owned();
     (!statement.is_empty()).then_some(statement)
+}
+
+/// Splits `text` into SQL statements using `;` outside quotes and comments.
+pub fn split_sql_statements(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut statements = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_line_comment = false;
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if in_line_comment {
+            if byte == b'\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if !in_single && !in_double && byte == b'-' && next == Some(b'-') {
+            in_line_comment = true;
+            index += 2;
+            continue;
+        }
+        if byte == b'\'' && !in_double {
+            in_single = !in_single;
+            index += 1;
+            continue;
+        }
+        if byte == b'"' && !in_single {
+            in_double = !in_double;
+            index += 1;
+            continue;
+        }
+        if byte == b';' && !in_single && !in_double {
+            let statement = text[start..index].trim().to_owned();
+            if !statement.is_empty() {
+                statements.push(statement);
+            }
+            index += 1;
+            start = skip_sql_trivia(bytes, index);
+            index = start;
+            continue;
+        }
+        index += 1;
+    }
+    let start = skip_sql_trivia(bytes, start.min(bytes.len()));
+    let tail = text[start.min(text.len())..].trim().to_owned();
+    if !tail.is_empty() {
+        statements.push(tail);
+    }
+    statements
+}
+
+fn skip_sql_trivia(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index.saturating_add(1) < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-'
+        {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    index
 }
 
 fn load_persisted_state(path: &Path) -> Result<PersistedDbState, String> {
@@ -2603,6 +2946,19 @@ mod tests {
     }
 
     #[test]
+    fn split_sql_statements_skips_semicolons_inside_quotes_and_comments() {
+        let source = "select 'a;b' from t; -- c; d\nupdate t set x = 1;\nselect 2";
+        assert_eq!(
+            split_sql_statements(source),
+            vec![
+                "select 'a;b' from t".to_owned(),
+                "update t set x = 1".to_owned(),
+                "select 2".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn sqls_workspace_settings_preserve_mssql_data_source_name() {
         let mut service = test_service();
         let session_id = DbSessionId(7);
@@ -2770,6 +3126,32 @@ mod tests {
     }
 
     #[test]
+    fn render_rows_draws_boxed_table_and_right_aligns_numbers() {
+        let output = render_rows(
+            "SQLite result",
+            &["id".to_owned(), "name".to_owned()],
+            &[
+                vec!["1".to_owned(), "Ada".to_owned()],
+                vec!["12".to_owned(), "Grace".to_owned()],
+            ],
+        );
+        assert_eq!(
+            output.lines,
+            vec![
+                "┌────┬───────┐".to_owned(),
+                "│ id │ name  │".to_owned(),
+                "├────┼───────┤".to_owned(),
+                "│  1 │ Ada   │".to_owned(),
+                "│ 12 │ Grace │".to_owned(),
+                "└────┴───────┘".to_owned(),
+                String::new(),
+                "2 rows  ·  2 columns".to_owned(),
+            ]
+        );
+        assert_eq!(output.row_count, 2);
+    }
+
+    #[test]
     fn sqlite_query_execution_and_schema_cache_work() {
         let state_dir = temp_state_dir("sqlite");
         let db_path = state_dir.join("app.db");
@@ -2822,6 +3204,39 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.replacement == "name")
         );
+    }
+
+    #[test]
+    fn sqlite_batch_execution_concatenates_query_results() {
+        let state_dir = temp_state_dir("sqlite-batch");
+        let db_path = state_dir.join("app.db");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        let connection = SqliteConnection::open(&db_path).expect("sqlite open");
+        connection
+            .execute_batch(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n\
+                 INSERT INTO users(name) VALUES ('Ada'), ('Grace');",
+            )
+            .expect("seed sqlite");
+        let mut service =
+            DbService::new_with_secret_store(state_dir, Arc::new(InMemorySecretStore::default()))
+                .expect("service");
+        let session = service
+            .connect_raw(&format!("sqlite://{}", db_path.display()), Some("local"))
+            .expect("connect sqlite");
+        service
+            .attach_query_buffer(20, Some(session.id), None)
+            .expect("query");
+        let result = service
+            .execute_sql_batch_for_buffer(
+                20,
+                "SELECT name FROM users WHERE id = 1;\nSELECT name FROM users WHERE id = 2;",
+            )
+            .expect("batch execute");
+        assert!(result.lines.iter().any(|line| line.contains("-- Query 1")));
+        assert!(result.lines.iter().any(|line| line.contains("-- Query 2")));
+        assert!(result.lines.iter().any(|line| line.contains("Ada")));
+        assert!(result.lines.iter().any(|line| line.contains("Grace")));
     }
 
     #[test]

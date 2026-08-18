@@ -340,13 +340,12 @@ pub(super) fn active_terminal_dimensions(
         let panes = ui
             .panes()
             .ok_or_else(|| "active workspace view is missing".to_owned())?;
-        let pane_rects = runtime_pane_rects(
+        let pane_rects = workspace_pane_rects(
             &*shell_user_library(runtime),
-            ui.pane_split_direction(),
+            ui,
             render_width,
             pane_height,
             panes.len(),
-            ui.active_pane_index(),
         );
         let rect = pane_rects
             .get(ui.active_pane_index())

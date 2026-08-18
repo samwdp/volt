@@ -173,3 +173,17 @@ _Avoid_: markdown renderer (when meaning several ad-hoc paths), hover-only markd
 **Pretty Kill-switch**:
 An optional size threshold that disables Markdown Pretty for an oversized source and falls back to Markdown Raw; default off.
 _Avoid_: pretty disable (when meaning the global/buffer enable toggle), render budget (as the spoken product term)
+
+### Database
+
+**Database Dashboard**:
+A specialised plugin buffer (`db.dashboard`) whose sections are laid out as Connections and Tables on the left, Editor and Output on the right. The Editor is an embedded writable buffer with the same keybinds as a normal query buffer. `Ctrl+c Ctrl+c` in Editor runs SQL and replaces Output; multiple statements concatenate into one scrollable Output. Opening a file while Dashboard is focused loads it into Editor; write/save targets that file.
+_Avoid_: query popup (when meaning this 2D buffer), schema browser (as the whole surface)
+
+**Database Multiview**:
+A workspace split opened by `db.multiview`: a narrow left sidebar (Connections above Tables) plus normal query buffers on the right. Golden-ratio sizing is forced off; left weight is smaller than right. Query output stays a popup, not an in-buffer Output section.
+_Avoid_: dashboard (when meaning this split), sidebar-only view
+
+**Buffer Section Layout**:
+A named split tree on plugin buffer sections (rows/columns with weights) used to place specialised panes. Absent a layout, sections stack vertically as before (Calculator Input/Output).
+_Avoid_: workspace split (when meaning in-buffer panes), pane layout (when meaning section chrome)

@@ -647,13 +647,12 @@ pub(super) fn browser_sync_plan(
     let panes = state
         .panes()
         .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
-    let mut pane_rects = runtime_pane_rects(
+    let mut pane_rects = workspace_pane_rects(
         user_library,
-        state.pane_split_direction(),
+        state,
         dock.content_width,
         pane_height,
         panes.len(),
-        state.active_pane_index(),
     );
     for rect in &mut pane_rects {
         rect.x = rect.x.saturating_add(dock.content_x);

@@ -128,6 +128,8 @@ pub mod db_hooks {
     pub const SAVE_SNIPPET: &str = "db.save-snippet";
     pub const REFRESH_SCHEMA: &str = "db.refresh-schema";
     pub const ACTIVATE_LINE: &str = "db.activate-line";
+    pub const DASHBOARD: &str = "db.dashboard";
+    pub const MULTIVIEW: &str = "db.multiview";
 }
 
 /// Hook name constants for terminal buffers.
@@ -184,6 +186,8 @@ pub mod buffer_kinds {
     pub const DB_HISTORY: &str = "db-history";
     pub const DB_SNIPPETS: &str = "db-snippets";
     pub const DB_RESULTS: &str = "db-results";
+    pub const DB_DASHBOARD: &str = "db-dashboard";
+    pub const DB_SIDEBAR: &str = "db-sidebar";
     pub const PDF: &str = "pdf";
     pub const ISSUES_BOARD: &str = "issues-board";
 }
@@ -207,6 +211,7 @@ pub struct PluginBufferSection {
     min_lines: ROption<usize>,
     initial_lines: RVec<RString>,
     update: PluginBufferSectionUpdate,
+    browser_kind: ROption<DbBrowserKind>,
 }
 
 impl PluginBufferSection {
@@ -218,6 +223,7 @@ impl PluginBufferSection {
             min_lines: ROption::RNone,
             initial_lines: RVec::new(),
             update: PluginBufferSectionUpdate::Replace,
+            browser_kind: ROption::RNone,
         }
     }
 
@@ -273,6 +279,119 @@ impl PluginBufferSection {
     pub const fn update(&self) -> PluginBufferSectionUpdate {
         self.update
     }
+
+    /// Marks this section as a live database browser surface.
+    pub fn with_browser_kind(mut self, kind: DbBrowserKind) -> Self {
+        self.browser_kind = ROption::RSome(kind);
+        self
+    }
+
+    /// Returns the optional database browser kind backing this section.
+    pub const fn browser_kind(&self) -> Option<DbBrowserKind> {
+        match self.browser_kind {
+            ROption::RSome(kind) => Some(kind),
+            ROption::RNone => None,
+        }
+    }
+}
+
+/// Split axis for a plugin buffer section layout tree.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum PluginBufferLayoutAxis {
+    /// Children stacked top to bottom.
+    Rows,
+    /// Children placed left to right.
+    Columns,
+}
+
+/// One node in a plugin buffer section layout tree.
+#[repr(u8)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub enum PluginBufferLayoutNode {
+    /// Named section leaf. `weight` shares leftover space with siblings.
+    Section { name: RString, weight: u32 },
+    /// Nested split.
+    Split {
+        axis: PluginBufferLayoutAxis,
+        weight: u32,
+        children: RVec<PluginBufferLayoutNode>,
+    },
+}
+
+impl PluginBufferLayoutNode {
+    /// Creates a section leaf.
+    pub fn section(name: impl Into<RString>, weight: u32) -> Self {
+        Self::Section {
+            name: name.into(),
+            weight: weight.max(1),
+        }
+    }
+
+    /// Creates a nested row split.
+    pub fn rows(weight: u32, children: Vec<Self>) -> Self {
+        Self::Split {
+            axis: PluginBufferLayoutAxis::Rows,
+            weight: weight.max(1),
+            children: children.into(),
+        }
+    }
+
+    /// Creates a nested column split.
+    pub fn columns(weight: u32, children: Vec<Self>) -> Self {
+        Self::Split {
+            axis: PluginBufferLayoutAxis::Columns,
+            weight: weight.max(1),
+            children: children.into(),
+        }
+    }
+
+    /// Returns the relative weight of this node.
+    pub const fn weight(&self) -> u32 {
+        match self {
+            Self::Section { weight, .. } | Self::Split { weight, .. } => *weight,
+        }
+    }
+}
+
+/// Optional 2D layout tree for plugin buffer sections.
+///
+/// When absent, the host stacks sections top to bottom in declaration order.
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct PluginBufferLayout {
+    axis: PluginBufferLayoutAxis,
+    children: RVec<PluginBufferLayoutNode>,
+}
+
+impl PluginBufferLayout {
+    /// Creates a layout tree.
+    pub fn new(axis: PluginBufferLayoutAxis, children: Vec<PluginBufferLayoutNode>) -> Self {
+        Self {
+            axis,
+            children: children.into(),
+        }
+    }
+
+    /// Creates a top-to-bottom layout.
+    pub fn rows(children: Vec<PluginBufferLayoutNode>) -> Self {
+        Self::new(PluginBufferLayoutAxis::Rows, children)
+    }
+
+    /// Creates a left-to-right layout.
+    pub fn columns(children: Vec<PluginBufferLayoutNode>) -> Self {
+        Self::new(PluginBufferLayoutAxis::Columns, children)
+    }
+
+    /// Returns the root split axis.
+    pub const fn axis(&self) -> PluginBufferLayoutAxis {
+        self.axis
+    }
+
+    /// Returns the root children.
+    pub fn children(&self) -> &[PluginBufferLayoutNode] {
+        self.children.as_slice()
+    }
 }
 
 /// Generic section metadata for plugin buffers that want host-rendered panes.
@@ -280,6 +399,7 @@ impl PluginBufferSection {
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct PluginBufferSections {
     sections: RVec<PluginBufferSection>,
+    layout: ROption<PluginBufferLayout>,
 }
 
 impl PluginBufferSections {
@@ -287,17 +407,32 @@ impl PluginBufferSections {
     pub fn new(sections: Vec<PluginBufferSection>) -> Self {
         Self {
             sections: sections.into(),
+            layout: ROption::RNone,
         }
     }
 
-    /// Returns the configured sections in display order.
+    /// Attaches a 2D layout tree. Section names in the tree must match `items`.
+    pub fn with_layout(mut self, layout: PluginBufferLayout) -> Self {
+        self.layout = ROption::RSome(layout);
+        self
+    }
+
+    /// Returns the configured sections in declaration order.
     pub fn items(&self) -> &[PluginBufferSection] {
         self.sections.as_slice()
     }
 
-    /// Returns the configured sections in display order.
+    /// Returns the configured sections in declaration order.
     pub fn sections(&self) -> &[PluginBufferSection] {
         self.items()
+    }
+
+    /// Returns the optional 2D layout tree.
+    pub fn layout(&self) -> Option<&PluginBufferLayout> {
+        match &self.layout {
+            ROption::RSome(layout) => Some(layout),
+            ROption::RNone => None,
+        }
     }
 }
 
@@ -3432,11 +3567,12 @@ impl PluginPackage {
 mod tests {
     use super::{
         ModelineAlignment, ModelinePart, ModelineSegment, OilKeyAction, PickerExtraKeybindSpec,
-        PickerProviderSpec, PickerSource, PluginAction, PluginBuffer, PluginBufferSection,
-        PluginBufferSectionUpdate, PluginBufferSections, PluginCommand, PluginHookBinding,
-        PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
-        StatuslineSpan, VimActionContext, VimActionSpec, VimEditAction, decode_modeline,
-        decode_statusline_spans, encode_modeline, encode_statusline_spans,
+        PickerProviderSpec, PickerSource, PluginAction, PluginBuffer, PluginBufferLayout,
+        PluginBufferLayoutNode, PluginBufferSection, PluginBufferSectionUpdate,
+        PluginBufferSections, PluginCommand, PluginHookBinding, PluginHookDeclaration,
+        PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode, StatuslineSpan,
+        VimActionContext, VimActionSpec, VimEditAction, decode_modeline, decode_statusline_spans,
+        encode_modeline, encode_statusline_spans,
     };
 
     #[test]
@@ -3607,6 +3743,44 @@ mod tests {
             !PluginBuffer::new("table", vec!["wide"])
                 .with_line_wrap(false)
                 .line_wrap()
+        );
+    }
+
+    #[test]
+    fn plugin_buffer_sections_can_declare_nested_layout_tree() {
+        let sections = PluginBufferSections::new(vec![
+            PluginBufferSection::new("Editor").with_writable(true),
+            PluginBufferSection::new("Connections")
+                .with_browser_kind(super::DbBrowserKind::Connections),
+            PluginBufferSection::new("Tables").with_browser_kind(super::DbBrowserKind::Schema),
+            PluginBufferSection::new("Output").with_update(PluginBufferSectionUpdate::Replace),
+        ])
+        .with_layout(PluginBufferLayout::columns(vec![
+            PluginBufferLayoutNode::rows(
+                1,
+                vec![
+                    PluginBufferLayoutNode::section("Connections", 1),
+                    PluginBufferLayoutNode::section("Tables", 3),
+                ],
+            ),
+            PluginBufferLayoutNode::rows(
+                3,
+                vec![
+                    PluginBufferLayoutNode::section("Editor", 3),
+                    PluginBufferLayoutNode::section("Output", 2),
+                ],
+            ),
+        ]));
+
+        let layout = sections.layout().expect("layout should be present");
+        assert_eq!(layout.children().len(), 2);
+        assert_eq!(
+            sections.items()[1].browser_kind(),
+            Some(super::DbBrowserKind::Connections)
+        );
+        assert_eq!(
+            sections.items()[2].browser_kind(),
+            Some(super::DbBrowserKind::Schema)
         );
     }
 

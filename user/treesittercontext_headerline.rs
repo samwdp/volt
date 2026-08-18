@@ -82,6 +82,45 @@ fn special_buffer_headerline(context: &GhostTextContext<'_>) -> Option<String> {
     if name.contains("terminal") {
         return Some(name.to_owned());
     }
+    db_buffer_headerline(name)
+}
+
+fn db_buffer_headerline(name: &str) -> Option<String> {
+    let icon = crate::icon_font::symbols::cod::COD_DATABASE;
+    let table = crate::icon_font::symbols::cod::COD_TABLE;
+    let history = crate::icon_font::symbols::cod::COD_HISTORY;
+    let bookmark = crate::icon_font::symbols::cod::COD_BOOKMARK;
+    if let Some(rest) = name.strip_prefix("*db-query") {
+        let label = rest.trim_end_matches('*').trim();
+        return Some(if label.is_empty() {
+            format!("{icon}  SQL query")
+        } else {
+            format!("{icon}  SQL query  ·  {label}")
+        });
+    }
+    if name.starts_with("*db-results") {
+        return Some(format!("{table}  Query results"));
+    }
+    if let Some(rest) = name.strip_prefix("*db-schema") {
+        let label = rest.trim_end_matches('*').trim();
+        return Some(if label.is_empty() {
+            format!("{table}  Schema")
+        } else {
+            format!("{table}  Schema  ·  {label}")
+        });
+    }
+    if name.starts_with("*db-connections") {
+        return Some(format!("{icon}  Connections"));
+    }
+    if name.starts_with("*db-history") {
+        return Some(format!("{history}  Query history"));
+    }
+    if name.starts_with("*db-snippets") {
+        return Some(format!("{bookmark}  Snippets"));
+    }
+    if name.starts_with("*db-connect") {
+        return Some(format!("{icon}  Connect"));
+    }
     None
 }
 
@@ -153,5 +192,21 @@ mod tests {
             Some("component Dashboard".to_owned())
         );
         assert_eq!(summarize_context("{", "block"), None);
+    }
+
+    #[test]
+    fn db_buffer_headerline_labels_sql_query_buffers() {
+        let icon = crate::icon_font::symbols::cod::COD_DATABASE;
+        assert_eq!(
+            super::db_buffer_headerline("*db-query local*"),
+            Some(format!("{icon}  SQL query  ·  local"))
+        );
+        assert_eq!(
+            super::db_buffer_headerline("*db-results*"),
+            Some(format!(
+                "{}  Query results",
+                crate::icon_font::symbols::cod::COD_TABLE
+            ))
+        );
     }
 }

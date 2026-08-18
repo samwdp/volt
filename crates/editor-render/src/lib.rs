@@ -1,11 +1,17 @@
 #![doc = r#"Render-adjacent layout helpers and font discovery used by the native editor shell."#]
 
+mod split_layout;
+
 use std::{
     env, fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use ttf_parser::{Face, fonts_in_collection, name_id};
+
+pub use split_layout::{
+    SplitAxis, SplitChild, SplitChildKind, SplitNode, layout_split_tree, pane_rects_with_weights,
+};
 
 /// Pixel-space rectangle used by the shell renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
