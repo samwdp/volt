@@ -70,6 +70,17 @@ impl TextRange {
     }
 }
 
+/// Cursor-local delimiter or tag pair used by show-paren highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShowParenMatch {
+    /// Delimiter or tag under the cursor.
+    pub origin: TextRange,
+    /// Matching delimiter or tag, when one exists within the scan limit.
+    pub counterpart: Option<TextRange>,
+    /// Whether `counterpart` is a true match for `origin`.
+    pub matched: bool,
+}
+
 /// Selection anchored at one point and extended to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
@@ -1030,44 +1041,40 @@ impl TextBuffer {
         self.move_object_end_backward(WordKind::BigWord)
     }
 
-    /// Moves the cursor to the matching paired delimiter.
+    /// Moves the cursor to the matching paired delimiter or HTML/XML tag.
     pub fn move_matching_delimiter(&mut self) -> bool {
-        if self.char_count() == 0 {
+        let Some(origin) = self.match_pair_origin_char() else {
+            return false;
+        };
+        let Some(pair) = self.pair_at_char(origin) else {
+            return false;
+        };
+        let Some(destination) = pair.counterpart.filter(|_| pair.matched) else {
+            return false;
+        };
+        let next = destination.start();
+        if next == self.cursor {
             return false;
         }
-
-        let line = self.cursor.line.min(self.line_count().saturating_sub(1));
-        let Some((line_start, line_end)) = self.line_char_bounds(line) else {
-            return false;
-        };
-        let original = self
-            .point_to_char(self.cursor)
-            .min(self.char_count().saturating_sub(1));
-        let target = (original..line_end)
-            .find(|index| delimiter_partner(self.rope.char(*index)).is_some())
-            .or_else(|| {
-                (line_start..original)
-                    .rev()
-                    .find(|index| delimiter_partner(self.rope.char(*index)).is_some())
-            });
-        let Some(target) = target else {
-            return false;
-        };
-
-        let Some((open, close, is_open)) = delimiter_partner(self.rope.char(target)) else {
-            return false;
-        };
-        let destination = if is_open {
-            self.find_matching_close(target, open, close)
-        } else {
-            self.find_matching_open(target, open, close)
-        };
-        let Some(destination) = destination else {
-            return false;
-        };
-
-        self.cursor = self.char_to_point(destination);
+        self.cursor = next;
         true
+    }
+
+    /// Returns the show-paren pair when `point` sits on a delimiter or HTML/XML tag.
+    pub fn show_paren_at(&self, point: TextPoint) -> Option<ShowParenMatch> {
+        if self.char_count() == 0 {
+            return None;
+        }
+        let line_len = self.line_len_chars(point.line)?;
+        if point.column >= line_len {
+            return None;
+        }
+
+        let char_index = self.point_to_char(point);
+        if char_index >= self.char_count() {
+            return None;
+        }
+        self.pair_at_char(char_index)
     }
 
     /// Moves the cursor to the start of the next sentence.
@@ -1730,8 +1737,21 @@ impl TextBuffer {
     }
 
     fn find_matching_close(&self, start_char: usize, open: char, close: char) -> Option<usize> {
+        self.find_matching_close_limited(start_char, open, close, self.char_count())
+    }
+
+    fn find_matching_close_limited(
+        &self,
+        start_char: usize,
+        open: char,
+        close: char,
+        limit: usize,
+    ) -> Option<usize> {
         let mut depth = 0usize;
-        for index in (start_char + 1)..self.char_count() {
+        let end = (start_char + 1)
+            .saturating_add(limit)
+            .min(self.char_count());
+        for index in (start_char + 1)..end {
             let character = self.rope.char(index);
             if character == open {
                 depth += 1;
@@ -1745,15 +1765,199 @@ impl TextBuffer {
         None
     }
 
-    fn find_matching_open(&self, start_char: usize, open: char, close: char) -> Option<usize> {
+    fn find_matching_open_limited(
+        &self,
+        start_char: usize,
+        open: char,
+        close: char,
+        limit: usize,
+    ) -> Option<usize> {
         let mut depth = 0usize;
-        for index in (0..start_char).rev() {
+        let search_start = start_char.saturating_sub(limit);
+        for index in (search_start..start_char).rev() {
             let character = self.rope.char(index);
             if character == close {
                 depth += 1;
             } else if character == open {
                 if depth == 0 {
                     return Some(index);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    fn match_pair_origin_char(&self) -> Option<usize> {
+        if self.char_count() == 0 {
+            return None;
+        }
+        let original = self
+            .point_to_char(self.cursor)
+            .min(self.char_count().saturating_sub(1));
+        if self
+            .show_paren_at(self.cursor)
+            .is_some_and(|pair| pair.matched)
+        {
+            return Some(original);
+        }
+
+        let line = self.cursor.line.min(self.line_count().saturating_sub(1));
+        let (line_start, line_end) = self.line_char_bounds(line)?;
+        (original..line_end)
+            .find(|&index| {
+                self.is_match_pair_scan_char(index)
+                    && self.pair_at_char(index).is_some_and(|pair| pair.matched)
+            })
+            .or_else(|| {
+                (line_start..original).rev().find(|&index| {
+                    self.is_match_pair_scan_char(index)
+                        && self.pair_at_char(index).is_some_and(|pair| pair.matched)
+                })
+            })
+    }
+
+    fn is_match_pair_scan_char(&self, index: usize) -> bool {
+        let Some(character) = self.rope.get_char(index) else {
+            return false;
+        };
+        delimiter_partner(character).is_some() || character == '<'
+    }
+
+    fn pair_at_char(&self, char_index: usize) -> Option<ShowParenMatch> {
+        let character = self.rope.get_char(char_index)?;
+        if let Some((open, close, is_open)) = delimiter_partner(character) {
+            let origin = self.char_range(char_index, char_index.saturating_add(1))?;
+            let destination = if is_open {
+                self.find_matching_close_limited(char_index, open, close, SHOW_PAREN_SCAN_LIMIT)
+            } else {
+                self.find_matching_open_limited(char_index, open, close, SHOW_PAREN_SCAN_LIMIT)
+            };
+            return Some(ShowParenMatch {
+                origin,
+                counterpart: destination
+                    .and_then(|index| self.char_range(index, index.saturating_add(1))),
+                matched: destination.is_some(),
+            });
+        }
+
+        self.show_paren_tag_at(char_index)
+    }
+
+    fn char_range(&self, start_char: usize, end_char: usize) -> Option<TextRange> {
+        if start_char >= end_char || end_char > self.char_count() {
+            return None;
+        }
+        Some(TextRange::new(
+            self.char_to_point(start_char),
+            self.char_to_point(end_char),
+        ))
+    }
+
+    fn show_paren_tag_at(&self, char_index: usize) -> Option<ShowParenMatch> {
+        let tag = self.tag_containing(char_index)?;
+        if tag.self_closing {
+            return None;
+        }
+
+        let origin = self.char_range(tag.start, tag.end_exclusive)?;
+        if tag.is_closing {
+            let open_tag = self.find_matching_open_tag(&tag, SHOW_PAREN_SCAN_LIMIT);
+            return Some(ShowParenMatch {
+                origin,
+                counterpart: open_tag
+                    .as_ref()
+                    .and_then(|open| self.char_range(open.start, open.end_exclusive)),
+                matched: open_tag.is_some(),
+            });
+        }
+
+        let close_tag = self.find_matching_close_tag_from(&tag, SHOW_PAREN_SCAN_LIMIT);
+        Some(ShowParenMatch {
+            origin,
+            counterpart: close_tag
+                .as_ref()
+                .and_then(|close| self.char_range(close.start, close.end_exclusive)),
+            matched: close_tag.is_some(),
+        })
+    }
+
+    fn tag_containing(&self, char_index: usize) -> Option<TagToken> {
+        let search_start = char_index.saturating_sub(SHOW_PAREN_TAG_LOOKBACK);
+        for start in (search_start..=char_index).rev() {
+            if self.rope.get_char(start) != Some('<') {
+                continue;
+            }
+            let Some(tag) =
+                parse_tag_token_at(start, self.char_count(), |index| self.rope.get_char(index))
+            else {
+                continue;
+            };
+            if tag.start <= char_index && char_index < tag.end_exclusive {
+                return Some(tag);
+            }
+            if tag.end_exclusive <= char_index {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn find_matching_close_tag_from(&self, open_tag: &TagToken, limit: usize) -> Option<TagToken> {
+        let end = open_tag
+            .end_exclusive
+            .saturating_add(limit)
+            .min(self.char_count());
+        let mut cursor = open_tag.end_exclusive;
+        let mut depth = 0usize;
+        while cursor < end {
+            if self.rope.get_char(cursor) != Some('<') {
+                cursor += 1;
+                continue;
+            }
+            let Some(tag) =
+                parse_tag_token_at(cursor, self.char_count(), |index| self.rope.get_char(index))
+            else {
+                cursor += 1;
+                continue;
+            };
+            if tag.name == open_tag.name {
+                if tag.is_closing {
+                    if depth == 0 {
+                        return Some(tag);
+                    }
+                    depth -= 1;
+                } else if !tag.self_closing {
+                    depth += 1;
+                }
+            }
+            cursor = tag.end_exclusive;
+        }
+        None
+    }
+
+    fn find_matching_open_tag(&self, close_tag: &TagToken, limit: usize) -> Option<TagToken> {
+        let search_start = close_tag.start.saturating_sub(limit);
+        let mut depth = 0usize;
+        let mut cursor = close_tag.start;
+        while cursor > search_start {
+            cursor -= 1;
+            if self.rope.get_char(cursor) != Some('<') {
+                continue;
+            }
+            let Some(tag) =
+                parse_tag_token_at(cursor, self.char_count(), |index| self.rope.get_char(index))
+            else {
+                continue;
+            };
+            if tag.name != close_tag.name {
+                continue;
+            }
+            if tag.is_closing {
+                depth += 1;
+            } else if !tag.self_closing {
+                if depth == 0 {
+                    return Some(tag);
                 }
                 depth -= 1;
             }
@@ -1921,35 +2125,37 @@ struct TagToken {
 }
 
 fn parse_tag_token(chars: &[char], start: usize) -> Option<TagToken> {
-    if chars.get(start) != Some(&'<') {
+    parse_tag_token_at(start, chars.len(), |index| chars.get(index).copied())
+}
+
+fn parse_tag_token_at(
+    start: usize,
+    len: usize,
+    char_at: impl Fn(usize) -> Option<char>,
+) -> Option<TagToken> {
+    if char_at(start) != Some('<') {
         return None;
     }
 
     let mut cursor = start + 1;
-    match chars.get(cursor)? {
+    match char_at(cursor)? {
         '!' | '?' => return None,
         _ => {}
     }
 
-    let is_closing = if chars.get(cursor) == Some(&'/') {
+    let is_closing = if char_at(cursor) == Some('/') {
         cursor += 1;
         true
     } else {
         false
     };
 
-    while chars
-        .get(cursor)
-        .is_some_and(|character| character.is_whitespace())
-    {
+    while char_at(cursor).is_some_and(|character| character.is_whitespace()) {
         cursor += 1;
     }
 
     let name_start = cursor;
-    while chars
-        .get(cursor)
-        .is_some_and(|character| is_tag_name_char(*character))
-    {
+    while char_at(cursor).is_some_and(is_tag_name_char) {
         cursor += 1;
     }
     if cursor == name_start {
@@ -1957,16 +2163,18 @@ fn parse_tag_token(chars: &[char], start: usize) -> Option<TagToken> {
     }
 
     let mut end = cursor;
-    while end < chars.len() && chars[end] != '>' {
+    while end < len && char_at(end) != Some('>') {
         end += 1;
     }
-    if end >= chars.len() {
+    if end >= len {
         return None;
     }
 
-    let name = chars[name_start..cursor].iter().collect::<String>();
+    let name = (name_start..cursor)
+        .filter_map(&char_at)
+        .collect::<String>();
     let mut tail = end;
-    while tail > cursor && chars[tail - 1].is_whitespace() {
+    while tail > cursor && char_at(tail - 1).is_some_and(char::is_whitespace) {
         tail -= 1;
     }
 
@@ -1975,7 +2183,7 @@ fn parse_tag_token(chars: &[char], start: usize) -> Option<TagToken> {
         start,
         end_exclusive: end + 1,
         is_closing,
-        self_closing: !is_closing && tail > cursor && chars[tail - 1] == '/',
+        self_closing: !is_closing && tail > cursor && char_at(tail - 1) == Some('/'),
     })
 }
 
@@ -2013,6 +2221,9 @@ fn find_matching_close_tag(chars: &[char], open_tag: &TagToken) -> Option<TagTok
 fn is_tag_name_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '-' | '_' | ':')
 }
+
+const SHOW_PAREN_SCAN_LIMIT: usize = 102_400;
+const SHOW_PAREN_TAG_LOOKBACK: usize = 4_096;
 
 fn delimiter_partner(character: char) -> Option<(char, char, bool)> {
     match character {
@@ -2551,5 +2762,181 @@ mod tests {
             .tag_range_at(TextPoint::new(0, 20), false)
             .expect("inner tag range");
         assert_eq!(buffer.slice(inner_tag), "hello");
+    }
+
+    #[test]
+    fn show_paren_at_opening_paren_finds_closing_paren() {
+        let buffer = TextBuffer::from_text("call(foo)");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 4))
+            .expect("opening paren match");
+        assert_eq!(
+            found.origin,
+            TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 5))
+        );
+        assert_eq!(
+            found.counterpart,
+            Some(TextRange::new(TextPoint::new(0, 8), TextPoint::new(0, 9)))
+        );
+        assert!(found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_closing_paren_finds_opening_paren() {
+        let buffer = TextBuffer::from_text("call(foo)");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 8))
+            .expect("closing paren match");
+        assert_eq!(
+            found.origin,
+            TextRange::new(TextPoint::new(0, 8), TextPoint::new(0, 9))
+        );
+        assert_eq!(
+            found.counterpart,
+            Some(TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 5)))
+        );
+        assert!(found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_nested_paren_matches_inner_pair() {
+        let buffer = TextBuffer::from_text("call(foo[bar])");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 8))
+            .expect("inner bracket match");
+        assert_eq!(buffer.slice(found.origin), "[");
+        assert_eq!(
+            found.counterpart.map(|range| buffer.slice(range)),
+            Some("]".to_owned())
+        );
+        assert!(found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_unmatched_paren_marks_mismatch() {
+        let buffer = TextBuffer::from_text("call(foo");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 4))
+            .expect("unmatched paren");
+        assert_eq!(buffer.slice(found.origin), "(");
+        assert_eq!(found.counterpart, None);
+        assert!(!found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_ignores_cursor_off_delimiter() {
+        let buffer = TextBuffer::from_text("call(foo)");
+        assert_eq!(buffer.show_paren_at(TextPoint::new(0, 0)), None);
+        assert_eq!(buffer.show_paren_at(TextPoint::new(0, 5)), None);
+    }
+
+    #[test]
+    fn show_paren_at_opening_html_tag_finds_closing_tag() {
+        let buffer = TextBuffer::from_text("<div>hi</div>");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 1))
+            .expect("opening tag match");
+        assert_eq!(buffer.slice(found.origin), "<div>");
+        assert_eq!(
+            found.counterpart.map(|range| buffer.slice(range)),
+            Some("</div>".to_owned())
+        );
+        assert!(found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_closing_html_tag_finds_opening_tag() {
+        let buffer = TextBuffer::from_text("<div>hi</div>");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 8))
+            .expect("closing tag match");
+        assert_eq!(buffer.slice(found.origin), "</div>");
+        assert_eq!(
+            found.counterpart.map(|range| buffer.slice(range)),
+            Some("<div>".to_owned())
+        );
+        assert!(found.matched);
+    }
+
+    #[test]
+    fn show_paren_at_html_tag_ignores_inner_content() {
+        let buffer = TextBuffer::from_text("<div>hi</div>");
+        assert_eq!(buffer.show_paren_at(TextPoint::new(0, 5)), None);
+        assert_eq!(buffer.show_paren_at(TextPoint::new(0, 6)), None);
+    }
+
+    #[test]
+    fn show_paren_at_nested_html_tags_match_same_name() {
+        let buffer = TextBuffer::from_text("<div><span>x</span></div>");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 0))
+            .expect("outer open tag");
+        assert_eq!(buffer.slice(found.origin), "<div>");
+        assert_eq!(
+            found.counterpart.map(|range| buffer.slice(range)),
+            Some("</div>".to_owned())
+        );
+        let inner = buffer
+            .show_paren_at(TextPoint::new(0, 6))
+            .expect("inner open tag");
+        assert_eq!(buffer.slice(inner.origin), "<span>");
+        assert_eq!(
+            inner.counterpart.map(|range| buffer.slice(range)),
+            Some("</span>".to_owned())
+        );
+    }
+
+    #[test]
+    fn show_paren_at_self_closing_html_tag_has_no_pair() {
+        let buffer = TextBuffer::from_text("<img src=\"x\" />");
+        assert_eq!(buffer.show_paren_at(TextPoint::new(0, 1)), None);
+    }
+
+    #[test]
+    fn show_paren_at_unmatched_html_tag_marks_mismatch() {
+        let buffer = TextBuffer::from_text("<div>hi");
+        let found = buffer
+            .show_paren_at(TextPoint::new(0, 0))
+            .expect("unmatched tag");
+        assert_eq!(buffer.slice(found.origin), "<div>");
+        assert_eq!(found.counterpart, None);
+        assert!(!found.matched);
+    }
+
+    #[test]
+    fn move_matching_delimiter_jumps_between_html_tags() {
+        let mut buffer = TextBuffer::from_text("<div>hi</div>");
+        buffer.set_cursor(TextPoint::new(0, 1));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 7));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 0));
+    }
+
+    #[test]
+    fn move_matching_delimiter_scans_forward_to_paren_on_the_line() {
+        let mut buffer = TextBuffer::from_text("call(foo)");
+        buffer.set_cursor(TextPoint::new(0, 0));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 8));
+    }
+
+    #[test]
+    fn move_matching_delimiter_scans_forward_to_html_tag_on_the_line() {
+        let mut buffer = TextBuffer::from_text("item <div>hi</div>");
+        buffer.set_cursor(TextPoint::new(0, 0));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 12));
+    }
+
+    #[test]
+    fn move_matching_delimiter_jumps_nested_html_tags() {
+        let mut buffer = TextBuffer::from_text("<div><span>x</span></div>");
+        buffer.set_cursor(TextPoint::new(0, 0));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 19));
+        buffer.set_cursor(TextPoint::new(0, 6));
+        assert!(buffer.move_matching_delimiter());
+        assert_eq!(buffer.cursor(), TextPoint::new(0, 12));
     }
 }

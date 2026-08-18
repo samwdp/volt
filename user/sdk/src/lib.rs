@@ -29,10 +29,10 @@ pub use abi::{
     AbiLanguageServerSpec, AbiLigatureConfig, AbiLspDiagnosticsInfo, AbiMarkdownPrettyConfig,
     AbiOilDefaults, AbiOilFeatureSpec, AbiOilKeyAction, AbiOilKeybindings, AbiOilSortMode,
     AbiPaneConfig, AbiPdfOpenMode, AbiPickerLayout, AbiPickerTruncateStrategy, AbiSection,
-    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiStatusEntry, AbiStatuslineContext,
-    AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme, AbiThemeOption,
-    AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot, UserLibraryModule,
-    UserLibraryModuleRef,
+    AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiShowParenConfig, AbiStatusEntry,
+    AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
+    AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot,
+    UserLibraryModule, UserLibraryModuleRef,
 };
 pub use editor_icons::symbols;
 
@@ -1754,6 +1754,9 @@ pub trait UserLibrary: Send + Sync {
     fn rainbow_parens_config(&self) -> RainbowParensConfig {
         RainbowParensConfig { enabled: true }
     }
+    fn show_paren_config(&self) -> ShowParenConfig {
+        ShowParenConfig { enabled: true }
+    }
     fn oil_defaults(&self) -> OilDefaults {
         OilDefaults::default()
     }
@@ -2826,6 +2829,12 @@ pub struct LigatureConfig {
 /// Rainbow delimiter configuration exported by the user library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RainbowParensConfig {
+    pub enabled: bool,
+}
+
+/// Show-paren configuration exported by the user library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShowParenConfig {
     pub enabled: bool,
 }
 

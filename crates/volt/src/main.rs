@@ -295,6 +295,10 @@ impl UserLibrary for DynamicUserLibrary {
         self.module.pane_config_v1()().rainbow_parens_config()
     }
 
+    fn show_paren_config(&self) -> editor_plugin_api::ShowParenConfig {
+        self.module.pane_config_v1()().show_paren_config()
+    }
+
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
         self.module.oil_defaults()().into()
     }

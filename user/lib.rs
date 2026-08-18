@@ -75,6 +75,8 @@ pub mod pdf;
 pub mod picker;
 /// Rainbow delimiter highlighting for nested brackets.
 pub mod rainbow_parens;
+/// Emacs-style matching delimiter and HTML/XML tag highlighting.
+pub mod show_paren;
 /// Compatibility alias for [`modeline`].
 pub mod statusline;
 /// Builtin terminal package surface.
@@ -141,6 +143,7 @@ pub fn packages() -> Vec<PluginPackage> {
         multicursor::package(),
         picker::package(),
         rainbow_parens::package(),
+        show_paren::package(),
         treesitter::package(),
         undotree::package(),
         workspace::package(),
@@ -196,8 +199,9 @@ use editor_plugin_api::{
     GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
     MarkdownPrettyConfig, ModelineSegment, OilDefaults, OilFeatureSpec, OilKeyAction,
     OilKeybindings, PaneConfig, PickerItemSpec, PickerProviderContext, PickerProviderSpec,
-    RainbowParensConfig, StatuslineContext, StatuslineSpan, TerminalConfig, TerminalFeatureSpec,
-    UserLibrary, WorkspaceDockConfig, WorkspaceRoot, flatten_modeline_to_spans,
+    RainbowParensConfig, ShowParenConfig, StatuslineContext, StatuslineSpan, TerminalConfig,
+    TerminalFeatureSpec, UserLibrary, WorkspaceDockConfig, WorkspaceRoot,
+    flatten_modeline_to_spans,
 };
 
 fn user_modeline_context<'a>(context: &StatuslineContext<'a>) -> modeline::ModelineContext<'a> {
@@ -391,6 +395,10 @@ impl UserLibrary for UserLibraryImpl {
 
     fn rainbow_parens_config(&self) -> RainbowParensConfig {
         rainbow_parens::config()
+    }
+
+    fn show_paren_config(&self) -> ShowParenConfig {
+        show_paren::config()
     }
 
     fn oil_defaults(&self) -> OilDefaults {
@@ -718,6 +726,7 @@ extern "C" fn exported_pane_config() -> AbiPaneConfig {
         UserLibraryImpl.markdown_pretty_config(),
         UserLibraryImpl.picker_layout(),
         UserLibraryImpl.rainbow_parens_config(),
+        UserLibraryImpl.show_paren_config(),
     )
 }
 
@@ -1491,6 +1500,8 @@ mod tests {
             "ui.selection",
             "ui.current-line",
             "ui.yank-flash",
+            "ui.show-paren.match",
+            "ui.show-paren.mismatch",
             "ui.notification.background",
             "ui.notification.foreground",
             "ui.notification.title",

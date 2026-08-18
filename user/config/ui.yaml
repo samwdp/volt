@@ -1,6 +1,7 @@
 picker_truncate_strategy: auto
 ligatures_enabled: true
 rainbow_parens_enabled: true
+show_paren_enabled: true
 
 pane:
   golden_ratio: true

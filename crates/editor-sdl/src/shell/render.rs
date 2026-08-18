@@ -2686,6 +2686,16 @@ fn render_buffer_with_view_state(
         .and_then(|registry| registry.resolve("ui.yank-flash"))
         .map(to_sdl_color)
         .unwrap_or(Color::RGBA(112, 196, 255, 120));
+    let show_paren_match_color = theme_color(
+        theme_registry,
+        TOKEN_SHOW_PAREN_MATCH,
+        Color::RGBA(110, 170, 255, 110),
+    );
+    let show_paren_mismatch_color = theme_color(
+        theme_registry,
+        TOKEN_SHOW_PAREN_MISMATCH,
+        Color::RGBA(220, 80, 80, 160),
+    );
     let git_added_fallback = theme_color(
         theme_registry,
         "git.status.entry.added",
@@ -3009,6 +3019,10 @@ fn render_buffer_with_view_state(
         let mut primary_cursor_text_overlay: Option<(i32, CursorTextOverlay)> = None;
         let mut multicursor_rects = Vec::new();
         let mut visual_row = 0usize;
+        let show_paren = buffer
+            .show_paren_enabled(user_library.show_paren_config().enabled)
+            .then(|| buffer.text.show_paren_at(view_state.cursor))
+            .flatten();
         for wrapped in wrapped_lines {
             let line_index = wrapped.line_index;
             let line_len = buffer.line_len_chars(line_index);
@@ -3020,6 +3034,13 @@ fn render_buffer_with_view_state(
                 .unwrap_or_default();
             let yank_range = yank_flash.and_then(|selection_state| {
                 selection_columns_for_visual(selection_state, line_index, line_len)
+            });
+            let show_paren_color = show_paren.as_ref().map(|pair| {
+                if pair.matched {
+                    show_paren_match_color
+                } else {
+                    show_paren_mismatch_color
+                }
             });
             if let Some(image) = wrapped.inline_image.as_ref() {
                 if visual_row >= visible_rows {
@@ -3153,6 +3174,32 @@ fn render_buffer_with_view_state(
                             cursor_roundness,
                             yank_flash_color,
                         )?;
+                    }
+                }
+                if let (Some(pair), Some(color)) = (show_paren.as_ref(), show_paren_color) {
+                    for range in [Some(pair.origin), pair.counterpart].into_iter().flatten() {
+                        if let Some((selection_start, selection_end)) =
+                            selection_columns_for_line(range, line_index, line_len)
+                        {
+                            let start = selection_start.max(segment.start_col);
+                            let end = selection_end.min(segment.end_col);
+                            if start < end {
+                                let start_display = wrapped
+                                    .char_map
+                                    .display_cols_between(segment.start_col, start);
+                                let width_display =
+                                    wrapped.char_map.display_cols_between(start, end);
+                                fill_selection_highlight(
+                                    target,
+                                    segment_x + (start_display as i32 * cell_width),
+                                    y,
+                                    (width_display as i32 * cell_width) as u32,
+                                    line_height.max(1) as u32,
+                                    cursor_roundness,
+                                    color,
+                                )?;
+                            }
+                        }
                     }
                 }
                 if segment_index == 0 {

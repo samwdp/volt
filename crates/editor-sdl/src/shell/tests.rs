@@ -336,6 +336,10 @@ impl UserLibrary for HeaderlineTestUserLibrary {
         RainbowParensConfig { enabled: true }
     }
 
+    fn show_paren_config(&self) -> editor_plugin_api::ShowParenConfig {
+        editor_plugin_api::ShowParenConfig { enabled: true }
+    }
+
     fn oil_defaults(&self) -> OilDefaults {
         OilDefaults {
             show_hidden: false,
@@ -7521,6 +7525,133 @@ fn render_buffer_draws_command_line_row_without_active_overlay() -> Result<(), S
                 && rect.width == 304
                 && rect.height == 16
     )));
+    Ok(())
+}
+
+#[test]
+fn render_buffer_draws_show_paren_match_highlight() -> Result<(), String> {
+    let match_color = Color::RGBA(12, 34, 56, 128);
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme").with_token(
+                TOKEN_SHOW_PAREN_MATCH,
+                editor_theme::Color::rgba(12, 34, 56, 128),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*show-paren*", vec!["call(foo)".to_owned()])?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(0, 4));
+    }
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &NullUserLibrary,
+        "test-theme",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRoundedRect { color, .. }
+                if *color == to_render_color(match_color)
+        )),
+        "expected show-paren match highlight, scene={scene:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn render_buffer_draws_show_paren_html_tag_highlight() -> Result<(), String> {
+    let match_color = Color::RGBA(9, 8, 7, 120);
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme").with_token(
+                TOKEN_SHOW_PAREN_MATCH,
+                editor_theme::Color::rgba(9, 8, 7, 120),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*show-paren-html*",
+        vec!["<div>hi</div>".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(0, 1));
+    }
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        buffer,
+        rect,
+        true,
+        None,
+        None,
+        None,
+        InputMode::Normal,
+        false,
+        None,
+        None,
+        false,
+        &NullUserLibrary,
+        "test-theme",
+        None,
+        false,
+        false,
+        None,
+        Some(&registry),
+        false,
+        8,
+        16,
+        12,
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRoundedRect { color, .. }
+                if *color == to_render_color(match_color)
+        )),
+        "expected show-paren HTML tag highlight, scene={scene:?}"
+    );
     Ok(())
 }
 

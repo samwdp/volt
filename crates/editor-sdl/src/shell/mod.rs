@@ -349,6 +349,7 @@ const HOOK_IMAGE_ZOOM_RESET: &str = image_hooks::ZOOM_RESET;
 const HOOK_IMAGE_TOGGLE_MODE: &str = image_hooks::TOGGLE_MODE;
 const HOOK_MARKDOWN_PRETTY_TOGGLE: &str = "markdown.pretty.toggle";
 const HOOK_RAINBOW_PARENS_TOGGLE: &str = "rainbow.parens.toggle";
+const HOOK_SHOW_PAREN_TOGGLE: &str = "show-paren.toggle";
 const HOOK_PDF_NEXT_PAGE: &str = pdf_hooks::NEXT_PAGE;
 const HOOK_PDF_PREVIOUS_PAGE: &str = pdf_hooks::PREVIOUS_PAGE;
 const HOOK_PDF_ROTATE_CLOCKWISE: &str = pdf_hooks::ROTATE_CLOCKWISE;
@@ -459,6 +460,8 @@ const TOKEN_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
 const TOKEN_LINE_NUMBER: &str = "ui.line-number";
 const TOKEN_LINE_NUMBER_CURRENT: &str = "ui.line-number.current";
 const TOKEN_CURRENT_LINE: &str = "ui.current-line";
+const TOKEN_SHOW_PAREN_MATCH: &str = "ui.show-paren.match";
+const TOKEN_SHOW_PAREN_MISMATCH: &str = "ui.show-paren.mismatch";
 const TOKEN_PANE_INACTIVE: &str = "ui.pane.inactive";
 const TOKEN_GHOST_TEXT: &str = "ui.ghost-text";
 const TOKEN_HEADERLINE: &str = "ui.headerline";
@@ -770,6 +773,10 @@ impl UserLibrary for DynamicUserLibrary {
 
     fn rainbow_parens_config(&self) -> editor_plugin_api::RainbowParensConfig {
         self.module.pane_config_v1()().rainbow_parens_config()
+    }
+
+    fn show_paren_config(&self) -> editor_plugin_api::ShowParenConfig {
+        self.module.pane_config_v1()().show_paren_config()
     }
 
     fn oil_defaults(&self) -> editor_plugin_api::OilDefaults {
@@ -3733,6 +3740,8 @@ pub(crate) struct ShellBuffer {
     markdown_pretty_enabled: Option<bool>,
     /// Per-buffer rainbow delimiter override (`None` = use user config default).
     rainbow_parens_enabled: Option<bool>,
+    /// Per-buffer show-paren override (`None` = use user config default).
+    show_paren_enabled: Option<bool>,
     pub(crate) scroll_row: usize,
     scroll_col: usize,
     line_wrap: bool,
@@ -4605,6 +4614,7 @@ impl ShellBuffer {
             forced_language: false,
             markdown_pretty_enabled: None,
             rainbow_parens_enabled: None,
+            show_paren_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4682,6 +4692,7 @@ impl ShellBuffer {
             forced_language: false,
             markdown_pretty_enabled: None,
             rainbow_parens_enabled: None,
+            show_paren_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap: plugin_buffer_line_wrap(buffer.kind(), user_library),
@@ -4762,6 +4773,7 @@ impl ShellBuffer {
             forced_language: false,
             markdown_pretty_enabled: None,
             rainbow_parens_enabled: None,
+            show_paren_enabled: None,
             scroll_row: 0,
             scroll_col: 0,
             line_wrap,
@@ -6079,6 +6091,15 @@ impl ShellBuffer {
     fn toggle_rainbow_parens(&mut self, default_enabled: bool) {
         let current = self.rainbow_parens_enabled(default_enabled);
         self.rainbow_parens_enabled = Some(!current);
+    }
+
+    fn show_paren_enabled(&self, default_enabled: bool) -> bool {
+        self.show_paren_enabled.unwrap_or(default_enabled)
+    }
+
+    fn toggle_show_paren(&mut self, default_enabled: bool) {
+        let current = self.show_paren_enabled(default_enabled);
+        self.show_paren_enabled = Some(!current);
     }
 
     fn lsp_diagnostics(&self) -> &[LspDiagnostic] {
@@ -16744,6 +16765,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_SHOW_PAREN_TOGGLE,
+        "Toggles show-paren highlighting for the active buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_PDF_PREVIOUS_PAGE,
         "Moves the active PDF buffer to the previous page.",
     )?;
@@ -18690,6 +18716,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_SHOW_PAREN_TOGGLE,
+            "shell.show-paren-toggle",
+            |_, runtime| {
+                toggle_active_show_paren(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_PDF_PREVIOUS_PAGE,
             "shell.pdf-previous-page",
             |_, runtime| {
@@ -20562,6 +20598,14 @@ fn toggle_active_rainbow_parens(runtime: &mut EditorRuntime) -> Result<(), Strin
         buffer.toggle_rainbow_parens(default_enabled);
     }
     queue_buffer_syntax_refresh(runtime, buffer_id)?;
+    Ok(())
+}
+
+fn toggle_active_show_paren(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let default_enabled = shell_user_library(runtime).show_paren_config().enabled;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.toggle_show_paren(default_enabled);
     Ok(())
 }
 

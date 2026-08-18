@@ -24,8 +24,9 @@ use crate::{
     HoverProvider, HoverProviderTopic, KeymapConfig, LigatureConfig, LspDiagnosticsInfo,
     MarkdownPrettyConfig, MarkdownPrettyIcon, OilDefaults, OilFeatureSpec, OilKeyAction,
     OilKeybindings, OilSortMode, PaneConfig, PdfOpenMode, PickerLayout, PickerProviderContext,
-    PickerProviderSpec, PickerTruncateStrategy, RainbowParensConfig, StatuslineContext,
-    TerminalConfig, TerminalFeatureSpec, WorkspaceDockConfig, WorkspaceDockSide, WorkspaceRoot,
+    PickerProviderSpec, PickerTruncateStrategy, RainbowParensConfig, ShowParenConfig,
+    StatuslineContext, TerminalConfig, TerminalFeatureSpec, WorkspaceDockConfig, WorkspaceDockSide,
+    WorkspaceRoot,
 };
 
 #[repr(C)]
@@ -1581,6 +1582,28 @@ impl From<AbiLigatureConfig> for LigatureConfig {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub struct AbiShowParenConfig {
+    pub enabled: bool,
+}
+
+impl From<ShowParenConfig> for AbiShowParenConfig {
+    fn from(value: ShowParenConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl From<AbiShowParenConfig> for ShowParenConfig {
+    fn from(value: AbiShowParenConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
 fn fraction_to_hundredths(value: f32) -> u16 {
     (value.clamp(0.0, 1.0) * 100.0).round() as u16
 }
@@ -1599,6 +1622,7 @@ pub struct AbiPaneConfig {
     pub picker_width_hundredths: u16,
     pub picker_height_hundredths: u16,
     pub rainbow_parens_enabled: bool,
+    pub show_paren_enabled: bool,
 }
 
 impl AbiPaneConfig {
@@ -1608,6 +1632,7 @@ impl AbiPaneConfig {
         markdown_pretty: MarkdownPrettyConfig,
         picker: PickerLayout,
         rainbow_parens: RainbowParensConfig,
+        show_paren: ShowParenConfig,
     ) -> Self {
         Self {
             golden_ratio: pane.golden_ratio,
@@ -1617,6 +1642,7 @@ impl AbiPaneConfig {
             picker_width_hundredths: fraction_to_hundredths(picker.width_fraction),
             picker_height_hundredths: fraction_to_hundredths(picker.height_fraction),
             rainbow_parens_enabled: rainbow_parens.enabled,
+            show_paren_enabled: show_paren.enabled,
         }
     }
 
@@ -1647,6 +1673,12 @@ impl AbiPaneConfig {
     pub fn rainbow_parens_config(&self) -> RainbowParensConfig {
         RainbowParensConfig {
             enabled: self.rainbow_parens_enabled,
+        }
+    }
+
+    pub fn show_paren_config(&self) -> ShowParenConfig {
+        ShowParenConfig {
+            enabled: self.show_paren_enabled,
         }
     }
 }
