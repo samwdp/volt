@@ -187,6 +187,19 @@ fn vim_counts_operators_and_text_objects_work() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn vim_cw_stops_before_trailing_whitespace() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(&mut state, "hello world")?;
+
+    state.handle_text_input("c")?;
+    state.handle_text_input("w")?;
+
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+    assert_eq!(state.active_buffer_mut()?.text.text(), " world");
+    Ok(())
+}
+
+#[test]
 fn vim_word_actions_at_line_end_preserve_newline() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = user_shell_state()?;
 

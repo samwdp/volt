@@ -24744,6 +24744,17 @@ fn close_acp_inline_picker_for(
     Ok(())
 }
 
+fn change_operator_word_motion(operator: VimOperator, motion: ShellMotion) -> ShellMotion {
+    if operator != VimOperator::Change {
+        return motion;
+    }
+    match motion {
+        ShellMotion::WordForward => ShellMotion::WordEnd,
+        ShellMotion::BigWordForward => ShellMotion::BigWordEnd,
+        other => other,
+    }
+}
+
 fn motion_is_inclusive(motion: ShellMotion) -> bool {
     matches!(
         motion,
@@ -27853,6 +27864,7 @@ fn apply_operator_motion(
     motion: ShellMotion,
     motion_count: Option<usize>,
 ) -> Result<(), String> {
+    let motion = change_operator_word_motion(operator, motion);
     if active_shell_buffer_vim_targets_input(runtime)? {
         return apply_input_operator_motion(
             runtime,

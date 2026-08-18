@@ -1005,6 +1005,7 @@ pub fn package() -> PluginPackage {
         leader_binding("w +", "workspace.mark", PluginKeymapScope::Workspace),
         leader_binding("w -", "workspace.unmark", PluginKeymapScope::Workspace),
         leader_binding("w m", "workspace.marks", PluginKeymapScope::Workspace),
+        leader_binding("w d", "workspace.dock.toggle", PluginKeymapScope::Workspace),
         leader_binding("W", "workspace.save", PluginKeymapScope::Workspace),
         PluginKeyBinding::new("Ctrl+n", "workspace.marked-1", PluginKeymapScope::Workspace),
         PluginKeyBinding::new("Ctrl+e", "workspace.marked-2", PluginKeymapScope::Workspace),
