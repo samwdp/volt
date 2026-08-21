@@ -9,7 +9,12 @@ use abi_stable::{
 };
 
 pub use editor_core::{Section, SectionAction, SectionItem, SectionTree};
-pub use editor_dap::DebugAdapterSpec;
+pub use editor_dap::{
+    BreakpointState, BreakpointStore, BreakpointToggle, DapClientError, DapClientManager,
+    DapLogEntry, DapLogSnapshot, DapSessionInfo, DebugAdapterRegistry, DebugAdapterRootStrategy,
+    DebugAdapterSpec, DebugAdapterTransport, DebugConfiguration, DebugRequestKind,
+    DebugSessionPlan, StoredBreakpoint,
+};
 pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
 pub use editor_git::{GitStatusSnapshot, StatusEntry};
 pub use editor_icons::{IconFontCategory, IconFontSymbol};
@@ -66,6 +71,24 @@ pub mod picker_hooks {
     pub const PREVIOUS: &str = "ui.picker.previous";
     pub const SUBMIT: &str = "ui.picker.submit";
     pub const CANCEL: &str = "ui.picker.cancel";
+}
+
+/// Hook name constants for the DAP subsystem.
+pub mod dap_hooks {
+    pub const START: &str = "dap.session-start";
+    pub const START_LAST: &str = "dap.session-start-last";
+    pub const START_RECENT: &str = "dap.session-start-recent";
+    pub const STOP: &str = "dap.session-stop";
+    pub const RESTART: &str = "dap.session-restart";
+    pub const CONTINUE: &str = "dap.continue";
+    pub const PAUSE: &str = "dap.pause";
+    pub const STEP: &str = "dap.step";
+    pub const STEP_INTO: &str = "dap.step-into";
+    pub const STEP_OUT: &str = "dap.step-out";
+    pub const LOG: &str = "dap.open-log";
+    pub const TOGGLE_BREAKPOINT: &str = "dap.toggle-breakpoint";
+    pub const DELETE_BREAKPOINT: &str = "dap.delete-breakpoint";
+    pub const OPEN_BREAKPOINTS: &str = "dap.open-breakpoints";
 }
 
 /// Hook name constants for the LSP subsystem.
@@ -188,6 +211,8 @@ pub mod buffer_kinds {
     pub const DB_RESULTS: &str = "db-results";
     pub const DB_DASHBOARD: &str = "db-dashboard";
     pub const DB_SIDEBAR: &str = "db-sidebar";
+    pub const DAP_BREAKPOINTS: &str = "dap-breakpoints";
+    pub const DAP_LOCALS: &str = "dap-locals";
     pub const PDF: &str = "pdf";
     pub const ISSUES_BOARD: &str = "issues-board";
 }

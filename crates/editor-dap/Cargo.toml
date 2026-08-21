@@ -13,6 +13,11 @@ workspace = true
 [package.rust-version]
 workspace = true
 
+[dependencies]
+dap-types = "0.0.1"
+serde = "1.0.228"
+serde_json = "1.0.149"
+
 [dependencies.editor-jobs]
 path = "../editor-jobs"
 

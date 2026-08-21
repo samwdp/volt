@@ -148,6 +148,40 @@ _Avoid_: stop buffer LSP, detach LSP (as the spoken product meaning of `lsp.stop
 Same picker grain as Language Server Session Stop: choose one live Session in the active Workspace and restart it. `lsp.restart` means this.
 _Avoid_: restart buffer LSP (as the spoken product meaning of `lsp.restart`)
 
+### Debugging
+
+**Debug Adapter**:
+An external Debug Adapter Protocol process the user installs on their machine (for example codelldb, gdb, or sharpdbg). Volt does not bundle adapters; compiled user specs only declare how to find and talk to them.
+_Avoid_: debugger (when meaning the adapter process), DAP server (as the spoken product term)
+
+**Debug Session**:
+At most one live debug connection owned by a Workspace. Leaving the Workspace tears down the Debug Layout but keeps the Session alive; returning rebuilds the layout from Session state.
+_Avoid_: DAP instance, debug process (when meaning Session identity), multi-session-per-workspace
+
+**Debug Configuration**:
+A named launch or attach setup: request kind, program or process target, cwd, args, and optional compile-before-debug. Comes from compiled defaults, optional project files, inference, and picker/minibuffer fills for missing pieces.
+_Avoid_: launch.json (as the product name), run config (as the spoken term)
+
+**Debug Layout**:
+The system-owned three-pane Workspace split used while debugging: Breakpoints, editor, and Locals (with Expressions as a section). User splits are blocked while it is active; ending the Session restores the prior layout and golden-ratio default. REPL, console, and pickers use Popup, not a fourth pane.
+_Avoid_: debug UI (vague), dap multiview (as the spoken product name), four-pane debug
+
+**Debug Stop**:
+The single command that ends the active Workspace’s Debug Session: disconnect the Debug Adapter, tear down the Debug Layout, and—when the Session was a launch—terminate the debugee; attach Sessions leave the process running. There is no separate detach command.
+_Avoid_: dap.detach, disconnect (as a second user-facing command)
+
+**Breakpoint**:
+A line marker stored for a Workspace (in memory for now) that can be toggled without a live Debug Session and is synced when a Session starts. Shown in the Debug Fringe; the Breakpoints pane lists them.
+_Avoid_: debug point, red dot (as the product term)
+
+**Watch Expression**:
+A user-owned expression kept in the Expressions section of the Locals pane and re-evaluated while stopped. Distinct from one-shot evaluate via minibuffer or the debug REPL Popup.
+_Avoid_: watch (alone), expression breakpoint
+
+**Debug Fringe**:
+While a Workspace has a live Debug Session, the editor gutter widens so DAP markers (breakpoint and execution position) sit beside git fringe marks instead of replacing them.
+_Avoid_: debug gutter (as the spoken product term), breakpoint column
+
 ### Markdown presentation
 
 **Markdown Pretty**:

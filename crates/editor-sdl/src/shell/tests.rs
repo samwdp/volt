@@ -19339,3 +19339,727 @@ fn workspace_dock_ctrl_l_enters_focus_when_right_docked() -> Result<(), String> 
     );
     Ok(())
 }
+
+#[test]
+fn debug_fringe_is_one_cell_when_idle_and_two_when_live() {
+    assert_eq!(debug_fringe_cell_count(false), 1);
+    assert_eq!(debug_fringe_cell_count(true), 2);
+    assert_eq!(editor_fringe_width_px(8, false), 8);
+    assert_eq!(editor_fringe_width_px(8, true), 16);
+}
+
+#[test]
+fn wrap_columns_shrink_when_debug_fringe_widens() {
+    let idle = wrap_columns_for_width_with_fringe(320, 8, 1);
+    let live = wrap_columns_for_width_with_fringe(320, 8, 2);
+    assert!(live < idle);
+}
+
+fn install_fake_tcp_dap_manager(
+    runtime: &mut EditorRuntime,
+) -> Result<(u16, thread::JoinHandle<()>), String> {
+    use editor_dap::{DebugAdapterRegistry, DebugAdapterSpec, DebugAdapterTransport};
+    use std::io::{BufRead, Read, Write};
+    use std::net::TcpListener;
+
+    fn write_raw(writer: &mut impl Write, body: &str) {
+        write!(writer, "Content-Length: {}\r\n\r\n{body}", body.len()).expect("write");
+        writer.flush().expect("flush");
+    }
+
+    fn read_body(reader: &mut impl BufRead) -> Result<String, String> {
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            if read == 0 {
+                return Err("adapter closed".to_owned());
+            }
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() {
+                break;
+            }
+            let Some((key, value)) = trimmed.split_once(':') else {
+                continue;
+            };
+            if key.eq_ignore_ascii_case("Content-Length") {
+                content_length = Some(value.trim().parse::<usize>().map_err(|e| e.to_string())?);
+            }
+        }
+        let len = content_length.ok_or_else(|| "missing Content-Length".to_owned())?;
+        let mut buf = vec![0_u8; len];
+        reader.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        String::from_utf8(buf).map_err(|e| e.to_string())
+    }
+
+    fn extract_field(body: &str, key: &str) -> Option<String> {
+        let needle = format!("\"{key}\"");
+        let start = body.find(&needle)?;
+        let after = &body[start + needle.len()..];
+        let after = after.trim_start_matches([' ', ':', '\t']);
+        if let Some(rest) = after.strip_prefix('"') {
+            let end = rest.find('"')?;
+            return Some(rest[..end].to_owned());
+        }
+        let end = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        Some(after[..end].to_owned())
+    }
+
+    fn fake_adapter_loop(reader: impl Read, mut writer: impl Write) {
+        let mut reader = std::io::BufReader::new(reader);
+        let mut seq = 1_u64;
+        let mut stopped_line = 1_u64;
+        let mut program_path = "main.rs".to_owned();
+        while let Ok(body) = read_body(&mut reader) {
+            let command = extract_field(&body, "command").unwrap_or_default();
+            let request_seq = extract_field(&body, "seq").unwrap_or_else(|| "0".to_owned());
+            match command.as_str() {
+                "initialize" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"initialize","body":{{"supportsConfigurationDoneRequest":false,"supportTerminateDebuggee":true,"supportsRestartRequest":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"event","event":"initialized","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "launch" | "attach" => {
+                    if let Some(program) = extract_field(&body, "program") {
+                        program_path = program;
+                    }
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"{command}","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                    stopped_line = 1;
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"event","event":"stopped","body":{{"reason":"entry","threadId":1,"allThreadsStopped":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "setBreakpoints" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"setBreakpoints","body":{{"breakpoints":[]}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "continue" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"continue","body":{{"allThreadsContinued":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "next" | "stepIn" | "stepOut" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"{command}","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                    stopped_line += 1;
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"event","event":"stopped","body":{{"reason":"step","threadId":1,"allThreadsStopped":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "pause" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"pause","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"event","event":"stopped","body":{{"reason":"pause","threadId":1,"allThreadsStopped":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "restart" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"restart","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                    stopped_line = 1;
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"event","event":"stopped","body":{{"reason":"entry","threadId":1,"allThreadsStopped":true}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "stackTrace" => {
+                    let path_json = program_path.replace('\\', "\\\\");
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"stackTrace","body":{{"stackFrames":[{{"id":1,"name":"main","source":{{"path":"{path_json}"}},"line":{stopped_line},"column":1}}],"totalFrames":1}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "scopes" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"scopes","body":{{"scopes":[{{"name":"Locals","variablesReference":1,"expensive":false}}]}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "variables" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"variables","body":{{"variables":[{{"name":"x","value":"42","type":"i32","variablesReference":0}}]}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "disconnect" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"disconnect","body":{{}}}}"#
+                        ),
+                    );
+                    break;
+                }
+                _ => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":false,"command":"{command}","message":"unsupported"}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+            }
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut sessions = 0_u8;
+        while sessions < 4 && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let reader = stream.try_clone().expect("clone");
+                    fake_adapter_loop(reader, stream);
+                    sessions += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut registry = DebugAdapterRegistry::new();
+    registry
+        .register(
+            DebugAdapterSpec::new("fake-dap", "rust", ["rs"], "", [] as [&str; 0])
+                .with_transport(DebugAdapterTransport::Tcp {
+                    host: "127.0.0.1".to_owned(),
+                    port,
+                })
+                .with_preference(10),
+        )
+        .map_err(|e| e.to_string())?;
+    runtime
+        .services_mut()
+        .insert(Arc::new(DapClientManager::new(registry)));
+    Ok((port, handle))
+}
+
+#[test]
+fn debug_layout_installs_three_panes_and_disables_golden_ratio() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    install_debug_layout(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    let view = ui
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?;
+    assert!(ui.is_debug_layout_active());
+    assert_eq!(view.golden_ratio_override, Some(false));
+    assert_eq!(
+        view.pane_size_weights.as_deref(),
+        Some(
+            [
+                DEBUG_LAYOUT_BREAKPOINTS_WEIGHT,
+                DEBUG_LAYOUT_EDITOR_WEIGHT,
+                DEBUG_LAYOUT_LOCALS_WEIGHT
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(view.panes.len(), 3);
+    assert_eq!(view.split_direction, Some(PaneSplitDirection::Vertical));
+    let left = ui
+        .buffer(view.panes[0].buffer_id)
+        .ok_or_else(|| "breakpoints pane missing".to_owned())?;
+    let right = ui
+        .buffer(view.panes[2].buffer_id)
+        .ok_or_else(|| "locals pane missing".to_owned())?;
+    assert!(matches!(
+        &left.kind,
+        BufferKind::Plugin(kind) if kind == DAP_BREAKPOINTS_KIND
+    ));
+    assert!(matches!(
+        &right.kind,
+        BufferKind::Plugin(kind) if kind == DAP_LOCALS_KIND
+    ));
+    assert!(
+        right.plugin_section_state.is_some(),
+        "locals pane should expose Locals/Expressions sections"
+    );
+    let rects = workspace_pane_rects(&*shell_user_library(&state.runtime), ui, 600, 200, 3);
+    assert_eq!(rects.len(), 3);
+    assert!(
+        rects[0].width < rects[1].width && rects[2].width < rects[1].width,
+        "editor pane should be widest: {rects:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn debug_layout_blocks_user_splits() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    install_debug_layout(&mut state.runtime)?;
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 3);
+    split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.pane_count(),
+        3,
+        "user splits must be blocked while Debug Layout is active"
+    );
+    Ok(())
+}
+
+#[test]
+fn debug_layout_teardown_restores_golden_ratio() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    assert!(
+        shell_user_library(&state.runtime)
+            .pane_config()
+            .golden_ratio
+    );
+    install_debug_layout(&mut state.runtime)?;
+    teardown_debug_layout(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    let view = ui
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?;
+    assert!(!ui.is_debug_layout_active());
+    assert_eq!(view.golden_ratio_override, None);
+    assert!(view.pane_size_weights.is_none());
+    assert_eq!(view.panes.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn dap_start_installs_debug_layout_and_stop_restores() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-layout-start-stop");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 3);
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    assert!(!shell_ui(&state.runtime)?.is_debug_layout_active());
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 1);
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-step-jump-locals");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(
+        &program,
+        "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    {
+        let dap = state
+            .runtime
+            .services()
+            .get::<Arc<DapClientManager>>()
+            .ok_or_else(|| "dap manager missing".to_owned())?;
+        assert!(
+            dap.session_info(workspace_id.get())
+                .map_err(|e| e.to_string())?
+                .is_some(),
+            "session must be live after start"
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for DAP stopped UI".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let ui = shell_ui(&state.runtime)?;
+    let view = ui
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?;
+    assert_eq!(view.active_pane, 1, "center editor pane should be focused");
+    let editor = ui
+        .buffer(view.panes[1].buffer_id)
+        .ok_or_else(|| "center editor missing".to_owned())?;
+    assert_eq!(editor.cursor_row(), 0, "should jump to stop line 1");
+    assert_eq!(editor.dap_execution_line(), Some(0));
+    let locals = ui
+        .buffer(view.panes[2].buffer_id)
+        .ok_or_else(|| "locals pane missing".to_owned())?;
+    let locals_text = locals.text.text();
+    assert!(
+        locals_text.contains("x: 42"),
+        "locals should refresh on stop: {locals_text}"
+    );
+
+    dap_control_for_active_workspace(&mut state.runtime, DapControl::StepOver)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for step stop".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let ui = shell_ui(&state.runtime)?;
+    let editor = ui
+        .buffer(
+            ui.workspace_view()
+                .ok_or_else(|| "view missing".to_owned())?
+                .panes[1]
+                .buffer_id,
+        )
+        .ok_or_else(|| "center editor missing".to_owned())?;
+    assert_eq!(editor.cursor_row(), 1);
+    assert_eq!(editor.dap_execution_line(), Some(1));
+
+    restart_dap_for_active_workspace(&mut state.runtime)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for restart stop".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let ui = shell_ui(&state.runtime)?;
+    let editor = ui
+        .buffer(
+            ui.workspace_view()
+                .ok_or_else(|| "view missing".to_owned())?
+                .panes[1]
+                .buffer_id,
+        )
+        .ok_or_else(|| "center editor missing".to_owned())?;
+    assert_eq!(editor.cursor_row(), 0);
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn debug_layout_hides_on_workspace_switch_and_rebuilds_on_return() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("dap-layout-ws-a");
+    let second_root = unique_temp_dir("dap-layout-ws-b");
+    let first = open_workspace_from_project(&mut state.runtime, "alpha", &first_root)?;
+    let program = first_root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+
+    let second = open_workspace_from_project(&mut state.runtime, "beta", &second_root)?;
+    assert_ne!(first, second);
+    assert!(
+        !shell_ui(&state.runtime)?.is_debug_layout_active(),
+        "leaving Workspace must tear down Debug Layout"
+    );
+    let dap = state
+        .runtime
+        .services()
+        .get::<Arc<DapClientManager>>()
+        .ok_or_else(|| "dap manager missing".to_owned())?;
+    assert!(
+        dap.session_info(first.get())
+            .map_err(|e| e.to_string())?
+            .is_some(),
+        "Debug Session must survive Workspace switch"
+    );
+
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    assert!(
+        shell_ui(&state.runtime)?.is_debug_layout_active(),
+        "returning to Workspace with live Session must rebuild Debug Layout"
+    );
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 3);
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = fs::remove_dir_all(&first_root);
+    let _ = fs::remove_dir_all(&second_root);
+    Ok(())
+}
+
+#[test]
+fn dap_start_opens_adapter_picker_ordered_by_preference() -> Result<(), String> {
+    use editor_dap::{DebugAdapterRegistry, DebugAdapterSpec, DebugAdapterTransport};
+
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-adapter-picker");
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let mut registry = DebugAdapterRegistry::new();
+    registry
+        .register(
+            DebugAdapterSpec::new("gdb-fake", "rust", ["rs"], "", [] as [&str; 0])
+                .with_transport(DebugAdapterTransport::Tcp {
+                    host: "127.0.0.1".to_owned(),
+                    port: 1,
+                })
+                .with_preference(50),
+        )
+        .map_err(|e| e.to_string())?;
+    registry
+        .register(
+            DebugAdapterSpec::new("codelldb-fake", "rust", ["rs"], "", [] as [&str; 0])
+                .with_transport(DebugAdapterTransport::Tcp {
+                    host: "127.0.0.1".to_owned(),
+                    port: 2,
+                })
+                .with_preference(100),
+        )
+        .map_err(|e| e.to_string())?;
+    state
+        .runtime
+        .services_mut()
+        .insert(Arc::new(DapClientManager::new(registry)));
+
+    start_dap_for_active_workspace(&mut state.runtime, None)?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "expected Debug Adapter picker".to_owned())?;
+    assert_eq!(picker.session().title(), "Choose Debug Adapter");
+    let ids: Vec<_> = picker
+        .session()
+        .matches()
+        .iter()
+        .map(|entry| entry.item().label().to_owned())
+        .collect();
+    assert_eq!(ids, ["codelldb-fake", "gdb-fake"]);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_start_lists_project_configurations_in_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-project-configs");
+    let volt_dir = root.join(".volt");
+    fs::create_dir_all(&volt_dir).map_err(|e| e.to_string())?;
+    fs::write(
+        volt_dir.join("debug.json"),
+        r#"{
+          "configurations": [
+            {
+              "name": "Project Launch",
+              "adapter": "fake-dap",
+              "request": "launch",
+              "program": "main.rs"
+            }
+          ]
+        }"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "expected Debug Configuration picker".to_owned())?;
+    assert_eq!(picker.session().title(), "Choose Debug Configuration");
+    let labels: Vec<_> = picker
+        .session()
+        .matches()
+        .iter()
+        .map(|entry| entry.item().label().to_owned())
+        .collect();
+    assert!(
+        labels.iter().any(|label| label.contains("Project Launch")),
+        "project config missing from {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.contains("Debug (current file)")),
+        "inferred/compiled default missing from {labels:?}"
+    );
+    let _ = fake.join();
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_start_last_replays_prior_configuration() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-start-last");
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+
+    start_dap_last(&mut state.runtime)?;
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+    let dap = state
+        .runtime
+        .services()
+        .get::<Arc<DapClientManager>>()
+        .ok_or_else(|| "dap manager missing".to_owned())?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    assert!(
+        dap.session_info(workspace_id.get())
+            .map_err(|e| e.to_string())?
+            .is_some()
+    );
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_heuristic_compile_opens_confirm_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-compile-confirm");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+
+    let configuration = DebugConfiguration::new("Debug", DebugRequestKind::Launch)
+        .with_target_program(program)
+        .with_cwd(root.clone());
+    continue_dap_start(&mut state.runtime, "fake-dap", configuration, true)?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "expected compile confirm picker".to_owned())?;
+    assert_eq!(picker.session().title(), "Compile before debug?");
+    let _ = fake.join();
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_default_workspace_skips_deep_inference() -> Result<(), String> {
+    let state = state_with_user_library()?;
+    let ctx = dap_start_context(&state.runtime)?;
+    assert!(
+        !ctx.allow_deep_inference,
+        "Default Workspace must not deep-infer Debug Configurations"
+    );
+    Ok(())
+}

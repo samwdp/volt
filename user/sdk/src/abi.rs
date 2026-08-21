@@ -5,7 +5,7 @@ use abi_stable::{
     std_types::{ROption, RStr, RString, RVec},
 };
 use editor_core::{Section, SectionAction, SectionItem, SectionTree};
-use editor_dap::DebugAdapterSpec;
+use editor_dap::{DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport};
 use editor_fs::{DirectoryEntry, DirectoryEntryKind};
 use editor_git::{GitLogEntry, GitStashEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry};
 use editor_icons::{IconFontCategory, IconFontSymbol};
@@ -684,6 +684,75 @@ impl From<AbiLanguageServerSpec> for LanguageServerSpec {
     }
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AbiDebugAdapterRootStrategy {
+    Workspace,
+    MarkersOrWorkspace,
+}
+
+impl From<DebugAdapterRootStrategy> for AbiDebugAdapterRootStrategy {
+    fn from(value: DebugAdapterRootStrategy) -> Self {
+        match value {
+            DebugAdapterRootStrategy::Workspace => Self::Workspace,
+            DebugAdapterRootStrategy::MarkersOrWorkspace => Self::MarkersOrWorkspace,
+        }
+    }
+}
+
+impl From<AbiDebugAdapterRootStrategy> for DebugAdapterRootStrategy {
+    fn from(value: AbiDebugAdapterRootStrategy) -> Self {
+        match value {
+            AbiDebugAdapterRootStrategy::Workspace => Self::Workspace,
+            AbiDebugAdapterRootStrategy::MarkersOrWorkspace => Self::MarkersOrWorkspace,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+pub enum AbiDebugAdapterTransportKind {
+    Stdio,
+    Tcp,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+pub struct AbiDebugAdapterTransport {
+    kind: AbiDebugAdapterTransportKind,
+    host: RString,
+    port: u16,
+}
+
+impl From<&DebugAdapterTransport> for AbiDebugAdapterTransport {
+    fn from(value: &DebugAdapterTransport) -> Self {
+        match value {
+            DebugAdapterTransport::Stdio => Self {
+                kind: AbiDebugAdapterTransportKind::Stdio,
+                host: RString::new(),
+                port: 0,
+            },
+            DebugAdapterTransport::Tcp { host, port } => Self {
+                kind: AbiDebugAdapterTransportKind::Tcp,
+                host: host.clone().into(),
+                port: *port,
+            },
+        }
+    }
+}
+
+impl From<AbiDebugAdapterTransport> for DebugAdapterTransport {
+    fn from(value: AbiDebugAdapterTransport) -> Self {
+        match value.kind {
+            AbiDebugAdapterTransportKind::Stdio => Self::Stdio,
+            AbiDebugAdapterTransportKind::Tcp => Self::Tcp {
+                host: value.host.into_string(),
+                port: value.port,
+            },
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiDebugAdapterSpec {
@@ -692,6 +761,11 @@ pub struct AbiDebugAdapterSpec {
     file_extensions: RVec<RString>,
     program: RString,
     args: RVec<RString>,
+    transport: AbiDebugAdapterTransport,
+    preference: i32,
+    root_markers: RVec<RString>,
+    root_strategy: AbiDebugAdapterRootStrategy,
+    enabled_by_default: bool,
 }
 
 impl From<DebugAdapterSpec> for AbiDebugAdapterSpec {
@@ -714,6 +788,17 @@ impl From<DebugAdapterSpec> for AbiDebugAdapterSpec {
                 .map(Into::into)
                 .collect::<Vec<RString>>()
                 .into(),
+            transport: AbiDebugAdapterTransport::from(value.transport()),
+            preference: value.preference(),
+            root_markers: value
+                .root_markers()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<RString>>()
+                .into(),
+            root_strategy: value.root_strategy().into(),
+            enabled_by_default: value.enabled_by_default(),
         }
     }
 }
@@ -727,6 +812,11 @@ impl From<AbiDebugAdapterSpec> for DebugAdapterSpec {
             value.program.into_string(),
             value.args.into_iter().map(RString::into_string),
         )
+        .with_transport(value.transport.into())
+        .with_preference(value.preference)
+        .with_root_markers(value.root_markers.into_iter().map(RString::into_string))
+        .with_root_strategy(value.root_strategy.into())
+        .with_enabled_by_default(value.enabled_by_default)
     }
 }
 

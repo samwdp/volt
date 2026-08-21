@@ -1,12 +1,28 @@
-#![doc = r#"Debug adapter registry, session plans, and debugger-facing launch metadata."#]
+#![doc = r#"Debug adapter registry, session plans, and DAP client host."#]
+
+mod breakpoints;
+mod client;
+mod config;
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf};
 
 use editor_jobs::JobSpec;
 
+pub use breakpoints::{BreakpointState, BreakpointStore, BreakpointToggle, StoredBreakpoint};
+pub use client::{
+    DapClientError, DapClientManager, DapExecutionPosition, DapLocalVariable, DapLogDirection,
+    DapLogEntry, DapLogSnapshot, DapSessionEvent, DapSessionInfo, DapStoppedSnapshot,
+    DapTransportLog,
+};
+pub use config::{
+    DapConfigError, DebugConfigurationCandidate, DebugConfigurationSource, DebugInferContext,
+    DebugStartHistory, DebugStartRecord, PROJECT_DEBUG_CONFIG_PATH,
+    collect_configuration_candidates, configuration_holes, infer_compile_heuristic,
+    infer_configurations, load_project_configurations,
+};
+
 /// Human-readable summary of this crate's responsibility.
-pub const ROLE: &str =
-    "Debug adapter registry, session plans, and debugger-facing launch metadata.";
+pub const ROLE: &str = "Debug adapter registry, session plans, and DAP client host.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -22,6 +38,32 @@ pub enum DebugRequestKind {
     Attach,
 }
 
+/// How Volt talks to a Debug Adapter process.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DebugAdapterTransport {
+    /// JSON-RPC frames over the adapter's stdin/stdout.
+    #[default]
+    Stdio,
+    /// JSON-RPC frames over a TCP socket the adapter listens on.
+    Tcp {
+        /// Host to connect to after the adapter is ready.
+        host: String,
+        /// Port the adapter listens on.
+        port: u16,
+    },
+}
+
+/// Strategy used to choose a debug project root for a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugAdapterRootStrategy {
+    /// Reuse the editor workspace root as-is.
+    #[default]
+    Workspace,
+    /// Prefer the nearest configured root marker for the current file and fall back to the editor
+    /// workspace root when no marker matches.
+    MarkersOrWorkspace,
+}
+
 /// Adapter specification compiled into the editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugAdapterSpec {
@@ -30,10 +72,15 @@ pub struct DebugAdapterSpec {
     file_extensions: Vec<String>,
     program: String,
     args: Vec<String>,
+    transport: DebugAdapterTransport,
+    preference: i32,
+    root_markers: Vec<String>,
+    root_strategy: DebugAdapterRootStrategy,
+    enabled_by_default: bool,
 }
 
 impl DebugAdapterSpec {
-    /// Creates a new debug-adapter specification.
+    /// Creates a new debug-adapter specification with stdio transport defaults.
     pub fn new(
         id: impl Into<String>,
         language_id: impl Into<String>,
@@ -50,7 +97,45 @@ impl DebugAdapterSpec {
                 .collect(),
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            transport: DebugAdapterTransport::Stdio,
+            preference: 0,
+            root_markers: Vec::new(),
+            root_strategy: DebugAdapterRootStrategy::Workspace,
+            enabled_by_default: true,
         }
+    }
+
+    /// Sets the transport used to speak DAP with this adapter.
+    pub fn with_transport(mut self, transport: DebugAdapterTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Sets preference for multi-adapter resolution. Higher values win.
+    pub fn with_preference(mut self, preference: i32) -> Self {
+        self.preference = preference;
+        self
+    }
+
+    /// Adds root markers used for project discovery.
+    pub fn with_root_markers(
+        mut self,
+        markers: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.root_markers = markers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the workspace-root strategy for this adapter.
+    pub fn with_root_strategy(mut self, strategy: DebugAdapterRootStrategy) -> Self {
+        self.root_strategy = strategy;
+        self
+    }
+
+    /// Controls whether generic DAP start should include this adapter by default.
+    pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
+        self.enabled_by_default = enabled_by_default;
+        self
     }
 
     /// Returns the adapter identifier.
@@ -77,6 +162,31 @@ impl DebugAdapterSpec {
     pub fn args(&self) -> &[String] {
         &self.args
     }
+
+    /// Returns the DAP transport.
+    pub fn transport(&self) -> &DebugAdapterTransport {
+        &self.transport
+    }
+
+    /// Returns preference used when multiple adapters match.
+    pub const fn preference(&self) -> i32 {
+        self.preference
+    }
+
+    /// Returns root markers used for project discovery.
+    pub fn root_markers(&self) -> &[String] {
+        &self.root_markers
+    }
+
+    /// Returns the workspace-root strategy.
+    pub const fn root_strategy(&self) -> DebugAdapterRootStrategy {
+        self.root_strategy
+    }
+
+    /// Returns whether generic DAP start should include this adapter by default.
+    pub const fn enabled_by_default(&self) -> bool {
+        self.enabled_by_default
+    }
 }
 
 /// Launch or attach configuration chosen by the user.
@@ -87,6 +197,9 @@ pub struct DebugConfiguration {
     target_program: Option<PathBuf>,
     cwd: Option<PathBuf>,
     args: Vec<String>,
+    adapter_id: Option<String>,
+    compile_command: Option<String>,
+    process_id: Option<u32>,
 }
 
 impl DebugConfiguration {
@@ -98,6 +211,9 @@ impl DebugConfiguration {
             target_program: None,
             cwd: None,
             args: Vec::new(),
+            adapter_id: None,
+            compile_command: None,
+            process_id: None,
         }
     }
 
@@ -116,6 +232,24 @@ impl DebugConfiguration {
     /// Sets command-line arguments for the debugee.
     pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Pins this configuration to a Debug Adapter id.
+    pub fn with_adapter_id(mut self, adapter_id: impl Into<String>) -> Self {
+        self.adapter_id = Some(adapter_id.into());
+        self
+    }
+
+    /// Sets an explicit compile-before-debug shell command.
+    pub fn with_compile_command(mut self, compile_command: impl Into<String>) -> Self {
+        self.compile_command = Some(compile_command.into());
+        self
+    }
+
+    /// Sets a process id for attach configurations.
+    pub fn with_process_id(mut self, process_id: u32) -> Self {
+        self.process_id = Some(process_id);
         self
     }
 
@@ -143,6 +277,21 @@ impl DebugConfiguration {
     pub fn args(&self) -> &[String] {
         &self.args
     }
+
+    /// Returns the pinned adapter id, if any.
+    pub fn adapter_id(&self) -> Option<&str> {
+        self.adapter_id.as_deref()
+    }
+
+    /// Returns the explicit compile-before-debug command, if any.
+    pub fn compile_command(&self) -> Option<&str> {
+        self.compile_command.as_deref()
+    }
+
+    /// Returns the attach process id, if any.
+    pub const fn process_id(&self) -> Option<u32> {
+        self.process_id
+    }
 }
 
 /// Prepared debug session plan for an adapter and configuration.
@@ -152,6 +301,7 @@ pub struct DebugSessionPlan {
     language_id: String,
     adapter_launch: JobSpec,
     configuration: DebugConfiguration,
+    transport: DebugAdapterTransport,
 }
 
 impl DebugSessionPlan {
@@ -174,6 +324,11 @@ impl DebugSessionPlan {
     pub fn configuration(&self) -> &DebugConfiguration {
         &self.configuration
     }
+
+    /// Returns the transport for this plan.
+    pub fn transport(&self) -> &DebugAdapterTransport {
+        &self.transport
+    }
 }
 
 /// Errors produced by DAP registry operations.
@@ -181,12 +336,12 @@ impl DebugSessionPlan {
 pub enum DapError {
     /// Duplicate adapter id registration.
     DuplicateAdapterId(String),
-    /// Duplicate extension registration.
-    DuplicateExtension(String),
     /// Unknown adapter id.
     UnknownAdapter(String),
     /// Unknown extension.
     UnknownExtension(String),
+    /// No enabled adapter matched the extension.
+    NoEnabledAdapter(String),
 }
 
 impl fmt::Display for DapError {
@@ -198,17 +353,17 @@ impl fmt::Display for DapError {
                     "debug adapter `{adapter_id}` is already registered"
                 )
             }
-            Self::DuplicateExtension(extension) => {
-                write!(
-                    formatter,
-                    "extension `{extension}` is already mapped to a debug adapter"
-                )
-            }
             Self::UnknownAdapter(adapter_id) => {
                 write!(formatter, "debug adapter `{adapter_id}` is not registered")
             }
             Self::UnknownExtension(extension) => {
                 write!(formatter, "no debug adapter registered for `{extension}`")
+            }
+            Self::NoEnabledAdapter(extension) => {
+                write!(
+                    formatter,
+                    "no enabled debug adapter registered for `{extension}`"
+                )
             }
         }
     }
@@ -220,7 +375,7 @@ impl Error for DapError {}
 #[derive(Debug, Default, Clone)]
 pub struct DebugAdapterRegistry {
     adapters: BTreeMap<String, DebugAdapterSpec>,
-    extensions: BTreeMap<String, String>,
+    extensions: BTreeMap<String, Vec<String>>,
 }
 
 impl DebugAdapterRegistry {
@@ -246,13 +401,10 @@ impl DebugAdapterRegistry {
             return Err(DapError::DuplicateAdapterId(adapter_id));
         }
         for extension in spec.file_extensions() {
-            if self.extensions.contains_key(extension) {
-                return Err(DapError::DuplicateExtension(extension.clone()));
-            }
-        }
-        for extension in spec.file_extensions() {
             self.extensions
-                .insert(extension.clone(), adapter_id.clone());
+                .entry(extension.clone())
+                .or_default()
+                .push(adapter_id.clone());
         }
         self.adapters.insert(adapter_id, spec);
         Ok(())
@@ -274,11 +426,54 @@ impl DebugAdapterRegistry {
         self.adapters.get(adapter_id)
     }
 
-    /// Returns an adapter for a file extension, if one exists.
-    pub fn adapter_for_extension(&self, extension: &str) -> Option<&DebugAdapterSpec> {
+    /// Returns adapters for a file extension, highest preference first.
+    pub fn adapters_for_extension(&self, extension: &str) -> Vec<&DebugAdapterSpec> {
         let extension = normalize_extension(extension);
-        let adapter_id = self.extensions.get(&extension)?;
-        self.adapters.get(adapter_id)
+        let Some(adapter_ids) = self.extensions.get(&extension) else {
+            return Vec::new();
+        };
+        let mut adapters = adapter_ids
+            .iter()
+            .filter_map(|adapter_id| self.adapters.get(adapter_id))
+            .collect::<Vec<_>>();
+        adapters.sort_by(|left, right| {
+            right
+                .preference()
+                .cmp(&left.preference())
+                .then_with(|| left.id().cmp(right.id()))
+        });
+        adapters
+    }
+
+    /// Returns the preferred enabled adapter for a file extension, if one exists.
+    pub fn adapter_for_extension(&self, extension: &str) -> Option<&DebugAdapterSpec> {
+        self.adapters_for_extension(extension)
+            .into_iter()
+            .find(|adapter| adapter.enabled_by_default())
+    }
+
+    /// Returns enabled adapters for a file extension, highest preference first.
+    pub fn enabled_adapters_for_extension(&self, extension: &str) -> Vec<&DebugAdapterSpec> {
+        self.adapters_for_extension(extension)
+            .into_iter()
+            .filter(|adapter| adapter.enabled_by_default())
+            .collect()
+    }
+
+    /// Resolves a preferred adapter for an extension, failing when none are enabled.
+    pub fn resolve_adapter_for_extension(
+        &self,
+        extension: &str,
+    ) -> Result<&DebugAdapterSpec, DapError> {
+        let extension = normalize_extension(extension);
+        let adapters = self.enabled_adapters_for_extension(&extension);
+        adapters.into_iter().next().ok_or_else(|| {
+            if self.extensions.contains_key(&extension) {
+                DapError::NoEnabledAdapter(extension)
+            } else {
+                DapError::UnknownExtension(extension)
+            }
+        })
     }
 
     /// Prepares a debug session plan using the named adapter.
@@ -301,6 +496,7 @@ impl DebugAdapterRegistry {
             language_id: adapter.language_id().to_owned(),
             adapter_launch: launch,
             configuration,
+            transport: adapter.transport.clone(),
         })
     }
 }
@@ -316,10 +512,23 @@ fn normalize_extension(extension: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{DebugAdapterRegistry, DebugAdapterSpec, DebugConfiguration, DebugRequestKind};
+    use super::{
+        DebugAdapterRegistry, DebugAdapterSpec, DebugAdapterTransport, DebugConfiguration,
+        DebugRequestKind,
+    };
 
     fn codelldb() -> DebugAdapterSpec {
         DebugAdapterSpec::new("codelldb", "rust", ["rs"], "codelldb", ["--port", "13000"])
+            .with_transport(DebugAdapterTransport::Tcp {
+                host: "127.0.0.1".to_owned(),
+                port: 13000,
+            })
+            .with_preference(100)
+            .with_root_markers(["Cargo.toml"])
+    }
+
+    fn gdb() -> DebugAdapterSpec {
+        DebugAdapterSpec::new("gdb", "rust", ["rs"], "gdb", ["-i=dap"]).with_preference(50)
     }
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -337,6 +546,30 @@ mod tests {
         let adapter = registry.adapter_for_extension("rs").expect("adapter");
         assert_eq!(adapter.id(), "codelldb");
         assert_eq!(adapter.program(), "codelldb");
+        assert_eq!(adapter.preference(), 100);
+    }
+
+    #[test]
+    fn registry_prefers_higher_preference_when_multiple_match() {
+        let mut registry = DebugAdapterRegistry::new();
+        must(registry.register(gdb()));
+        must(registry.register(codelldb()));
+
+        let adapters = registry.adapters_for_extension("rs");
+        assert_eq!(
+            adapters
+                .iter()
+                .map(|adapter| adapter.id())
+                .collect::<Vec<_>>(),
+            ["codelldb", "gdb"]
+        );
+        assert_eq!(
+            registry
+                .resolve_adapter_for_extension("rs")
+                .expect("preferred")
+                .id(),
+            "codelldb"
+        );
     }
 
     #[test]
@@ -359,5 +592,9 @@ mod tests {
         assert_eq!(plan.adapter_launch().program(), "codelldb");
         assert_eq!(plan.configuration().name(), "Debug volt");
         assert_eq!(plan.configuration().args(), ["--shell-hidden"]);
+        assert!(matches!(
+            plan.transport(),
+            DebugAdapterTransport::Tcp { port: 13000, .. }
+        ));
     }
 }

@@ -2189,9 +2189,13 @@ pub(super) fn buffer_cursor_screen_anchor(
             .len();
     let body_y = layout.body_y + headerline_rows as i32 * line_height;
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
-    let fringe_width = cell_width;
+    let fringe_width = editor_fringe_width_px(cell_width, buffer.dap_fringe_live());
     let line_number_width = cell_width * 5;
-    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let wrap_cols = wrap_columns_for_width_with_fringe(
+        rect.width(),
+        cell_width,
+        debug_fringe_cell_count(buffer.dap_fringe_live()),
+    );
     let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
     let cursor_row = buffer.cursor_row();
     let cursor_col = buffer.cursor_col();
@@ -2341,10 +2345,14 @@ pub(super) fn buffer_point_at_screen(
     let y = y.clamp(body_top, body_bottom.saturating_sub(1));
     let visual_row_target = ((y - body_top) / line_height) as usize;
     let cell_width = cell_width.max(1);
-    let fringe_width = cell_width;
+    let fringe_width = editor_fringe_width_px(cell_width, buffer.dap_fringe_live());
     let line_number_width = cell_width * 5;
     let text_x = rect.x() + 12 + fringe_width + line_number_width;
-    let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+    let wrap_cols = wrap_columns_for_width_with_fringe(
+        rect.width(),
+        cell_width,
+        debug_fringe_cell_count(buffer.dap_fringe_live()),
+    );
     let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
     let wrapped_lines = collect_wrapped_lines(
         buffer,
@@ -2725,6 +2733,21 @@ fn render_buffer_with_view_state(
         user_library.gitfringe_token_removed(),
         git_removed_fallback,
     );
+    let debug_fringe_verified = theme_color(
+        theme_registry,
+        TOKEN_DEBUG_FRINGE_BREAKPOINT,
+        Color::RGB(224, 107, 117),
+    );
+    let debug_fringe_pending = theme_color(
+        theme_registry,
+        TOKEN_DEBUG_FRINGE_PENDING,
+        Color::RGB(209, 154, 102),
+    );
+    let debug_fringe_execution = theme_color(
+        theme_registry,
+        TOKEN_DEBUG_FRINGE_EXECUTION,
+        Color::RGB(86, 182, 194),
+    );
     let cell_width = cell_width.max(1);
     let (git_branch, git_added, git_removed) = git_summary
         .map(|summary| (summary.branch.as_deref(), summary.added, summary.removed))
@@ -2909,9 +2932,14 @@ fn render_buffer_with_view_state(
             line_height,
         )?;
     } else {
-        let fringe_width = cell_width;
+        let debug_fringe_live = buffer.dap_fringe_live();
+        let fringe_width = editor_fringe_width_px(cell_width, debug_fringe_live);
         let line_number_width = cell_width * 5;
-        let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
+        let wrap_cols = wrap_columns_for_width_with_fringe(
+            rect.width(),
+            cell_width,
+            debug_fringe_cell_count(debug_fringe_live),
+        );
         let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
         let context_overlay =
             buffer_context_overlay_snapshot(buffer, active, typing_active, user_library);
@@ -3206,11 +3234,37 @@ fn render_buffer_with_view_state(
                         .lsp_show_buffer_diagnostics()
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
+                    let git_fringe_x = if debug_fringe_live {
+                        fringe_x + cell_width
+                    } else {
+                        fringe_x
+                    };
+                    if debug_fringe_live {
+                        if buffer.dap_execution_line() == Some(line_index) {
+                            draw_text(
+                                target,
+                                fringe_x,
+                                y,
+                                DEBUG_FRINGE_EXECUTION_GLYPH,
+                                debug_fringe_execution,
+                            )?;
+                        } else if let Some(state) = buffer.dap_fringe_marker(line_index) {
+                            let (glyph, color) = match state {
+                                BreakpointState::Verified => {
+                                    (DEBUG_FRINGE_VERIFIED_GLYPH, debug_fringe_verified)
+                                }
+                                BreakpointState::Pending | BreakpointState::Unverified => {
+                                    (DEBUG_FRINGE_PENDING_GLYPH, debug_fringe_pending)
+                                }
+                            };
+                            draw_text(target, fringe_x, y, glyph, color)?;
+                        }
+                    }
                     if let Some(severity) = diagnostic_severity {
                         let color = diagnostic_color(severity, theme_registry);
                         draw_text(
                             target,
-                            fringe_x,
+                            git_fringe_x,
                             y,
                             user_library.lsp_diagnostic_icon(),
                             color,
@@ -3224,7 +3278,7 @@ fn render_buffer_with_view_state(
                         fill_window_surface_rect(
                             target,
                             PixelRectToRect::rect(
-                                rect.x() + 8,
+                                git_fringe_x - 4,
                                 y,
                                 GIT_FRINGE_BAR_WIDTH,
                                 line_height.max(1) as u32,
