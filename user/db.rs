@@ -263,7 +263,7 @@ pub fn package() -> PluginPackage {
         ),
         hook_command(
             "db.multiview",
-            "Opens a database sidebar plus query buffers, with output in a popup.",
+            "Opens or closes the database sidebar split; closing restores pane golden ratio.",
             db_hooks::MULTIVIEW,
             None,
         ),
@@ -275,12 +275,18 @@ pub fn package() -> PluginPackage {
                 None::<&str>,
             )],
         ),
+        hook_command(
+            "db.submit-connect",
+            "Submits the database connection prompt.",
+            input_hooks::SUBMIT,
+            None,
+        ),
     ])
     .with_buffers(vec![
         PluginBuffer::new(CONNECT_KIND, connect_buffer_lines()).with_key_bindings(vec![
-            PluginKeyBinding::new("Enter", input_hooks::SUBMIT, PluginKeymapScope::Popup)
+            PluginKeyBinding::new("Enter", "db.submit-connect", PluginKeymapScope::Popup)
                 .with_vim_mode(PluginVimMode::Insert),
-            PluginKeyBinding::new("Ctrl+Enter", input_hooks::SUBMIT, PluginKeymapScope::Popup)
+            PluginKeyBinding::new("Ctrl+Enter", "db.submit-connect", PluginKeymapScope::Popup)
                 .with_vim_mode(PluginVimMode::Insert),
         ]),
         PluginBuffer::new(QUERY_KIND, query_buffer_lines()).with_key_bindings(vec![
@@ -447,6 +453,7 @@ mod tests {
             "db.save-snippet",
             "db.dashboard",
             "db.multiview",
+            "db.submit-connect",
         ] {
             assert!(
                 package
@@ -456,6 +463,26 @@ mod tests {
                 "missing command `{command_name}`",
             );
         }
+    }
+
+    #[test]
+    fn connect_buffer_binds_enter_to_submit_command() {
+        let package = package();
+        let connect_buffer = package
+            .buffers()
+            .iter()
+            .find(|buffer| buffer.kind() == CONNECT_KIND)
+            .expect("connect buffer should be exported");
+        assert!(
+            connect_buffer.key_bindings().iter().any(|binding| {
+                binding.chord() == "Enter"
+                    && binding
+                        .command_names()
+                        .iter()
+                        .any(|name| name.as_str() == "db.submit-connect")
+            }),
+            "connect Enter must run a command, not the ui.input.submit hook name",
+        );
     }
 
     #[test]

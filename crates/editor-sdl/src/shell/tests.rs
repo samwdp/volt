@@ -15448,6 +15448,64 @@ fn db_multiview_disables_golden_ratio_and_narrows_left_sidebar() -> Result<(), S
 }
 
 #[test]
+fn db_multiview_toggle_restores_golden_ratio() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    open_db_multiview(&mut state.runtime)?;
+    open_db_multiview(&mut state.runtime)?;
+    let ui = shell_ui(&state.runtime)?;
+    let view = ui
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?;
+    assert_eq!(view.golden_ratio_override, None);
+    assert!(view.pane_size_weights.is_none());
+    assert_eq!(view.panes.len(), 1);
+    assert!(
+        shell_user_library(&state.runtime)
+            .pane_config()
+            .golden_ratio,
+        "default pane config should keep golden ratio enabled"
+    );
+    Ok(())
+}
+
+#[test]
+fn db_connect_enter_submits_pasted_connection_string() -> Result<(), String> {
+    let state_dir = TempTestDir::new("db-connect-enter");
+    fs::create_dir_all(state_dir.path()).map_err(|error| error.to_string())?;
+    let db_path = state_dir.path().join("connect.sqlite3");
+    let connection_string = format!("sqlite://{}", db_path.display());
+    let mut state = state_with_user_library()?;
+
+    state
+        .runtime
+        .execute_command("db.connect")
+        .map_err(|error| error.to_string())?;
+    {
+        let ui = shell_ui(&state.runtime)?;
+        assert!(
+            ui.popup_focus,
+            "db.connect prompt should take popup focus so paste and Enter target the prompt"
+        );
+        assert_eq!(ui.input_mode(), InputMode::Insert);
+        assert_eq!(ui.vim().target, VimTarget::Input);
+    }
+    assert!(
+        paste_text_into_active_input_buffer(&mut state.runtime, &connection_string)
+            .map_err(|error| error.to_string())?,
+        "paste should land in the DB connect input"
+    );
+    let handled = state
+        .try_runtime_keybinding(Keycode::Return, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Enter should submit the DB connect prompt");
+    let session = db_service(&state.runtime)?
+        .active_session_summary()
+        .ok_or_else(|| "Enter did not create a database session".to_owned())?;
+    assert_eq!(session.engine.label(), "SQLite");
+    Ok(())
+}
+
+#[test]
 fn opened_toml_file_survives_layout_and_receives_tree_sitter_highlighting() -> Result<(), String> {
     let root = TempTestDir::new("file-tree-sitter-toml-highlighting");
     fs::create_dir_all(root.path()).map_err(|error| error.to_string())?;

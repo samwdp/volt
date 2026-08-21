@@ -9836,6 +9836,23 @@ impl ShellUiState {
         }
     }
 
+    fn is_db_multiview_active(&self) -> bool {
+        self.workspace_view().is_some_and(|view| {
+            view.pane_size_weights.as_deref()
+                == Some([DB_MULTIVIEW_LEFT_WEIGHT, DB_MULTIVIEW_RIGHT_WEIGHT].as_slice())
+        })
+    }
+
+    fn db_multiview_sidebar_pane_id(&self) -> Option<PaneId> {
+        self.workspace_view().and_then(|view| {
+            view.panes.iter().find_map(|pane| {
+                self.buffer(pane.buffer_id)
+                    .filter(|buffer| buffer_is_db_sidebar(&buffer.kind))
+                    .map(|_| pane.pane_id)
+            })
+        })
+    }
+
     fn active_workspace_buffer_ids(&self) -> Option<&[BufferId]> {
         self.workspace_view().map(|view| view.buffer_ids.as_slice())
     }
@@ -12952,19 +12969,8 @@ impl ShellState {
         let vim_mode = keymap_vim_mode(self.input_mode()?);
         let runtime_surface_before =
             active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-        let overlay_modes = self.overlay_minor_modes()?;
-        if self.ui()?.picker_visible() && self.try_picker_extra_keybinding(chord)? {
-            return Ok(());
-        }
-        if self
-            .runtime
-            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
-            .map_err(|error| ShellError::Runtime(error.to_string()))?
-        {
-            return Ok(());
-        }
-
-        if self.try_plugin_buffer_keybinding(chord, vim_mode)? {
+        let picker_visible = self.ui()?.picker_visible();
+        if self.try_plugin_or_overlay_keybinding(chord, vim_mode, picker_visible)? {
             return Ok(());
         }
 
@@ -13503,24 +13509,10 @@ impl ShellState {
                 return Ok(());
             }
 
-            let overlay_modes = self.overlay_minor_modes()?;
-            if self
-                .runtime
-                .execute_key_binding_in_scopes(&overlay_modes, vim_mode, &token)
-                .map_err(|error| ShellError::Runtime(error.to_string()))?
-            {
+            let picker_visible = self.ui()?.picker_visible();
+            if self.try_plugin_or_overlay_keybinding(&token, vim_mode, picker_visible)? {
                 let runtime_surface_before =
                     active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-                self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
-                self.clear_stale_vim_count()?;
-                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
-                self.maybe_finish_change_after_input()?;
-                return Ok(());
-            }
-
-            let runtime_surface_before =
-                active_runtime_surface(&self.runtime).map_err(ShellError::Runtime)?;
-            if self.try_plugin_buffer_keybinding(&token, vim_mode)? {
                 self.sync_active_buffer_if_surface_changed(runtime_surface_before)?;
                 self.clear_stale_vim_count()?;
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
@@ -14459,26 +14451,7 @@ impl ShellState {
             return Ok(true);
         }
 
-        let overlay_modes = self.overlay_minor_modes()?;
-        if picker_visible && self.try_picker_extra_keybinding(&chord)? {
-            self.queue_suppressed_text_input_for_chord(&chord);
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
-        }
-
-        if self
-            .runtime
-            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, &chord)
-            .map_err(|error| ShellError::Runtime(error.to_string()))?
-        {
-            self.queue_suppressed_text_input_for_chord(&chord);
-            self.record_vim_input(VimRecordedInput::Chord(chord))?;
-            self.maybe_finish_change_after_input()?;
-            return Ok(true);
-        }
-
-        if self.try_plugin_buffer_keybinding(&chord, vim_mode)? {
+        if self.try_plugin_or_overlay_keybinding(&chord, vim_mode, picker_visible)? {
             self.queue_suppressed_text_input_for_chord(&chord);
             self.record_vim_input(VimRecordedInput::Chord(chord))?;
             self.maybe_finish_change_after_input()?;
@@ -14529,14 +14502,43 @@ impl ShellState {
         Ok(true)
     }
 
+    fn try_plugin_or_overlay_keybinding(
+        &mut self,
+        chord: &str,
+        vim_mode: KeymapVimMode,
+        picker_visible: bool,
+    ) -> Result<bool, ShellError> {
+        if picker_visible && self.try_picker_extra_keybinding(chord)? {
+            return Ok(true);
+        }
+        if !picker_visible && self.try_plugin_buffer_keybinding(chord, vim_mode)? {
+            return Ok(true);
+        }
+        let overlay_modes = self.overlay_minor_modes()?;
+        if self
+            .runtime
+            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
+            .map_err(|error| ShellError::Runtime(error.to_string()))?
+        {
+            return Ok(true);
+        }
+        if picker_visible && self.try_plugin_buffer_keybinding(chord, vim_mode)? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn try_plugin_buffer_keybinding(
         &mut self,
         chord: &str,
         vim_mode: KeymapVimMode,
     ) -> Result<bool, ShellError> {
-        let buffer_id = match self.ui()?.active_buffer_id() {
-            Some(buffer_id) => buffer_id,
-            None => return Ok(false),
+        let (buffer_id, popup_focused) = {
+            let ui = self.ui()?;
+            let Some(buffer_id) = ui.focused_buffer_id() else {
+                return Ok(false);
+            };
+            (buffer_id, ui.popup_focus)
         };
         let plugin_kind = {
             let Some(buffer) = self.ui()?.buffer(buffer_id) else {
@@ -14551,11 +14553,8 @@ impl ShellState {
             .plugin_buffer_key_bindings(&plugin_kind)
             .into_iter()
             .find(|binding| {
-                matches!(
-                    binding.scope(),
-                    editor_plugin_api::PluginKeymapScope::Workspace
-                        | editor_plugin_api::PluginKeymapScope::Global
-                ) && plugin_vim_mode_matches(binding.vim_mode(), vim_mode)
+                plugin_buffer_binding_scope_active(binding.scope(), popup_focused)
+                    && plugin_vim_mode_matches(binding.vim_mode(), vim_mode)
                     && binding.chord() == chord
             });
         let Some(binding) = binding else {
@@ -26745,6 +26744,7 @@ fn open_db_connect_prompt(runtime: &mut EditorRuntime) -> Result<(), String> {
     db_service_mut(runtime)?.attach_prompt_buffer(buffer_id.get());
     {
         let ui = shell_ui_mut(runtime)?;
+        ui.set_popup_focus(true);
         ui.set_active_vim_target(VimTarget::Input);
         ui.enter_insert_mode();
     }
@@ -26859,6 +26859,9 @@ fn open_db_query_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn open_db_dashboard(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.is_db_multiview_active() {
+        close_db_multiview(runtime)?;
+    }
     let buffer_id = create_db_query_like_buffer(
         runtime,
         DB_DASHBOARD_BUFFER_NAME,
@@ -26872,6 +26875,9 @@ fn open_db_dashboard(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn open_db_multiview(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.is_db_multiview_active() {
+        return close_db_multiview(runtime);
+    }
     let sidebar_id =
         open_or_focus_workspace_plugin_buffer(runtime, DB_SIDEBAR_BUFFER_NAME, DB_SIDEBAR_KIND)?;
     refresh_db_layout_browsers(runtime, sidebar_id)?;
@@ -32872,6 +32878,15 @@ fn split_runtime_pane(
     Ok(())
 }
 
+fn close_db_multiview(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let sidebar_pane_id = shell_ui(runtime)?.db_multiview_sidebar_pane_id();
+    shell_ui_mut(runtime)?.set_db_multiview_layout(false);
+    if let Some(pane_id) = sidebar_pane_id {
+        close_runtime_pane_by_id(runtime, pane_id)?;
+    }
+    Ok(())
+}
+
 fn close_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let workspace_id = runtime
         .model()
@@ -32883,6 +32898,14 @@ fn close_runtime_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .active_pane_id()
         .ok_or_else(|| format!("workspace `{workspace_id}` has no active pane"))?;
+    close_runtime_pane_by_id(runtime, pane_id)
+}
+
+fn close_runtime_pane_by_id(runtime: &mut EditorRuntime, pane_id: PaneId) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     runtime
         .model_mut()
         .close_pane(workspace_id, pane_id)
@@ -33907,6 +33930,19 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
         InputMode::Normal => KeymapVimMode::Normal,
         InputMode::Insert | InputMode::Replace => KeymapVimMode::Insert,
         InputMode::Visual => KeymapVimMode::Visual,
+    }
+}
+
+fn plugin_buffer_binding_scope_active(
+    scope: editor_plugin_api::PluginKeymapScope,
+    popup_focused: bool,
+) -> bool {
+    match scope {
+        editor_plugin_api::PluginKeymapScope::Global
+        | editor_plugin_api::PluginKeymapScope::Workspace => true,
+        editor_plugin_api::PluginKeymapScope::Popup => popup_focused,
+        editor_plugin_api::PluginKeymapScope::Autocomplete
+        | editor_plugin_api::PluginKeymapScope::Hover => false,
     }
 }
 
