@@ -18924,6 +18924,68 @@ fn lsp_restart_with_no_live_sessions_returns_error_without_picker() -> Result<()
 }
 
 #[test]
+fn lsp_install_server_opens_recipe_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    state
+        .runtime
+        .execute_command("lsp.install-server")
+        .map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let picker = ui
+        .picker()
+        .ok_or_else(|| "install picker missing".to_owned())?;
+    assert_eq!(picker.session().title(), "Install Language Server");
+    assert!(picker.session().item_count() > 0);
+    let selected = picker.session().selected().expect("one row");
+    assert!(
+        selected
+            .item()
+            .label()
+            .contains("typescript-language-server")
+            || selected.item().label().contains("rust-analyzer")
+            || !selected.item().label().is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn dap_install_server_opens_recipe_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    state
+        .runtime
+        .execute_command("dap.install-server")
+        .map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let picker = ui
+        .picker()
+        .ok_or_else(|| "install picker missing".to_owned())?;
+    assert_eq!(picker.session().title(), "Install Debug Adapter");
+    assert!(picker.session().item_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn install_picker_label_prefixes_status_icon() {
+    let plus = tool_install::install_picker_label(false, "rust-analyzer");
+    let check = tool_install::install_picker_label(true, "rust-analyzer");
+    assert!(plus.ends_with(" rust-analyzer"));
+    assert!(check.ends_with(" rust-analyzer"));
+    assert_ne!(plus, check);
+}
+
+#[test]
+fn lsp_install_unknown_id_returns_error() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let error = tool_install::install_language_server_by_id(&mut state.runtime, "not-a-server")
+        .expect_err("unknown spec must fail");
+    assert!(
+        error.contains("not registered"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn lsp_session_lifecycle_picker_labels_sessions_and_wires_stop_action() {
     let root = {
         #[cfg(windows)]

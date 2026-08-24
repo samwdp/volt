@@ -1103,6 +1103,11 @@ impl LspClientManager {
         }
     }
 
+    /// Returns the language-server registry.
+    pub fn registry(&self) -> &LanguageServerRegistry {
+        &self.registry
+    }
+
     pub fn log_snapshot(&self) -> LspLogSnapshot {
         self.transport_log
             .lock()
@@ -3148,14 +3153,16 @@ fn build_lsp_command(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    let mut env = env.to_vec();
+    editor_tool_install::merge_effective_path(&mut env);
     #[cfg(windows)]
     if let Some(runtime_env) = runtime_env {
-        apply_windows_runtime_environment(&mut command, env, runtime_env);
+        apply_windows_runtime_environment(&mut command, &env, runtime_env);
     } else {
-        apply_command_environment(&mut command, env);
+        apply_command_environment(&mut command, &env);
     }
     #[cfg(not(windows))]
-    apply_command_environment(&mut command, env);
+    apply_command_environment(&mut command, &env);
     command
 }
 
@@ -6714,9 +6721,12 @@ mod tests {
                 ))
             })
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            vars.get("PATH").map(String::as_str),
-            Some("C:\\fnm;C:\\custom")
+        let path = vars.get("PATH").map(String::as_str);
+        assert!(
+            path.is_some_and(
+                |value| value == "C:\\fnm;C:\\custom" || value.starts_with("C:\\fnm;C:\\custom;")
+            ),
+            "PATH should keep fnm ahead of explicit PATH, got {path:?}"
         );
         assert_eq!(
             vars.get("FNM_DIR").map(String::as_str),
@@ -6759,9 +6769,12 @@ mod tests {
                 ))
             })
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            vars.get("PATH").map(String::as_str),
-            Some("C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0;C:\\custom")
+        let path = vars.get("PATH").map(String::as_str);
+        assert!(
+            path.is_some_and(|value| value
+                == "C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0;C:\\custom"
+                || value.starts_with("C:\\Users\\sam\\AppData\\Roaming\\nvm\\v22.1.0;C:\\custom;")),
+            "PATH should keep nvm ahead of explicit PATH, got {path:?}"
         );
         assert_eq!(
             vars.get("NVM_HOME").map(String::as_str),

@@ -1,8 +1,8 @@
 use editor_plugin_api::{
-    DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport, PluginAction, PluginBuffer,
-    PluginBufferLayout, PluginBufferLayoutNode, PluginBufferSection, PluginBufferSections,
-    PluginCommand, PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage,
-    PluginVimMode, buffer_kinds, dap_hooks,
+    DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport, InstallRecipe, PluginAction,
+    PluginBuffer, PluginBufferLayout, PluginBufferLayoutNode, PluginBufferSection,
+    PluginBufferSections, PluginCommand, PluginHookDeclaration, PluginKeyBinding,
+    PluginKeymapScope, PluginPackage, PluginVimMode, buffer_kinds, dap_hooks,
 };
 
 pub const HOOK_DAP_START: &str = dap_hooks::START;
@@ -31,6 +31,7 @@ pub const HOOK_DAP_BREAKPOINT_HIT_CONDITION: &str = dap_hooks::BREAKPOINT_HIT_CO
 pub const HOOK_DAP_BREAKPOINT_LOG_MESSAGE: &str = dap_hooks::BREAKPOINT_LOG_MESSAGE;
 pub const HOOK_DAP_TOGGLE_VARIABLE: &str = dap_hooks::TOGGLE_VARIABLE;
 pub const HOOK_DAP_GOTO_BREAKPOINT: &str = dap_hooks::GOTO_BREAKPOINT;
+pub const HOOK_DAP_INSTALL: &str = dap_hooks::INSTALL;
 
 pub const BREAKPOINTS_KIND: &str = buffer_kinds::DAP_BREAKPOINTS;
 pub const LOCALS_KIND: &str = buffer_kinds::DAP_LOCALS;
@@ -51,6 +52,11 @@ pub fn package() -> PluginPackage {
             "dap.start",
             "Starts a Workspace Debug Session using the preferred adapter for the active file.",
             vec![PluginAction::emit_hook(HOOK_DAP_START, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "dap.install-server",
+            "Installs a Debug Adapter from a picker, or a Spec id.",
+            vec![PluginAction::emit_hook(HOOK_DAP_INSTALL, None::<&str>)],
         ),
         PluginCommand::new(
             "dap.stop",
@@ -316,6 +322,10 @@ pub fn package() -> PluginPackage {
             HOOK_DAP_GOTO_BREAKPOINT,
             "Opens the source of the Breakpoint under the cursor.",
         ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_INSTALL,
+            "Installs a Debug Adapter when it is missing from PATH.",
+        ),
     ])
     .with_buffers(vec![
         PluginBuffer::new(
@@ -405,6 +415,41 @@ pub fn debug_adapters() -> Vec<DebugAdapterSpec> {
         .with_root_markers(["*.sln", "*.csproj"])
         .with_root_strategy(DebugAdapterRootStrategy::MarkersOrWorkspace),
     ]
+    .into_iter()
+    .map(
+        |adapter| match install_recipe_for_debug_adapter(adapter.id()) {
+            Some(recipe) => adapter.with_install_recipe(recipe),
+            None => adapter,
+        },
+    )
+    .collect()
+}
+
+fn install_recipe_for_debug_adapter(adapter_id: &str) -> Option<InstallRecipe> {
+    match adapter_id {
+        "codelldb" => codelldb_recipe(),
+        _ => None,
+    }
+}
+
+fn codelldb_recipe() -> Option<InstallRecipe> {
+    let (asset, binary) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => ("codelldb-win32-x64.vsix", "extension/adapter/codelldb.exe"),
+        ("windows", "aarch64") => (
+            "codelldb-win32-arm64.vsix",
+            "extension/adapter/codelldb.exe",
+        ),
+        ("linux", "x86_64") => ("codelldb-linux-x64.vsix", "extension/adapter/codelldb"),
+        ("linux", "aarch64") => ("codelldb-linux-arm64.vsix", "extension/adapter/codelldb"),
+        ("macos", "x86_64") => ("codelldb-darwin-x64.vsix", "extension/adapter/codelldb"),
+        ("macos", "aarch64") => ("codelldb-darwin-arm64.vsix", "extension/adapter/codelldb"),
+        _ => return None,
+    };
+    Some(InstallRecipe::github_release_binary(
+        "vadimcn/codelldb",
+        asset,
+        binary,
+    ))
 }
 
 #[cfg(test)]
@@ -511,6 +556,7 @@ mod tests {
             "dap.toggle-variable",
             "dap.goto-breakpoint",
             "dap.log",
+            "dap.install-server",
         ] {
             assert!(
                 names.iter().any(|name| name == expected),
@@ -610,5 +656,25 @@ mod tests {
             bindings.contains(&("F11", "dap.step-into", PluginKeymapScope::Dap)),
             "DAP Mode F11 must step into"
         );
+    }
+
+    #[test]
+    fn debug_adapters_attach_typed_install_recipes() {
+        let adapters = debug_adapters();
+        let codelldb = adapters
+            .iter()
+            .find(|adapter| adapter.id() == "codelldb")
+            .expect("codelldb");
+        if codelldb_recipe().is_some() {
+            assert!(matches!(
+                codelldb.install_recipe(),
+                Some(InstallRecipe::Archive { .. })
+            ));
+        }
+        let gdb = adapters
+            .iter()
+            .find(|adapter| adapter.id() == "gdb")
+            .expect("gdb");
+        assert!(gdb.install_recipe().is_none());
     }
 }

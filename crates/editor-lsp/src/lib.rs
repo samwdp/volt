@@ -22,6 +22,7 @@ pub use client::{
     LspNotificationLevel, LspNotificationProgress, LspNotificationSnapshot, LspServerCommand,
     LspSignatureHelpContents, LspTextEdit, language_server_session_in_workspace_scope,
 };
+pub use editor_tool_install::InstallRecipe;
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str = "Language Server Protocol registry, session plans, diagnostics, launch metadata, and client runtime management.";
@@ -418,6 +419,7 @@ pub struct LanguageServerSpec {
     env: Vec<(String, String)>,
     workspace_configuration: WorkspaceConfiguration,
     enabled_by_default: bool,
+    install_recipe: Option<InstallRecipe>,
     path_matcher: PathMatcher,
 }
 
@@ -460,6 +462,7 @@ impl LanguageServerSpec {
             env: Vec::new(),
             workspace_configuration: WorkspaceConfiguration::default(),
             enabled_by_default: true,
+            install_recipe: None,
             path_matcher: PathMatcher::from_parts(
                 &file_extensions,
                 [] as [&str; 0],
@@ -552,6 +555,12 @@ impl LanguageServerSpec {
     /// Controls whether generic LSP startup should include this server by default.
     pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
         self.enabled_by_default = enabled_by_default;
+        self
+    }
+
+    /// Sets the optional Install Recipe used when the program is not on PATH.
+    pub fn with_install_recipe(mut self, recipe: InstallRecipe) -> Self {
+        self.install_recipe = Some(recipe);
         self
     }
 
@@ -696,6 +705,11 @@ impl LanguageServerSpec {
     /// Returns whether generic LSP startup should include this server by default.
     pub const fn enabled_by_default(&self) -> bool {
         self.enabled_by_default
+    }
+
+    /// Returns the Install Recipe, if this server is Volt-installable.
+    pub fn install_recipe(&self) -> Option<&InstallRecipe> {
+        self.install_recipe.as_ref()
     }
 
     /// Returns whether this server should attach to the provided path.
@@ -953,6 +967,13 @@ impl LanguageServerRegistry {
     /// Returns a server by identifier.
     pub fn server(&self, server_id: &str) -> Option<&LanguageServerSpec> {
         self.servers.get(server_id)
+    }
+
+    /// Returns registered servers in registration order.
+    pub fn servers(&self) -> impl Iterator<Item = &LanguageServerSpec> {
+        self.server_order
+            .iter()
+            .filter_map(|server_id| self.servers.get(server_id))
     }
 
     /// Returns a server for a file extension, if one is registered.

@@ -23,6 +23,7 @@ pub use config::{
     collect_configuration_candidates, configuration_holes, infer_compile_heuristic,
     infer_configurations, load_project_configurations,
 };
+pub use editor_tool_install::InstallRecipe;
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str = "Debug adapter registry, session plans, and DAP client host.";
@@ -80,6 +81,7 @@ pub struct DebugAdapterSpec {
     root_markers: Vec<String>,
     root_strategy: DebugAdapterRootStrategy,
     enabled_by_default: bool,
+    install_recipe: Option<InstallRecipe>,
 }
 
 impl DebugAdapterSpec {
@@ -105,6 +107,7 @@ impl DebugAdapterSpec {
             root_markers: Vec::new(),
             root_strategy: DebugAdapterRootStrategy::Workspace,
             enabled_by_default: true,
+            install_recipe: None,
         }
     }
 
@@ -138,6 +141,12 @@ impl DebugAdapterSpec {
     /// Controls whether generic DAP start should include this adapter by default.
     pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
         self.enabled_by_default = enabled_by_default;
+        self
+    }
+
+    /// Sets the optional Install Recipe used when the program is not on PATH.
+    pub fn with_install_recipe(mut self, recipe: InstallRecipe) -> Self {
+        self.install_recipe = Some(recipe);
         self
     }
 
@@ -189,6 +198,11 @@ impl DebugAdapterSpec {
     /// Returns whether generic DAP start should include this adapter by default.
     pub const fn enabled_by_default(&self) -> bool {
         self.enabled_by_default
+    }
+
+    /// Returns the Install Recipe, if this adapter is Volt-installable.
+    pub fn install_recipe(&self) -> Option<&InstallRecipe> {
+        self.install_recipe.as_ref()
     }
 }
 
@@ -427,6 +441,11 @@ impl DebugAdapterRegistry {
     /// Returns an adapter by identifier.
     pub fn adapter(&self, adapter_id: &str) -> Option<&DebugAdapterSpec> {
         self.adapters.get(adapter_id)
+    }
+
+    /// Returns registered adapters sorted by id.
+    pub fn adapters(&self) -> impl Iterator<Item = &DebugAdapterSpec> {
+        self.adapters.values()
     }
 
     /// Returns adapters for a file extension, highest preference first.

@@ -1,4 +1,5 @@
 use super::{
+    tool_install::{ToolInstallState, continue_tool_install},
     treesitter_install::{
         TreeSitterInstallState, TreeSitterRecompileState, continue_tree_sitter_install,
         continue_tree_sitter_recompile,
@@ -28,6 +29,7 @@ pub(super) enum StreamedCommandExitAction {
     },
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
+    ContinueToolInstall(Box<ToolInstallState>),
     /// Keep the popup buffer open after the process exits; no git refresh, no close.
     #[allow(dead_code)]
     LeaveOpen,
@@ -568,6 +570,24 @@ pub(super) fn refresh_pending_streamed_commands(
                     StreamedCommandExitAction::ContinueTreeSitterRecompile(state) => {
                         if let Err(error) =
                             continue_tree_sitter_recompile(runtime, buffer_id, *state, outcome)
+                        {
+                            append_streamed_command_error(runtime, buffer_id, &error)?;
+                            shell_ui_mut(runtime)?.apply_notification(
+                                streamed_command_notification(
+                                    buffer_id,
+                                    &popup_title,
+                                    &command_label,
+                                    false,
+                                    None,
+                                    Some(&error),
+                                ),
+                                now,
+                            );
+                        }
+                    }
+                    StreamedCommandExitAction::ContinueToolInstall(state) => {
+                        if let Err(error) =
+                            continue_tool_install(runtime, buffer_id, *state, outcome.success)
                         {
                             append_streamed_command_error(runtime, buffer_id, &error)?;
                             shell_ui_mut(runtime)?.apply_notification(

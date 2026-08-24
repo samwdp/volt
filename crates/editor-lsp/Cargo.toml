@@ -27,6 +27,9 @@ path = "../editor-jobs"
 [dependencies.editor-path]
 path = "../editor-path"
 
+[dependencies.editor-tool-install]
+path = "../editor-tool-install"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_lsp"

@@ -21,6 +21,9 @@ serde_json = "1.0.149"
 [dependencies.editor-jobs]
 path = "../editor-jobs"
 
+[dependencies.editor-tool-install]
+path = "../editor-tool-install"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_dap"

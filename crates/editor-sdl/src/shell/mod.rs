@@ -15,6 +15,7 @@ mod pdf;
 mod picker;
 mod render;
 mod terminal;
+mod tool_install;
 mod treesitter_install;
 mod ui_overlays;
 mod workspace_dock;
@@ -429,6 +430,7 @@ const HOOK_LSP_DIAGNOSTICS: &str = lsp_hooks::DIAGNOSTICS;
 const HOOK_LSP_CODE_ACTIONS: &str = lsp_hooks::CODE_ACTIONS;
 const HOOK_LSP_COPILOT_SIGN_IN: &str = lsp_hooks::COPILOT_SIGN_IN;
 const HOOK_LSP_COPILOT_SIGN_OUT: &str = lsp_hooks::COPILOT_SIGN_OUT;
+const HOOK_LSP_INSTALL: &str = lsp_hooks::INSTALL;
 const HOOK_DAP_START: &str = dap_hooks::START;
 const HOOK_DAP_START_LAST: &str = dap_hooks::START_LAST;
 const HOOK_DAP_START_RECENT: &str = dap_hooks::START_RECENT;
@@ -455,6 +457,7 @@ const HOOK_DAP_BREAKPOINT_HIT_CONDITION: &str = dap_hooks::BREAKPOINT_HIT_CONDIT
 const HOOK_DAP_BREAKPOINT_LOG_MESSAGE: &str = dap_hooks::BREAKPOINT_LOG_MESSAGE;
 const HOOK_DAP_TOGGLE_VARIABLE: &str = dap_hooks::TOGGLE_VARIABLE;
 const HOOK_DAP_GOTO_BREAKPOINT: &str = dap_hooks::GOTO_BREAKPOINT;
+const HOOK_DAP_INSTALL: &str = dap_hooks::INSTALL;
 const DAP_SESSIONS_BUFFER_NAME: &str = "*dap-sessions*";
 const DAP_LOG_BUFFER_NAME: &str = "*dap-log*";
 const DAP_BREAKPOINTS_BUFFER_NAME: &str = "*dap-breakpoints*";
@@ -8705,6 +8708,8 @@ enum PickerAction {
         target: TextPoint,
     },
     InstallTreeSitterLanguage(String),
+    InstallLanguageServer(String),
+    InstallDebugAdapter(String),
     CreateWorkspace {
         name: String,
         root: PathBuf,
@@ -9401,6 +9406,7 @@ pub(crate) struct ShellUiState {
     pending_workspace_readme_opens: VecDeque<PathBuf>,
     /// Pending DAP start waiting on minibuffer hole fill.
     pending_dap_start: Option<PendingDapStartPrompt>,
+    failed_tool_installs: BTreeSet<String>,
 }
 
 impl ShellUiState {
@@ -9470,6 +9476,7 @@ impl ShellUiState {
             pending_syntax_prewarm_roots: VecDeque::new(),
             pending_workspace_readme_opens: VecDeque::new(),
             pending_dap_start: None,
+            failed_tool_installs: BTreeSet::new(),
         }
     }
 
@@ -19460,6 +19467,14 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     install_tree_sitter_language(runtime, &language_id)?;
                     sync_active_buffer(runtime)?;
                 }
+                PickerAction::InstallLanguageServer(server_id) => {
+                    tool_install::install_language_server_by_id(runtime, &server_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::InstallDebugAdapter(adapter_id) => {
+                    tool_install::install_debug_adapter_by_id(runtime, &adapter_id)?;
+                    sync_active_buffer(runtime)?;
+                }
                 PickerAction::CreateWorkspace { name, root } => {
                     open_workspace_from_project(runtime, &name, &root)?;
                     sync_active_buffer(runtime)?;
@@ -19854,6 +19869,18 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
     }
 
+    if runtime.hooks().contains(HOOK_LSP_INSTALL) {
+        runtime
+            .subscribe_hook(
+                HOOK_LSP_INSTALL,
+                "shell.install-lsp-server",
+                |event, runtime| {
+                    tool_install::handle_lsp_install_hook(runtime, event.detail.as_deref())
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -20100,6 +20127,17 @@ fn register_dap_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 HOOK_DAP_GOTO_BREAKPOINT,
                 "shell.dap-goto-breakpoint",
                 |_, runtime| dap_goto_breakpoint(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_INSTALL) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_INSTALL,
+                "shell.install-dap-adapter",
+                |event, runtime| {
+                    tool_install::handle_dap_install_hook(runtime, event.detail.as_deref())
+                },
             )
             .map_err(|error| error.to_string())?;
     }
@@ -20529,6 +20567,9 @@ fn finish_dap_session_start(
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
     let dap_client = dap_client_manager(runtime)?;
+    if tool_install::install_debug_adapter_then_start(runtime, adapter_id, configuration.clone())? {
+        return Ok(());
+    }
     let extension = dap_start_context(runtime)?.extension;
     dap_client
         .start(
@@ -22366,6 +22407,14 @@ fn execute_lsp_start_for_buffer(
     context: &ActiveLspBufferContext,
     preferred_server_id: Option<&str>,
 ) -> Result<(), String> {
+    if tool_install::queue_missing_language_server_installs(
+        runtime,
+        manager,
+        context,
+        preferred_server_id,
+    )? {
+        return Ok(());
+    }
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, manager, context)?;
     {
@@ -31573,6 +31622,12 @@ fn execute_vim_command_line(runtime: &mut EditorRuntime, command: &str) -> Resul
         sync_active_buffer(runtime)?;
         return Ok(());
     }
+    if let Some(spec_id) = command.strip_prefix("lsp.install-server ") {
+        return tool_install::handle_lsp_install_hook(runtime, Some(spec_id.trim()));
+    }
+    if let Some(spec_id) = command.strip_prefix("dap.install-server ") {
+        return tool_install::handle_dap_install_hook(runtime, Some(spec_id.trim()));
+    }
     let matches = runtime
         .commands()
         .command_names()
@@ -35693,6 +35748,8 @@ fn install_optional_runtime_services(
         .map_err(|error| ShellError::Runtime(error.to_string()))?;
     runtime.services_mut().insert(syntax_registry);
     configure_syntax_refresh_worker(runtime).map_err(ShellError::Runtime)?;
+    editor_tool_install::ensure_install_layout()
+        .map_err(|error| ShellError::Runtime(error.to_string()))?;
     register_lsp_status_hooks(runtime).map_err(ShellError::Runtime)?;
     register_dap_hooks(runtime).map_err(ShellError::Runtime)?;
     Ok(())

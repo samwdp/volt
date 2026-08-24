@@ -1905,6 +1905,11 @@ fn spawn_adapter_command(adapter: &DebugAdapterSpec) -> Result<Child, DapClientE
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    let mut env = Vec::new();
+    editor_tool_install::merge_effective_path(&mut env);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     match command.spawn() {
         Ok(child) => Ok(child),
         Err(error) => Err(DapClientError::AdapterMissing {

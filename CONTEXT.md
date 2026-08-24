@@ -132,6 +132,30 @@ _Avoid_: commit message buffer (when meaning the dedicated commit UI), stream po
 
 ### Language servers
 
+**Language Server**:
+An external language-server program named by a Language Server Spec (for example rust-analyzer or typescript-language-server). Distinct from a Language Server Session, which is one planned or live process of that program.
+_Avoid_: LSP instance (say Session), LSP binary (as the spoken product term)
+
+**Volt Data Directory**:
+The per-user directory that holds Tree-sitter grammars, Language Server Installs, and Debug Adapter Installs as sibling `grammars/`, `lsp/`, and `dap/` folders. Overriding the grammar directory does not move lsp or dap.
+_Avoid_: appdata (as the spoken product term), mason folder
+
+**Install Recipe**:
+A typed method on a Language Server Spec or Debug Adapter Spec: npm, dotnet tool, Go, pip, cargo, or an archive download (GitHub release, zip, vsix). Not an arbitrary shell command. Installs fetch latest; re-running the recipe upgrades. A Spec with no recipe is not Volt-installable; a PATH-visible program still starts.
+_Avoid_: install script (as the spoken product term), mason registry
+
+**Install Picker**:
+The picker opened by `lsp.install-server` or `dap.install-server`. Each row is the Spec id, prefixed with `FA_CHECK` when Volt can already start that program (PATH or a prior Install) and `FA_PLUS` when it cannot. A server or adapter id skips the picker. Choosing a PATH-visible row does not download; choosing an existing Volt copy re-runs the recipe.
+_Avoid_: server list, mason UI, trailing “- installed” text
+
+**Failed Install**:
+An Install Recipe that did not succeed. Auto-start does not retry that Spec again in this Volt process until the matching explicit install command or a successful start.
+_Avoid_: install error (as the spoken term)
+
+**Language Server Install**:
+A Volt-owned copy of a Language Server, used when that program is not already on PATH. Created automatically when start cannot find the program, and by `lsp.install-server`. After an explicit Install, a Language Server Session starts only if the active buffer would auto-start that server. Several missing servers on one open queue one Command Stream at a time. Visible to Volt immediately and on later launches; not added to the user's shell PATH. Volt installs the Language Server, not the language toolchain.
+_Avoid_: global npm package (as the product concept), mason install (as the spoken product term)
+
 **Solution**:
 A `.sln` file that groups one or more C# projects. When a Solution is available, csharp-ls uses one Language Server Session for that Solution — not one Session per `.csproj`.
 _Avoid_: project (when meaning the `.sln`), workspace (when meaning the `.sln`)
@@ -151,8 +175,12 @@ _Avoid_: restart buffer LSP (as the spoken product meaning of `lsp.restart`)
 ### Debugging
 
 **Debug Adapter**:
-An external Debug Adapter Protocol process the user installs on their machine (for example codelldb, gdb, or sharpdbg). Volt does not bundle adapters; compiled user specs only declare how to find and talk to them.
+An external Debug Adapter Protocol process used for a Debug Session (for example codelldb, gdb, or sharpdbg). Distinct from the Debug Session. Volt uses a PATH-visible adapter when one exists; otherwise it may perform a Debug Adapter Install.
 _Avoid_: debugger (when meaning the adapter process), DAP server (as the spoken product term)
+
+**Debug Adapter Install**:
+A Volt-owned copy of a Debug Adapter, used when that program is not already on PATH. Created automatically when start cannot find the program, and by `dap.install-server`. An explicit Install does not start a Debug Session (DAP has no file-open auto-start). A failed `dap.start` may Install then continue starting. Visible to Volt immediately and on later launches; not added to the user's shell PATH. Volt installs the Debug Adapter, not the debugger toolchain.
+_Avoid_: bundled debugger (Volt does not ship adapter binaries in the app), mason install (as the spoken product term)
 
 **Debug Session**:
 At most one live debug connection owned by a Workspace. Leaving the Workspace tears down the Debug Layout but keeps the Session alive; returning rebuilds the layout from Session state.

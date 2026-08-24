@@ -3761,23 +3761,7 @@ where
 }
 
 fn default_install_root() -> PathBuf {
-    if let Some(path) = env::var_os("VOLT_GRAMMAR_DIR").map(PathBuf::from) {
-        return path;
-    }
-
-    let base = if cfg!(target_os = "windows") {
-        env::var_os("LOCALAPPDATA")
-            .or_else(|| env::var_os("APPDATA"))
-            .map(PathBuf::from)
-    } else {
-        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
-            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
-        })
-    };
-
-    base.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("volt")
-        .join("grammars")
+    editor_path::grammar_install_root()
 }
 
 fn default_query_asset_root() -> Option<PathBuf> {

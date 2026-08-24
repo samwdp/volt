@@ -10,7 +10,7 @@ use editor_fs::{DirectoryEntry, DirectoryEntryKind};
 use editor_git::{GitLogEntry, GitStashEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry};
 use editor_icons::{IconFontCategory, IconFontSymbol};
 use editor_lsp::{
-    LanguageServerRootStrategy, LanguageServerSpec, WorkspaceConfiguration,
+    InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, WorkspaceConfiguration,
     WorkspaceConfigurationValue,
 };
 use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
@@ -554,6 +554,124 @@ impl From<AbiLanguageServerRootStrategy> for LanguageServerRootStrategy {
     }
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StableAbi)]
+enum AbiInstallRecipeKind {
+    Npm,
+    DotnetTool,
+    Go,
+    Pip,
+    Cargo,
+    Archive,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
+struct AbiInstallRecipe {
+    kind: AbiInstallRecipeKind,
+    packages: RVec<RString>,
+    prerelease: bool,
+    url: RString,
+    binary: RString,
+}
+
+impl From<&InstallRecipe> for AbiInstallRecipe {
+    fn from(value: &InstallRecipe) -> Self {
+        match value {
+            InstallRecipe::Npm { packages } => Self {
+                kind: AbiInstallRecipeKind::Npm,
+                packages: packages
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<RString>>()
+                    .into(),
+                prerelease: false,
+                url: RString::new(),
+                binary: RString::new(),
+            },
+            InstallRecipe::DotnetTool {
+                package,
+                prerelease,
+            } => Self {
+                kind: AbiInstallRecipeKind::DotnetTool,
+                packages: vec![RString::from(package.clone())].into(),
+                prerelease: *prerelease,
+                url: RString::new(),
+                binary: RString::new(),
+            },
+            InstallRecipe::Go { module } => Self {
+                kind: AbiInstallRecipeKind::Go,
+                packages: vec![RString::from(module.clone())].into(),
+                prerelease: false,
+                url: RString::new(),
+                binary: RString::new(),
+            },
+            InstallRecipe::Pip { packages } => Self {
+                kind: AbiInstallRecipeKind::Pip,
+                packages: packages
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<RString>>()
+                    .into(),
+                prerelease: false,
+                url: RString::new(),
+                binary: RString::new(),
+            },
+            InstallRecipe::Cargo { crate_name } => Self {
+                kind: AbiInstallRecipeKind::Cargo,
+                packages: vec![RString::from(crate_name.clone())].into(),
+                prerelease: false,
+                url: RString::new(),
+                binary: RString::new(),
+            },
+            InstallRecipe::Archive { url, binary } => Self {
+                kind: AbiInstallRecipeKind::Archive,
+                packages: RVec::new(),
+                prerelease: false,
+                url: url.clone().into(),
+                binary: binary.clone().unwrap_or_default().into(),
+            },
+        }
+    }
+}
+
+impl From<AbiInstallRecipe> for InstallRecipe {
+    fn from(value: AbiInstallRecipe) -> Self {
+        let packages: Vec<String> = value
+            .packages
+            .into_iter()
+            .map(RString::into_string)
+            .collect();
+        match value.kind {
+            AbiInstallRecipeKind::Npm => Self::Npm { packages },
+            AbiInstallRecipeKind::DotnetTool => Self::DotnetTool {
+                package: packages.into_iter().next().unwrap_or_default(),
+                prerelease: value.prerelease,
+            },
+            AbiInstallRecipeKind::Go => Self::Go {
+                module: packages.into_iter().next().unwrap_or_default(),
+            },
+            AbiInstallRecipeKind::Pip => Self::Pip { packages },
+            AbiInstallRecipeKind::Cargo => Self::Cargo {
+                crate_name: packages.into_iter().next().unwrap_or_default(),
+            },
+            AbiInstallRecipeKind::Archive => Self::Archive {
+                url: value.url.into_string(),
+                binary: {
+                    let binary = value.binary.into_string();
+                    if binary.is_empty() {
+                        None
+                    } else {
+                        Some(binary)
+                    }
+                },
+            },
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, StableAbi)]
 pub struct AbiLanguageServerSpec {
@@ -571,6 +689,7 @@ pub struct AbiLanguageServerSpec {
     env: RVec<AbiStringPair>,
     workspace_configuration: AbiWorkspaceConfiguration,
     enabled_by_default: bool,
+    install_recipe: ROption<AbiInstallRecipe>,
 }
 
 impl From<LanguageServerSpec> for AbiLanguageServerSpec {
@@ -638,6 +757,7 @@ impl From<LanguageServerSpec> for AbiLanguageServerSpec {
             env: env.into(),
             workspace_configuration: value.workspace_configuration().into(),
             enabled_by_default: value.enabled_by_default(),
+            install_recipe: value.install_recipe().map(AbiInstallRecipe::from).into(),
         }
     }
 }
@@ -663,6 +783,9 @@ impl From<AbiLanguageServerSpec> for LanguageServerSpec {
         )
         .with_root_strategy(value.root_strategy.into())
         .with_enabled_by_default(value.enabled_by_default);
+        if let Some(recipe) = value.install_recipe.into_option() {
+            spec = spec.with_install_recipe(recipe.into());
+        }
         let mappings = value
             .document_language_ids
             .into_iter()
@@ -766,6 +889,7 @@ pub struct AbiDebugAdapterSpec {
     root_markers: RVec<RString>,
     root_strategy: AbiDebugAdapterRootStrategy,
     enabled_by_default: bool,
+    install_recipe: ROption<AbiInstallRecipe>,
 }
 
 impl From<DebugAdapterSpec> for AbiDebugAdapterSpec {
@@ -799,13 +923,14 @@ impl From<DebugAdapterSpec> for AbiDebugAdapterSpec {
                 .into(),
             root_strategy: value.root_strategy().into(),
             enabled_by_default: value.enabled_by_default(),
+            install_recipe: value.install_recipe().map(AbiInstallRecipe::from).into(),
         }
     }
 }
 
 impl From<AbiDebugAdapterSpec> for DebugAdapterSpec {
     fn from(value: AbiDebugAdapterSpec) -> Self {
-        DebugAdapterSpec::new(
+        let mut spec = DebugAdapterSpec::new(
             value.id.into_string(),
             value.language_id.into_string(),
             value.file_extensions.into_iter().map(RString::into_string),
@@ -816,7 +941,11 @@ impl From<AbiDebugAdapterSpec> for DebugAdapterSpec {
         .with_preference(value.preference)
         .with_root_markers(value.root_markers.into_iter().map(RString::into_string))
         .with_root_strategy(value.root_strategy.into())
-        .with_enabled_by_default(value.enabled_by_default)
+        .with_enabled_by_default(value.enabled_by_default);
+        if let Some(recipe) = value.install_recipe.into_option() {
+            spec = spec.with_install_recipe(recipe.into());
+        }
+        spec
     }
 }
 
@@ -2670,10 +2799,11 @@ impl RootModule for UserLibraryModuleRef {
 mod tests {
     use std::path::Path;
 
-    use editor_lsp::LanguageServerSpec;
+    use editor_dap::DebugAdapterSpec;
+    use editor_lsp::{InstallRecipe, LanguageServerSpec};
     use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
-    use super::{AbiLanguageConfiguration, AbiLanguageServerSpec};
+    use super::{AbiDebugAdapterSpec, AbiLanguageConfiguration, AbiLanguageServerSpec};
 
     #[test]
     fn abi_language_configuration_round_trips_path_matchers() {
@@ -2852,5 +2982,53 @@ mod tests {
             .expect("hint array");
         assert_eq!(hints[0].as_str(), Some("types"));
         assert!(hints[1].is_null());
+    }
+
+    #[test]
+    fn abi_language_server_spec_round_trips_install_recipe() {
+        let spec = LanguageServerSpec::new(
+            "typescript-language-server",
+            "typescript",
+            ["ts"],
+            "typescript-language-server",
+            ["--stdio"],
+        )
+        .with_install_recipe(InstallRecipe::npm([
+            "typescript-language-server",
+            "typescript",
+        ]));
+
+        let round_trip = LanguageServerSpec::from(AbiLanguageServerSpec::from(spec));
+        match round_trip.install_recipe() {
+            Some(InstallRecipe::Npm { packages }) => {
+                assert_eq!(
+                    packages,
+                    &[
+                        "typescript-language-server".to_owned(),
+                        "typescript".to_owned()
+                    ]
+                );
+            }
+            other => panic!("expected npm recipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abi_debug_adapter_spec_round_trips_install_recipe() {
+        let spec =
+            DebugAdapterSpec::new("codelldb", "rust", ["rs"], "codelldb", ["--port", "13000"])
+                .with_install_recipe(InstallRecipe::github_release_binary(
+                    "vadimcn/codelldb",
+                    "codelldb-win32-x64.vsix",
+                    "extension/adapter/codelldb.exe",
+                ));
+        let round_trip = DebugAdapterSpec::from(AbiDebugAdapterSpec::from(spec));
+        match round_trip.install_recipe() {
+            Some(InstallRecipe::Archive { url, binary }) => {
+                assert!(url.contains("codelldb-win32-x64.vsix"));
+                assert_eq!(binary.as_deref(), Some("extension/adapter/codelldb.exe"));
+            }
+            other => panic!("expected archive recipe, got {other:?}"),
+        }
     }
 }

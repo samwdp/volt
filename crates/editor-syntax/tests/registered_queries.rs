@@ -7,9 +7,10 @@
 //! and uses the bundled `markdown-inline/highlights.scm` query; this is the
 //! explicit regression guard requested for that language pair.
 #![allow(unused_crate_dependencies)]
-use std::{env, path::PathBuf};
+use std::path::PathBuf;
 
 use editor_buffer::TextBuffer;
+use editor_path::grammar_install_root;
 use editor_syntax::{
     CaptureThemeMapping, GrammarSource, HighlightWindow, LanguageConfiguration, SyntaxRegistry,
 };
@@ -48,23 +49,7 @@ fn user_grammars_root() -> PathBuf {
 }
 
 fn default_grammars_root() -> PathBuf {
-    if let Some(path) = env::var_os("VOLT_GRAMMAR_DIR").map(PathBuf::from) {
-        return path;
-    }
-
-    let base = if cfg!(target_os = "windows") {
-        env::var_os("LOCALAPPDATA")
-            .or_else(|| env::var_os("APPDATA"))
-            .map(PathBuf::from)
-    } else {
-        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
-            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
-        })
-    };
-
-    base.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("volt")
-        .join("grammars")
+    grammar_install_root()
 }
 
 fn rust_language() -> editor_syntax::Language {

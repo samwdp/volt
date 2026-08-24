@@ -31,6 +31,9 @@ tree-sitter-rust = "0.24.1"
 [dev-dependencies.editor-buffer]
 path = "../editor-buffer"
 
+[dev-dependencies.editor-path]
+path = "../editor-path"
+
 [target."cfg(windows)".dependencies]
 find-msvc-tools = "0.1.9"
 

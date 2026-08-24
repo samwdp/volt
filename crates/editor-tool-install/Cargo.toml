@@ -1,0 +1,26 @@
+[package]
+name = "editor-tool-install"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies.editor-jobs]
+path = "../editor-jobs"
+
+[dependencies.editor-path]
+path = "../editor-path"
+
+[lib]
+path = "src/lib.rs"
+name = "editor_tool_install"
+required-features = []
+crate-type = ["lib"]

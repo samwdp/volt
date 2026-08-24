@@ -1,6 +1,9 @@
 #![doc = r#"Filename-aware path matching shared across syntax, LSP, and hook dispatch."#]
 
-use std::path::Path;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 const EXTENSION_SCORE_BASE: usize = 1_000;
 const GLOB_SCORE_BASE: usize = 2_000;
@@ -12,6 +15,29 @@ pub const ROLE: &str = "Filename-aware path matching shared across syntax, LSP, 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
     ROLE
+}
+
+/// Per-user Volt data directory (`…/volt`), parent of grammars, lsp, and dap.
+pub fn volt_data_dir() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("APPDATA"))
+            .map(PathBuf::from)
+    } else {
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+    };
+
+    base.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("volt")
+}
+
+/// Tree-sitter grammar install root. `VOLT_GRAMMAR_DIR` overrides this folder only.
+pub fn grammar_install_root() -> PathBuf {
+    env::var_os("VOLT_GRAMMAR_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| volt_data_dir().join("grammars"))
 }
 
 /// One supported filename matching strategy.
@@ -241,7 +267,9 @@ fn glob_matches(pattern: &str, candidate: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{PathMatcher, PathPattern, normalize_extension};
+    use super::{
+        PathMatcher, PathPattern, grammar_install_root, normalize_extension, volt_data_dir,
+    };
 
     #[test]
     fn filter_parsing_preserves_extension_filename_and_glob_forms() {
@@ -278,5 +306,14 @@ mod tests {
     #[test]
     fn normalize_extension_strips_dots_and_lowercases() {
         assert_eq!(normalize_extension(".RS"), "rs");
+    }
+
+    #[test]
+    fn grammar_install_root_is_under_volt_data_dir_without_override() {
+        // SAFETY: test process may already have VOLT_GRAMMAR_DIR; we only assert default shape
+        // when the override is unset.
+        if std::env::var_os("VOLT_GRAMMAR_DIR").is_none() {
+            assert_eq!(grammar_install_root(), volt_data_dir().join("grammars"));
+        }
     }
 }

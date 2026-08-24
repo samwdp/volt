@@ -18,7 +18,9 @@ pub use editor_dap::{
 pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
 pub use editor_git::{GitStatusSnapshot, StatusEntry};
 pub use editor_icons::{IconFontCategory, IconFontSymbol};
-pub use editor_lsp::{LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind};
+pub use editor_lsp::{
+    InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind,
+};
 pub use editor_syntax::{
     CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxNodeContext, SyntaxPoint,
 };
@@ -101,6 +103,7 @@ pub mod dap_hooks {
     pub const BREAKPOINT_LOG_MESSAGE: &str = "dap.breakpoint-log-message";
     pub const TOGGLE_VARIABLE: &str = "dap.toggle-variable";
     pub const GOTO_BREAKPOINT: &str = "dap.goto-breakpoint";
+    pub const INSTALL: &str = "dap.install-server";
 }
 
 /// Hook name constants for the LSP subsystem.
@@ -116,6 +119,7 @@ pub mod lsp_hooks {
     pub const CODE_ACTIONS: &str = "lsp.code-actions";
     pub const COPILOT_SIGN_IN: &str = "lsp.copilot-sign-in";
     pub const COPILOT_SIGN_OUT: &str = "lsp.copilot-sign-out";
+    pub const INSTALL: &str = "lsp.install-server";
 }
 
 /// Hook name constants for the git subsystem.

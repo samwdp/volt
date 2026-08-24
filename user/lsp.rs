@@ -1,7 +1,8 @@
 use crate::icon_font::symbols::md;
 use editor_plugin_api::{
-    LanguageServerRootStrategy, LanguageServerSpec, PluginAction, PluginCommand, PluginHookBinding,
-    PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
+    InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, PluginAction, PluginCommand,
+    PluginHookBinding, PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginVimMode,
 };
 
 pub const HOOK_LSP_START: &str = "lsp.server-start";
@@ -15,6 +16,7 @@ pub const HOOK_LSP_DIAGNOSTICS: &str = "lsp.diagnostics";
 pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
 pub const HOOK_LSP_COPILOT_SIGN_IN: &str = "lsp.copilot-sign-in";
 pub const HOOK_LSP_COPILOT_SIGN_OUT: &str = "lsp.copilot-sign-out";
+pub const HOOK_LSP_INSTALL: &str = "lsp.install-server";
 pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Space";
 pub const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
 pub const COPILOT_ENABLED_DEFAULT: bool = false;
@@ -145,6 +147,11 @@ pub fn package() -> PluginPackage {
             "Signs the active GitHub Copilot language server session out.",
             HOOK_LSP_COPILOT_SIGN_OUT,
             None,
+        ),
+        PluginCommand::new(
+            "lsp.install-server",
+            "Installs a Language Server from a picker, or a Spec id.",
+            vec![PluginAction::emit_hook(HOOK_LSP_INSTALL, None::<&str>)],
         ),
         hook_command(
             "lsp.start-rust-analyzer",
@@ -422,6 +429,10 @@ pub fn package() -> PluginPackage {
         PluginHookDeclaration::new(
             HOOK_LSP_COPILOT_SIGN_OUT,
             "Signs the active GitHub Copilot language server session out.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_LSP_INSTALL,
+            "Installs a Language Server when it is missing from PATH.",
         ),
     ])
     .with_key_bindings(vec![
@@ -1530,6 +1541,14 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
     ];
     servers.push(copilot_language_server(&servers));
     servers
+        .into_iter()
+        .map(
+            |server| match install_recipe_for_language_server(server.id()) {
+                Some(recipe) => server.with_install_recipe(recipe),
+                None => server,
+            },
+        )
+        .collect()
 }
 
 fn copilot_language_server(servers: &[LanguageServerSpec]) -> LanguageServerSpec {
@@ -1566,6 +1585,100 @@ fn copilot_language_server(servers: &[LanguageServerSpec]) -> LanguageServerSpec
     .with_file_names(file_names)
     .with_document_language_ids(document_language_ids)
     .with_enabled_by_default(COPILOT_ENABLED_DEFAULT)
+}
+
+fn install_recipe_for_language_server(server_id: &str) -> Option<InstallRecipe> {
+    match server_id {
+        SERVER_TYPESCRIPT_LANGUAGE_SERVER => Some(InstallRecipe::npm([
+            "typescript-language-server",
+            "typescript",
+        ])),
+        SERVER_TAILWINDCSS_LANGUAGE_SERVER => {
+            Some(InstallRecipe::npm(["@tailwindcss/language-server"]))
+        }
+        SERVER_VSCODE_JSON_LANGUAGE_SERVER
+        | SERVER_VSCODE_HTML_LANGUAGE_SERVER
+        | SERVER_VSCODE_CSS_LANGUAGE_SERVER => {
+            Some(InstallRecipe::npm(["vscode-langservers-extracted"]))
+        }
+        SERVER_YAML_LANGUAGE_SERVER => Some(InstallRecipe::npm(["yaml-language-server"])),
+        SERVER_BASH_LANGUAGE_SERVER => Some(InstallRecipe::npm(["bash-language-server"])),
+        SERVER_GRAPHQL_LANGUAGE_SERVICE => {
+            Some(InstallRecipe::npm(["graphql-language-service-cli"]))
+        }
+        SERVER_INTELEPHENSE => Some(InstallRecipe::npm(["intelephense"])),
+        SERVER_PERLNAVIGATOR => Some(InstallRecipe::npm(["perlnavigator-server"])),
+        COPILOT_LANGUAGE_SERVER => Some(InstallRecipe::npm(["@github/copilot-language-server"])),
+        SERVER_CSHARP_LS => Some(InstallRecipe::dotnet_tool("csharp-ls")),
+        SERVER_ROSLYN_LANGUAGE_SERVER => Some(InstallRecipe::dotnet_tool_prerelease(
+            "roslyn-language-server",
+        )),
+        SERVER_GOPLS => Some(InstallRecipe::go("golang.org/x/tools/gopls@latest")),
+        SERVER_SQLS => Some(InstallRecipe::go("github.com/sqls-server/sqls@latest")),
+        SERVER_BUFLS => Some(InstallRecipe::go(
+            "github.com/bufbuild/buf-language-server/cmd/bufls@latest",
+        )),
+        SERVER_PYRIGHT_LANGSERVER => Some(InstallRecipe::pip(["jedi-language-server"])),
+        SERVER_CMAKE_LANGUAGE_SERVER => Some(InstallRecipe::pip(["cmake-language-server"])),
+        SERVER_MAKEFILE_LANGUAGE_SERVER => Some(InstallRecipe::pip(["makefile-language-server"])),
+        SERVER_TOMBI => Some(InstallRecipe::cargo("tombi")),
+        SERVER_TEXLAB => Some(InstallRecipe::cargo("texlab")),
+        SERVER_RUST_ANALYZER => rust_analyzer_recipe(),
+        SERVER_MARKSMAN => marksman_recipe(),
+        SERVER_ELIXIR_LS => Some(InstallRecipe::github_release(
+            "elixir-lsp/elixir-ls",
+            "elixir-ls.zip",
+        )),
+        SERVER_CLOJURE_LSP => clojure_lsp_recipe(),
+        _ => None,
+    }
+}
+
+fn rust_analyzer_recipe() -> Option<InstallRecipe> {
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "rust-analyzer-x86_64-pc-windows-msvc.zip",
+        ("windows", "aarch64") => "rust-analyzer-aarch64-pc-windows-msvc.zip",
+        ("linux", "x86_64") => "rust-analyzer-x86_64-unknown-linux-gnu.gz",
+        ("linux", "aarch64") => "rust-analyzer-aarch64-unknown-linux-gnu.gz",
+        ("macos", "x86_64") => "rust-analyzer-x86_64-apple-darwin.gz",
+        ("macos", "aarch64") => "rust-analyzer-aarch64-apple-darwin.gz",
+        _ => return None,
+    };
+    Some(InstallRecipe::github_release(
+        "rust-lang/rust-analyzer",
+        asset,
+    ))
+}
+
+fn marksman_recipe() -> Option<InstallRecipe> {
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "marksman-windows-x64.exe",
+        ("linux", "x86_64") => "marksman-linux-x64",
+        ("linux", "aarch64") => "marksman-linux-arm64",
+        ("macos", "x86_64") => "marksman-macos",
+        ("macos", "aarch64") => "marksman-macos-arm64",
+        _ => return None,
+    };
+    Some(InstallRecipe::github_release_binary(
+        "artempyanykh/marksman",
+        asset,
+        asset,
+    ))
+}
+
+fn clojure_lsp_recipe() -> Option<InstallRecipe> {
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "clojure-lsp-native-windows-amd64.zip",
+        ("linux", "x86_64") => "clojure-lsp-native-linux-amd64.zip",
+        ("linux", "aarch64") => "clojure-lsp-native-linux-aarch64.zip",
+        ("macos", "x86_64") => "clojure-lsp-native-macos-amd64.zip",
+        ("macos", "aarch64") => "clojure-lsp-native-macos-aarch64.zip",
+        _ => return None,
+    };
+    Some(InstallRecipe::github_release(
+        "clojure-lsp/clojure-lsp",
+        asset,
+    ))
 }
 
 fn hook_command(
@@ -1624,6 +1737,7 @@ mod tests {
             "lsp.diagnostics",
             "lsp.code-actions",
             "lsp.code-action",
+            "lsp.install-server",
         ] {
             assert!(
                 has_command(&package, command_name),
@@ -1701,6 +1815,42 @@ mod tests {
             .find(|server| server.id() == SERVER_SQLS)
             .expect("sqls server should be registered");
         assert_eq!(sqls.workspace_configuration_section(), Some("sqls"));
+    }
+
+    #[test]
+    fn language_servers_attach_typed_install_recipes() {
+        let servers = language_servers();
+        let recipe_kind = |id: &str| {
+            servers
+                .iter()
+                .find(|server| server.id() == id)
+                .and_then(|server| server.install_recipe())
+                .map(|recipe| match recipe {
+                    InstallRecipe::Npm { .. } => "npm",
+                    InstallRecipe::DotnetTool { .. } => "dotnet",
+                    InstallRecipe::Go { .. } => "go",
+                    InstallRecipe::Pip { .. } => "pip",
+                    InstallRecipe::Cargo { .. } => "cargo",
+                    InstallRecipe::Archive { .. } => "archive",
+                })
+        };
+
+        assert_eq!(recipe_kind(SERVER_TYPESCRIPT_LANGUAGE_SERVER), Some("npm"));
+        assert_eq!(recipe_kind(SERVER_CSHARP_LS), Some("dotnet"));
+        assert_eq!(recipe_kind(SERVER_GOPLS), Some("go"));
+        assert_eq!(recipe_kind(SERVER_PYRIGHT_LANGSERVER), Some("pip"));
+        assert_eq!(recipe_kind(SERVER_TOMBI), Some("cargo"));
+        if rust_analyzer_recipe().is_some() {
+            assert_eq!(recipe_kind(SERVER_RUST_ANALYZER), Some("archive"));
+        }
+        assert!(
+            servers
+                .iter()
+                .find(|server| server.id() == SERVER_SOURCEKIT_LSP)
+                .expect("sourcekit")
+                .install_recipe()
+                .is_none()
+        );
     }
 
     #[test]

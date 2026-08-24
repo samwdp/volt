@@ -1055,6 +1055,7 @@ version = "0.1.0"
 dependencies = [
  "dap-types",
  "editor-jobs",
+ "editor-tool-install",
  "serde",
  "serde_json",
 ]
@@ -1104,6 +1105,7 @@ dependencies = [
  "editor-buffer",
  "editor-jobs",
  "editor-path",
+ "editor-tool-install",
  "lsp-types",
  "serde",
  "serde_json",
@@ -1185,6 +1187,7 @@ dependencies = [
  "editor-syntax",
  "editor-terminal",
  "editor-theme",
+ "editor-tool-install",
  "fontdue",
  "gtk",
  "image",
@@ -1229,6 +1232,14 @@ dependencies = [
 [[package]]
 name = "editor-theme"
 version = "0.1.0"
+
+[[package]]
+name = "editor-tool-install"
+version = "0.1.0"
+dependencies = [
+ "editor-jobs",
+ "editor-path",
+]
 
 [[package]]
 name = "either"
