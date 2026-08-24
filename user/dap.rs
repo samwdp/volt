@@ -1,7 +1,8 @@
 use editor_plugin_api::{
     DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport, PluginAction, PluginBuffer,
     PluginBufferLayout, PluginBufferLayoutNode, PluginBufferSection, PluginBufferSections,
-    PluginCommand, PluginHookDeclaration, PluginPackage, buffer_kinds, dap_hooks,
+    PluginCommand, PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage,
+    PluginVimMode, buffer_kinds, dap_hooks,
 };
 
 pub const HOOK_DAP_START: &str = dap_hooks::START;
@@ -18,9 +19,22 @@ pub const HOOK_DAP_LOG: &str = dap_hooks::LOG;
 pub const HOOK_DAP_TOGGLE_BREAKPOINT: &str = dap_hooks::TOGGLE_BREAKPOINT;
 pub const HOOK_DAP_DELETE_BREAKPOINT: &str = dap_hooks::DELETE_BREAKPOINT;
 pub const HOOK_DAP_OPEN_BREAKPOINTS: &str = dap_hooks::OPEN_BREAKPOINTS;
+pub const HOOK_DAP_EXPRESSIONS_ADD: &str = dap_hooks::EXPRESSIONS_ADD;
+pub const HOOK_DAP_EXPRESSIONS_REMOVE: &str = dap_hooks::EXPRESSIONS_REMOVE;
+pub const HOOK_DAP_EVAL: &str = dap_hooks::EVAL;
+pub const HOOK_DAP_EVAL_AT_POINT: &str = dap_hooks::EVAL_AT_POINT;
+pub const HOOK_DAP_REPL: &str = dap_hooks::REPL;
+pub const HOOK_DAP_SWITCH_THREAD: &str = dap_hooks::SWITCH_THREAD;
+pub const HOOK_DAP_SWITCH_STACK_FRAME: &str = dap_hooks::SWITCH_STACK_FRAME;
+pub const HOOK_DAP_BREAKPOINT_CONDITION: &str = dap_hooks::BREAKPOINT_CONDITION;
+pub const HOOK_DAP_BREAKPOINT_HIT_CONDITION: &str = dap_hooks::BREAKPOINT_HIT_CONDITION;
+pub const HOOK_DAP_BREAKPOINT_LOG_MESSAGE: &str = dap_hooks::BREAKPOINT_LOG_MESSAGE;
+pub const HOOK_DAP_TOGGLE_VARIABLE: &str = dap_hooks::TOGGLE_VARIABLE;
+pub const HOOK_DAP_GOTO_BREAKPOINT: &str = dap_hooks::GOTO_BREAKPOINT;
 
 pub const BREAKPOINTS_KIND: &str = buffer_kinds::DAP_BREAKPOINTS;
 pub const LOCALS_KIND: &str = buffer_kinds::DAP_LOCALS;
+pub const REPL_KIND: &str = buffer_kinds::DAP_REPL;
 
 pub const LOCALS_SECTION: &str = "Locals";
 pub const EXPRESSIONS_SECTION: &str = "Expressions";
@@ -103,6 +117,96 @@ pub fn package() -> PluginPackage {
             )],
         ),
         PluginCommand::new(
+            "dap.expressions-add",
+            "Adds a Watch Expression to the Expressions section.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_EXPRESSIONS_ADD,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.expressions-remove",
+            "Removes a Watch Expression from the Expressions section.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_EXPRESSIONS_REMOVE,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.eval",
+            "Evaluates an expression once without adding a Watch.",
+            vec![PluginAction::emit_hook(HOOK_DAP_EVAL, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "dap.eval-at-point",
+            "Evaluates the identifier at point once without adding a Watch.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_EVAL_AT_POINT,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.repl",
+            "Opens the debug REPL Popup.",
+            vec![PluginAction::emit_hook(HOOK_DAP_REPL, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "dap.switch-thread",
+            "Switches the active Debug Session thread.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_SWITCH_THREAD,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.switch-stack-frame",
+            "Switches the active Debug Session stack frame.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_SWITCH_STACK_FRAME,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.breakpoint-condition",
+            "Sets or clears the Breakpoint condition on the current line.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_BREAKPOINT_CONDITION,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.breakpoint-hit-condition",
+            "Sets or clears the Breakpoint hit condition on the current line.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_BREAKPOINT_HIT_CONDITION,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.breakpoint-log-message",
+            "Sets or clears the Breakpoint log message (logpoint) on the current line.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_BREAKPOINT_LOG_MESSAGE,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.toggle-variable",
+            "Expands or collapses the Locals or Watch Expression under the cursor.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_TOGGLE_VARIABLE,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "dap.goto-breakpoint",
+            "Jumps to the source of the Breakpoint under the cursor.",
+            vec![PluginAction::emit_hook(
+                HOOK_DAP_GOTO_BREAKPOINT,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
             "dap.start-codelldb",
             "Starts a Rust Debug Session with the codelldb adapter.",
             vec![PluginAction::emit_hook(HOOK_DAP_START, Some("codelldb"))],
@@ -167,26 +271,101 @@ pub fn package() -> PluginPackage {
             HOOK_DAP_OPEN_BREAKPOINTS,
             "Opens the Workspace Breakpoints surface.",
         ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_EXPRESSIONS_ADD,
+            "Adds a Watch Expression shown under Locals.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_EXPRESSIONS_REMOVE,
+            "Removes a Watch Expression from the Expressions section.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_EVAL,
+            "Evaluates an expression once without adding a Watch.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_EVAL_AT_POINT,
+            "Evaluates the identifier at point once without adding a Watch.",
+        ),
+        PluginHookDeclaration::new(HOOK_DAP_REPL, "Opens the debug REPL Popup."),
+        PluginHookDeclaration::new(
+            HOOK_DAP_SWITCH_THREAD,
+            "Switches the active Debug Session thread and refreshes Locals/watches.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_SWITCH_STACK_FRAME,
+            "Switches the active stack frame and refreshes Locals/watches.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_BREAKPOINT_CONDITION,
+            "Sets or clears the Breakpoint condition and syncs to the adapter.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_BREAKPOINT_HIT_CONDITION,
+            "Sets or clears the Breakpoint hit condition and syncs to the adapter.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_BREAKPOINT_LOG_MESSAGE,
+            "Sets or clears the Breakpoint log message and syncs to the adapter.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_TOGGLE_VARIABLE,
+            "Toggles expansion of a structured Locals or Watch Expression row.",
+        ),
+        PluginHookDeclaration::new(
+            HOOK_DAP_GOTO_BREAKPOINT,
+            "Opens the source of the Breakpoint under the cursor.",
+        ),
     ])
     .with_buffers(vec![
         PluginBuffer::new(
             BREAKPOINTS_KIND,
             vec!["No Breakpoints in this Workspace.".to_owned()],
+        )
+        .with_key_bindings(vec![
+            PluginKeyBinding::new("Enter", "dap.goto-breakpoint", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+        ]),
+        PluginBuffer::new(
+            LOCALS_KIND,
+            vec!["No locals".to_owned(), "Watch Expressions".to_owned()],
+        )
+        .with_sections(locals_sections())
+        .with_key_bindings(vec![
+            PluginKeyBinding::new("Enter", "dap.toggle-variable", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+            PluginKeyBinding::new("l", "dap.toggle-variable", PluginKeymapScope::Workspace)
+                .with_vim_mode(PluginVimMode::Normal),
+        ]),
+        PluginBuffer::new(
+            REPL_KIND,
+            vec!["(debug REPL — enter expression below)".to_owned()],
         ),
-        PluginBuffer::new(LOCALS_KIND, vec!["(no locals)".to_owned()])
-            .with_sections(locals_sections()),
+    ])
+    .with_key_bindings(vec![
+        PluginKeyBinding::new(
+            "Space d a",
+            "dap.toggle-breakpoint",
+            PluginKeymapScope::Workspace,
+        ),
+        PluginKeyBinding::new("F5", "dap.start", PluginKeymapScope::Global),
+        PluginKeyBinding::new("F5", "dap.continue", PluginKeymapScope::Dap),
+        PluginKeyBinding::new("F10", "dap.step", PluginKeymapScope::Dap),
+        PluginKeyBinding::new("F11", "dap.step-into", PluginKeymapScope::Dap),
     ])
 }
 
-/// Locals pane: Locals above, Expressions below (empty until watches added).
+/// Locals pane: adapter locals above a Watch Expressions header (insert a line to watch).
+/// Expressions below mirrors those watches.
 pub fn locals_sections() -> PluginBufferSections {
     PluginBufferSections::new(vec![
         PluginBufferSection::new(LOCALS_SECTION)
+            .with_writable(true)
             .with_min_lines(4)
-            .with_initial_lines(vec!["(no locals)".to_owned()]),
+            .with_initial_lines(vec!["No locals".to_owned(), "Watch Expressions".to_owned()]),
         PluginBufferSection::new(EXPRESSIONS_SECTION)
             .with_min_lines(2)
-            .with_initial_lines(vec!["(no expressions)".to_owned()]),
+            .with_initial_lines(vec!["No watches".to_owned()]),
     ])
     .with_layout(PluginBufferLayout::rows(vec![
         PluginBufferLayoutNode::section(LOCALS_SECTION, 3),
@@ -215,10 +394,16 @@ pub fn debug_adapters() -> Vec<DebugAdapterSpec> {
         .with_preference(50)
         .with_root_markers(["Cargo.toml", "Makefile", "CMakeLists.txt"])
         .with_root_strategy(DebugAdapterRootStrategy::MarkersOrWorkspace),
-        DebugAdapterSpec::new("sharpdbg", "csharp", ["cs"], "sharpdbg", [] as [&str; 0])
-            .with_preference(100)
-            .with_root_markers(["*.sln", "*.csproj"])
-            .with_root_strategy(DebugAdapterRootStrategy::MarkersOrWorkspace),
+        DebugAdapterSpec::new(
+            "sharpdbg",
+            "csharp",
+            ["cs"],
+            "sharpdbg",
+            ["--interpreter=vscode"],
+        )
+        .with_preference(100)
+        .with_root_markers(["*.sln", "*.csproj"])
+        .with_root_strategy(DebugAdapterRootStrategy::MarkersOrWorkspace),
     ]
 }
 
@@ -240,6 +425,10 @@ mod tests {
         );
         let layout = sections.layout().expect("locals layout");
         assert_eq!(layout.children().len(), 2);
+        assert!(
+            sections.sections()[0].writable(),
+            "Locals section must be writable so Watch Expressions can be inserted as lines"
+        );
     }
 
     #[test]
@@ -251,6 +440,29 @@ mod tests {
                 .buffer(LOCALS_KIND)
                 .and_then(|buffer| buffer.sections().cloned())
                 .is_some()
+        );
+        assert!(package.buffer(REPL_KIND).is_some());
+        let locals_chords: Vec<_> = package
+            .buffer(LOCALS_KIND)
+            .expect("locals")
+            .key_bindings()
+            .iter()
+            .map(|binding| (binding.chord(), binding.command_name()))
+            .collect();
+        assert!(
+            locals_chords.contains(&("Enter", "dap.toggle-variable")),
+            "Locals Enter must toggle expansion: {locals_chords:?}"
+        );
+        let bp_chords: Vec<_> = package
+            .buffer(BREAKPOINTS_KIND)
+            .expect("breakpoints")
+            .key_bindings()
+            .iter()
+            .map(|binding| (binding.chord(), binding.command_name()))
+            .collect();
+        assert!(
+            bp_chords.contains(&("Enter", "dap.goto-breakpoint")),
+            "Breakpoints Enter must jump: {bp_chords:?}"
         );
     }
 
@@ -269,6 +481,36 @@ mod tests {
             "dap.step-into",
             "dap.step-out",
             "dap.restart",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing command {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_exports_polish_commands() {
+        let package = package();
+        let names: Vec<_> = package
+            .commands()
+            .iter()
+            .map(|command| command.name().to_owned())
+            .collect();
+        for expected in [
+            "dap.expressions-add",
+            "dap.expressions-remove",
+            "dap.eval",
+            "dap.eval-at-point",
+            "dap.repl",
+            "dap.switch-thread",
+            "dap.switch-stack-frame",
+            "dap.breakpoint-condition",
+            "dap.breakpoint-hit-condition",
+            "dap.breakpoint-log-message",
+            "dap.toggle-variable",
+            "dap.goto-breakpoint",
+            "dap.log",
         ] {
             assert!(
                 names.iter().any(|name| name == expected),
@@ -317,6 +559,11 @@ mod tests {
             .expect("sharpdbg");
         assert!(csharp.file_extensions().iter().any(|ext| ext == "cs"));
         assert_eq!(csharp.preference(), 100);
+        assert_eq!(
+            csharp.args(),
+            &["--interpreter=vscode".to_owned()],
+            "sharpdbg requires --interpreter=vscode for DAP stdio"
+        );
 
         let cpp_gdb = adapters
             .iter()
@@ -329,5 +576,39 @@ mod tests {
             })
             .expect("gdb for c/c++");
         assert_eq!(cpp_gdb.preference(), 50);
+    }
+
+    #[test]
+    fn package_exports_workspace_and_dap_mode_keybindings() {
+        let package = package();
+        let bindings: Vec<_> = package
+            .key_bindings()
+            .iter()
+            .map(|binding| (binding.chord(), binding.command_name(), binding.scope()))
+            .collect();
+        assert!(
+            bindings.contains(&(
+                "Space d a",
+                "dap.toggle-breakpoint",
+                PluginKeymapScope::Workspace
+            )),
+            "Workspace <leader> da must toggle Breakpoint"
+        );
+        assert!(
+            bindings.contains(&("F5", "dap.start", PluginKeymapScope::Global)),
+            "F5 must start a Debug Session when DAP Mode is inactive"
+        );
+        assert!(
+            bindings.contains(&("F5", "dap.continue", PluginKeymapScope::Dap)),
+            "DAP Mode F5 must continue"
+        );
+        assert!(
+            bindings.contains(&("F10", "dap.step", PluginKeymapScope::Dap)),
+            "DAP Mode F10 must step over"
+        );
+        assert!(
+            bindings.contains(&("F11", "dap.step-into", PluginKeymapScope::Dap)),
+            "DAP Mode F11 must step into"
+        );
     }
 }

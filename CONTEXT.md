@@ -27,7 +27,7 @@ A project root path recorded in the Mark List for quick jump. List order matters
 _Avoid_: favorite, bookmark, pin, starred workspace
 
 **Minor Mode**:
-A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, autocomplete, and hover are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
+A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, autocomplete, hover, and DAP Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
 _Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
 
 **Worktree**:
@@ -175,12 +175,16 @@ A line marker stored for a Workspace (in memory for now) that can be toggled wit
 _Avoid_: debug point, red dot (as the product term)
 
 **Watch Expression**:
-A user-owned expression kept in the Expressions section of the Locals pane and re-evaluated while stopped. Distinct from one-shot evaluate via minibuffer or the debug REPL Popup.
+A user-owned expression. Insert a line under the Watch Expressions header in the Locals section (or use the Expressions section / add command). Re-evaluated while the Debug Session is stopped, and as soon as a new line is committed during a live Session.
 _Avoid_: watch (alone), expression breakpoint
 
 **Debug Fringe**:
 While a Workspace has a live Debug Session, the editor gutter widens so DAP markers (breakpoint and execution position) sit beside git fringe marks instead of replacing them.
 _Avoid_: debug gutter (as the spoken product term), breakpoint column
+
+**DAP Mode**:
+The Minor Mode active while the active Workspace has a live Debug Session. Continue/step chords live here so they override Global start bindings (for example F5 continues instead of starting).
+_Avoid_: debug mode (as the spoken product term)
 
 ### Markdown presentation
 

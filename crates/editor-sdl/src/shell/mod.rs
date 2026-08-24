@@ -3,6 +3,7 @@ mod browser;
 mod clipboard;
 mod command_line;
 mod command_stream;
+mod dap;
 mod db;
 mod diagnostics;
 mod directory;
@@ -22,6 +23,7 @@ mod workspace_search;
 use browser::*;
 use command_line::*;
 use command_stream::*;
+use dap::*;
 use db::*;
 use diagnostics::*;
 use directory::*;
@@ -94,10 +96,10 @@ use editor_core::{
     push_key_sequence, tick_key_sequence,
 };
 use editor_dap::{
-    BreakpointState, DapClientManager, DapLogDirection, DapLogSnapshot, DapSessionEvent,
-    DebugAdapterRegistry, DebugConfiguration, DebugConfigurationCandidate, DebugInferContext,
-    DebugRequestKind, collect_configuration_candidates, configuration_holes,
-    infer_compile_heuristic,
+    BreakpointState, DapClientError, DapClientManager, DapEvaluateContext, DapLogDirection,
+    DapLogSnapshot, DapSessionEvent, DebugAdapterRegistry, DebugConfiguration,
+    DebugConfigurationCandidate, DebugInferContext, DebugRequestKind,
+    collect_configuration_candidates, configuration_holes, infer_compile_heuristic,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -384,6 +386,10 @@ const DB_MULTIVIEW_RIGHT_WEIGHT: u32 = 3;
 const DAP_BREAKPOINTS_KIND: &str = buffer_kinds::DAP_BREAKPOINTS;
 const DAP_LOCALS_KIND: &str = buffer_kinds::DAP_LOCALS;
 const DAP_LOCALS_BUFFER_NAME: &str = "*dap-locals*";
+const DAP_REPL_BUFFER_NAME: &str = "*dap-repl*";
+const DAP_EVAL_BUFFER_NAME: &str = "*dap-eval*";
+const DAP_LOCALS_SECTION: &str = "Locals";
+const DAP_EXPRESSIONS_SECTION: &str = "Expressions";
 const DEBUG_LAYOUT_BREAKPOINTS_WEIGHT: u32 = 1;
 const DEBUG_LAYOUT_EDITOR_WEIGHT: u32 = 3;
 const DEBUG_LAYOUT_LOCALS_WEIGHT: u32 = 2;
@@ -437,15 +443,29 @@ const HOOK_DAP_LOG: &str = dap_hooks::LOG;
 const HOOK_DAP_TOGGLE_BREAKPOINT: &str = dap_hooks::TOGGLE_BREAKPOINT;
 const HOOK_DAP_DELETE_BREAKPOINT: &str = dap_hooks::DELETE_BREAKPOINT;
 const HOOK_DAP_OPEN_BREAKPOINTS: &str = dap_hooks::OPEN_BREAKPOINTS;
+const HOOK_DAP_EXPRESSIONS_ADD: &str = dap_hooks::EXPRESSIONS_ADD;
+const HOOK_DAP_EXPRESSIONS_REMOVE: &str = dap_hooks::EXPRESSIONS_REMOVE;
+const HOOK_DAP_EVAL: &str = dap_hooks::EVAL;
+const HOOK_DAP_EVAL_AT_POINT: &str = dap_hooks::EVAL_AT_POINT;
+const HOOK_DAP_REPL: &str = dap_hooks::REPL;
+const HOOK_DAP_SWITCH_THREAD: &str = dap_hooks::SWITCH_THREAD;
+const HOOK_DAP_SWITCH_STACK_FRAME: &str = dap_hooks::SWITCH_STACK_FRAME;
+const HOOK_DAP_BREAKPOINT_CONDITION: &str = dap_hooks::BREAKPOINT_CONDITION;
+const HOOK_DAP_BREAKPOINT_HIT_CONDITION: &str = dap_hooks::BREAKPOINT_HIT_CONDITION;
+const HOOK_DAP_BREAKPOINT_LOG_MESSAGE: &str = dap_hooks::BREAKPOINT_LOG_MESSAGE;
+const HOOK_DAP_TOGGLE_VARIABLE: &str = dap_hooks::TOGGLE_VARIABLE;
+const HOOK_DAP_GOTO_BREAKPOINT: &str = dap_hooks::GOTO_BREAKPOINT;
 const DAP_SESSIONS_BUFFER_NAME: &str = "*dap-sessions*";
 const DAP_LOG_BUFFER_NAME: &str = "*dap-log*";
 const DAP_BREAKPOINTS_BUFFER_NAME: &str = "*dap-breakpoints*";
 const DEBUG_FRINGE_VERIFIED_GLYPH: &str = "●";
 const DEBUG_FRINGE_PENDING_GLYPH: &str = "○";
+const DEBUG_FRINGE_UNVERIFIED_GLYPH: &str = "✕";
 const DEBUG_FRINGE_EXECUTION_GLYPH: &str = "▶";
 const TOKEN_DEBUG_FRINGE_BREAKPOINT: &str = "debug.fringe.breakpoint";
 const TOKEN_DEBUG_FRINGE_PENDING: &str = "debug.fringe.pending";
 const TOKEN_DEBUG_FRINGE_EXECUTION: &str = "debug.fringe.execution";
+const TOKEN_DEBUG_LINE_EXECUTION: &str = "debug.line.execution";
 const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
 const ACP_INPUT_PLACEHOLDER: &str =
     "Type / for commands, @ for files. Paste images with Ctrl+Shift+V";
@@ -2687,7 +2707,8 @@ fn wrap_columns_for_width(width: u32, cell_width: i32) -> usize {
     wrap_columns_for_width_with_fringe(width, cell_width, 1)
 }
 
-/// Editor gutter fringe cell count: two cells while a Debug Session is live, else one (git only).
+/// Editor gutter fringe cell count: two cells while a Debug Session is live, else one.
+/// Idle Breakpoints still draw in the single cell (may replace git on that line).
 pub(super) const fn debug_fringe_cell_count(session_live: bool) -> u32 {
     if session_live { 2 } else { 1 }
 }
@@ -3906,6 +3927,7 @@ struct PluginTextPaneState {
     update: PluginBufferSectionUpdate,
     browser_kind: Option<DbBrowserKind>,
     text: TextBuffer,
+    syntax_lines: IndexedSyntaxLines,
     scroll_row: usize,
     viewport_rows: usize,
     wrap_cols: usize,
@@ -4050,6 +4072,7 @@ impl Default for PluginTextPaneState {
             update: PluginBufferSectionUpdate::Replace,
             browser_kind: None,
             text: TextBuffer::new(),
+            syntax_lines: IndexedSyntaxLines::new(),
             scroll_row: 0,
             viewport_rows: 1,
             wrap_cols: 1,
@@ -4478,6 +4501,7 @@ impl PluginTextPaneState {
     fn replace_lines(&mut self, lines: Vec<String>, follow_output: bool) {
         let cursor = self.cursor();
         let scroll_row = self.scroll_row;
+        self.syntax_lines.clear();
         self.text = if lines.is_empty() {
             TextBuffer::new()
         } else {
@@ -4497,6 +4521,10 @@ impl PluginTextPaneState {
         } else {
             self.scroll_row = scroll_row.min(self.max_scroll_row());
         }
+    }
+
+    fn set_indexed_syntax_lines(&mut self, syntax_lines: IndexedSyntaxLines) {
+        self.syntax_lines = syntax_lines;
     }
 
     fn append_lines(&mut self, mut lines: Vec<String>, follow_output: bool) {
@@ -8760,6 +8788,15 @@ enum PickerAction {
     SkipDapCompile {
         adapter_id: String,
         configuration: DebugConfiguration,
+    },
+    RemoveDapExpression {
+        expression: String,
+    },
+    SwitchDapThread {
+        thread_id: u64,
+    },
+    SwitchDapStackFrame {
+        frame_id: u64,
     },
 }
 
@@ -13219,6 +13256,10 @@ impl ShellState {
         } else if ui.hover().is_some() {
             modes.push(KeymapScope::Hover);
         }
+        if !modes.contains(&KeymapScope::Popup) && active_workspace_has_debug_session(&self.runtime)
+        {
+            modes.push(KeymapScope::Dap);
+        }
         Ok(modes)
     }
 
@@ -14444,8 +14485,17 @@ impl ShellState {
                     .ui()
                     .ok()
                     .and_then(|ui| ui.input_prompt())
-                    .filter(|p| !p.text().is_empty())
-                    .map(|p| (p.id.clone(), p.text().to_owned()));
+                    .filter(|prompt| {
+                        !prompt.text().is_empty()
+                            || matches!(
+                                prompt.id.as_str(),
+                                DAP_BP_CONDITION_PROMPT_ID
+                                    | DAP_BP_HIT_CONDITION_PROMPT_ID
+                                    | DAP_BP_LOG_MESSAGE_PROMPT_ID
+                                    | DAP_REPL_PROMPT_ID
+                            )
+                    })
+                    .map(|prompt| (prompt.id.clone(), prompt.text().to_owned()));
                 if let Some((id, text)) = confirmed {
                     self.ui_mut()?.close_input_prompt();
                     dispatch_input_prompt_confirm(&mut self.runtime, &id, &text)
@@ -17900,6 +17950,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             let previous_mode = shell_ui(runtime)?.input_mode();
             let buffer_id = active_shell_buffer_id(runtime)?;
             let is_directory = buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind);
+            let is_dap_locals = matches!(
+                &shell_buffer(runtime, buffer_id)?.kind,
+                BufferKind::Plugin(kind) if kind == DAP_LOCALS_KIND
+            );
             let cursor_point = {
                 let buffer = shell_buffer(runtime, buffer_id)?;
                 terminal_buffer_cursor_point_for_normal_mode(buffer)
@@ -17950,12 +18004,15 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             if finish_change {
                 finish_change_recording(runtime)?;
             }
-            if is_directory
-                && matches!(previous_mode, InputMode::Insert | InputMode::Replace)
-                && let Err(error) = apply_directory_edit_queue(runtime, buffer_id)
-            {
-                record_runtime_error(runtime, "oil.directory", error.clone());
-                return Err(error);
+            if matches!(previous_mode, InputMode::Insert | InputMode::Replace) {
+                if is_directory && let Err(error) = apply_directory_edit_queue(runtime, buffer_id) {
+                    record_runtime_error(runtime, "oil.directory", error.clone());
+                    return Err(error);
+                }
+                if is_dap_locals && let Err(error) = apply_dap_locals_edits(runtime, buffer_id) {
+                    record_runtime_error(runtime, "dap.locals", error.clone());
+                    return Err(error);
+                }
             }
             Ok(())
         })
@@ -19564,25 +19621,43 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     configuration,
                     ask_heuristic_compile,
                 } => {
-                    continue_dap_start(runtime, &adapter_id, configuration, ask_heuristic_compile)?;
+                    let result = continue_dap_start(
+                        runtime,
+                        &adapter_id,
+                        configuration,
+                        ask_heuristic_compile,
+                    );
+                    report_dap_result(runtime, "DAP start failed", result)?;
                 }
                 PickerAction::ConfirmDapCompile {
                     adapter_id,
                     configuration,
                     command,
                 } => {
-                    run_dap_prelaunch_then_start(
+                    let result = run_dap_prelaunch_then_start(
                         runtime,
                         &adapter_id,
                         configuration,
                         Some(command),
-                    )?;
+                    );
+                    report_dap_result(runtime, "DAP start failed", result)?;
                 }
                 PickerAction::SkipDapCompile {
                     adapter_id,
                     configuration,
                 } => {
-                    run_dap_prelaunch_then_start(runtime, &adapter_id, configuration, None)?;
+                    let result =
+                        run_dap_prelaunch_then_start(runtime, &adapter_id, configuration, None);
+                    report_dap_result(runtime, "DAP start failed", result)?;
+                }
+                PickerAction::RemoveDapExpression { expression } => {
+                    remove_dap_expression(runtime, &expression)?;
+                }
+                PickerAction::SwitchDapThread { thread_id } => {
+                    switch_dap_thread(runtime, thread_id)?;
+                }
+                PickerAction::SwitchDapStackFrame { frame_id } => {
+                    switch_dap_stack_frame(runtime, frame_id)?;
                 }
             }
 
@@ -19788,14 +19863,18 @@ fn register_dap_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             .subscribe_hook(
                 HOOK_DAP_START,
                 "shell.start-dap-session",
-                |event, runtime| start_dap_for_active_workspace(runtime, event.detail.as_deref()),
+                |event, runtime| {
+                    let result = start_dap_for_active_workspace(runtime, event.detail.as_deref());
+                    report_dap_result(runtime, "DAP start failed", result)
+                },
             )
             .map_err(|error| error.to_string())?;
     }
     if runtime.hooks().contains(HOOK_DAP_START_LAST) {
         runtime
             .subscribe_hook(HOOK_DAP_START_LAST, "shell.start-dap-last", |_, runtime| {
-                start_dap_last(runtime)
+                let result = start_dap_last(runtime);
+                report_dap_result(runtime, "DAP start failed", result)
             })
             .map_err(|error| error.to_string())?;
     }
@@ -19804,7 +19883,10 @@ fn register_dap_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             .subscribe_hook(
                 HOOK_DAP_START_RECENT,
                 "shell.start-dap-recent",
-                |_, runtime| open_dap_start_recent_picker(runtime),
+                |_, runtime| {
+                    let result = open_dap_start_recent_picker(runtime);
+                    report_dap_result(runtime, "DAP start failed", result)
+                },
             )
             .map_err(|error| error.to_string())?;
     }
@@ -19899,6 +19981,128 @@ fn register_dap_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
     }
+    if runtime.hooks().contains(HOOK_DAP_EXPRESSIONS_ADD) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_EXPRESSIONS_ADD,
+                "shell.dap-expressions-add",
+                |event, runtime| dap_expressions_add(runtime, event.detail.as_deref()),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_EXPRESSIONS_REMOVE) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_EXPRESSIONS_REMOVE,
+                "shell.dap-expressions-remove",
+                |event, runtime| dap_expressions_remove(runtime, event.detail.as_deref()),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_EVAL) {
+        runtime
+            .subscribe_hook(HOOK_DAP_EVAL, "shell.dap-eval", |event, runtime| {
+                dap_eval(runtime, event.detail.as_deref())
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_EVAL_AT_POINT) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_EVAL_AT_POINT,
+                "shell.dap-eval-at-point",
+                |_, runtime| dap_eval_at_point(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_REPL) {
+        runtime
+            .subscribe_hook(HOOK_DAP_REPL, "shell.dap-repl", |_, runtime| {
+                open_dap_repl(runtime)
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_SWITCH_THREAD) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_SWITCH_THREAD,
+                "shell.dap-switch-thread",
+                |_, runtime| open_dap_switch_thread_picker(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_SWITCH_STACK_FRAME) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_SWITCH_STACK_FRAME,
+                "shell.dap-switch-stack-frame",
+                |_, runtime| open_dap_switch_stack_frame_picker(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_BREAKPOINT_CONDITION) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_BREAKPOINT_CONDITION,
+                "shell.dap-breakpoint-condition",
+                |event, runtime| {
+                    dap_breakpoint_extra_prompt(
+                        runtime,
+                        DapBreakpointExtraKind::Condition,
+                        event.detail.as_deref(),
+                    )
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_BREAKPOINT_HIT_CONDITION) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_BREAKPOINT_HIT_CONDITION,
+                "shell.dap-breakpoint-hit-condition",
+                |event, runtime| {
+                    dap_breakpoint_extra_prompt(
+                        runtime,
+                        DapBreakpointExtraKind::HitCondition,
+                        event.detail.as_deref(),
+                    )
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_BREAKPOINT_LOG_MESSAGE) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_BREAKPOINT_LOG_MESSAGE,
+                "shell.dap-breakpoint-log-message",
+                |event, runtime| {
+                    dap_breakpoint_extra_prompt(
+                        runtime,
+                        DapBreakpointExtraKind::LogMessage,
+                        event.detail.as_deref(),
+                    )
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_TOGGLE_VARIABLE) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_TOGGLE_VARIABLE,
+                "shell.dap-toggle-variable",
+                |_, runtime| dap_toggle_variable(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if runtime.hooks().contains(HOOK_DAP_GOTO_BREAKPOINT) {
+        runtime
+            .subscribe_hook(
+                HOOK_DAP_GOTO_BREAKPOINT,
+                "shell.dap-goto-breakpoint",
+                |_, runtime| dap_goto_breakpoint(runtime),
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -19920,6 +20124,12 @@ struct PendingDapStartPrompt {
 
 const DAP_PROGRAM_PROMPT_ID: &str = "dap-program";
 const DAP_PROCESS_PROMPT_ID: &str = "dap-process";
+const DAP_EXPRESSION_ADD_PROMPT_ID: &str = "dap-expression-add";
+const DAP_EVAL_PROMPT_ID: &str = "dap-eval";
+const DAP_REPL_PROMPT_ID: &str = "dap-repl";
+const DAP_BP_CONDITION_PROMPT_ID: &str = "dap-bp-condition";
+const DAP_BP_HIT_CONDITION_PROMPT_ID: &str = "dap-bp-hit-condition";
+const DAP_BP_LOG_MESSAGE_PROMPT_ID: &str = "dap-bp-log-message";
 
 fn start_dap_for_active_workspace(
     runtime: &mut EditorRuntime,
@@ -20230,10 +20440,18 @@ fn run_dap_prelaunch_then_start(
     configuration: DebugConfiguration,
     compile_command: Option<String>,
 ) -> Result<(), String> {
+    save_workspace_for_dap_start(runtime)?;
     if let Some(command) = compile_command {
         run_dap_compile_before_debug(runtime, &command)?;
     }
     finish_dap_session_start(runtime, adapter_id, configuration)
+}
+
+fn save_workspace_for_dap_start(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = active_shell_workspace_id(runtime)
+        .or_else(|| runtime.model().active_workspace_id().ok())
+        .ok_or_else(|| "dap.start needs an active Workspace to save".to_owned())?;
+    save_workspace(runtime, workspace_id)
 }
 
 fn run_dap_compile_before_debug(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
@@ -20326,6 +20544,38 @@ fn finish_dap_session_start(
     Ok(())
 }
 
+fn notify_dap_failure(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    message: &str,
+) -> Result<(), String> {
+    shell_ui_mut(runtime)?.apply_notification(
+        NotificationUpdate {
+            key: "dap.failure".to_owned(),
+            severity: NotificationSeverity::Error,
+            title: title.to_owned(),
+            body_lines: vec![message.to_owned()],
+            progress: None,
+            active: false,
+            action: None,
+            workspace_id: None,
+        },
+        Instant::now(),
+    );
+    Ok(())
+}
+
+fn report_dap_result(
+    runtime: &mut EditorRuntime,
+    title: &str,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    if let Err(error) = &result {
+        let _ = notify_dap_failure(runtime, title, error);
+    }
+    result
+}
+
 fn dap_client_manager(runtime: &EditorRuntime) -> Result<Arc<DapClientManager>, String> {
     runtime
         .services()
@@ -20348,17 +20598,25 @@ fn stop_dap_for_active_workspace(runtime: &mut EditorRuntime) -> Result<(), Stri
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let dap_client = runtime
-        .services()
-        .get::<Arc<DapClientManager>>()
-        .cloned()
-        .ok_or_else(|| "DAP client manager service missing".to_owned())?;
-    dap_client
-        .stop_session(workspace_id.get())
+    finish_dap_session(runtime, workspace_id.get())
+}
+
+fn finish_dap_session(runtime: &mut EditorRuntime, workspace_id: u64) -> Result<(), String> {
+    let dap_client = dap_client_manager(runtime)?;
+    match dap_client.stop_session(workspace_id) {
+        Ok(_) | Err(DapClientError::SessionMissing(_)) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let active = runtime
+        .model()
+        .active_workspace_id()
         .map_err(|error| error.to_string())?;
+    if active.get() != workspace_id {
+        return Ok(());
+    }
     teardown_debug_layout(runtime)?;
     refresh_dap_fringe_cache(runtime)?;
-    refresh_dap_sessions_buffer(runtime, workspace_id)?;
+    refresh_dap_sessions_buffer(runtime, active)?;
     Ok(())
 }
 
@@ -20412,6 +20670,10 @@ fn dap_control_for_active_workspace(
         DapControl::StepOut => dap_client
             .step_out(workspace_id.get())
             .map_err(|error| error.to_string())?,
+    }
+    if !matches!(control, DapControl::Pause) {
+        // SharpDbg never sends `continued`; clear execution UI until the next stop.
+        apply_dap_continued_ui(runtime, workspace_id.get())?;
     }
     Ok(())
 }
@@ -20584,21 +20846,23 @@ fn refresh_dap_fringe_cache(runtime: &mut EditorRuntime) -> Result<(), String> {
             buffer.clear_dap_fringe();
             continue;
         };
-        if !session_live {
-            buffer.clear_dap_fringe();
-            continue;
-        }
         let mut markers = BTreeMap::new();
         for bp in &workspace_bps {
-            if bp.path() == path.as_path() {
+            if editor_dap::debug_source_paths_eq(bp.path(), path.as_path()) {
                 markers.insert((bp.line() as usize).saturating_sub(1), bp.state());
             }
         }
         let execution_line = execution.as_ref().and_then(|position| {
-            (position.path() == path.as_path())
+            editor_dap::debug_source_paths_eq(position.path(), path.as_path())
                 .then_some((position.line() as usize).saturating_sub(1))
         });
-        buffer.set_dap_fringe(true, markers, execution_line);
+        // Breakpoints show in the Debug Fringe without a live Session (one cell; may
+        // replace git on that line). Two-cell widening only while the Session is live.
+        if session_live || !markers.is_empty() {
+            buffer.set_dap_fringe(session_live, markers, execution_line);
+        } else {
+            buffer.clear_dap_fringe();
+        }
     }
     Ok(())
 }
@@ -20657,17 +20921,17 @@ fn open_dap_breakpoints_buffer(runtime: &mut EditorRuntime) -> Result<(), String
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    refresh_dap_breakpoints_buffer(runtime, workspace_id)?;
-    if shell_ui(runtime)?.is_debug_layout_active() {
-        focus_debug_layout_pane(runtime, 0)?;
-        return Ok(());
-    }
     let buffer_id = ensure_dap_workspace_buffer(
         runtime,
         workspace_id,
         DAP_BREAKPOINTS_BUFFER_NAME,
         DAP_BREAKPOINTS_KIND,
     )?;
+    refresh_dap_breakpoints_buffer(runtime, workspace_id)?;
+    if shell_ui(runtime)?.is_debug_layout_active() {
+        focus_debug_layout_pane(runtime, 0)?;
+        return Ok(());
+    }
     {
         let ui = shell_ui_mut(runtime)?;
         ui.focus_buffer_in_active_pane(buffer_id);
@@ -20684,45 +20948,57 @@ fn refresh_dap_breakpoints_buffer(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
 ) -> Result<(), String> {
-    let lines = dap_breakpoints_buffer_lines(runtime, workspace_id.get())?;
-    let buffer_id = ensure_dap_workspace_buffer(
+    let Some(buffer_id) = find_workspace_named_buffer(
         runtime,
         workspace_id,
         DAP_BREAKPOINTS_BUFFER_NAME,
-        DAP_BREAKPOINTS_KIND,
-    )?;
+        &BufferKind::Plugin(DAP_BREAKPOINTS_KIND.to_owned()),
+    )?
+    else {
+        return Ok(());
+    };
+    ensure_shell_buffer(runtime, buffer_id)?;
+    let (lines, syntax_lines) = dap_breakpoints_buffer_content(runtime, workspace_id)?;
     {
         let ui = shell_ui_mut(runtime)?;
         if let Some(buffer) = ui.buffer_mut(buffer_id) {
-            buffer.replace_with_lines_follow_output(lines);
+            buffer.replace_with_lines_preserve_view(lines);
+            buffer.set_indexed_syntax_lines(Some(syntax_lines), None);
         }
     }
     Ok(())
 }
 
-fn dap_breakpoints_buffer_lines(
+fn dap_breakpoints_buffer_content(
     runtime: &EditorRuntime,
-    workspace_id: u64,
-) -> Result<Vec<String>, String> {
+    workspace_id: WorkspaceId,
+) -> Result<(Vec<String>, IndexedSyntaxLines), String> {
     let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
-        return Ok(vec!["DAP client manager is not available.".to_owned()]);
+        let message = "DAP client manager is not available.";
+        let mut syntax_lines = IndexedSyntaxLines::new();
+        let mut spans = Vec::new();
+        push_span_bytes(
+            &mut spans,
+            message,
+            0,
+            message.len(),
+            TOKEN_DEBUG_BREAKPOINT_EMPTY,
+        );
+        syntax_lines.insert(0, spans);
+        return Ok((vec![message.to_owned()], syntax_lines));
     };
     let breakpoints = dap_client
-        .list_breakpoints(workspace_id)
+        .list_breakpoints(workspace_id.get())
         .map_err(|error| error.to_string())?;
-    if breakpoints.is_empty() {
-        return Ok(vec!["No Breakpoints in this Workspace.".to_owned()]);
-    }
-    let mut lines = vec!["Breakpoints:".to_owned(), String::new()];
-    for bp in breakpoints {
-        let state = match bp.state() {
-            BreakpointState::Pending => "pending",
-            BreakpointState::Verified => "verified",
-            BreakpointState::Unverified => "unverified",
-        };
-        lines.push(format!("{}:{} ({})", bp.path().display(), bp.line(), state));
-    }
-    Ok(lines)
+    let root = runtime
+        .model()
+        .workspace(workspace_id)
+        .ok()
+        .and_then(|workspace| workspace.root().map(Path::to_path_buf));
+    Ok((
+        dap_breakpoint_lines(&breakpoints, root.as_deref()),
+        dap_breakpoint_syntax_lines(&breakpoints, root.as_deref()),
+    ))
 }
 
 fn refresh_dap_locals_buffer(
@@ -20735,40 +21011,237 @@ fn refresh_dap_locals_buffer(
         DAP_LOCALS_BUFFER_NAME,
         DAP_LOCALS_KIND,
     )?;
-    let lines = dap_locals_buffer_lines(runtime, workspace_id.get())?;
+    if dap_locals_insert_in_progress(runtime, buffer_id)? {
+        return Ok(());
+    }
+    let (local_lines, expression_lines) =
+        dap_locals_and_expression_lines(runtime, workspace_id.get())?;
+    let local_syntax = dap_variable_syntax_lines(&local_lines, false);
+    let expression_syntax = dap_variable_syntax_lines(&expression_lines, true);
     {
         let ui = shell_ui_mut(runtime)?;
         if let Some(buffer) = ui.buffer_mut(buffer_id) {
-            buffer.replace_with_lines_follow_output(lines);
+            set_named_plugin_section_lines(buffer, DAP_LOCALS_SECTION, local_lines, local_syntax);
+            set_named_plugin_section_lines(
+                buffer,
+                DAP_EXPRESSIONS_SECTION,
+                expression_lines,
+                expression_syntax,
+            );
         }
     }
     Ok(())
 }
 
-fn dap_locals_buffer_lines(
+fn dap_locals_insert_in_progress(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<bool, String> {
+    let ui = shell_ui(runtime)?;
+    if ui.active_buffer_id() != Some(buffer_id) {
+        return Ok(false);
+    }
+    if !matches!(ui.input_mode(), InputMode::Insert | InputMode::Replace) {
+        return Ok(false);
+    }
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    Ok(buffer
+        .plugin_active_section_name()
+        .unwrap_or(DAP_LOCALS_SECTION)
+        == DAP_LOCALS_SECTION)
+}
+
+fn set_named_plugin_section_lines(
+    buffer: &mut ShellBuffer,
+    section_name: &str,
+    lines: Vec<String>,
+    syntax_lines: IndexedSyntaxLines,
+) {
+    let index = {
+        let Some(state) = buffer.plugin_section_state.as_ref() else {
+            buffer.replace_with_lines_preserve_view(lines);
+            buffer.set_indexed_syntax_lines(Some(syntax_lines), None);
+            return;
+        };
+        let Some(index) = state.section_index_by_name(section_name) else {
+            return;
+        };
+        index
+    };
+    if index == 0 {
+        buffer.replace_with_lines_preserve_view(lines);
+        buffer.set_indexed_syntax_lines(Some(syntax_lines), None);
+        return;
+    }
+    if let Some(state) = buffer.plugin_section_state.as_mut()
+        && let Some(pane) = state.attached_section_mut(index)
+    {
+        pane.replace_lines(lines, false);
+        pane.set_indexed_syntax_lines(syntax_lines);
+    }
+}
+
+fn dap_locals_and_expression_lines(
     runtime: &EditorRuntime,
     workspace_id: u64,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
-        return Ok(vec!["(no locals)".to_owned()]);
+        return Ok((
+            dap_locals_section_lines(&[], &[], &[], false),
+            dap_expression_section_lines(&[], &[], false),
+        ));
     };
+    let idle_watches = dap_client
+        .list_expressions(workspace_id)
+        .map_err(|error| error.to_string())?;
     let Some(snapshot) = dap_client
         .stopped_snapshot(workspace_id)
         .map_err(|error| error.to_string())?
     else {
-        return Ok(vec!["(no locals)".to_owned()]);
+        return Ok((
+            dap_locals_section_lines(&[], &[], &idle_watches, false),
+            dap_expression_section_lines(&[], &idle_watches, false),
+        ));
     };
-    if snapshot.locals().is_empty() {
-        return Ok(vec!["(no locals)".to_owned()]);
+    let local_rows = snapshot.local_rows();
+    let watch_rows = snapshot.watch_rows();
+    Ok((
+        dap_locals_section_lines(&local_rows, &watch_rows, &idle_watches, true),
+        dap_expression_section_lines(&watch_rows, &idle_watches, true),
+    ))
+}
+
+fn apply_dap_locals_edits(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let (workspace_id, lines) = {
+        let Ok(buffer) = shell_buffer(runtime, buffer_id) else {
+            return Ok(());
+        };
+        match &buffer.kind {
+            BufferKind::Plugin(kind) if kind == DAP_LOCALS_KIND => {}
+            _ => return Ok(()),
+        }
+        if buffer
+            .plugin_active_section_name()
+            .unwrap_or(DAP_LOCALS_SECTION)
+            != DAP_LOCALS_SECTION
+        {
+            return Ok(());
+        }
+        let workspace_id = runtime
+            .model()
+            .active_workspace_id()
+            .map_err(|error| error.to_string())?;
+        let lines: Vec<String> = (0..buffer.text.line_count())
+            .filter_map(|line_index| buffer.text.line(line_index))
+            .collect();
+        (workspace_id, lines)
+    };
+    if !lines.iter().any(|line| line == DAP_WATCHES_HEADER) {
+        refresh_dap_locals_buffer(runtime, workspace_id)?;
+        return Ok(());
     }
-    Ok(snapshot
-        .locals()
-        .iter()
-        .map(|local| match local.type_name() {
-            Some(type_name) => format!("{}: {} ({})", local.name(), local.value(), type_name),
-            None => format!("{}: {}", local.name(), local.value()),
-        })
-        .collect())
+    let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
+        return Ok(());
+    };
+    dap_client
+        .set_expressions(workspace_id.get(), extract_watch_expressions(&lines))
+        .map_err(|error| error.to_string())?;
+    refresh_dap_locals_buffer(runtime, workspace_id)
+}
+
+fn dap_toggle_variable(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (section, line_index, lines) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        match &buffer.kind {
+            BufferKind::Plugin(kind) if kind == DAP_LOCALS_KIND => {}
+            _ => {
+                return Err("dap.toggle-variable requires the Locals buffer".to_owned());
+            }
+        }
+        let section = buffer
+            .plugin_active_section_name()
+            .unwrap_or(DAP_LOCALS_SECTION)
+            .to_owned();
+        let line_index = buffer
+            .plugin_attached_pane_state()
+            .map(|pane| pane.cursor().line)
+            .unwrap_or_else(|| buffer.cursor_row());
+        let lines: Vec<String> = (0..buffer.text.line_count())
+            .filter_map(|index| buffer.text.line(index))
+            .collect();
+        (section, line_index, lines)
+    };
+    let dap_client = dap_client_manager(runtime)?;
+    let Some(snapshot) = dap_client
+        .stopped_snapshot(workspace_id.get())
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let local_rows = snapshot.local_rows();
+    let watch_rows = snapshot.watch_rows();
+    let row = if section == DAP_EXPRESSIONS_SECTION {
+        watch_rows.get(line_index)
+    } else {
+        match locals_line_variable_kind(&lines, line_index, local_rows.len(), watch_rows.len()) {
+            Some(DapLocalsLineTarget::Local(index)) => local_rows.get(index),
+            Some(DapLocalsLineTarget::Watch(index)) => watch_rows.get(index),
+            None => return Ok(()),
+        }
+    };
+    let Some(row) = row else {
+        return Ok(());
+    };
+    if !row.expandable() {
+        return Ok(());
+    }
+    dap_client
+        .toggle_variable_expand(workspace_id.get(), row.path())
+        .map_err(|error| error.to_string())?;
+    refresh_dap_locals_buffer(runtime, workspace_id)
+}
+
+fn dap_goto_breakpoint(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let line_index = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        match &buffer.kind {
+            BufferKind::Plugin(kind) if kind == DAP_BREAKPOINTS_KIND => buffer.cursor_row(),
+            _ => {
+                return Err("dap.goto-breakpoint requires the Breakpoints buffer".to_owned());
+            }
+        }
+    };
+    let dap_client = dap_client_manager(runtime)?;
+    let breakpoints = dap_client
+        .list_breakpoints(workspace_id.get())
+        .map_err(|error| error.to_string())?;
+    let Some(bp) = breakpoints.get(line_index) else {
+        return Ok(());
+    };
+    let path = bp.path().to_path_buf();
+    let line = bp.line();
+    if shell_ui(runtime)?.is_debug_layout_active() {
+        focus_debug_layout_pane(runtime, 1)?;
+    }
+    open_workspace_file_at(
+        runtime,
+        &path,
+        TextPoint::new((line as usize).saturating_sub(1), 0),
+    )?;
+    if shell_ui(runtime)?.is_debug_layout_active() {
+        focus_debug_layout_pane(runtime, 1)?;
+    }
+    Ok(())
 }
 
 fn apply_dap_stopped_ui(runtime: &mut EditorRuntime, workspace_id: u64) -> Result<(), String> {
@@ -20788,7 +21261,6 @@ fn apply_dap_stopped_ui(runtime: &mut EditorRuntime, workspace_id: u64) -> Resul
         return Ok(());
     }
     refresh_dap_locals_buffer(runtime, active_workspace)?;
-    refresh_dap_fringe_cache(runtime)?;
     if let Some(position) = snapshot.position() {
         if shell_ui(runtime)?.is_debug_layout_active() {
             focus_debug_layout_pane(runtime, 1)?;
@@ -20805,6 +21277,7 @@ fn apply_dap_stopped_ui(runtime: &mut EditorRuntime, workspace_id: u64) -> Resul
             focus_debug_layout_pane(runtime, 1)?;
         }
     }
+    refresh_dap_fringe_cache(runtime)?;
     Ok(())
 }
 
@@ -20818,6 +21291,408 @@ fn apply_dap_continued_ui(runtime: &mut EditorRuntime, workspace_id: u64) -> Res
     }
     refresh_dap_locals_buffer(runtime, active_workspace)?;
     refresh_dap_fringe_cache(runtime)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DapBreakpointExtraKind {
+    Condition,
+    HitCondition,
+    LogMessage,
+}
+
+fn dap_expressions_add(runtime: &mut EditorRuntime, detail: Option<&str>) -> Result<(), String> {
+    if let Some(expression) = detail.map(str::trim).filter(|text| !text.is_empty()) {
+        return add_dap_expression(runtime, expression);
+    }
+    let overlay = InputPromptOverlay::new(DAP_EXPRESSION_ADD_PROMPT_ID, "Watch expression: ", "");
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+fn add_dap_expression(runtime: &mut EditorRuntime, expression: &str) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let dap_client = dap_client_manager(runtime)?;
+    dap_client
+        .add_expression(workspace_id.get(), expression)
+        .map_err(|error| error.to_string())?;
+    refresh_dap_locals_buffer(runtime, workspace_id)?;
+    Ok(())
+}
+
+fn dap_expressions_remove(runtime: &mut EditorRuntime, detail: Option<&str>) -> Result<(), String> {
+    if let Some(expression) = detail.map(str::trim).filter(|text| !text.is_empty()) {
+        return remove_dap_expression(runtime, expression);
+    }
+    open_dap_expressions_remove_picker(runtime)
+}
+
+fn remove_dap_expression(runtime: &mut EditorRuntime, expression: &str) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let dap_client = dap_client_manager(runtime)?;
+    let removed = dap_client
+        .remove_expression(workspace_id.get(), expression)
+        .map_err(|error| error.to_string())?;
+    if !removed {
+        return Err(format!("Watch Expression `{expression}` not found"));
+    }
+    refresh_dap_locals_buffer(runtime, workspace_id)?;
+    Ok(())
+}
+
+fn open_dap_expressions_remove_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let expressions = dap_client_manager(runtime)?
+        .list_expressions(workspace_id.get())
+        .map_err(|error| error.to_string())?;
+    if expressions.is_empty() {
+        return Err("no Watch Expressions to remove".to_owned());
+    }
+    let entries = expressions
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| PickerEntry {
+            item: PickerItem::new(
+                format!("dap-watch:{index}"),
+                expression.clone(),
+                "remove Watch Expression",
+                None::<String>,
+            ),
+            action: PickerAction::RemoveDapExpression { expression },
+            quickfix: None,
+        })
+        .collect();
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries(
+        "Remove Watch Expression",
+        entries,
+    ));
+    Ok(())
+}
+
+fn dap_eval(runtime: &mut EditorRuntime, detail: Option<&str>) -> Result<(), String> {
+    if let Some(expression) = detail.map(str::trim).filter(|text| !text.is_empty()) {
+        return show_dap_eval_result(runtime, expression, DapEvaluateContext::Repl);
+    }
+    let overlay = InputPromptOverlay::new(DAP_EVAL_PROMPT_ID, "Eval: ", "");
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+fn dap_eval_at_point(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let expression = {
+        let buffer = shell_ui(runtime)?
+            .buffer(buffer_id)
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        completion_token_at_cursor(buffer)
+            .map(|(_, token)| token)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "no identifier at point".to_owned())?
+    };
+    show_dap_eval_result(runtime, &expression, DapEvaluateContext::Hover)
+}
+
+fn show_dap_eval_result(
+    runtime: &mut EditorRuntime,
+    expression: &str,
+    context: DapEvaluateContext,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let result = dap_client_manager(runtime)?
+        .evaluate(workspace_id.get(), expression, context)
+        .map_err(|error| error.to_string())?;
+    let lines = vec![
+        format!("expression: {}", result.expression()),
+        format!(
+            "result: {}{}",
+            if result.ok() { "" } else { "! " },
+            result.value()
+        ),
+    ];
+    let buffer_id = ensure_dap_surface_buffer(
+        runtime,
+        workspace_id,
+        DAP_EVAL_BUFFER_NAME,
+        Some("DAP Eval"),
+    )?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(buffer_id) {
+            buffer.replace_with_lines_follow_output(lines);
+        }
+        ui.focus_buffer_in_active_pane(buffer_id);
+        ui.enter_normal_mode();
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn open_dap_repl(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let _ = dap_client_manager(runtime)?
+        .session_info(workspace_id.get())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no live Debug Session".to_owned())?;
+    let buffer_id = ensure_dap_surface_buffer(
+        runtime,
+        workspace_id,
+        DAP_REPL_BUFFER_NAME,
+        Some("DAP REPL"),
+    )?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(buffer_id)
+            && buffer.line_count() <= 1
+            && buffer
+                .text
+                .line(0)
+                .map(|line| line.is_empty() || line.starts_with('('))
+                .unwrap_or(true)
+        {
+            buffer.replace_with_lines_follow_output(vec!["(debug REPL)".to_owned(), String::new()]);
+        }
+        ui.focus_buffer_in_active_pane(buffer_id);
+        ui.enter_normal_mode();
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "DAP REPL: ", "");
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+fn submit_dap_repl_expression(runtime: &mut EditorRuntime, expression: &str) -> Result<(), String> {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return open_dap_repl(runtime);
+    }
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let result = dap_client_manager(runtime)?
+        .evaluate(workspace_id.get(), expression, DapEvaluateContext::Repl)
+        .map_err(|error| error.to_string())?;
+    let buffer_id = ensure_dap_surface_buffer(
+        runtime,
+        workspace_id,
+        DAP_REPL_BUFFER_NAME,
+        Some("DAP REPL"),
+    )?;
+    {
+        let ui = shell_ui_mut(runtime)?;
+        if let Some(buffer) = ui.buffer_mut(buffer_id) {
+            let mut lines = (0..buffer.line_count())
+                .map(|index| buffer.text.line(index).unwrap_or_default())
+                .collect::<Vec<_>>();
+            if lines.len() == 1 && lines[0].is_empty() {
+                lines.clear();
+            }
+            lines.push(format!("> {expression}"));
+            lines.push(format!(
+                "{}{}",
+                if result.ok() { "" } else { "! " },
+                result.value()
+            ));
+            lines.push(String::new());
+            buffer.replace_with_lines_follow_output(lines);
+        }
+        ui.focus_buffer_in_active_pane(buffer_id);
+        ui.enter_normal_mode();
+    }
+    runtime
+        .model_mut()
+        .focus_buffer(workspace_id, buffer_id)
+        .map_err(|error| error.to_string())?;
+    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "DAP REPL: ", "");
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+fn open_dap_switch_thread_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let threads = dap_client_manager(runtime)?
+        .list_threads(workspace_id.get())
+        .map_err(|error| error.to_string())?;
+    if threads.is_empty() {
+        return Err("Debug Adapter reported no threads".to_owned());
+    }
+    let entries = threads
+        .into_iter()
+        .map(|thread| PickerEntry {
+            item: PickerItem::new(
+                format!("dap-thread:{}", thread.id()),
+                format!("{} ({})", thread.name(), thread.id()),
+                "switch active thread",
+                None::<String>,
+            ),
+            action: PickerAction::SwitchDapThread {
+                thread_id: thread.id(),
+            },
+            quickfix: None,
+        })
+        .collect();
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Switch Thread", entries));
+    Ok(())
+}
+
+fn open_dap_switch_stack_frame_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let frames = dap_client_manager(runtime)?
+        .list_stack_frames(workspace_id.get())
+        .map_err(|error| error.to_string())?;
+    if frames.is_empty() {
+        return Err("no stack frames for the active thread".to_owned());
+    }
+    let entries = frames
+        .into_iter()
+        .map(|frame| {
+            let detail = match frame.path() {
+                Some(path) => format!("{}:{}", path.display(), frame.line()),
+                None => format!("line {}", frame.line()),
+            };
+            PickerEntry {
+                item: PickerItem::new(
+                    format!("dap-frame:{}", frame.id()),
+                    frame.name(),
+                    detail,
+                    None::<String>,
+                ),
+                action: PickerAction::SwitchDapStackFrame {
+                    frame_id: frame.id(),
+                },
+                quickfix: None,
+            }
+        })
+        .collect();
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Switch Stack Frame", entries));
+    Ok(())
+}
+
+fn switch_dap_thread(runtime: &mut EditorRuntime, thread_id: u64) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    dap_client_manager(runtime)?
+        .switch_thread(workspace_id.get(), thread_id)
+        .map_err(|error| error.to_string())?;
+    apply_dap_stopped_ui(runtime, workspace_id.get())
+}
+
+fn switch_dap_stack_frame(runtime: &mut EditorRuntime, frame_id: u64) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    dap_client_manager(runtime)?
+        .switch_stack_frame(workspace_id.get(), frame_id)
+        .map_err(|error| error.to_string())?;
+    apply_dap_stopped_ui(runtime, workspace_id.get())
+}
+
+fn dap_breakpoint_extra_prompt(
+    runtime: &mut EditorRuntime,
+    kind: DapBreakpointExtraKind,
+    detail: Option<&str>,
+) -> Result<(), String> {
+    if let Some(value) = detail {
+        return apply_dap_breakpoint_extra(runtime, kind, value);
+    }
+    let (workspace_id, path, line) = dap_breakpoint_cursor_target(runtime)?;
+    let existing = dap_client_manager(runtime)?
+        .list_breakpoints(workspace_id.get())
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|bp| bp.path() == path.as_path() && bp.line() == line);
+    let (prompt_id, label, prefill) = match kind {
+        DapBreakpointExtraKind::Condition => (
+            DAP_BP_CONDITION_PROMPT_ID,
+            "Breakpoint condition: ",
+            existing
+                .as_ref()
+                .and_then(|bp| bp.condition())
+                .unwrap_or(""),
+        ),
+        DapBreakpointExtraKind::HitCondition => (
+            DAP_BP_HIT_CONDITION_PROMPT_ID,
+            "Breakpoint hit condition: ",
+            existing
+                .as_ref()
+                .and_then(|bp| bp.hit_condition())
+                .unwrap_or(""),
+        ),
+        DapBreakpointExtraKind::LogMessage => (
+            DAP_BP_LOG_MESSAGE_PROMPT_ID,
+            "Breakpoint log message: ",
+            existing
+                .as_ref()
+                .and_then(|bp| bp.log_message())
+                .unwrap_or(""),
+        ),
+    };
+    let overlay = InputPromptOverlay::new(prompt_id, label, prefill);
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+fn apply_dap_breakpoint_extra(
+    runtime: &mut EditorRuntime,
+    kind: DapBreakpointExtraKind,
+    text: &str,
+) -> Result<(), String> {
+    let (workspace_id, path, line) = dap_breakpoint_cursor_target(runtime)?;
+    let value = {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    };
+    let (condition, hit_condition, log_message) = match kind {
+        DapBreakpointExtraKind::Condition => (Some(value), None, None),
+        DapBreakpointExtraKind::HitCondition => (None, Some(value), None),
+        DapBreakpointExtraKind::LogMessage => (None, None, Some(value)),
+    };
+    dap_client_manager(runtime)?
+        .set_breakpoint_extras(
+            workspace_id.get(),
+            path,
+            line,
+            condition,
+            hit_condition,
+            log_message,
+        )
+        .map_err(|error| error.to_string())?;
+    refresh_dap_fringe_cache(runtime)?;
+    refresh_dap_breakpoints_buffer(runtime, workspace_id)?;
     Ok(())
 }
 
@@ -20839,6 +21714,9 @@ fn refresh_pending_dap(runtime: &mut EditorRuntime) -> Result<bool, String> {
             DapSessionEvent::Continued { workspace_id } => {
                 apply_dap_continued_ui(runtime, workspace_id)?;
             }
+            DapSessionEvent::Terminated { workspace_id } => {
+                finish_dap_session(runtime, workspace_id)?;
+            }
         }
     }
     Ok(true)
@@ -20858,7 +21736,7 @@ fn ensure_dap_workspace_buffer(
     }
     let buffer_id = runtime
         .model_mut()
-        .create_buffer(workspace_id, name, buffer_kind.clone(), None)
+        .create_popup_buffer(workspace_id, name, buffer_kind.clone(), None)
         .map_err(|error| error.to_string())?;
     {
         let user_library = shell_user_library(runtime);
@@ -27821,10 +28699,11 @@ fn directory_yank_for_range(
 
 fn apply_directory_edit_queue_if_needed(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
-    if !buffer_is_directory(&shell_buffer(runtime, buffer_id)?.kind) {
-        return Ok(());
+    let kind = shell_buffer(runtime, buffer_id)?.kind.clone();
+    if buffer_is_directory(&kind) {
+        apply_directory_edit_queue(runtime, buffer_id)?;
     }
-    apply_directory_edit_queue(runtime, buffer_id)
+    apply_dap_locals_edits(runtime, buffer_id)
 }
 
 fn apply_operator_to_range(
@@ -30547,6 +31426,18 @@ fn dispatch_input_prompt_confirm(
         COMPILE_PROMPT_ID => run_compile_command_streamed(runtime, text),
         DAP_PROGRAM_PROMPT_ID => confirm_dap_program_prompt(runtime, text),
         DAP_PROCESS_PROMPT_ID => confirm_dap_process_prompt(runtime, text),
+        DAP_EXPRESSION_ADD_PROMPT_ID => add_dap_expression(runtime, text),
+        DAP_EVAL_PROMPT_ID => show_dap_eval_result(runtime, text, DapEvaluateContext::Repl),
+        DAP_REPL_PROMPT_ID => submit_dap_repl_expression(runtime, text),
+        DAP_BP_CONDITION_PROMPT_ID => {
+            apply_dap_breakpoint_extra(runtime, DapBreakpointExtraKind::Condition, text)
+        }
+        DAP_BP_HIT_CONDITION_PROMPT_ID => {
+            apply_dap_breakpoint_extra(runtime, DapBreakpointExtraKind::HitCondition, text)
+        }
+        DAP_BP_LOG_MESSAGE_PROMPT_ID => {
+            apply_dap_breakpoint_extra(runtime, DapBreakpointExtraKind::LogMessage, text)
+        }
         _ => Ok(()),
     }
 }
@@ -33612,7 +34503,11 @@ fn find_workspace_file_buffer(
         .map_err(|error| error.to_string())?;
     Ok(workspace
         .buffers()
-        .find(|buffer| buffer.path() == Some(path))
+        .find(|buffer| {
+            buffer
+                .path()
+                .is_some_and(|existing| editor_dap::debug_source_paths_eq(existing, path))
+        })
         .map(Buffer::id))
 }
 
@@ -35570,6 +36465,20 @@ fn keymap_vim_mode(input_mode: InputMode) -> KeymapVimMode {
     }
 }
 
+fn active_workspace_has_debug_session(runtime: &EditorRuntime) -> bool {
+    let Ok(workspace_id) = runtime.model().active_workspace_id() else {
+        return false;
+    };
+    let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
+        return false;
+    };
+    dap_client
+        .session_info(workspace_id.get())
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 fn plugin_buffer_binding_scope_active(
     scope: editor_plugin_api::PluginKeymapScope,
     popup_focused: bool,
@@ -35579,7 +36488,8 @@ fn plugin_buffer_binding_scope_active(
         | editor_plugin_api::PluginKeymapScope::Workspace => true,
         editor_plugin_api::PluginKeymapScope::Popup => popup_focused,
         editor_plugin_api::PluginKeymapScope::Autocomplete
-        | editor_plugin_api::PluginKeymapScope::Hover => false,
+        | editor_plugin_api::PluginKeymapScope::Hover
+        | editor_plugin_api::PluginKeymapScope::Dap => false,
     }
 }
 

@@ -19349,6 +19349,59 @@ fn debug_fringe_is_one_cell_when_idle_and_two_when_live() {
 }
 
 #[test]
+fn toggle_breakpoint_without_session_shows_idle_fringe_marker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-idle-fringe");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("Program.cs");
+    fs::write(&program, "class Program { static void Main() {} }\n").map_err(|e| e.to_string())?;
+    let buffer_id = open_workspace_file(&mut state.runtime, &program)?;
+
+    toggle_dap_breakpoint_at_cursor(&mut state.runtime)?;
+    sync_active_buffer(&mut state.runtime)?;
+
+    let focused = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(
+        focused, buffer_id,
+        "toggling a Breakpoint must not switch away from the editor buffer"
+    );
+    let focused_name = shell_ui(&state.runtime)?
+        .buffer(focused)
+        .ok_or_else(|| "focused buffer missing".to_owned())?
+        .display_name()
+        .to_owned();
+    assert_ne!(
+        focused_name, DAP_BREAKPOINTS_BUFFER_NAME,
+        "toggle must not open `{DAP_BREAKPOINTS_BUFFER_NAME}`"
+    );
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "buffer missing".to_owned())?;
+    assert!(
+        !buffer.dap_fringe_live(),
+        "idle Workspace must keep one-cell fringe (no live Session)"
+    );
+    assert_eq!(
+        buffer.dap_fringe_marker(0),
+        Some(BreakpointState::Pending),
+        "Breakpoint must appear in Debug Fringe before a Session starts"
+    );
+
+    let workspace_id = workspace.get();
+    let listed = state
+        .runtime
+        .services()
+        .get::<Arc<DapClientManager>>()
+        .ok_or_else(|| "dap manager missing".to_owned())?
+        .list_breakpoints(workspace_id)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(listed.len(), 1);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn wrap_columns_shrink_when_debug_fringe_widens() {
     let idle = wrap_columns_for_width_with_fringe(320, 8, 1);
     let live = wrap_columns_for_width_with_fringe(320, 8, 2);
@@ -19420,7 +19473,7 @@ fn install_fake_tcp_dap_manager(
                     write_raw(
                         &mut writer,
                         &format!(
-                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"initialize","body":{{"supportsConfigurationDoneRequest":false,"supportTerminateDebuggee":true,"supportsRestartRequest":true}}}}"#
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"initialize","body":{{"supportsConfigurationDoneRequest":true,"supportTerminateDebuggee":true,"supportsRestartRequest":true}}}}"#
                         ),
                     );
                     seq += 1;
@@ -19428,6 +19481,15 @@ fn install_fake_tcp_dap_manager(
                         &mut writer,
                         &format!(
                             r#"{{"seq":{seq},"type":"event","event":"initialized","body":{{}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "configurationDone" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"configurationDone","body":{{}}}}"#
                         ),
                     );
                     seq += 1;
@@ -19465,10 +19527,26 @@ fn install_fake_tcp_dap_manager(
                     write_raw(
                         &mut writer,
                         &format!(
-                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"continue","body":{{"allThreadsContinued":true}}}}"#
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"continue"}}"#
                         ),
                     );
                     seq += 1;
+                    if program_path.contains("exit-on-continue") {
+                        write_raw(
+                            &mut writer,
+                            &format!(
+                                r#"{{"seq":{seq},"type":"event","event":"exited","body":{{"exitCode":0}}}}"#
+                            ),
+                        );
+                        seq += 1;
+                        write_raw(
+                            &mut writer,
+                            &format!(
+                                r#"{{"seq":{seq},"type":"event","event":"terminated","body":{{}}}}"#
+                            ),
+                        );
+                        break;
+                    }
                 }
                 "next" | "stepIn" | "stepOut" => {
                     write_raw(
@@ -19525,7 +19603,37 @@ fn install_fake_tcp_dap_manager(
                     write_raw(
                         &mut writer,
                         &format!(
-                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"stackTrace","body":{{"stackFrames":[{{"id":1,"name":"main","source":{{"path":"{path_json}"}},"line":{stopped_line},"column":1}}],"totalFrames":1}}}}"#
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"stackTrace","body":{{"stackFrames":[{{"id":1,"name":"main","source":{{"path":"{path_json}"}},"line":{stopped_line},"column":1}},{{"id":2,"name":"caller","source":{{"path":"{path_json}"}},"line":{},"column":1}}],"totalFrames":2}}}}"#,
+                            stopped_line + 10
+                        ),
+                    );
+                    seq += 1;
+                }
+                "threads" => {
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"threads","body":{{"threads":[{{"id":1,"name":"main"}},{{"id":2,"name":"worker"}}]}}}}"#
+                        ),
+                    );
+                    seq += 1;
+                }
+                "evaluate" => {
+                    let expression = extract_field(&body, "expression").unwrap_or_default();
+                    let frame_id =
+                        extract_field(&body, "frameId").unwrap_or_else(|| "1".to_owned());
+                    let eval_body = if expression == "person" {
+                        r#"{"result":"Person { ... }","type":"Person","variablesReference":2}"#
+                            .to_owned()
+                    } else {
+                        format!(
+                            r#"{{"result":"{expression}@{frame_id}={stopped_line}","variablesReference":0}}"#
+                        )
+                    };
+                    write_raw(
+                        &mut writer,
+                        &format!(
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"evaluate","body":{eval_body}}}"#
                         ),
                     );
                     seq += 1;
@@ -19540,10 +19648,23 @@ fn install_fake_tcp_dap_manager(
                     seq += 1;
                 }
                 "variables" => {
+                    let reference = extract_field(&body, "variablesReference")
+                        .unwrap_or_else(|| "1".to_owned());
+                    let variables = match reference.as_str() {
+                        "2" => {
+                            r#"[{"name":"Name","value":"\"Ada\"","type":"string","variablesReference":0},{"name":"Address","value":"Address { ... }","type":"Address","variablesReference":3}]"#
+                        }
+                        "3" => {
+                            r#"[{"name":"City","value":"\"London\"","type":"string","variablesReference":0}]"#
+                        }
+                        _ => {
+                            r#"[{"name":"x","value":"42","type":"i32","variablesReference":0},{"name":"person","value":"Person { ... }","type":"Person","variablesReference":2}]"#
+                        }
+                    };
                     write_raw(
                         &mut writer,
                         &format!(
-                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"variables","body":{{"variables":[{{"name":"x","value":"42","type":"i32","variablesReference":0}}]}}}}"#
+                            r#"{{"seq":{seq},"type":"response","request_seq":{request_seq},"success":true,"command":"variables","body":{{"variables":{variables}}}}}"#
                         ),
                     );
                     seq += 1;
@@ -19718,6 +19839,47 @@ fn dap_start_installs_debug_layout_and_stop_restores() -> Result<(), String> {
 }
 
 #[test]
+fn dap_start_saves_dirty_workspace_files_before_launch() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-start-saves-dirty");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let buffer_id = open_workspace_file(&mut state.runtime, &program)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// dirty\n");
+        assert!(buffer.is_dirty());
+    }
+    assert_eq!(
+        fs::read_to_string(&program).map_err(|e| e.to_string())?,
+        "fn main() {}\n",
+        "disk must stay stale until dap.start"
+    );
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+
+    assert_eq!(
+        fs::read_to_string(&program).map_err(|e| e.to_string())?,
+        "// dirty\nfn main() {}\n",
+        "dap.start must save dirty Workspace files before compile-before-debug / launch"
+    );
+    assert!(
+        !shell_buffer(&state.runtime, buffer_id)?.is_dirty(),
+        "saved buffer must clear dirty"
+    );
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let root = unique_temp_dir("dap-step-jump-locals");
@@ -19731,6 +19893,7 @@ fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String
     let _buffer = open_workspace_file(&mut state.runtime, &program)?;
 
     let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    toggle_dap_breakpoint_at_cursor(&mut state.runtime)?;
     start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
     assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
     let workspace_id = state
@@ -19773,7 +19936,15 @@ fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String
         .buffer(view.panes[1].buffer_id)
         .ok_or_else(|| "center editor missing".to_owned())?;
     assert_eq!(editor.cursor_row(), 0, "should jump to stop line 1");
+    assert!(
+        editor.dap_fringe_live(),
+        "live Session must widen Debug Fringe in the center pane"
+    );
     assert_eq!(editor.dap_execution_line(), Some(0));
+    assert!(
+        editor.dap_fringe_marker(0).is_some(),
+        "Breakpoint on the stopped line must stay in the Debug Fringe"
+    );
     let locals = ui
         .buffer(view.panes[2].buffer_id)
         .ok_or_else(|| "locals pane missing".to_owned())?;
@@ -19782,8 +19953,40 @@ fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String
         locals_text.contains("x: 42"),
         "locals should refresh on stop: {locals_text}"
     );
+    assert!(
+        locals_text.contains(&format!("{DAP_VAR_COLLAPSED_GLYPH} person:")),
+        "structured Locals must show a collapsed chevron: {locals_text}"
+    );
+    let breakpoints = ui
+        .buffer(view.panes[0].buffer_id)
+        .ok_or_else(|| "breakpoints pane missing".to_owned())?;
+    let bp_text = breakpoints.text.text();
+    assert!(
+        bp_text.contains("main.rs:1"),
+        "Breakpoints pane should list the source line: {bp_text}"
+    );
+    assert!(
+        !bp_text.contains("Breakpoints:"),
+        "Breakpoints pane should not repeat the title as a header: {bp_text}"
+    );
 
     dap_control_for_active_workspace(&mut state.runtime, DapControl::StepOver)?;
+    {
+        let ui = shell_ui(&state.runtime)?;
+        let editor = ui
+            .buffer(
+                ui.workspace_view()
+                    .ok_or_else(|| "view missing".to_owned())?
+                    .panes[1]
+                    .buffer_id,
+            )
+            .ok_or_else(|| "center editor missing".to_owned())?;
+        assert_eq!(
+            editor.dap_execution_line(),
+            None,
+            "step must clear the execution highlight until the next stop"
+        );
+    }
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let changed = refresh_pending_dap(&mut state.runtime)?;
@@ -19830,6 +20033,399 @@ fn dap_stopped_jumps_to_source_refreshes_locals_and_steps() -> Result<(), String
         .ok_or_else(|| "center editor missing".to_owned())?;
     assert_eq!(editor.cursor_row(), 0);
     assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_locals_and_watches_expand_structured_variables() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-expand-vars");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {\n    let person = Person;\n}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for DAP stopped UI".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    focus_debug_layout_pane(&mut state.runtime, 2)?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.plugin_focus_section_named(DAP_LOCALS_SECTION);
+        let line = (0..buffer.line_count())
+            .find(|&index| {
+                buffer
+                    .text
+                    .line(index)
+                    .is_some_and(|line| line.contains("person:"))
+            })
+            .ok_or_else(|| "person Locals row missing".to_owned())?;
+        buffer.set_cursor(TextPoint::new(line, 0));
+    }
+    state
+        .runtime
+        .execute_command("dap.toggle-variable")
+        .map_err(|error| error.to_string())?;
+
+    let locals_id = shell_ui(&state.runtime)?
+        .workspace_view()
+        .ok_or_else(|| "workspace view missing".to_owned())?
+        .panes[2]
+        .buffer_id;
+    let locals_text = {
+        let locals = shell_buffer(&state.runtime, locals_id)?;
+        plugin_section_lines(locals, DAP_LOCALS_SECTION)?.join("\n")
+    };
+    assert!(
+        locals_text.contains(DAP_WATCHES_HEADER),
+        "Locals section must keep Watch Expressions header: {locals_text}"
+    );
+    assert!(
+        locals_text.contains(&format!("{DAP_VAR_EXPANDED_GLYPH} person:")),
+        "person should expand: {locals_text}"
+    );
+    assert!(
+        locals_text.contains("Name:") && locals_text.contains("Address:"),
+        "expanded person must show members: {locals_text}"
+    );
+
+    add_dap_expression(&mut state.runtime, "person")?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.plugin_focus_section_named(DAP_EXPRESSIONS_SECTION);
+        buffer.set_cursor(TextPoint::new(0, 0));
+    }
+    state
+        .runtime
+        .execute_command("dap.toggle-variable")
+        .map_err(|error| error.to_string())?;
+    let watch_text = {
+        let locals = shell_buffer(&state.runtime, locals_id)?;
+        plugin_section_lines(locals, DAP_EXPRESSIONS_SECTION)?.join("\n")
+    };
+    assert!(
+        watch_text.contains(&format!("{DAP_VAR_EXPANDED_GLYPH} person:")),
+        "Watch Expression should expand: {watch_text}"
+    );
+    assert!(
+        watch_text.contains("Name:"),
+        "expanded watch must show members: {watch_text}"
+    );
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_locals_insert_watch_expression_evaluates_while_stopped() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-insert-watch");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {\n    let x = 1;\n}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for DAP stopped UI".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    focus_debug_layout_pane(&mut state.runtime, 2)?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.plugin_focus_section_named(DAP_LOCALS_SECTION);
+        let mut lines: Vec<String> = (0..buffer.line_count())
+            .filter_map(|index| buffer.text.line(index))
+            .collect();
+        let header = lines
+            .iter()
+            .position(|line| line == DAP_WATCHES_HEADER)
+            .ok_or_else(|| format!("Watch Expressions header missing: {lines:?}"))?;
+        lines.insert(header + 1, "x".to_owned());
+        buffer.replace_with_lines_preserve_view(lines);
+    }
+    apply_dap_locals_edits(&mut state.runtime, buffer_id)?;
+
+    let locals_text = {
+        let locals = shell_buffer(&state.runtime, buffer_id)?;
+        plugin_section_lines(locals, DAP_LOCALS_SECTION)?.join("\n")
+    };
+    assert!(
+        locals_text.contains(DAP_WATCHES_HEADER),
+        "header must remain: {locals_text}"
+    );
+    assert!(
+        locals_text.lines().any(|line| line.contains("x@")),
+        "inserted Watch Expression must evaluate while stopped: {locals_text}"
+    );
+    let watch_text = {
+        let locals = shell_buffer(&state.runtime, buffer_id)?;
+        plugin_section_lines(locals, DAP_EXPRESSIONS_SECTION)?.join("\n")
+    };
+    assert!(
+        watch_text.contains("x@"),
+        "Expressions section must mirror the new watch: {watch_text}"
+    );
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_continue_to_exit_tears_down_debug_layout() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-continue-exit");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("exit-on-continue.rs");
+    fs::write(&program, "fn main() {\n    let x = 1;\n}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for DAP stopped UI".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(shell_ui(&state.runtime)?.is_debug_layout_active());
+
+    dap_control_for_active_workspace(&mut state.runtime, DapControl::Continue)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let _ = refresh_pending_dap(&mut state.runtime)?;
+        if !shell_ui(&state.runtime)?.is_debug_layout_active() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for Debug Stop cleanup after continue".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(shell_ui(&state.runtime)?.pane_count(), 1);
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|e| e.to_string())?;
+    {
+        let dap = state
+            .runtime
+            .services()
+            .get::<Arc<DapClientManager>>()
+            .ok_or_else(|| "dap manager missing".to_owned())?;
+        assert!(
+            dap.session_info(workspace_id.get())
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            "Session must end after process exit"
+        );
+    }
+    let ui = shell_ui(&state.runtime)?;
+    let editor = ui
+        .buffer(
+            ui.workspace_view()
+                .ok_or_else(|| "view missing".to_owned())?
+                .panes[0]
+                .buffer_id,
+        )
+        .ok_or_else(|| "editor missing".to_owned())?;
+    assert!(
+        !editor.dap_fringe_live(),
+        "Debug Fringe must not stay live after Debug Stop cleanup"
+    );
+
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_mode_function_keys_continue_and_step() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let idle_modes = state.overlay_minor_modes().map_err(|e| e.to_string())?;
+    assert!(
+        !idle_modes.contains(&KeymapScope::Dap),
+        "DAP Mode must stay off without a Session"
+    );
+    let start = state
+        .runtime
+        .keymaps()
+        .resolve_with_minor_modes(&idle_modes, KeymapVimMode::Any, "F5")
+        .ok_or_else(|| "expected Global F5".to_owned())?;
+    assert_eq!(start.command_name(), "dap.start");
+
+    let root = unique_temp_dir("dap-mode-keys");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|e| e.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+
+    let live_modes = state.overlay_minor_modes().map_err(|e| e.to_string())?;
+    assert!(
+        live_modes.contains(&KeymapScope::Dap),
+        "live Session must activate DAP Mode: {live_modes:?}"
+    );
+    let continue_binding = state
+        .runtime
+        .keymaps()
+        .resolve_with_minor_modes(&live_modes, KeymapVimMode::Any, "F5")
+        .ok_or_else(|| "expected DAP F5".to_owned())?;
+    assert_eq!(continue_binding.command_name(), "dap.continue");
+    let step = state
+        .runtime
+        .keymaps()
+        .resolve_with_minor_modes(&live_modes, KeymapVimMode::Any, "F10")
+        .ok_or_else(|| "expected DAP F10".to_owned())?;
+    assert_eq!(step.command_name(), "dap.step");
+    let into = state
+        .runtime
+        .keymaps()
+        .resolve_with_minor_modes(&live_modes, KeymapVimMode::Any, "F11")
+        .ok_or_else(|| "expected DAP F11".to_owned())?;
+    assert_eq!(into.command_name(), "dap.step-into");
+
+    let toggle = state
+        .runtime
+        .keymaps()
+        .resolve_with_minor_modes(&[KeymapScope::Workspace], KeymapVimMode::Any, "Space d a")
+        .ok_or_else(|| "expected <leader> da".to_owned())?;
+    assert_eq!(toggle.command_name(), "dap.toggle-breakpoint");
+
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = workspace;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_watches_eval_repl_switch_and_breakpoint_extras() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-polish");
+    let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() { let x = 1; }\n").map_err(|e| e.to_string())?;
+    let buffer_id = open_workspace_file(&mut state.runtime, &program)?;
+
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+    start_dap_for_active_workspace(&mut state.runtime, Some("fake-dap"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let changed = refresh_pending_dap(&mut state.runtime)?;
+        if changed {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for stop".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    add_dap_expression(&mut state.runtime, "x")?;
+    let workspace_id = workspace.get();
+    let (locals, expressions) = dap_locals_and_expression_lines(&state.runtime, workspace_id)?;
+    assert!(
+        locals.iter().any(|line| line == DAP_WATCHES_HEADER),
+        "locals must keep Watch Expressions header: {locals:?}"
+    );
+    assert!(
+        locals.iter().any(|line| line.contains("x")),
+        "locals rows: {locals:?}"
+    );
+    assert!(
+        expressions.iter().any(|line| line.contains("x:")),
+        "expression rows: {expressions:?}"
+    );
+
+    show_dap_eval_result(&mut state.runtime, "y", DapEvaluateContext::Repl)?;
+    open_dap_repl(&mut state.runtime)?;
+    submit_dap_repl_expression(&mut state.runtime, "z")?;
+    assert!(
+        shell_ui(&state.runtime)?
+            .input_prompt()
+            .is_some_and(|prompt| prompt.id == DAP_REPL_PROMPT_ID),
+        "REPL should reopen prompt"
+    );
+
+    switch_dap_thread(&mut state.runtime, 2)?;
+    switch_dap_stack_frame(&mut state.runtime, 2)?;
+
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.focus_buffer_in_active_pane(buffer_id);
+        if let Some(buffer) = ui.buffer_mut(buffer_id) {
+            buffer.text.set_cursor(TextPoint::new(0, 0));
+        }
+    }
+    apply_dap_breakpoint_extra(
+        &mut state.runtime,
+        DapBreakpointExtraKind::Condition,
+        "x > 0",
+    )?;
+    apply_dap_breakpoint_extra(
+        &mut state.runtime,
+        DapBreakpointExtraKind::HitCondition,
+        "2",
+    )?;
+    apply_dap_breakpoint_extra(
+        &mut state.runtime,
+        DapBreakpointExtraKind::LogMessage,
+        "hit",
+    )?;
+    let bps = dap_client_manager(&state.runtime)?
+        .list_breakpoints(workspace_id)
+        .map_err(|e| e.to_string())?;
+    let bp = bps
+        .iter()
+        .find(|bp| bp.line() == 1)
+        .ok_or_else(|| "breakpoint missing".to_owned())?;
+    assert_eq!(bp.condition(), Some("x > 0"));
+    assert_eq!(bp.hit_condition(), Some("2"));
+    assert_eq!(bp.log_message(), Some("hit"));
+
+    open_dap_log_buffer(&mut state.runtime)?;
+    remove_dap_expression(&mut state.runtime, "x")?;
 
     stop_dap_for_active_workspace(&mut state.runtime)?;
     let _ = fake.join();

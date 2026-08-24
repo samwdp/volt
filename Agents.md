@@ -96,3 +96,13 @@ Canonical role names used as-is (`needs-triage`, `needs-info`, `ready-for-agent`
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+
+### Internal docs
+
+internal docs live in the `docs` directory. These consist of html documents that are used as a static site and markdown files. The html documents should be updated first. Use existing styling and only make changes that are appropriate to the work that has been undertaken such as:
+
+- Any new `user` packages that have been added. Give a simple description of the user package and what it does.
+- Any new technologies that have been added
+
+Use git commit history to update the changelog in the site, link any github issues that appear. Ensure this page is easy to filter and is up to date. 

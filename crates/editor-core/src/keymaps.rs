@@ -172,6 +172,8 @@ pub enum KeymapScope {
     Autocomplete,
     /// Hover overlay Minor Mode.
     Hover,
+    /// DAP Mode: live Debug Session on the active Workspace.
+    Dap,
 }
 
 impl fmt::Display for KeymapScope {
@@ -182,6 +184,7 @@ impl fmt::Display for KeymapScope {
             Self::Popup => formatter.write_str("popup"),
             Self::Autocomplete => formatter.write_str("autocomplete"),
             Self::Hover => formatter.write_str("hover"),
+            Self::Dap => formatter.write_str("dap"),
         }
     }
 }
@@ -819,6 +822,24 @@ mod tests {
             .expect("Hover Minor Mode should win");
 
         assert_eq!(binding.command_name(), "hover.next");
+        Ok(())
+    }
+
+    #[test]
+    fn dap_mode_overrides_global_f5_while_session_live() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register("F5", "dap.start", KeymapScope::Global, CommandSource::Core)?;
+        registry.register("F5", "dap.continue", KeymapScope::Dap, CommandSource::Core)?;
+
+        let continued = registry
+            .resolve_with_minor_modes(&[KeymapScope::Dap], KeymapVimMode::Any, "F5")
+            .expect("DAP Mode should claim F5");
+        assert_eq!(continued.command_name(), "dap.continue");
+
+        let started = registry
+            .resolve_with_minor_modes(&[], KeymapVimMode::Any, "F5")
+            .expect("Global F5 should start when DAP Mode is inactive");
+        assert_eq!(started.command_name(), "dap.start");
         Ok(())
     }
 }

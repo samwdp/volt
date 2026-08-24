@@ -24,6 +24,9 @@ pub struct StoredBreakpoint {
     /// 1-based DAP line number.
     line: u32,
     state: BreakpointState,
+    condition: Option<String>,
+    hit_condition: Option<String>,
+    log_message: Option<String>,
 }
 
 impl StoredBreakpoint {
@@ -33,6 +36,9 @@ impl StoredBreakpoint {
             path: path.into(),
             line,
             state: BreakpointState::Pending,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
         }
     }
 
@@ -56,10 +62,47 @@ impl StoredBreakpoint {
         matches!(self.state, BreakpointState::Verified)
     }
 
+    /// Conditional expression, when set.
+    pub fn condition(&self) -> Option<&str> {
+        self.condition.as_deref()
+    }
+
+    /// Hit-condition expression, when set.
+    pub fn hit_condition(&self) -> Option<&str> {
+        self.hit_condition.as_deref()
+    }
+
+    /// Logpoint message, when set.
+    pub fn log_message(&self) -> Option<&str> {
+        self.log_message.as_deref()
+    }
+
     /// Sets verification state after a `setBreakpoints` response.
     pub fn set_state(&mut self, state: BreakpointState) {
         self.state = state;
     }
+
+    /// Sets or clears the Breakpoint condition.
+    pub fn set_condition(&mut self, condition: Option<String>) {
+        self.condition = normalize_optional_text(condition);
+    }
+
+    /// Sets or clears the hit condition.
+    pub fn set_hit_condition(&mut self, hit_condition: Option<String>) {
+        self.hit_condition = normalize_optional_text(hit_condition);
+    }
+
+    /// Sets or clears the logpoint message.
+    pub fn set_log_message(&mut self, log_message: Option<String>) {
+        self.log_message = normalize_optional_text(log_message);
+    }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
 }
 
 /// Result of toggling a Breakpoint at a line.
@@ -196,17 +239,121 @@ impl BreakpointStore {
             bp.set_state(BreakpointState::Pending);
         }
     }
+
+    /// Updates Breakpoint extras at `path`:`line`. Returns false when missing.
+    pub fn update_extras(
+        &mut self,
+        workspace_id: u64,
+        path: &Path,
+        line: u32,
+        condition: Option<Option<String>>,
+        hit_condition: Option<Option<String>>,
+        log_message: Option<Option<String>>,
+    ) -> bool {
+        let Some(entries) = self.by_workspace.get_mut(&workspace_id) else {
+            return false;
+        };
+        let Some(bp) = entries
+            .iter_mut()
+            .find(|bp| paths_equal(bp.path(), path) && bp.line() == line)
+        else {
+            return false;
+        };
+        if let Some(condition) = condition {
+            bp.set_condition(condition);
+        }
+        if let Some(hit_condition) = hit_condition {
+            bp.set_hit_condition(hit_condition);
+        }
+        if let Some(log_message) = log_message {
+            bp.set_log_message(log_message);
+        }
+        true
+    }
+
+    /// Ensures a Breakpoint exists at `path`:`line` (pending), then updates extras.
+    pub fn upsert_extras(
+        &mut self,
+        workspace_id: u64,
+        path: impl Into<PathBuf>,
+        line: u32,
+        condition: Option<Option<String>>,
+        hit_condition: Option<Option<String>>,
+        log_message: Option<Option<String>>,
+    ) {
+        let path = path.into();
+        if self.get(workspace_id, &path, line).is_none() {
+            let _ = self.toggle(workspace_id, path.clone(), line);
+        }
+        let _ = self.update_extras(
+            workspace_id,
+            &path,
+            line,
+            condition,
+            hit_condition,
+            log_message,
+        );
+    }
+}
+
+/// Compares Debug Adapter source paths, ignoring slash style and Windows case.
+pub fn debug_source_paths_eq(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    normalize_debug_source_path(left) == normalize_debug_source_path(right)
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
-    // Compare lossless display strings so Windows drive letters stay case-insensitive enough
-    // via PathBuf equality while still matching absolute paths used by the shell.
-    left == right
+    debug_source_paths_eq(left, right)
+}
+
+fn normalize_debug_source_path(path: &Path) -> String {
+    let mut text = path.to_string_lossy().replace('/', "\\");
+    if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+        text = stripped.to_owned();
+    }
+    let mut normalized = String::with_capacity(text.len());
+    let mut prev_slash = false;
+    for ch in text.chars() {
+        if ch == '\\' {
+            if !prev_slash || normalized.is_empty() {
+                normalized.push('\\');
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        normalized.push(ch);
+    }
+    #[cfg(windows)]
+    {
+        normalized.make_ascii_lowercase();
+    }
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BreakpointState, BreakpointStore, BreakpointToggle};
+    use super::{BreakpointState, BreakpointStore, BreakpointToggle, debug_source_paths_eq};
+    use std::path::Path;
+
+    #[test]
+    fn debug_source_paths_eq_ignores_slash_style_and_windows_case() {
+        assert!(debug_source_paths_eq(
+            Path::new(r"P:\Testing\Program.cs"),
+            Path::new("P:/Testing/Program.cs"),
+        ));
+        #[cfg(windows)]
+        assert!(debug_source_paths_eq(
+            Path::new(r"P:\Testing\Program.cs"),
+            Path::new(r"p:\testing\program.cs"),
+        ));
+        assert!(!debug_source_paths_eq(
+            Path::new(r"P:\Testing\Program.cs"),
+            Path::new(r"P:\Testing\Other.cs"),
+        ));
+    }
 
     #[test]
     fn toggle_adds_and_removes_without_session() {
@@ -268,5 +415,37 @@ mod tests {
         store.delete(1, std::path::Path::new("a.rs"), 1);
         assert!(store.list(1).is_empty());
         assert_eq!(store.list(2).len(), 1);
+    }
+
+    #[test]
+    fn extras_persist_on_stored_breakpoint() {
+        let mut store = BreakpointStore::new();
+        store.upsert_extras(
+            4,
+            "main.rs",
+            7,
+            Some(Some("x > 1".to_owned())),
+            Some(Some("5".to_owned())),
+            Some(Some("hit {x}".to_owned())),
+        );
+        let bp = store
+            .get(4, std::path::Path::new("main.rs"), 7)
+            .expect("bp");
+        assert_eq!(bp.condition(), Some("x > 1"));
+        assert_eq!(bp.hit_condition(), Some("5"));
+        assert_eq!(bp.log_message(), Some("hit {x}"));
+        assert!(store.update_extras(
+            4,
+            std::path::Path::new("main.rs"),
+            7,
+            Some(None),
+            None,
+            None,
+        ));
+        let bp = store
+            .get(4, std::path::Path::new("main.rs"), 7)
+            .expect("bp");
+        assert_eq!(bp.condition(), None);
+        assert_eq!(bp.hit_condition(), Some("5"));
     }
 }

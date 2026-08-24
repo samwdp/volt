@@ -353,25 +353,52 @@ pub fn infer_configurations(ctx: &DebugInferContext<'_>) -> Vec<DebugConfigurati
         ));
     }
 
+    if ctx.allow_deep_inference
+        && let Some(root) = ctx.workspace_root
+        && let Some(dll) = infer_dotnet_dll(root, active_file)
+    {
+        let mut configuration = DebugConfiguration::new("Debug (dotnet)", DebugRequestKind::Launch)
+            .with_target_program(dll)
+            .with_compile_command("dotnet build");
+        if let Some(cwd) = &cwd {
+            configuration = configuration.with_cwd(cwd.clone());
+        }
+        if let Some(adapter) = ctx.preferred_adapter_id {
+            configuration = configuration.with_adapter_id(adapter);
+        }
+        candidates.push(DebugConfigurationCandidate::new(
+            configuration,
+            DebugConfigurationSource::Inferred,
+            ctx.preferred_adapter_id.map(str::to_owned),
+        ));
+    }
+
     // Shallow default: launch the open file path (useful for scripts / Default Workspace).
-    let mut configuration =
-        DebugConfiguration::new("Debug (current file)", DebugRequestKind::Launch)
-            .with_target_program(active_file.to_path_buf());
-    if let Some(cwd) = cwd {
-        configuration = configuration.with_cwd(cwd);
+    // Skip for C# when we already inferred a project — launching the .cs source is useless.
+    let skip_current_file = candidates.iter().any(|candidate| {
+        candidate.configuration().name() == "Debug (dotnet)"
+            || candidate.configuration().name() == "Debug (Cargo)"
+    });
+    if !skip_current_file {
+        let mut configuration =
+            DebugConfiguration::new("Debug (current file)", DebugRequestKind::Launch)
+                .with_target_program(active_file.to_path_buf());
+        if let Some(cwd) = cwd {
+            configuration = configuration.with_cwd(cwd);
+        }
+        if let Some(adapter) = ctx.preferred_adapter_id {
+            configuration = configuration.with_adapter_id(adapter);
+        }
+        candidates.push(DebugConfigurationCandidate::new(
+            configuration,
+            if ctx.allow_deep_inference {
+                DebugConfigurationSource::CompiledDefault
+            } else {
+                DebugConfigurationSource::Inferred
+            },
+            ctx.preferred_adapter_id.map(str::to_owned),
+        ));
     }
-    if let Some(adapter) = ctx.preferred_adapter_id {
-        configuration = configuration.with_adapter_id(adapter);
-    }
-    candidates.push(DebugConfigurationCandidate::new(
-        configuration,
-        if ctx.allow_deep_inference {
-            DebugConfigurationSource::CompiledDefault
-        } else {
-            DebugConfigurationSource::Inferred
-        },
-        ctx.preferred_adapter_id.map(str::to_owned),
-    ));
 
     candidates
 }
@@ -388,17 +415,7 @@ pub fn infer_compile_heuristic(
         .map(|ext| ext.to_ascii_lowercase());
     match extension.as_deref() {
         Some("rs") if root.join("Cargo.toml").is_file() => Some("cargo build".to_owned()),
-        Some("cs")
-            if root.read_dir().ok()?.filter_map(Result::ok).any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| {
-                        ext.eq_ignore_ascii_case("sln") || ext.eq_ignore_ascii_case("csproj")
-                    })
-            }) =>
-        {
+        Some("cs") if active_file.is_some_and(|file| find_csproj(root, file).is_some()) => {
             Some("dotnet build".to_owned())
         }
         Some("c" | "cpp" | "cc" | "cxx" | "h" | "hpp") if root.join("Makefile").is_file() => {
@@ -436,6 +453,111 @@ fn resolve_path(root: &Path, value: &str) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+fn first_project_file(dir: &Path, extensions: &[&str]) -> Option<PathBuf> {
+    let mut entries = fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    entries.into_iter().find_map(|entry| {
+        let path = entry.path();
+        let ext = path.extension()?.to_str()?;
+        extensions
+            .iter()
+            .any(|wanted| ext.eq_ignore_ascii_case(wanted))
+            .then_some(path)
+    })
+}
+
+fn find_csproj(root: &Path, active_file: &Path) -> Option<PathBuf> {
+    let is_csharp = active_file
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cs"));
+    if !is_csharp {
+        return None;
+    }
+    let mut current = active_file.parent()?;
+    loop {
+        if let Some(project) = first_project_file(current, &["csproj"]) {
+            return Some(project);
+        }
+        if current == root {
+            break;
+        }
+        current = current.parent()?;
+        if !current.starts_with(root) && current != root {
+            break;
+        }
+    }
+    first_project_file(root, &["csproj"])
+}
+
+/// Resolves the Debug-build DLL path for a nearby .csproj (SharpDbg needs `program`).
+fn infer_dotnet_dll(root: &Path, active_file: &Path) -> Option<PathBuf> {
+    let csproj = find_csproj(root, active_file)?;
+    let contents = fs::read_to_string(&csproj).ok()?;
+    let assembly = parse_csproj_property(&contents, "AssemblyName").unwrap_or_else(|| {
+        csproj
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "App".to_owned())
+    });
+    let tfm = parse_csproj_property(&contents, "TargetFramework")
+        .or_else(|| {
+            parse_csproj_property(&contents, "TargetFrameworks").and_then(|frameworks| {
+                frameworks
+                    .split([';', ' '])
+                    .map(str::trim)
+                    .find(|part| !part.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "net8.0".to_owned());
+    let project_dir = csproj.parent()?;
+    let candidate = project_dir
+        .join("bin")
+        .join("Debug")
+        .join(&tfm)
+        .join(format!("{assembly}.dll"));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    if let Some(existing) = find_existing_debug_dll(project_dir, &assembly) {
+        return Some(existing);
+    }
+    // Expected path after `dotnet build` (mirrors cargo inference before first build).
+    Some(candidate)
+}
+
+fn find_existing_debug_dll(project_dir: &Path, assembly: &str) -> Option<PathBuf> {
+    let debug_root = project_dir.join("bin").join("Debug");
+    let entries = fs::read_dir(&debug_root).ok()?;
+    let mut matches = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let tfm_dir = entry.path();
+        if !tfm_dir.is_dir() {
+            continue;
+        }
+        let dll = tfm_dir.join(format!("{assembly}.dll"));
+        if dll.is_file() {
+            matches.push(dll);
+        }
+    }
+    matches.sort();
+    matches.pop()
+}
+
+fn parse_csproj_property(contents: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = contents.find(&open)? + open.len();
+    let rest = &contents[start..];
+    let end = rest.find(&close)?;
+    let value = rest[..end].trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn infer_rust_cargo_binary(root: &Path, active_file: &Path) -> Option<PathBuf> {
@@ -576,6 +698,47 @@ mod tests {
         assert_eq!(
             infer_compile_heuristic(Some(root.as_path()), Some(file.as_path())).as_deref(),
             Some("cargo build")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deep_inference_finds_dotnet_dll() {
+        let root = temp_dir("dotnet");
+        fs::write(
+            root.join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>"#,
+        )
+        .expect("csproj");
+        let file = root.join("Program.cs");
+        fs::write(&file, "Console.WriteLine(\"hi\");\n").expect("cs");
+
+        let ctx = DebugInferContext {
+            workspace_root: Some(root.as_path()),
+            active_file: Some(file.as_path()),
+            preferred_adapter_id: Some("sharpdbg"),
+            allow_deep_inference: true,
+        };
+        let inferred = infer_configurations(&ctx);
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].configuration().name(), "Debug (dotnet)");
+        assert_eq!(
+            inferred[0].configuration().target_program(),
+            Some(
+                &root
+                    .join("bin")
+                    .join("Debug")
+                    .join("net8.0")
+                    .join("App.dll")
+            )
+        );
+        assert_eq!(
+            inferred[0].configuration().compile_command(),
+            Some("dotnet build")
+        );
+        assert_eq!(
+            infer_compile_heuristic(Some(root.as_path()), Some(file.as_path())).as_deref(),
+            Some("dotnet build")
         );
         let _ = fs::remove_dir_all(&root);
     }

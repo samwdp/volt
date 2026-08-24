@@ -55,10 +55,11 @@ pub fn package() -> PluginPackage {
                 )],
             ),
         ])
-        .with_key_bindings(vec![
-            PluginKeyBinding::new("F5", "workspace.compile", PluginKeymapScope::Global),
-            PluginKeyBinding::new("S-F5", "workspace.recompile", PluginKeymapScope::Global),
-        ])
+        .with_key_bindings(vec![PluginKeyBinding::new(
+            "S-F5",
+            "workspace.recompile",
+            PluginKeymapScope::Global,
+        )])
 }
 
 // ─── Default build commands ───────────────────────────────────────────────────
@@ -246,10 +247,15 @@ mod tests {
     fn compile_package_exports_global_keybindings() {
         let pkg = package();
         assert!(pkg.key_bindings().iter().any(|kb| {
-            kb.command_name() == "workspace.compile" && kb.scope() == PluginKeymapScope::Global
+            kb.command_name() == "workspace.recompile"
+                && kb.scope() == PluginKeymapScope::Global
+                && kb.chord() == "S-F5"
         }));
-        assert!(pkg.key_bindings().iter().any(|kb| {
-            kb.command_name() == "workspace.recompile" && kb.scope() == PluginKeymapScope::Global
-        }));
+        assert!(
+            !pkg.key_bindings()
+                .iter()
+                .any(|kb| kb.command_name() == "workspace.compile"),
+            "F5 now starts a Debug Session; compile stays on Shift+F5 recompile"
+        );
     }
 }

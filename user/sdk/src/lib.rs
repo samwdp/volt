@@ -89,6 +89,18 @@ pub mod dap_hooks {
     pub const TOGGLE_BREAKPOINT: &str = "dap.toggle-breakpoint";
     pub const DELETE_BREAKPOINT: &str = "dap.delete-breakpoint";
     pub const OPEN_BREAKPOINTS: &str = "dap.open-breakpoints";
+    pub const EXPRESSIONS_ADD: &str = "dap.expressions-add";
+    pub const EXPRESSIONS_REMOVE: &str = "dap.expressions-remove";
+    pub const EVAL: &str = "dap.eval";
+    pub const EVAL_AT_POINT: &str = "dap.eval-at-point";
+    pub const REPL: &str = "dap.repl";
+    pub const SWITCH_THREAD: &str = "dap.switch-thread";
+    pub const SWITCH_STACK_FRAME: &str = "dap.switch-stack-frame";
+    pub const BREAKPOINT_CONDITION: &str = "dap.breakpoint-condition";
+    pub const BREAKPOINT_HIT_CONDITION: &str = "dap.breakpoint-hit-condition";
+    pub const BREAKPOINT_LOG_MESSAGE: &str = "dap.breakpoint-log-message";
+    pub const TOGGLE_VARIABLE: &str = "dap.toggle-variable";
+    pub const GOTO_BREAKPOINT: &str = "dap.goto-breakpoint";
 }
 
 /// Hook name constants for the LSP subsystem.
@@ -213,6 +225,7 @@ pub mod buffer_kinds {
     pub const DB_SIDEBAR: &str = "db-sidebar";
     pub const DAP_BREAKPOINTS: &str = "dap-breakpoints";
     pub const DAP_LOCALS: &str = "dap-locals";
+    pub const DAP_REPL: &str = "dap-repl";
     pub const PDF: &str = "pdf";
     pub const ISSUES_BOARD: &str = "issues-board";
 }
@@ -3099,6 +3112,8 @@ pub enum PluginKeymapScope {
     Autocomplete,
     /// Hover overlay Minor Mode.
     Hover,
+    /// DAP Mode: live Debug Session on the active Workspace.
+    Dap,
 }
 
 /// Modal Vim state that can activate a keybinding.

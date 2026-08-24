@@ -1,7 +1,7 @@
 //! Live DAP client: transport, handshake, and one Debug Session per Workspace.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     io::{self, BufRead, BufReader, Read, Write},
@@ -18,13 +18,14 @@ use std::{
 };
 
 use dap_types::{
-    AttachRequestArguments, ContinueArguments, DisconnectArguments, InitializeRequestArguments,
-    LaunchRequestArguments, NextArguments, PauseArguments, RestartArguments, ScopesArguments,
-    SetBreakpointsArguments, Source, SourceBreakpoint, StackTraceArguments, StepInArguments,
-    StepOutArguments, VariablesArguments,
+    AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
+    EvaluateArgumentsContext, InitializeRequestArguments, LaunchRequestArguments, NextArguments,
+    PauseArguments, RestartArguments, ScopesArguments, SetBreakpointsArguments, Source,
+    SourceBreakpoint, StackTraceArguments, StepInArguments, StepOutArguments, VariablesArguments,
     requests::{
-        Attach, Continue, Disconnect, Initialize, Launch, Next, Pause, Request as DapRequest,
-        Restart, Scopes, SetBreakpoints, StackTrace, StepIn, StepOut, Variables,
+        Attach, Continue, Disconnect, Evaluate, Initialize, Launch, Next, Pause,
+        Request as DapRequest, Restart, Scopes, SetBreakpoints, StackTrace, StepIn, StepOut,
+        Threads, Variables,
     },
 };
 use serde::Deserialize;
@@ -40,6 +41,9 @@ const TRANSPORT_LOG_MAX_ENTRIES: usize = 256;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_CONNECT_RETRY: Duration = Duration::from_millis(50);
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Errors produced by the DAP client host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,15 +249,21 @@ impl DapExecutionPosition {
     }
 }
 
-/// One Locals variable row for the Debug Layout.
+/// Structured Locals or Watch child node. `variables_reference > 0` means expandable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DapLocalVariable {
+pub struct DapVariableNode {
     name: String,
     value: String,
     type_name: Option<String>,
+    variables_reference: u64,
+    children: Vec<DapVariableNode>,
+    expanded: bool,
 }
 
-impl DapLocalVariable {
+/// One Locals variable row for the Debug Layout.
+pub type DapLocalVariable = DapVariableNode;
+
+impl DapVariableNode {
     /// Returns the variable name.
     pub fn name(&self) -> &str {
         &self.name
@@ -268,21 +278,278 @@ impl DapLocalVariable {
     pub fn type_name(&self) -> Option<&str> {
         self.type_name.as_deref()
     }
+
+    /// Returns the DAP `variablesReference`. Non-zero means children can be fetched.
+    pub const fn variables_reference(&self) -> u64 {
+        self.variables_reference
+    }
+
+    /// Returns whether this node can be expanded.
+    pub const fn expandable(&self) -> bool {
+        self.variables_reference > 0
+    }
+
+    /// Returns whether children are currently shown.
+    pub const fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Returns fetched children (empty when collapsed or a leaf).
+    pub fn children(&self) -> &[DapVariableNode] {
+        &self.children
+    }
+}
+
+/// Stable expand path: Locals (`watch = None`) or a Watch Expression plus member names.
+///
+/// Paths use names, not live `variablesReference` values, so expansion survives a step.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DapVariablePath {
+    watch: Option<String>,
+    segments: Vec<String>,
+}
+
+impl DapVariablePath {
+    /// Path into Locals, e.g. `["person", "Address"]`.
+    pub fn locals(segments: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            watch: None,
+            segments: segments.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Path under a Watch Expression. Empty `segments` is the watch root.
+    pub fn watch(
+        expression: impl Into<String>,
+        segments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            watch: Some(expression.into()),
+            segments: segments.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Watch Expression text, or `None` for Locals.
+    pub fn watch_expression(&self) -> Option<&str> {
+        self.watch.as_deref()
+    }
+
+    /// Member-name segments under the Locals root or Watch Expression.
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    fn is_prefix_of(&self, other: &Self) -> bool {
+        self.watch == other.watch && other.segments.starts_with(&self.segments)
+    }
+}
+
+/// Flattened tree row for Locals / Expressions rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapVariableRow {
+    path: DapVariablePath,
+    depth: usize,
+    expandable: bool,
+    expanded: bool,
+    name: String,
+    value: String,
+    type_name: Option<String>,
+    ok: bool,
+}
+
+impl DapVariableRow {
+    /// Returns the expand path for this row.
+    pub fn path(&self) -> &DapVariablePath {
+        &self.path
+    }
+
+    /// Returns indent depth (0 = root).
+    pub const fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Returns whether this row can expand.
+    pub const fn expandable(&self) -> bool {
+        self.expandable
+    }
+
+    /// Returns whether this row is expanded.
+    pub const fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Returns the display name (variable or Watch Expression).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the display value or error text.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the optional type name.
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
+    }
+
+    /// Returns whether evaluation succeeded (Locals always `true`).
+    pub const fn ok(&self) -> bool {
+        self.ok
+    }
+}
+
+/// Context for one-shot / Watch / REPL evaluate requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DapEvaluateContext {
+    /// Watch Expressions section.
+    Watch,
+    /// Debug REPL Popup.
+    Repl,
+    /// Hover / eval-at-point.
+    Hover,
+}
+
+impl From<DapEvaluateContext> for EvaluateArgumentsContext {
+    fn from(value: DapEvaluateContext) -> Self {
+        match value {
+            DapEvaluateContext::Watch => Self::Watch,
+            DapEvaluateContext::Repl => Self::Repl,
+            DapEvaluateContext::Hover => Self::Hover,
+        }
+    }
+}
+
+/// One Watch Expression row for the Expressions section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapWatchExpression {
+    expression: String,
+    value: String,
+    type_name: Option<String>,
+    ok: bool,
+    variables_reference: u64,
+    children: Vec<DapVariableNode>,
+    expanded: bool,
+}
+
+impl DapWatchExpression {
+    /// Returns the watched expression text.
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    /// Returns the evaluated value or error message.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the optional type name.
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
+    }
+
+    /// Returns whether evaluation succeeded.
+    pub const fn ok(&self) -> bool {
+        self.ok
+    }
+
+    /// Returns the DAP `variablesReference`. Non-zero means children can be fetched.
+    pub const fn variables_reference(&self) -> u64 {
+        self.variables_reference
+    }
+
+    /// Returns whether this Watch Expression can be expanded.
+    pub const fn expandable(&self) -> bool {
+        self.ok && self.variables_reference > 0
+    }
+
+    /// Returns whether children are currently shown.
+    pub const fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Returns fetched children (empty when collapsed or a leaf).
+    pub fn children(&self) -> &[DapVariableNode] {
+        &self.children
+    }
+}
+
+/// Thread row for switch-thread pickers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapThreadInfo {
+    id: u64,
+    name: String,
+}
+
+impl DapThreadInfo {
+    /// Returns the DAP thread id.
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the thread name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Stack frame row for switch-stack-frame pickers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapStackFrameInfo {
+    id: u64,
+    name: String,
+    path: Option<PathBuf>,
+    line: u32,
+    column: u32,
+}
+
+impl DapStackFrameInfo {
+    /// Returns the DAP frame id.
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the frame name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the optional source path.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Returns the 1-based line.
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// Returns the 1-based column.
+    pub const fn column(&self) -> u32 {
+        self.column
+    }
 }
 
 /// Snapshot captured when a Session stops.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DapStoppedSnapshot {
     thread_id: u64,
+    frame_id: Option<u64>,
     reason: String,
     position: Option<DapExecutionPosition>,
     locals: Vec<DapLocalVariable>,
+    watches: Vec<DapWatchExpression>,
 }
 
 impl DapStoppedSnapshot {
     /// Returns the stopped thread id.
     pub const fn thread_id(&self) -> u64 {
         self.thread_id
+    }
+
+    /// Returns the active stack frame id, when known.
+    pub const fn frame_id(&self) -> Option<u64> {
+        self.frame_id
     }
 
     /// Returns the stop reason string.
@@ -295,9 +562,48 @@ impl DapStoppedSnapshot {
         self.position.as_ref()
     }
 
-    /// Returns Locals rows for the top frame.
+    /// Returns Locals rows for the active frame.
     pub fn locals(&self) -> &[DapLocalVariable] {
         &self.locals
+    }
+
+    /// Returns Watch Expression rows for the active frame.
+    pub fn watches(&self) -> &[DapWatchExpression] {
+        &self.watches
+    }
+
+    /// Returns flattened Locals rows including expanded children.
+    pub fn local_rows(&self) -> Vec<DapVariableRow> {
+        let mut rows = Vec::new();
+        flatten_variable_nodes(&self.locals, None, &[], 0, &mut rows);
+        rows
+    }
+
+    /// Returns flattened Watch Expression rows including expanded children.
+    pub fn watch_rows(&self) -> Vec<DapVariableRow> {
+        let mut rows = Vec::new();
+        for watch in &self.watches {
+            rows.push(DapVariableRow {
+                path: DapVariablePath::watch(&watch.expression, Vec::<String>::new()),
+                depth: 0,
+                expandable: watch.expandable(),
+                expanded: watch.expanded,
+                name: watch.expression.clone(),
+                value: watch.value.clone(),
+                type_name: watch.type_name.clone(),
+                ok: watch.ok,
+            });
+            if watch.expanded {
+                flatten_variable_nodes(
+                    &watch.children,
+                    Some(watch.expression.as_str()),
+                    &[],
+                    1,
+                    &mut rows,
+                );
+            }
+        }
+        rows
     }
 }
 
@@ -314,6 +620,11 @@ pub enum DapSessionEvent {
         /// Workspace owning the Session.
         workspace_id: u64,
     },
+    /// Adapter reported `exited` or `terminated`; run Debug Stop cleanup.
+    Terminated {
+        /// Workspace owning the Session.
+        workspace_id: u64,
+    },
 }
 
 struct PendingResponse {
@@ -323,8 +634,11 @@ struct PendingResponse {
 #[derive(Debug, Default)]
 struct SessionStopState {
     last_thread_id: Option<u64>,
+    selected_thread_id: Option<u64>,
+    selected_frame_id: Option<u64>,
     last_reason: Option<String>,
     snapshot: Option<DapStoppedSnapshot>,
+    ended: bool,
 }
 
 struct DapSessionHandle {
@@ -370,6 +684,8 @@ pub struct DapClientManager {
     registry: DebugAdapterRegistry,
     sessions: Mutex<BTreeMap<u64, Arc<DapSessionHandle>>>,
     breakpoints: Mutex<BreakpointStore>,
+    watches: Mutex<BTreeMap<u64, Vec<String>>>,
+    expanded: Mutex<BTreeMap<u64, BTreeSet<DapVariablePath>>>,
     transport_log: TransportLog,
     events: Arc<Mutex<VecDeque<DapSessionEvent>>>,
     history: Mutex<crate::DebugStartHistory>,
@@ -382,6 +698,8 @@ impl DapClientManager {
             registry,
             sessions: Mutex::new(BTreeMap::new()),
             breakpoints: Mutex::new(BreakpointStore::new()),
+            watches: Mutex::new(BTreeMap::new()),
+            expanded: Mutex::new(BTreeMap::new()),
             transport_log: Arc::new(Mutex::new(DapTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
             events: Arc::new(Mutex::new(VecDeque::new())),
             history: Mutex::new(crate::DebugStartHistory::new()),
@@ -491,6 +809,305 @@ impl DapClientManager {
         Ok(removed)
     }
 
+    /// Sets Breakpoint condition / hit condition / log message at the cursor line.
+    /// Creates the Breakpoint when missing. Empty strings clear the field.
+    pub fn set_breakpoint_extras(
+        &self,
+        workspace_id: u64,
+        path: impl Into<std::path::PathBuf>,
+        line: u32,
+        condition: Option<Option<String>>,
+        hit_condition: Option<Option<String>>,
+        log_message: Option<Option<String>>,
+    ) -> Result<(), DapClientError> {
+        let path = path.into();
+        {
+            let mut store = self
+                .breakpoints
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            store.upsert_extras(
+                workspace_id,
+                path.clone(),
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            );
+        }
+        if self.session_info(workspace_id)?.is_some() {
+            self.sync_breakpoints_for_source(workspace_id, &path)?;
+        }
+        Ok(())
+    }
+
+    /// Lists Watch Expressions for a Workspace.
+    pub fn list_expressions(&self, workspace_id: u64) -> Result<Vec<String>, DapClientError> {
+        let watches = self
+            .watches
+            .lock()
+            .map_err(|_| DapClientError::LockPoisoned)?;
+        Ok(watches.get(&workspace_id).cloned().unwrap_or_default())
+    }
+
+    /// Adds a Watch Expression (deduped). Re-evaluates when stopped.
+    pub fn add_expression(
+        &self,
+        workspace_id: u64,
+        expression: impl Into<String>,
+    ) -> Result<Vec<String>, DapClientError> {
+        let expression = expression.into().trim().to_owned();
+        if expression.is_empty() {
+            return Err(DapClientError::Protocol(
+                "Watch Expression cannot be empty".to_owned(),
+            ));
+        }
+        {
+            let mut watches = self
+                .watches
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            let entries = watches.entry(workspace_id).or_default();
+            if !entries.iter().any(|existing| existing == &expression) {
+                entries.push(expression);
+            }
+        }
+        if self.stopped_snapshot(workspace_id)?.is_some() {
+            let _ = self.refresh_stopped_snapshot(workspace_id)?;
+        }
+        self.list_expressions(workspace_id)
+    }
+
+    /// Removes a Watch Expression by exact text. Returns whether one was removed.
+    pub fn remove_expression(
+        &self,
+        workspace_id: u64,
+        expression: &str,
+    ) -> Result<bool, DapClientError> {
+        let removed = {
+            let mut watches = self
+                .watches
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            let Some(entries) = watches.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            let before = entries.len();
+            entries.retain(|existing| existing != expression);
+            let removed = entries.len() != before;
+            if entries.is_empty() {
+                watches.remove(&workspace_id);
+            }
+            removed
+        };
+        if removed && self.stopped_snapshot(workspace_id)?.is_some() {
+            let _ = self.refresh_stopped_snapshot(workspace_id)?;
+        }
+        Ok(removed)
+    }
+
+    /// Replaces the Watch Expression list for a Workspace (empty entries dropped, order kept).
+    pub fn set_expressions(
+        &self,
+        workspace_id: u64,
+        expressions: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Vec<String>, DapClientError> {
+        let mut cleaned = Vec::new();
+        for expression in expressions {
+            let expression = expression.into().trim().to_owned();
+            if expression.is_empty() {
+                continue;
+            }
+            if !cleaned.iter().any(|existing| existing == &expression) {
+                cleaned.push(expression);
+            }
+        }
+        {
+            let mut watches = self
+                .watches
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            if cleaned.is_empty() {
+                watches.remove(&workspace_id);
+            } else {
+                watches.insert(workspace_id, cleaned.clone());
+            }
+        }
+        if self.stopped_snapshot(workspace_id)?.is_some() {
+            let _ = self.refresh_stopped_snapshot(workspace_id)?;
+        }
+        self.list_expressions(workspace_id)
+    }
+
+    /// One-shot evaluate without adding a Watch Expression.
+    pub fn evaluate(
+        &self,
+        workspace_id: u64,
+        expression: &str,
+        context: DapEvaluateContext,
+    ) -> Result<DapWatchExpression, DapClientError> {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            return Err(DapClientError::Protocol(
+                "evaluate expression cannot be empty".to_owned(),
+            ));
+        }
+        let handle = self.session_handle(workspace_id)?;
+        let frame_id = {
+            let state = handle
+                .stop_state
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            state
+                .selected_frame_id
+                .or_else(|| state.snapshot.as_ref().and_then(|snap| snap.frame_id))
+        };
+        evaluate_expression(&handle, expression, frame_id, context.into())
+    }
+
+    /// Lists adapter threads for the live Session.
+    pub fn list_threads(&self, workspace_id: u64) -> Result<Vec<DapThreadInfo>, DapClientError> {
+        let handle = self.session_handle(workspace_id)?;
+        let response = handle.request::<Threads>(())?;
+        Ok(response
+            .threads
+            .into_iter()
+            .map(|thread| DapThreadInfo {
+                id: thread.id,
+                name: thread.name,
+            })
+            .collect())
+    }
+
+    /// Switches the active stopped thread and refreshes Locals/watches.
+    pub fn switch_thread(
+        &self,
+        workspace_id: u64,
+        thread_id: u64,
+    ) -> Result<DapStoppedSnapshot, DapClientError> {
+        let handle = self.session_handle(workspace_id)?;
+        {
+            let mut state = handle
+                .stop_state
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            state.selected_thread_id = Some(thread_id);
+            state.last_thread_id = Some(thread_id);
+            state.selected_frame_id = None;
+        }
+        self.refresh_stopped_snapshot(workspace_id)
+    }
+
+    /// Lists stack frames for the active (or selected) thread.
+    pub fn list_stack_frames(
+        &self,
+        workspace_id: u64,
+    ) -> Result<Vec<DapStackFrameInfo>, DapClientError> {
+        let handle = self.session_handle(workspace_id)?;
+        let thread_id = active_thread_id(&handle)?;
+        let stack = handle.request::<StackTrace>(StackTraceArguments {
+            thread_id,
+            start_frame: Some(0),
+            levels: Some(32),
+            format: None,
+        })?;
+        Ok(stack
+            .stack_frames
+            .into_iter()
+            .map(|frame| DapStackFrameInfo {
+                id: frame.id,
+                name: frame.name,
+                path: frame
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.path.as_ref())
+                    .map(PathBuf::from),
+                line: u32::try_from(frame.line).unwrap_or(0),
+                column: u32::try_from(frame.column).unwrap_or(1).max(1),
+            })
+            .collect())
+    }
+
+    /// Switches the active stack frame and refreshes Locals/watches.
+    pub fn switch_stack_frame(
+        &self,
+        workspace_id: u64,
+        frame_id: u64,
+    ) -> Result<DapStoppedSnapshot, DapClientError> {
+        let handle = self.session_handle(workspace_id)?;
+        {
+            let mut state = handle
+                .stop_state
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            state.selected_frame_id = Some(frame_id);
+        }
+        self.refresh_stopped_snapshot(workspace_id)
+    }
+
+    /// Expands or collapses a Locals / Watch tree node and fetches children when expanding.
+    pub fn toggle_variable_expand(
+        &self,
+        workspace_id: u64,
+        path: &DapVariablePath,
+    ) -> Result<DapStoppedSnapshot, DapClientError> {
+        let handle = self.session_handle(workspace_id)?;
+        let mut snapshot = {
+            let state = handle
+                .stop_state
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            state.snapshot.clone().ok_or_else(|| {
+                DapClientError::Protocol(
+                    "Debug Session has no stopped snapshot; wait for a stop before expanding variables"
+                        .to_owned(),
+                )
+            })?
+        };
+
+        let currently_expanded = {
+            let expanded = self
+                .expanded
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            expanded
+                .get(&workspace_id)
+                .is_some_and(|set| set.contains(path))
+        };
+
+        if currently_expanded {
+            collapse_variable_path(&mut snapshot, path);
+            let mut expanded = self
+                .expanded
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            if let Some(set) = expanded.get_mut(&workspace_id) {
+                set.retain(|existing| !path.is_prefix_of(existing));
+                if set.is_empty() {
+                    expanded.remove(&workspace_id);
+                }
+            }
+        } else if expand_variable_path(&handle, &mut snapshot, path)? {
+            let mut expanded = self
+                .expanded
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            expanded
+                .entry(workspace_id)
+                .or_default()
+                .insert(path.clone());
+        }
+
+        {
+            let mut state = handle
+                .stop_state
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            state.snapshot = Some(snapshot.clone());
+        }
+        Ok(snapshot)
+    }
+
     /// Returns a snapshot of recent DAP transport traffic.
     pub fn log_snapshot(&self) -> DapLogSnapshot {
         self.transport_log
@@ -553,30 +1170,46 @@ impl DapClientManager {
         Ok(state.snapshot.clone())
     }
 
-    /// Fetches stack/locals for the last stopped thread and stores the snapshot.
+    /// Fetches stack/locals/watches for the active stopped thread/frame.
     pub fn refresh_stopped_snapshot(
         &self,
         workspace_id: u64,
     ) -> Result<DapStoppedSnapshot, DapClientError> {
         let handle = self.session_handle(workspace_id)?;
-        let (thread_id, reason) = {
+        let (thread_id, frame_id, reason) = {
             let state = handle
                 .stop_state
                 .lock()
                 .map_err(|_| DapClientError::LockPoisoned)?;
-            let thread_id = state.last_thread_id.unwrap_or(1);
+            let thread_id = state
+                .selected_thread_id
+                .or(state.last_thread_id)
+                .unwrap_or(1);
+            let frame_id = state.selected_frame_id;
             let reason = state
                 .last_reason
                 .clone()
                 .unwrap_or_else(|| "pause".to_owned());
-            (thread_id, reason)
+            (thread_id, frame_id, reason)
         };
-        let snapshot = capture_stopped_snapshot(&handle, thread_id, reason)?;
+        let watches = self.list_expressions(workspace_id)?;
+        let expanded = {
+            let expanded = self
+                .expanded
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            expanded.get(&workspace_id).cloned().unwrap_or_default()
+        };
+        let snapshot =
+            capture_stopped_snapshot(&handle, thread_id, frame_id, reason, &watches, &expanded)?;
         {
             let mut state = handle
                 .stop_state
                 .lock()
                 .map_err(|_| DapClientError::LockPoisoned)?;
+            if state.selected_frame_id.is_none() {
+                state.selected_frame_id = snapshot.frame_id;
+            }
             state.snapshot = Some(snapshot.clone());
         }
         Ok(snapshot)
@@ -845,9 +1478,9 @@ impl DapClientManager {
                 .map(|bp| SourceBreakpoint {
                     line: u64::from(bp.line()),
                     column: None,
-                    condition: None,
-                    hit_condition: None,
-                    log_message: None,
+                    condition: bp.condition().map(str::to_owned),
+                    hit_condition: bp.hit_condition().map(str::to_owned),
+                    log_message: bp.log_message().map(str::to_owned),
                     mode: None,
                 })
                 .collect::<Vec<_>>()
@@ -963,10 +1596,6 @@ impl DapClientManager {
             supports_start_debugging_request: None,
         })?;
 
-        wait_for_initialized(&initialized, READ_TIMEOUT)?;
-
-        self.sync_all_breakpoints(workspace_id, &handle)?;
-
         match plan.configuration().request() {
             DebugRequestKind::Launch => {
                 let body = launch_arguments(plan.configuration());
@@ -976,6 +1605,15 @@ impl DapClientManager {
                 let body = attach_arguments(plan.configuration());
                 handle.request::<Attach>(AttachRequestArguments { raw: body })?;
             }
+        }
+
+        wait_for_initialized(&initialized, READ_TIMEOUT)?;
+        self.sync_all_breakpoints(workspace_id, &handle)?;
+        if capabilities
+            .supports_configuration_done_request
+            .unwrap_or(false)
+        {
+            send_configuration_done(&handle)?;
         }
 
         handle.info.support_terminate_debuggee =
@@ -1008,12 +1646,15 @@ impl DapSessionHandle {
             pending.insert(seq, PendingResponse { tx });
         }
 
-        let message = json!({
+        let mut message = json!({
             "seq": seq,
             "type": "request",
             "command": R::COMMAND,
             "arguments": arguments,
         });
+        if let Some(args) = message.get_mut("arguments") {
+            strip_null_fields(args);
+        }
         write_frame(
             &self.writer,
             &self.transport_log,
@@ -1033,12 +1674,48 @@ impl DapSessionHandle {
     }
 }
 
+fn send_configuration_done(handle: &DapSessionHandle) -> Result<(), DapClientError> {
+    let seq = handle.next_request_id.fetch_add(1, Ordering::AcqRel);
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let mut pending = handle
+            .pending
+            .lock()
+            .map_err(|_| DapClientError::LockPoisoned)?;
+        pending.insert(seq, PendingResponse { tx });
+    }
+    let message = json!({
+        "seq": seq,
+        "type": "request",
+        "command": "configurationDone",
+        "arguments": {}
+    });
+    write_frame(
+        &handle.writer,
+        &handle.transport_log,
+        &handle.info.adapter_id,
+        &message,
+    )?;
+    let _ = rx.recv_timeout(READ_TIMEOUT).map_err(|_| {
+        DapClientError::Protocol(format!(
+            "timed out waiting for `configurationDone` response from `{}`",
+            handle.info.adapter_id
+        ))
+    })??;
+    Ok(())
+}
+
 fn parse_response_body<R>(body: Value, adapter_id: &str) -> Result<R::Response, DapClientError>
 where
     R: DapRequest,
     R::Response: for<'de> Deserialize<'de>,
 {
-    match serde_json::from_value::<R::Response>(body.clone()) {
+    // Adapters often omit `body` or send `null` for optional response structs.
+    let body = match body {
+        Value::Null => Value::Object(serde_json::Map::new()),
+        other => other,
+    };
+    match serde_json::from_value::<R::Response>(body) {
         Ok(value) => Ok(value),
         Err(error) if mem::size_of::<R::Response>() == 0 => {
             // Many adapters send `{}` for unit responses.
@@ -1056,12 +1733,34 @@ where
     }
 }
 
+fn strip_null_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, child| !child.is_null());
+            for child in map.values_mut() {
+                strip_null_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_null_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn launch_arguments(configuration: &DebugConfiguration) -> Value {
     let mut body = json!({
         "name": configuration.name(),
         "noDebug": false,
+        // SharpDbg defaults here, but be explicit: Volt has no DAP terminal pane yet
+        // (`runInTerminal` is ignored). `externalTerminal` would pop a console window.
+        "console": "internalConsole",
     });
     if let Some(program) = configuration.target_program() {
+        // SharpDbg.Cli (dotnet tool) requires `program` (DLL/EXE). VS Code's
+        // projectPath helper is extension-side only and is ignored here.
         body["program"] = Value::String(program.display().to_string());
     }
     if let Some(cwd) = configuration.cwd() {
@@ -1189,8 +1888,18 @@ fn connect_tcp(host: &str, port: u16, expect_retry: bool) -> Result<TcpStream, D
     )))
 }
 
+fn configure_adapter_command(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn spawn_adapter_command(adapter: &DebugAdapterSpec) -> Result<Child, DapClientError> {
     let mut command = Command::new(adapter.program());
+    configure_adapter_command(&mut command);
     command
         .args(adapter.args())
         .stdin(Stdio::piped())
@@ -1292,6 +2001,8 @@ fn spawn_reader_thread(
                                         .to_owned();
                                     if let Ok(mut state) = stop_state.lock() {
                                         state.last_thread_id = thread_id.or(Some(1));
+                                        state.selected_thread_id = None;
+                                        state.selected_frame_id = None;
                                         state.last_reason = Some(reason);
                                         state.snapshot = None;
                                     }
@@ -1307,6 +2018,9 @@ fn spawn_reader_thread(
                                         queue
                                             .push_back(DapSessionEvent::Continued { workspace_id });
                                     }
+                                }
+                                "exited" | "terminated" => {
+                                    mark_session_ended(&stop_state, &events, workspace_id);
                                 }
                                 _ => {}
                             }
@@ -1340,6 +2054,28 @@ fn spawn_reader_thread(
             }
         }
     })
+}
+
+fn mark_session_ended(
+    stop_state: &Mutex<SessionStopState>,
+    events: &Mutex<VecDeque<DapSessionEvent>>,
+    workspace_id: u64,
+) {
+    let first_end = match stop_state.lock() {
+        Ok(mut state) => {
+            let first = !state.ended;
+            state.ended = true;
+            state.snapshot = None;
+            first
+        }
+        Err(_) => false,
+    };
+    if !first_end {
+        return;
+    }
+    if let Ok(mut queue) = events.lock() {
+        queue.push_back(DapSessionEvent::Terminated { workspace_id });
+    }
 }
 
 fn write_frame(
@@ -1433,11 +2169,14 @@ fn active_thread_id(handle: &DapSessionHandle) -> Result<u64, DapClientError> {
         .stop_state
         .lock()
         .map_err(|_| DapClientError::LockPoisoned)?;
-    state.last_thread_id.ok_or_else(|| {
-        DapClientError::Protocol(
-            "Debug Session has no stopped thread; wait for a stop before stepping".to_owned(),
-        )
-    })
+    state
+        .selected_thread_id
+        .or(state.last_thread_id)
+        .ok_or_else(|| {
+            DapClientError::Protocol(
+                "Debug Session has no stopped thread; wait for a stop before stepping".to_owned(),
+            )
+        })
 }
 
 fn clear_stopped_snapshot(handle: &DapSessionHandle) -> Result<(), DapClientError> {
@@ -1449,19 +2188,58 @@ fn clear_stopped_snapshot(handle: &DapSessionHandle) -> Result<(), DapClientErro
     Ok(())
 }
 
+fn evaluate_expression(
+    handle: &DapSessionHandle,
+    expression: &str,
+    frame_id: Option<u64>,
+    context: EvaluateArgumentsContext,
+) -> Result<DapWatchExpression, DapClientError> {
+    match handle.request::<Evaluate>(EvaluateArguments {
+        expression: expression.to_owned(),
+        frame_id,
+        context: Some(context),
+        format: None,
+    }) {
+        Ok(response) => Ok(DapWatchExpression {
+            expression: expression.to_owned(),
+            value: response.result,
+            type_name: response.type_,
+            ok: true,
+            variables_reference: response.variables_reference,
+            children: Vec::new(),
+            expanded: false,
+        }),
+        Err(error) => Ok(DapWatchExpression {
+            expression: expression.to_owned(),
+            value: error.to_string(),
+            type_name: None,
+            ok: false,
+            variables_reference: 0,
+            children: Vec::new(),
+            expanded: false,
+        }),
+    }
+}
+
 fn capture_stopped_snapshot(
     handle: &DapSessionHandle,
     thread_id: u64,
+    preferred_frame_id: Option<u64>,
     reason: String,
+    watches: &[String],
+    expanded: &BTreeSet<DapVariablePath>,
 ) -> Result<DapStoppedSnapshot, DapClientError> {
     let stack = handle.request::<StackTrace>(StackTraceArguments {
         thread_id,
         start_frame: Some(0),
-        levels: Some(1),
+        levels: Some(32),
         format: None,
     })?;
-    let top = stack.stack_frames.first();
-    let position = top.and_then(|frame| {
+    let frame = preferred_frame_id
+        .and_then(|frame_id| stack.stack_frames.iter().find(|frame| frame.id == frame_id))
+        .or_else(|| stack.stack_frames.first());
+    let frame_id = frame.map(|frame| frame.id);
+    let position = frame.and_then(|frame| {
         let path = frame
             .source
             .as_ref()
@@ -1472,58 +2250,307 @@ fn capture_stopped_snapshot(
         Some(DapExecutionPosition { path, line, column })
     });
 
-    let mut locals = Vec::new();
-    if let Some(frame) = top {
-        let scopes = handle.request::<Scopes>(ScopesArguments { frame_id: frame.id })?;
-        let locals_scope = scopes
-            .scopes
-            .iter()
-            .find(|scope| {
-                scope.name.eq_ignore_ascii_case("locals")
-                    || matches!(
-                        scope.presentation_hint,
-                        Some(dap_types::ScopePresentationHint::Locals)
-                    )
-            })
-            .or_else(|| scopes.scopes.first());
-        if let Some(scope) = locals_scope
-            && scope.variables_reference > 0
-        {
-            let response = handle.request::<Variables>(VariablesArguments {
-                variables_reference: scope.variables_reference,
-                filter: None,
-                start: None,
-                count: None,
-                format: None,
-            })?;
-            locals = response
-                .variables
-                .into_iter()
-                .map(|variable| DapLocalVariable {
-                    name: variable.name,
-                    value: variable.value,
-                    type_name: variable.type_,
-                })
-                .collect();
-        }
+    let mut locals = match frame {
+        Some(frame) => match load_locals(handle, frame.id) {
+            Ok(locals) => locals,
+            Err(error) => {
+                record_transport_event(
+                    &handle.transport_log,
+                    handle.info.adapter_id(),
+                    format!("failed to load Locals: {error}"),
+                );
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    apply_expanded_paths(handle, &mut locals, None, &[], expanded);
+
+    let mut watch_rows = Vec::with_capacity(watches.len());
+    for expression in watches {
+        watch_rows.push(evaluate_expression(
+            handle,
+            expression,
+            frame_id,
+            EvaluateArgumentsContext::Watch,
+        )?);
     }
+    apply_expanded_watch_roots(handle, &mut watch_rows, expanded);
 
     Ok(DapStoppedSnapshot {
         thread_id,
+        frame_id,
         reason,
         position,
         locals,
+        watches: watch_rows,
     })
+}
+
+fn load_locals(
+    handle: &DapSessionHandle,
+    frame_id: u64,
+) -> Result<Vec<DapLocalVariable>, DapClientError> {
+    let scopes = handle.request::<Scopes>(ScopesArguments { frame_id })?;
+    let locals_scope = scopes
+        .scopes
+        .iter()
+        .find(|scope| {
+            scope.name.eq_ignore_ascii_case("locals")
+                || matches!(
+                    scope.presentation_hint,
+                    Some(dap_types::ScopePresentationHint::Locals)
+                )
+        })
+        .or_else(|| scopes.scopes.first());
+    let Some(scope) = locals_scope else {
+        return Ok(Vec::new());
+    };
+    if scope.variables_reference == 0 {
+        return Ok(Vec::new());
+    }
+    load_variable_children(handle, scope.variables_reference)
+}
+
+fn variable_node_from_dap(variable: dap_types::Variable) -> DapVariableNode {
+    DapVariableNode {
+        name: variable.name,
+        value: variable.value,
+        type_name: variable.type_,
+        variables_reference: variable.variables_reference,
+        children: Vec::new(),
+        expanded: false,
+    }
+}
+
+fn load_variable_children(
+    handle: &DapSessionHandle,
+    variables_reference: u64,
+) -> Result<Vec<DapVariableNode>, DapClientError> {
+    if variables_reference == 0 {
+        return Ok(Vec::new());
+    }
+    let response = handle.request::<Variables>(VariablesArguments {
+        variables_reference,
+        filter: None,
+        start: None,
+        count: None,
+        format: None,
+    })?;
+    Ok(response
+        .variables
+        .into_iter()
+        .map(variable_node_from_dap)
+        .collect())
+}
+
+fn flatten_variable_nodes(
+    nodes: &[DapVariableNode],
+    watch: Option<&str>,
+    prefix: &[String],
+    depth: usize,
+    rows: &mut Vec<DapVariableRow>,
+) {
+    for node in nodes {
+        let mut segments = prefix.to_vec();
+        segments.push(node.name.clone());
+        let path = match watch {
+            Some(expression) => DapVariablePath::watch(expression, segments.clone()),
+            None => DapVariablePath::locals(segments.clone()),
+        };
+        rows.push(DapVariableRow {
+            path,
+            depth,
+            expandable: node.expandable(),
+            expanded: node.expanded,
+            name: node.name.clone(),
+            value: node.value.clone(),
+            type_name: node.type_name.clone(),
+            ok: true,
+        });
+        if node.expanded {
+            flatten_variable_nodes(&node.children, watch, &segments, depth + 1, rows);
+        }
+    }
+}
+
+fn apply_expanded_paths(
+    handle: &DapSessionHandle,
+    nodes: &mut [DapVariableNode],
+    watch: Option<&str>,
+    prefix: &[String],
+    expanded: &BTreeSet<DapVariablePath>,
+) {
+    for node in nodes {
+        let mut segments = prefix.to_vec();
+        segments.push(node.name.clone());
+        let path = match watch {
+            Some(expression) => DapVariablePath::watch(expression, segments.clone()),
+            None => DapVariablePath::locals(segments.clone()),
+        };
+        if expanded.contains(&path) && node.variables_reference > 0 {
+            match load_variable_children(handle, node.variables_reference) {
+                Ok(children) => {
+                    node.children = children;
+                    node.expanded = true;
+                    apply_expanded_paths(handle, &mut node.children, watch, &segments, expanded);
+                }
+                Err(error) => {
+                    record_transport_event(
+                        &handle.transport_log,
+                        handle.info.adapter_id(),
+                        format!("failed to expand `{}`: {error}", node.name),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn apply_expanded_watch_roots(
+    handle: &DapSessionHandle,
+    watches: &mut [DapWatchExpression],
+    expanded: &BTreeSet<DapVariablePath>,
+) {
+    for watch in watches {
+        let path = DapVariablePath::watch(&watch.expression, Vec::<String>::new());
+        if expanded.contains(&path) && watch.expandable() {
+            match load_variable_children(handle, watch.variables_reference) {
+                Ok(children) => {
+                    watch.children = children;
+                    watch.expanded = true;
+                    apply_expanded_paths(
+                        handle,
+                        &mut watch.children,
+                        Some(watch.expression.as_str()),
+                        &[],
+                        expanded,
+                    );
+                }
+                Err(error) => {
+                    record_transport_event(
+                        &handle.transport_log,
+                        handle.info.adapter_id(),
+                        format!(
+                            "failed to expand Watch Expression `{}`: {error}",
+                            watch.expression
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn find_variable_node_mut<'a>(
+    nodes: &'a mut [DapVariableNode],
+    segments: &[String],
+) -> Option<&'a mut DapVariableNode> {
+    let (head, tail) = segments.split_first()?;
+    let index = nodes.iter().position(|node| node.name == *head)?;
+    let node = nodes.get_mut(index)?;
+    if tail.is_empty() {
+        Some(node)
+    } else {
+        find_variable_node_mut(&mut node.children, tail)
+    }
+}
+
+fn expand_variable_node(
+    handle: &DapSessionHandle,
+    node: &mut DapVariableNode,
+) -> Result<bool, DapClientError> {
+    if node.variables_reference == 0 {
+        return Ok(false);
+    }
+    node.children = load_variable_children(handle, node.variables_reference)?;
+    node.expanded = true;
+    Ok(true)
+}
+
+fn expand_watch_root(
+    handle: &DapSessionHandle,
+    watch: &mut DapWatchExpression,
+) -> Result<bool, DapClientError> {
+    if !watch.expandable() {
+        return Ok(false);
+    }
+    watch.children = load_variable_children(handle, watch.variables_reference)?;
+    watch.expanded = true;
+    Ok(true)
+}
+
+fn expand_variable_path(
+    handle: &DapSessionHandle,
+    snapshot: &mut DapStoppedSnapshot,
+    path: &DapVariablePath,
+) -> Result<bool, DapClientError> {
+    match path.watch_expression() {
+        Some(expression) => {
+            let watch = snapshot
+                .watches
+                .iter_mut()
+                .find(|watch| watch.expression == expression)
+                .ok_or_else(|| {
+                    DapClientError::Protocol(format!("Watch Expression `{expression}` not found"))
+                })?;
+            if path.segments.is_empty() {
+                expand_watch_root(handle, watch)
+            } else {
+                let node = find_variable_node_mut(&mut watch.children, &path.segments).ok_or_else(
+                    || DapClientError::Protocol("variable path not found".to_owned()),
+                )?;
+                expand_variable_node(handle, node)
+            }
+        }
+        None => {
+            let node = find_variable_node_mut(&mut snapshot.locals, &path.segments)
+                .ok_or_else(|| DapClientError::Protocol("variable path not found".to_owned()))?;
+            expand_variable_node(handle, node)
+        }
+    }
+}
+
+fn collapse_variable_path(snapshot: &mut DapStoppedSnapshot, path: &DapVariablePath) {
+    match path.watch_expression() {
+        Some(expression) => {
+            let Some(watch) = snapshot
+                .watches
+                .iter_mut()
+                .find(|watch| watch.expression == expression)
+            else {
+                return;
+            };
+            if path.segments.is_empty() {
+                watch.children.clear();
+                watch.expanded = false;
+                return;
+            }
+            if let Some(node) = find_variable_node_mut(&mut watch.children, &path.segments) {
+                node.children.clear();
+                node.expanded = false;
+            }
+        }
+        None => {
+            if let Some(node) = find_variable_node_mut(&mut snapshot.locals, &path.segments) {
+                node.children.clear();
+                node.expanded = false;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        env, fs,
         io::{Read, Write, pipe},
         net::TcpListener,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         thread,
         time::{Duration, Instant},
@@ -1532,7 +2559,10 @@ mod tests {
     use dap_types::DisconnectArguments;
     use serde_json::{Value, json};
 
-    use super::{DapClientError, DapClientManager, DapLogDirection, DapSessionEvent, read_frame};
+    use super::{
+        DapClientError, DapClientManager, DapLogDirection, DapSessionEvent, DapVariablePath,
+        read_frame,
+    };
     use crate::{
         BreakpointState, BreakpointToggle, DebugAdapterRegistry, DebugAdapterSpec,
         DebugAdapterTransport, DebugConfiguration, DebugRequestKind,
@@ -1543,6 +2573,60 @@ mod tests {
         write!(writer, "Content-Length: {}\r\n\r\n", encoded.len()).expect("header");
         writer.write_all(&encoded).expect("body");
         writer.flush().expect("flush");
+    }
+
+    fn json_value_contains_null(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::Array(items) => items.iter().any(json_value_contains_null),
+            Value::Object(map) => map.values().any(json_value_contains_null),
+            _ => false,
+        }
+    }
+
+    fn fake_variables_for_reference(reference: u64, running: bool) -> Vec<Value> {
+        match reference {
+            2 => vec![
+                json!({
+                    "name": "Name",
+                    "value": "\"Ada\"",
+                    "type": "string",
+                    "variablesReference": 0
+                }),
+                json!({
+                    "name": "Address",
+                    "value": "Address { ... }",
+                    "type": "Address",
+                    "variablesReference": 3
+                }),
+            ],
+            3 => vec![json!({
+                "name": "City",
+                "value": "\"London\"",
+                "type": "string",
+                "variablesReference": 0
+            })],
+            _ => vec![
+                json!({
+                    "name": "x",
+                    "value": "42",
+                    "type": "i32",
+                    "variablesReference": 0
+                }),
+                json!({
+                    "name": "running",
+                    "value": if running { "true" } else { "false" },
+                    "type": "bool",
+                    "variablesReference": 0
+                }),
+                json!({
+                    "name": "person",
+                    "value": "Person { ... }",
+                    "type": "Person",
+                    "variablesReference": 2
+                }),
+            ],
+        }
     }
 
     fn fake_adapter_loop(
@@ -1562,6 +2646,23 @@ mod tests {
                 .unwrap_or_default()
                 .to_owned();
             let request_seq = message.get("seq").and_then(Value::as_u64).unwrap_or(0);
+            if matches!(command.as_str(), "continue" | "next" | "stepIn" | "stepOut")
+                && message
+                    .get("arguments")
+                    .is_some_and(json_value_contains_null)
+            {
+                let response = json!({
+                    "seq": seq,
+                    "type": "response",
+                    "request_seq": request_seq,
+                    "success": false,
+                    "command": command,
+                    "message": "null optional fields are not allowed"
+                });
+                seq += 1;
+                write_frame_to(&mut writer, &response);
+                continue;
+            }
             match command.as_str() {
                 "initialize" => {
                     let response = json!({
@@ -1571,7 +2672,7 @@ mod tests {
                         "success": true,
                         "command": "initialize",
                         "body": {
-                            "supportsConfigurationDoneRequest": false,
+                            "supportsConfigurationDoneRequest": true,
                             "supportTerminateDebuggee": true,
                             "supportsRestartRequest": true
                         }
@@ -1586,6 +2687,18 @@ mod tests {
                     });
                     seq += 1;
                     write_frame_to(&mut writer, &event);
+                }
+                "configurationDone" => {
+                    let response = json!({
+                        "seq": seq,
+                        "type": "response",
+                        "request_seq": request_seq,
+                        "success": true,
+                        "command": "configurationDone",
+                        "body": {}
+                    });
+                    seq += 1;
+                    write_frame_to(&mut writer, &response);
                 }
                 "launch" | "attach" => {
                     if let Some(program) = message
@@ -1648,17 +2761,35 @@ mod tests {
                     write_frame_to(&mut writer, &response);
                 }
                 "continue" => {
+                    // Omit `body` like adapters that send success with no ContinueResponse fields.
                     let response = json!({
                         "seq": seq,
                         "type": "response",
                         "request_seq": request_seq,
                         "success": true,
-                        "command": "continue",
-                        "body": { "allThreadsContinued": true }
+                        "command": "continue"
                     });
                     seq += 1;
                     write_frame_to(&mut writer, &response);
                     running = true;
+                    if program_path.contains("exit-on-continue") {
+                        let exited = json!({
+                            "seq": seq,
+                            "type": "event",
+                            "event": "exited",
+                            "body": { "exitCode": 0 }
+                        });
+                        seq += 1;
+                        write_frame_to(&mut writer, &exited);
+                        let terminated = json!({
+                            "seq": seq,
+                            "type": "event",
+                            "event": "terminated",
+                            "body": {}
+                        });
+                        write_frame_to(&mut writer, &terminated);
+                        break;
+                    }
                 }
                 "next" | "stepIn" | "stepOut" => {
                     let response = json!({
@@ -1754,9 +2885,86 @@ mod tests {
                                 },
                                 "line": stopped_line,
                                 "column": 1
+                            }, {
+                                "id": 2,
+                                "name": "caller",
+                                "source": {
+                                    "name": "main.rs",
+                                    "path": program_path
+                                },
+                                "line": stopped_line.saturating_add(10),
+                                "column": 1
                             }],
-                            "totalFrames": 1
+                            "totalFrames": 2
                         }
+                    });
+                    seq += 1;
+                    write_frame_to(&mut writer, &response);
+                }
+                "threads" => {
+                    let response = json!({
+                        "seq": seq,
+                        "type": "response",
+                        "request_seq": request_seq,
+                        "success": true,
+                        "command": "threads",
+                        "body": {
+                            "threads": [
+                                { "id": 1, "name": "main" },
+                                { "id": 2, "name": "worker" }
+                            ]
+                        }
+                    });
+                    seq += 1;
+                    write_frame_to(&mut writer, &response);
+                }
+                "evaluate" => {
+                    let expression = message
+                        .pointer("/arguments/expression")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let frame_id = message
+                        .pointer("/arguments/frameId")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1);
+                    if expression == "fail" {
+                        let response = json!({
+                            "seq": seq,
+                            "type": "response",
+                            "request_seq": request_seq,
+                            "success": false,
+                            "command": "evaluate",
+                            "message": "cannot evaluate"
+                        });
+                        seq += 1;
+                        write_frame_to(&mut writer, &response);
+                        continue;
+                    }
+                    let (result, type_name, variables_reference) = if expression == "person" {
+                        ("Person { ... }".to_owned(), Some("Person"), 2_u64)
+                    } else {
+                        (
+                            format!("{expression}@{frame_id}={stopped_line}"),
+                            None,
+                            0_u64,
+                        )
+                    };
+                    let mut body = json!({
+                        "result": result,
+                        "variablesReference": variables_reference
+                    });
+                    if let Some(type_name) = type_name
+                        && let Some(object) = body.as_object_mut()
+                    {
+                        object.insert("type".to_owned(), Value::String(type_name.to_owned()));
+                    }
+                    let response = json!({
+                        "seq": seq,
+                        "type": "response",
+                        "request_seq": request_seq,
+                        "success": true,
+                        "command": "evaluate",
+                        "body": body
                     });
                     seq += 1;
                     write_frame_to(&mut writer, &response);
@@ -1780,25 +2988,18 @@ mod tests {
                     write_frame_to(&mut writer, &response);
                 }
                 "variables" => {
+                    let reference = message
+                        .pointer("/arguments/variablesReference")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1);
+                    let variables = fake_variables_for_reference(reference, running);
                     let response = json!({
                         "seq": seq,
                         "type": "response",
                         "request_seq": request_seq,
                         "success": true,
                         "command": "variables",
-                        "body": {
-                            "variables": [{
-                                "name": "x",
-                                "value": "42",
-                                "type": "i32",
-                                "variablesReference": 0
-                            }, {
-                                "name": "running",
-                                "value": if running { "true" } else { "false" },
-                                "type": "bool",
-                                "variablesReference": 0
-                            }]
-                        }
+                        "body": { "variables": variables }
                     });
                     seq += 1;
                     write_frame_to(&mut writer, &response);
@@ -1907,6 +3108,13 @@ mod tests {
         assert!(log.entries().iter().any(|entry| {
             entry.direction() == DapLogDirection::Send && entry.message().contains("initialize")
         }));
+        assert!(
+            log.entries().iter().any(|entry| {
+                entry.direction() == DapLogDirection::Send
+                    && entry.message().contains("configurationDone")
+            }),
+            "SharpDbg-style adapters require configurationDone after setBreakpoints"
+        );
     }
 
     #[test]
@@ -2114,6 +3322,51 @@ mod tests {
         panic!("timed out waiting for stopped event");
     }
 
+    fn wait_for_terminated(manager: &DapClientManager, workspace_id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let events = manager.drain_events().expect("drain");
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    DapSessionEvent::Terminated {
+                        workspace_id: id
+                    } if *id == workspace_id
+                )
+            }) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for terminated event");
+    }
+
+    fn assert_control_requests_omit_nulls(manager: &DapClientManager) {
+        let sends: Vec<String> = manager
+            .log_snapshot()
+            .entries()
+            .iter()
+            .filter(|entry| entry.direction() == DapLogDirection::Send)
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| {
+                message.contains("\"command\":\"continue\"")
+                    || message.contains("\"command\":\"next\"")
+                    || message.contains("\"command\":\"stepIn\"")
+                    || message.contains("\"command\":\"stepOut\"")
+            })
+            .collect();
+        assert!(
+            !sends.is_empty(),
+            "expected continue/step requests in the DAP send log"
+        );
+        for message in &sends {
+            assert!(
+                !message.contains(":null"),
+                "control request must omit null optionals: {message}"
+            );
+        }
+    }
+
     #[test]
     fn continue_step_pause_and_locals_against_fake_adapter() {
         let (port, _last_disconnect, fake) = start_tcp_fake();
@@ -2169,8 +3422,142 @@ mod tests {
                 .line(),
             13
         );
+        assert_control_requests_omit_nulls(&manager);
 
         manager.stop_session(11).expect("stop");
+        let _ = fake.join();
+    }
+
+    #[test]
+    fn expand_collapse_and_reapply_nested_locals_and_watches() {
+        let (port, _last_disconnect, fake) = start_tcp_fake();
+        let mut registry = DebugAdapterRegistry::new();
+        registry.register(tcp_fake_spec(port)).expect("register");
+        let manager = DapClientManager::new(registry);
+        manager
+            .start(
+                15,
+                Some("fake-dap"),
+                None,
+                DebugConfiguration::new("expand", DebugRequestKind::Launch)
+                    .with_target_program("src/main.rs"),
+            )
+            .expect("start");
+
+        wait_for_stopped(&manager, 15);
+        let snapshot = manager.refresh_stopped_snapshot(15).expect("snapshot");
+        let person = snapshot
+            .locals()
+            .iter()
+            .find(|local| local.name() == "person")
+            .expect("person");
+        assert!(person.expandable());
+        assert!(!person.expanded());
+        assert!(person.children().is_empty());
+
+        let expanded = manager
+            .toggle_variable_expand(15, &DapVariablePath::locals(["person"]))
+            .expect("expand person");
+        let person = expanded
+            .locals()
+            .iter()
+            .find(|local| local.name() == "person")
+            .expect("person");
+        assert!(person.expanded());
+        assert_eq!(person.children().len(), 2);
+        assert_eq!(person.children()[0].name(), "Name");
+        assert_eq!(person.children()[0].value(), "\"Ada\"");
+        assert_eq!(person.children()[1].name(), "Address");
+        assert!(person.children()[1].expandable());
+
+        let nested = manager
+            .toggle_variable_expand(15, &DapVariablePath::locals(["person", "Address"]))
+            .expect("expand address");
+        let address = nested
+            .locals()
+            .iter()
+            .find(|local| local.name() == "person")
+            .expect("person")
+            .children()
+            .iter()
+            .find(|child| child.name() == "Address")
+            .expect("address");
+        assert_eq!(address.children().len(), 1);
+        assert_eq!(address.children()[0].name(), "City");
+
+        let collapsed = manager
+            .toggle_variable_expand(15, &DapVariablePath::locals(["person"]))
+            .expect("collapse person");
+        let person = collapsed
+            .locals()
+            .iter()
+            .find(|local| local.name() == "person")
+            .expect("person");
+        assert!(!person.expanded());
+        assert!(person.children().is_empty());
+
+        manager
+            .toggle_variable_expand(15, &DapVariablePath::locals(["person"]))
+            .expect("re-expand");
+        manager.step_over(15).expect("step");
+        wait_for_stopped(&manager, 15);
+        let stepped = manager.refresh_stopped_snapshot(15).expect("stepped");
+        let person = stepped
+            .locals()
+            .iter()
+            .find(|local| local.name() == "person")
+            .expect("person");
+        assert!(
+            person.expanded() && person.children().iter().any(|child| child.name() == "Name"),
+            "expand path must survive a step: {:?}",
+            person.children()
+        );
+
+        manager.add_expression(15, "person").expect("watch");
+        let with_watch = manager.refresh_stopped_snapshot(15).expect("watch snap");
+        assert!(
+            with_watch
+                .watches()
+                .iter()
+                .any(|watch| watch.expression() == "person" && watch.expandable()),
+            "person watch should be expandable: {:?}",
+            with_watch.watches()
+        );
+        let watch_expanded = manager
+            .toggle_variable_expand(15, &DapVariablePath::watch("person", Vec::<String>::new()))
+            .expect("expand watch");
+        let watch = watch_expanded
+            .watches()
+            .iter()
+            .find(|watch| watch.expression() == "person")
+            .expect("watch");
+        assert!(watch.expanded());
+        assert!(watch.children().iter().any(|child| child.name() == "Name"));
+
+        manager.stop_session(15).expect("stop");
+        let _ = fake.join();
+    }
+
+    #[test]
+    fn continue_to_process_exit_queues_terminated() {
+        let (port, _last_disconnect, fake) = start_tcp_fake();
+        let mut registry = DebugAdapterRegistry::new();
+        registry.register(tcp_fake_spec(port)).expect("register");
+        let manager = DapClientManager::new(registry);
+        manager
+            .start(
+                14,
+                Some("fake-dap"),
+                None,
+                DebugConfiguration::new("exit", DebugRequestKind::Launch)
+                    .with_target_program("exit-on-continue.rs"),
+            )
+            .expect("start");
+
+        wait_for_stopped(&manager, 14);
+        manager.continue_session(14).expect("continue");
+        wait_for_terminated(&manager, 14);
+        manager.stop_session(14).expect("stop");
         let _ = fake.join();
     }
 
@@ -2210,6 +3597,87 @@ mod tests {
         assert_eq!(after.position().expect("pos").line(), 10);
 
         manager.stop_session(12).expect("stop");
+        let _ = fake.join();
+    }
+
+    #[test]
+    fn watches_eval_switch_context_and_breakpoint_extras_against_fake_adapter() {
+        use super::DapEvaluateContext;
+
+        let (port, _last_disconnect, fake) = start_tcp_fake();
+        let mut registry = DebugAdapterRegistry::new();
+        registry.register(tcp_fake_spec(port)).expect("register");
+        let manager = DapClientManager::new(registry);
+        manager
+            .start(
+                13,
+                Some("fake-dap"),
+                None,
+                DebugConfiguration::new("polish", DebugRequestKind::Launch)
+                    .with_target_program("src/main.rs"),
+            )
+            .expect("start");
+        wait_for_stopped(&manager, 13);
+
+        manager
+            .set_breakpoint_extras(
+                13,
+                "src/main.rs",
+                11,
+                Some(Some("x > 0".to_owned())),
+                Some(Some("3".to_owned())),
+                Some(Some("log {x}".to_owned())),
+            )
+            .expect("bp extras");
+        let bp = manager
+            .list_breakpoints(13)
+            .expect("list")
+            .into_iter()
+            .find(|bp| bp.line() == 11)
+            .expect("bp");
+        assert_eq!(bp.condition(), Some("x > 0"));
+        assert_eq!(bp.hit_condition(), Some("3"));
+        assert_eq!(bp.log_message(), Some("log {x}"));
+
+        manager.add_expression(13, "x").expect("add watch");
+        let snapshot = manager.refresh_stopped_snapshot(13).expect("snap");
+        assert!(
+            snapshot
+                .watches()
+                .iter()
+                .any(|watch| watch.expression() == "x" && watch.ok()),
+            "watch should evaluate: {:?}",
+            snapshot.watches()
+        );
+
+        let eval = manager
+            .evaluate(13, "y", DapEvaluateContext::Repl)
+            .expect("eval");
+        assert!(eval.ok());
+        assert!(eval.value().contains("y@"));
+
+        let threads = manager.list_threads(13).expect("threads");
+        assert_eq!(threads.len(), 2);
+        manager.switch_thread(13, 2).expect("switch thread");
+        assert_eq!(
+            manager
+                .stopped_snapshot(13)
+                .expect("snap")
+                .expect("present")
+                .thread_id(),
+            2
+        );
+
+        let frames = manager.list_stack_frames(13).expect("frames");
+        assert!(frames.len() >= 2);
+        let switched = manager.switch_stack_frame(13, 2).expect("switch frame");
+        assert_eq!(switched.frame_id(), Some(2));
+        assert_eq!(switched.position().expect("pos").line(), 20);
+
+        assert!(manager.remove_expression(13, "x").expect("remove"));
+        assert!(manager.list_expressions(13).expect("list").is_empty());
+
+        manager.stop_session(13).expect("stop");
         let _ = fake.join();
     }
 
@@ -2278,5 +3746,375 @@ mod tests {
                 .and_then(|args| args.terminate_debuggee),
             Some(true)
         );
+    }
+
+    #[test]
+    fn launch_arguments_always_send_program_path() {
+        let config = DebugConfiguration::new("Debug (dotnet)", DebugRequestKind::Launch)
+            .with_target_program("bin/Debug/net10.0/App.dll")
+            .with_cwd(".");
+        let body = super::launch_arguments(&config);
+        assert_eq!(body["program"], "bin/Debug/net10.0/App.dll");
+        assert_eq!(body["console"], "internalConsole");
+        assert!(body.get("projectPath").is_none());
+    }
+
+    const STRUCT_CTOR_PROGRAM: &str = r#"Console.WriteLine("Hello, World!");
+var a = 1;
+var b = new foo();
+Console.WriteLine(a);
+
+public struct foo{
+public string bar => "bar";
+}
+"#;
+
+    fn sharpdbg_spec() -> Option<DebugAdapterSpec> {
+        Command::new("sharpdbg")
+            .arg("--help")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()
+            .filter(|status| status.success())
+            .map(|_| {
+                DebugAdapterSpec::new(
+                    "sharpdbg",
+                    "csharp",
+                    ["cs"],
+                    "sharpdbg",
+                    ["--interpreter=vscode"],
+                )
+            })
+    }
+
+    fn wait_for_stopped_or_terminated(
+        manager: &DapClientManager,
+        workspace_id: u64,
+        timeout: Duration,
+    ) -> DapSessionEvent {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let events = manager.drain_events().expect("drain");
+            if let Some(event) = events.into_iter().find(|event| {
+                matches!(
+                    event,
+                    DapSessionEvent::Stopped {
+                        workspace_id: id,
+                    } if *id == workspace_id
+                ) || matches!(
+                    event,
+                    DapSessionEvent::Terminated {
+                        workspace_id: id,
+                    } if *id == workspace_id
+                )
+            }) {
+                return event;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for stopped/terminated. log:\n{}",
+            dap_log_text(manager)
+        );
+    }
+
+    fn dap_log_text(manager: &DapClientManager) -> String {
+        manager
+            .log_snapshot()
+            .entries()
+            .iter()
+            .map(|entry| format!("{:?} {}", entry.direction(), entry.message()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn find_named_dll(root: &Path, file_name: &str) -> Option<PathBuf> {
+        let mut found = None;
+        fn walk(dir: &Path, file_name: &str, found: &mut Option<PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, file_name, found);
+                } else if path.file_name().is_some_and(|name| name == file_name) {
+                    *found = Some(path);
+                }
+            }
+        }
+        walk(&root.join("bin").join("Debug"), file_name, &mut found);
+        found
+    }
+
+    fn build_csharp_fixture(source: &str) -> (PathBuf, PathBuf, PathBuf) {
+        static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("volt-sharpdbg-step-{}-{seq}", std::process::id()));
+        fs::create_dir_all(&root).expect("temp project");
+        fs::write(
+            root.join("StepStruct.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DebugType>portable</DebugType>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+</Project>
+"#,
+        )
+        .expect("csproj");
+        let program = root.join("Program.cs");
+        fs::write(&program, source).expect("program");
+        static DOTNET_BUILD: Mutex<()> = Mutex::new(());
+        let _build_lock = DOTNET_BUILD
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let build = Command::new("dotnet")
+            .args(["build", "-c", "Debug", "--nologo"])
+            .current_dir(&root)
+            .output()
+            .expect("dotnet build");
+        assert!(
+            build.status.success(),
+            "dotnet build failed\nstdout:{}\nstderr:{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let dll = find_named_dll(&root, "StepStruct.dll").expect("built dll");
+        (root, program, dll)
+    }
+
+    fn start_struct_ctor_session(
+        workspace_id: u64,
+        source: &str,
+    ) -> Option<(DapClientManager, PathBuf)> {
+        let spec = sharpdbg_spec()?;
+        let (root, program, dll) = build_csharp_fixture(source);
+        let mut registry = DebugAdapterRegistry::new();
+        registry.register(spec).expect("register");
+        let manager = DapClientManager::new(registry);
+        manager
+            .toggle_breakpoint(workspace_id, program.as_path(), 1)
+            .expect("bp");
+        manager
+            .start(
+                workspace_id,
+                Some("sharpdbg"),
+                None,
+                DebugConfiguration::new("Debug (dotnet)", DebugRequestKind::Launch)
+                    .with_target_program(&dll)
+                    .with_cwd(&root),
+            )
+            .expect("start");
+        let first = wait_for_stopped_or_terminated(&manager, workspace_id, Duration::from_secs(20));
+        assert!(
+            matches!(first, DapSessionEvent::Stopped { .. }),
+            "expected first stop, got {first:?}\n{}",
+            dap_log_text(&manager)
+        );
+        Some((manager, root))
+    }
+
+    fn snapshot_line(manager: &DapClientManager, workspace_id: u64) -> Option<u32> {
+        manager
+            .refresh_stopped_snapshot(workspace_id)
+            .ok()
+            .and_then(|snapshot| snapshot.position().map(super::DapExecutionPosition::line))
+    }
+
+    fn step_over_until_line(
+        manager: &DapClientManager,
+        workspace_id: u64,
+        target: u32,
+        budget: usize,
+    ) -> Vec<Option<u32>> {
+        let mut lines = Vec::new();
+        for step in 0..budget {
+            let line = snapshot_line(manager, workspace_id);
+            lines.push(line);
+            if line == Some(target) {
+                return lines;
+            }
+            manager.step_over(workspace_id).expect("step");
+            let event =
+                wait_for_stopped_or_terminated(manager, workspace_id, Duration::from_secs(20));
+            assert!(
+                matches!(event, DapSessionEvent::Stopped { .. }),
+                "Session ended after {step} steps, lines={lines:?}, event={event:?}\n{}",
+                dap_log_text(manager)
+            );
+        }
+        lines
+    }
+
+    #[test]
+    fn sharpdbg_step_over_struct_construction_keeps_session() {
+        let Some((manager, root)) = start_struct_ctor_session(91, STRUCT_CTOR_PROGRAM) else {
+            return;
+        };
+        let to_ctor = step_over_until_line(&manager, 91, 3, 6);
+        assert_eq!(
+            to_ctor.last().copied().flatten(),
+            Some(3),
+            "never reached `var b`; lines={to_ctor:?}\n{}",
+            dap_log_text(&manager)
+        );
+        manager.step_over(91).expect("step over ctor");
+        let event = wait_for_stopped_or_terminated(&manager, 91, Duration::from_secs(20));
+        assert!(
+            matches!(event, DapSessionEvent::Stopped { .. }),
+            "Session ended stepping over `new foo()`, lines={to_ctor:?}, event={event:?}\n{}",
+            dap_log_text(&manager)
+        );
+        assert_eq!(
+            snapshot_line(&manager, 91),
+            Some(4),
+            "expected Console.WriteLine(a) after ctor\n{}",
+            dap_log_text(&manager)
+        );
+        manager.stop_session(91).expect("stop");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sharpdbg_step_into_struct_construction_keeps_session() {
+        let Some((manager, root)) = start_struct_ctor_session(92, STRUCT_CTOR_PROGRAM) else {
+            return;
+        };
+        let to_ctor = step_over_until_line(&manager, 92, 3, 8);
+        assert_eq!(
+            to_ctor.last().copied().flatten(),
+            Some(3),
+            "never reached `var b`; lines={to_ctor:?}\n{}",
+            dap_log_text(&manager)
+        );
+        manager.step_into(92).expect("step into ctor");
+        let event = wait_for_stopped_or_terminated(&manager, 92, Duration::from_secs(20));
+        assert!(
+            matches!(event, DapSessionEvent::Stopped { .. }),
+            "Session ended on step-into `new foo()`, lines={to_ctor:?}, event={event:?}\n{}",
+            dap_log_text(&manager)
+        );
+        assert!(
+            snapshot_line(&manager, 92).is_some(),
+            "lost execution position after step-into `new foo()`\n{}",
+            dap_log_text(&manager)
+        );
+        manager.stop_session(92).expect("stop");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sharpdbg_double_step_over_struct_construction_keeps_session() {
+        let Some((manager, root)) = start_struct_ctor_session(93, STRUCT_CTOR_PROGRAM) else {
+            return;
+        };
+        let to_ctor = step_over_until_line(&manager, 93, 3, 6);
+        assert_eq!(to_ctor.last().copied().flatten(), Some(3));
+        manager.step_over(93).expect("first next");
+        manager.step_over(93).expect("second next while running");
+        let event = wait_for_stopped_or_terminated(&manager, 93, Duration::from_secs(20));
+        assert!(
+            matches!(event, DapSessionEvent::Stopped { .. }),
+            "Session ended after stacked `next` on `new foo()`, lines={to_ctor:?}, event={event:?}\n{}",
+            dap_log_text(&manager)
+        );
+        manager.stop_session(93).expect("stop");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sharpdbg_step_into_from_entry_keeps_session_through_struct_ctor() {
+        let Some((manager, root)) = start_struct_ctor_session(94, STRUCT_CTOR_PROGRAM) else {
+            return;
+        };
+        let mut lines = Vec::new();
+        for step in 0..12 {
+            let line = snapshot_line(&manager, 94);
+            lines.push(line);
+            if line == Some(4) {
+                manager.stop_session(94).expect("stop");
+                let _ = fs::remove_dir_all(&root);
+                return;
+            }
+            manager.step_into(94).expect("step into");
+            let event = wait_for_stopped_or_terminated(&manager, 94, Duration::from_secs(20));
+            assert!(
+                matches!(event, DapSessionEvent::Stopped { .. }),
+                "Session ended on F11-from-entry after {step} steps, lines={lines:?}, event={event:?}\n{}",
+                dap_log_text(&manager)
+            );
+        }
+        manager.stop_session(94).expect("stop");
+        let _ = fs::remove_dir_all(&root);
+        panic!(
+            "never reached Console.WriteLine(a) with F11-only; lines={lines:?}\n{}",
+            dap_log_text(&manager)
+        );
+    }
+
+    #[test]
+    fn sharpdbg_expand_struct_local_keeps_session() {
+        let Some((manager, root)) = start_struct_ctor_session(95, STRUCT_CTOR_PROGRAM) else {
+            return;
+        };
+        let to_after = step_over_until_line(&manager, 95, 4, 8);
+        assert_eq!(
+            to_after.last().copied().flatten(),
+            Some(4),
+            "never reached line after ctor; lines={to_after:?}\n{}",
+            dap_log_text(&manager)
+        );
+        let snapshot = manager.refresh_stopped_snapshot(95).expect("snapshot");
+        assert!(
+            snapshot
+                .locals()
+                .iter()
+                .any(|local| local.name() == "b" && local.expandable()),
+            "expected expandable local `b`: {:?}\n{}",
+            snapshot
+                .locals()
+                .iter()
+                .map(|local| (local.name(), local.value(), local.expandable()))
+                .collect::<Vec<_>>(),
+            dap_log_text(&manager)
+        );
+        let expanded = manager
+            .toggle_variable_expand(95, &super::DapVariablePath::locals(["b"]))
+            .expect("expand b");
+        let b = expanded
+            .locals()
+            .iter()
+            .find(|local| local.name() == "b")
+            .expect("b");
+        assert!(
+            b.children().iter().any(|child| child.name() == "bar"),
+            "expected property `bar` under `b`: {:?}\n{}",
+            b.children()
+                .iter()
+                .map(|child| (child.name(), child.value()))
+                .collect::<Vec<_>>(),
+            dap_log_text(&manager)
+        );
+        let drained = manager.drain_events().expect("drain");
+        assert!(
+            !drained
+                .iter()
+                .any(|event| matches!(event, DapSessionEvent::Terminated { .. })),
+            "Session ended expanding `b.bar`: {drained:?}\n{}",
+            dap_log_text(&manager)
+        );
+        assert!(
+            manager.stopped_snapshot(95).ok().flatten().is_some(),
+            "lost stopped snapshot expanding `b`\n{}",
+            dap_log_text(&manager)
+        );
+        manager.stop_session(95).expect("stop");
+        let _ = fs::remove_dir_all(&root);
     }
 }

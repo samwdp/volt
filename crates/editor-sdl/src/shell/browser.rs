@@ -949,6 +949,7 @@ pub(super) fn render_browser_buffer_body(
         render_text_panel(
             target,
             &state.footer_pane.text,
+            Some(&state.footer_pane.syntax_lines),
             state.footer_pane.scroll_row,
             (active && state.active_pane == BrowserPane::Footer)
                 .then_some(state.footer_pane.cursor()),

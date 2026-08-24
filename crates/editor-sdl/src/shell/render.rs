@@ -2748,6 +2748,11 @@ fn render_buffer_with_view_state(
         TOKEN_DEBUG_FRINGE_EXECUTION,
         Color::RGB(86, 182, 194),
     );
+    let debug_line_execution = theme_color(
+        theme_registry,
+        TOKEN_DEBUG_LINE_EXECUTION,
+        Color::RGBA(86, 182, 194, 48),
+    );
     let cell_width = cell_width.max(1);
     let (git_branch, git_added, git_removed) = git_summary
         .map(|summary| (summary.branch.as_deref(), summary.added, summary.removed))
@@ -3127,7 +3132,23 @@ fn render_buffer_with_view_state(
                     break;
                 }
                 let y = body_y + visual_row as i32 * line_height;
-                if active && line_index == cursor_row && !matches!(input_mode, InputMode::Visual) {
+                let is_execution_line = buffer.dap_execution_line() == Some(line_index);
+                if is_execution_line {
+                    fill_window_surface_rect(
+                        target,
+                        PixelRectToRect::rect(
+                            gutter_x,
+                            y,
+                            rect.width().saturating_sub(24),
+                            line_height.max(1) as u32,
+                        ),
+                        debug_line_execution,
+                        window_effects,
+                    )?;
+                } else if active
+                    && line_index == cursor_row
+                    && !matches!(input_mode, InputMode::Visual)
+                {
                     fill_window_surface_rect(
                         target,
                         PixelRectToRect::rect(
@@ -3234,58 +3255,64 @@ fn render_buffer_with_view_state(
                         .lsp_show_buffer_diagnostics()
                         .then(|| buffer.lsp_diagnostic_severity(line_index))
                         .flatten();
+                    let dap_marker = buffer.dap_fringe_marker(line_index);
+                    let dap_execution = buffer.dap_execution_line() == Some(line_index);
+                    let shows_dap_glyph = dap_execution || dap_marker.is_some();
                     let git_fringe_x = if debug_fringe_live {
                         fringe_x + cell_width
                     } else {
                         fringe_x
                     };
-                    if debug_fringe_live {
-                        if buffer.dap_execution_line() == Some(line_index) {
-                            draw_text(
-                                target,
-                                fringe_x,
-                                y,
-                                DEBUG_FRINGE_EXECUTION_GLYPH,
-                                debug_fringe_execution,
-                            )?;
-                        } else if let Some(state) = buffer.dap_fringe_marker(line_index) {
-                            let (glyph, color) = match state {
-                                BreakpointState::Verified => {
-                                    (DEBUG_FRINGE_VERIFIED_GLYPH, debug_fringe_verified)
-                                }
-                                BreakpointState::Pending | BreakpointState::Unverified => {
-                                    (DEBUG_FRINGE_PENDING_GLYPH, debug_fringe_pending)
-                                }
-                            };
-                            draw_text(target, fringe_x, y, glyph, color)?;
-                        }
-                    }
-                    if let Some(severity) = diagnostic_severity {
-                        let color = diagnostic_color(severity, theme_registry);
+                    if dap_execution {
                         draw_text(
                             target,
-                            git_fringe_x,
+                            fringe_x,
                             y,
-                            user_library.lsp_diagnostic_icon(),
-                            color,
+                            DEBUG_FRINGE_EXECUTION_GLYPH,
+                            debug_fringe_execution,
                         )?;
-                    } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
-                        let color = match kind {
-                            GitFringeKind::Added => git_fringe_added,
-                            GitFringeKind::Modified => git_fringe_modified,
-                            GitFringeKind::Removed => git_fringe_removed,
+                    } else if let Some(state) = dap_marker {
+                        let (glyph, color) = match state {
+                            BreakpointState::Verified => {
+                                (DEBUG_FRINGE_VERIFIED_GLYPH, debug_fringe_verified)
+                            }
+                            BreakpointState::Pending | BreakpointState::Unverified => {
+                                (DEBUG_FRINGE_PENDING_GLYPH, debug_fringe_pending)
+                            }
                         };
-                        fill_window_surface_rect(
-                            target,
-                            PixelRectToRect::rect(
-                                git_fringe_x - 4,
+                        draw_text(target, fringe_x, y, glyph, color)?;
+                    }
+                    // Idle: Breakpoint glyph replaces git on that line. Live Session:
+                    // DAP markers keep the left cell; git uses the widened right cell.
+                    let draw_git_or_diagnostic = debug_fringe_live || !shows_dap_glyph;
+                    if draw_git_or_diagnostic {
+                        if let Some(severity) = diagnostic_severity {
+                            let color = diagnostic_color(severity, theme_registry);
+                            draw_text(
+                                target,
+                                git_fringe_x,
                                 y,
-                                GIT_FRINGE_BAR_WIDTH,
-                                line_height.max(1) as u32,
-                            ),
-                            color,
-                            window_effects,
-                        )?;
+                                user_library.lsp_diagnostic_icon(),
+                                color,
+                            )?;
+                        } else if let Some(kind) = buffer.git_fringe_kind(line_index) {
+                            let color = match kind {
+                                GitFringeKind::Added => git_fringe_added,
+                                GitFringeKind::Modified => git_fringe_modified,
+                                GitFringeKind::Removed => git_fringe_removed,
+                            };
+                            fill_window_surface_rect(
+                                target,
+                                PixelRectToRect::rect(
+                                    git_fringe_x - 4,
+                                    y,
+                                    GIT_FRINGE_BAR_WIDTH,
+                                    line_height.max(1) as u32,
+                                ),
+                                color,
+                                window_effects,
+                            )?;
+                        }
                     }
                     let line_number = if relative_line_numbers {
                         if line_index == cursor_row {
@@ -4180,7 +4207,7 @@ fn render_plugin_section_buffer_body_with_view_state(
         } else {
             None
         };
-        let (text, scroll_row, cursor_point, title, pane_mode) = if index == 0 {
+        let (text, scroll_row, cursor_point, title, pane_mode, pane_syntax) = if index == 0 {
             (
                 &buffer.text,
                 base_view_state.scroll_row,
@@ -4191,6 +4218,7 @@ fn render_plugin_section_buffer_body_with_view_state(
                 } else {
                     InputMode::Normal
                 },
+                Some(&buffer.syntax_lines),
             )
         } else {
             let Some(pane) = state.attached_section(index) else {
@@ -4206,11 +4234,13 @@ fn render_plugin_section_buffer_body_with_view_state(
                 } else {
                     InputMode::Normal
                 },
+                Some(&pane.syntax_lines),
             )
         };
         render_text_panel(
             target,
             text,
+            pane_syntax,
             scroll_row,
             cursor_point,
             pane_active,
@@ -4241,6 +4271,7 @@ fn render_plugin_section_buffer_body_with_view_state(
 pub(super) fn render_text_panel(
     target: &mut DrawTarget<'_>,
     text: &TextBuffer,
+    syntax_lines: Option<&IndexedSyntaxLines>,
     scroll_row: usize,
     cursor_point: Option<TextPoint>,
     pane_active: bool,
@@ -4375,9 +4406,20 @@ pub(super) fn render_text_panel(
                     char_map.display_cols_between(segment.start_col, cursor_col),
                 ));
             }
-            let rendered =
-                char_map.display_text_for_range(&line, segment.start_col, segment.end_col);
-            draw_text(target, body_x, y, &rendered, foreground)?;
+            draw_buffer_text(
+                target,
+                body_x,
+                y,
+                &line,
+                *segment,
+                &char_map,
+                syntax_lines
+                    .and_then(|lines| lines.get(&line_index))
+                    .map(Vec::as_slice),
+                theme_registry,
+                foreground,
+                cell_width,
+            )?;
             visual_row = visual_row.saturating_add(1);
         }
         if visual_row >= pane_layout.visible_rows {
@@ -4791,6 +4833,7 @@ pub(super) fn render_acp_buffer_body(
     render_text_panel(
         target,
         &state.footer_pane.text,
+        Some(&state.footer_pane.syntax_lines),
         state.footer_pane.scroll_row,
         (active && active_pane == AcpPane::Footer).then_some(state.footer_pane.cursor()),
         active && active_pane == AcpPane::Footer,

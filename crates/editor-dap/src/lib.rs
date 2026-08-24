@@ -8,11 +8,14 @@ use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf};
 
 use editor_jobs::JobSpec;
 
-pub use breakpoints::{BreakpointState, BreakpointStore, BreakpointToggle, StoredBreakpoint};
+pub use breakpoints::{
+    BreakpointState, BreakpointStore, BreakpointToggle, StoredBreakpoint, debug_source_paths_eq,
+};
 pub use client::{
-    DapClientError, DapClientManager, DapExecutionPosition, DapLocalVariable, DapLogDirection,
-    DapLogEntry, DapLogSnapshot, DapSessionEvent, DapSessionInfo, DapStoppedSnapshot,
-    DapTransportLog,
+    DapClientError, DapClientManager, DapEvaluateContext, DapExecutionPosition, DapLocalVariable,
+    DapLogDirection, DapLogEntry, DapLogSnapshot, DapSessionEvent, DapSessionInfo,
+    DapStackFrameInfo, DapStoppedSnapshot, DapThreadInfo, DapTransportLog, DapVariableNode,
+    DapVariablePath, DapVariableRow, DapWatchExpression,
 };
 pub use config::{
     DapConfigError, DebugConfigurationCandidate, DebugConfigurationSource, DebugInferContext,
