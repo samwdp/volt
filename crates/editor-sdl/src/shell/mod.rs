@@ -89,7 +89,7 @@ use crate::window_effects::{
     WindowEffects, apply_window_effects, configure_window_opacity_driver,
     current_window_effect_settings, update_window_effects, window_creation_flags,
 };
-use editor_buffer::{TextBuffer, TextPoint, TextRange, TextSnapshot, WordKind};
+use editor_buffer::{TextBuffer, TextEdit, TextPoint, TextRange, TextSnapshot, WordKind};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, CycleDirection, EditorRuntime, HookEvent,
     KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
@@ -14052,7 +14052,7 @@ impl ShellState {
         else {
             return Ok(());
         };
-        let (buffer_id, buffer_revision, text, path, cursor, language_id) = {
+        let (buffer_id, buffer_revision, text, path, cursor, language_id, edits) = {
             let ui = self.ui()?;
             let Some(buffer_id) = ui.active_buffer_id() else {
                 return Ok(());
@@ -14073,6 +14073,7 @@ impl ShellState {
             {
                 return Ok(());
             }
+            let edits = lsp_edits_since_last_sync(&lsp_client, &path, &buffer.text);
             (
                 buffer_id,
                 buffer.text.revision(),
@@ -14080,6 +14081,7 @@ impl ShellState {
                 path,
                 buffer.cursor_point(),
                 buffer.language_id().map(str::to_owned),
+                edits,
             )
         };
         let root = workspace_root_for_path(&self.runtime, &path).map_err(ShellError::Runtime)?;
@@ -14093,6 +14095,7 @@ impl ShellState {
             cursor,
             options: lsp_formatting_options(&self.runtime, language_id.as_deref()),
             lsp_client,
+            edits,
         };
         self.ui_mut()?.inline_completion_worker.schedule(request);
         Ok(())
@@ -22469,6 +22472,16 @@ fn execute_lsp_start_for_buffer(
     schedule_immediate_lsp_sync(runtime, context, preferred_server_id)
 }
 
+fn lsp_edits_since_last_sync(
+    lsp_client: &LspClientManager,
+    path: &Path,
+    buffer: &TextBuffer,
+) -> Option<Vec<TextEdit>> {
+    lsp_client
+        .last_synced_revision(path)
+        .and_then(|revision| buffer.edits_since(revision))
+}
+
 fn schedule_immediate_lsp_sync(
     runtime: &mut EditorRuntime,
     context: &ActiveLspBufferContext,
@@ -22479,6 +22492,9 @@ fn schedule_immediate_lsp_sync(
         .get::<Arc<LspClientManager>>()
         .cloned()
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
+    let edits = shell_ui(runtime)?
+        .buffer(context.buffer_id)
+        .and_then(|buffer| lsp_edits_since_last_sync(&lsp_client, &context.path, &buffer.text));
     let request = LspSyncWorkerRequest {
         path: context.path.clone(),
         revision: context.revision,
@@ -22486,6 +22502,7 @@ fn schedule_immediate_lsp_sync(
         root: context.root.clone(),
         lsp_client,
         preferred_server_id: preferred_server_id.map(str::to_owned),
+        edits,
     };
     let ui = shell_ui_mut(runtime)?;
     ui.lsp_sync_worker.schedule(request, false);
@@ -24181,6 +24198,7 @@ struct AutocompleteBufferRequest {
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
     lsp_client: Option<Arc<LspClientManager>>,
+    edits: Option<Vec<TextEdit>>,
 }
 
 struct PendingAutocompleteRequest {
@@ -24196,6 +24214,7 @@ struct LspSyncWorkerRequest {
     root: Option<PathBuf>,
     lsp_client: Arc<LspClientManager>,
     preferred_server_id: Option<String>,
+    edits: Option<Vec<TextEdit>>,
 }
 
 struct PendingLspSyncRequest {
@@ -24214,6 +24233,7 @@ struct InlineCompletionWorkerRequest {
     cursor: TextPoint,
     options: LspFormattingOptions,
     lsp_client: Arc<LspClientManager>,
+    edits: Option<Vec<TextEdit>>,
 }
 
 struct PendingInlineCompletionRequest {
@@ -24249,11 +24269,12 @@ impl InlineCompletionWorkerState {
                 }
                 let result = request
                     .lsp_client
-                    .sync_buffer(
+                    .sync_buffer_with_edits(
                         &request.path,
                         request.text.text(),
                         request.buffer_revision,
                         request.root.as_deref(),
+                        request.edits.as_deref(),
                     )
                     .and_then(|_| {
                         request.lsp_client.inline_completion(
@@ -24350,18 +24371,20 @@ impl LspSyncWorkerState {
                 }
                 for request in latest_by_path.into_values() {
                     let sync_result = match request.preferred_server_id.as_deref() {
-                        Some(server_id) => request.lsp_client.start_buffer_server(
+                        Some(server_id) => request.lsp_client.start_buffer_server_with_edits(
                             &request.path,
                             request.text.text(),
                             request.revision,
                             request.root.as_deref(),
                             server_id,
+                            request.edits.as_deref(),
                         ),
-                        None => request.lsp_client.sync_buffer(
+                        None => request.lsp_client.sync_buffer_with_edits(
                             &request.path,
                             request.text.text(),
                             request.revision,
                             request.root.as_deref(),
+                            request.edits.as_deref(),
                         ),
                     };
                     let error = sync_result.err().map(|error| error.to_string());
@@ -24483,6 +24506,7 @@ struct AutocompleteWorkerRequest {
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
     lsp_client: Option<Arc<LspClientManager>>,
+    edits: Option<Vec<TextEdit>>,
 }
 
 struct AutocompleteWorkerResult {
@@ -24559,6 +24583,7 @@ impl AutocompleteWorkerState {
                 query: request.query,
                 providers: request.providers,
                 lsp_client: request.lsp_client,
+                edits: request.edits,
             },
         });
     }
@@ -24731,7 +24756,13 @@ fn lsp_autocomplete_entries(
     };
     let text = request.text.text();
     let completions = lsp_client
-        .sync_buffer(path, text, request.buffer_revision, request.root.as_deref())
+        .sync_buffer_with_edits(
+            path,
+            text,
+            request.buffer_revision,
+            request.root.as_deref(),
+            request.edits.as_deref(),
+        )
         .ok()
         .and_then(|_| lsp_client.completions(path, request.cursor).ok())
         .unwrap_or_default();
@@ -25108,7 +25139,12 @@ fn autocomplete_request_for_buffer(
         cursor: buffer.cursor_point(),
         query,
         providers: registry.providers.clone(),
-        lsp_client,
+        lsp_client: lsp_client.clone(),
+        edits: lsp_client.as_ref().and_then(|client| {
+            buffer
+                .lsp_path()
+                .and_then(|path| lsp_edits_since_last_sync(client, path, &buffer.text))
+        }),
     })
 }
 
@@ -34199,6 +34235,7 @@ fn schedule_pending_lsp_syncs(
                     root,
                     lsp_client: lsp_client.clone(),
                     preferred_server_id: None,
+                    edits: lsp_edits_since_last_sync(&lsp_client, &path, &buffer.text),
                 }))
             })
             .collect::<Result<Vec<_>, String>>()?

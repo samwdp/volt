@@ -11234,6 +11234,7 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
             },
         ],
         lsp_client: None,
+        edits: None,
     };
 
     let entries = autocomplete_entries(&request);
@@ -11295,6 +11296,7 @@ fn autocomplete_entries_are_not_limited_by_visible_result_limit() -> Result<(), 
             kind: AutocompleteProviderKind::Buffer,
         }],
         lsp_client: None,
+        edits: None,
     };
 
     let entries = autocomplete_entries(&request);

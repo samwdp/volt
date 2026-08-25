@@ -1017,6 +1017,9 @@ struct LspSessionHandle {
     next_request_id: AtomicU64,
     next_progress_token: AtomicU64,
     disconnected: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_next_send: AtomicBool,
+    needs_full_document: Mutex<BTreeSet<PathBuf>>,
 }
 
 impl std::fmt::Debug for LspSessionHandle {
@@ -1167,6 +1170,15 @@ impl LspClientManager {
             return Ok(None);
         };
         session.csharp_metadata(uri)
+    }
+
+    pub fn last_synced_revision(&self, path: &Path) -> Option<u64> {
+        self.state
+            .lock()
+            .ok()?
+            .tracked_buffers
+            .get(path)
+            .map(|tracked| tracked.revision)
     }
 
     pub fn needs_sync(&self, path: &Path, revision: u64) -> bool {
@@ -1356,8 +1368,19 @@ impl LspClientManager {
         revision: u64,
         root: Option<&Path>,
     ) -> Result<Vec<String>, LspClientError> {
+        self.sync_buffer_with_edits(path, text, revision, root, None)
+    }
+
+    pub fn sync_buffer_with_edits(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        root: Option<&Path>,
+        edits: Option<&[editor_buffer::TextEdit]>,
+    ) -> Result<Vec<String>, LspClientError> {
         let sessions = self.ensure_sessions_for_path(path, root, None, false)?;
-        self.sync_buffer_to_sessions(path, text.into(), revision, sessions)
+        self.sync_buffer_to_sessions(path, text.into(), revision, sessions, edits)
     }
 
     pub fn start_buffer_server(
@@ -1368,8 +1391,20 @@ impl LspClientManager {
         root: Option<&Path>,
         server_id: &str,
     ) -> Result<Vec<String>, LspClientError> {
+        self.start_buffer_server_with_edits(path, text, revision, root, server_id, None)
+    }
+
+    pub fn start_buffer_server_with_edits(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        root: Option<&Path>,
+        server_id: &str,
+        edits: Option<&[editor_buffer::TextEdit]>,
+    ) -> Result<Vec<String>, LspClientError> {
         let sessions = self.ensure_sessions_for_path(path, root, Some(server_id), true)?;
-        self.sync_buffer_to_sessions(path, text.into(), revision, sessions)
+        self.sync_buffer_to_sessions(path, text.into(), revision, sessions, edits)
     }
 
     pub fn save_buffer(&self, path: &Path) -> Result<(), LspClientError> {
@@ -1532,8 +1567,28 @@ impl LspClientManager {
         server_id: &str,
         session_root: Option<&Path>,
     ) -> Result<Vec<String>, LspClientError> {
+        self.sync_buffer_onto_session_with_edits(
+            path,
+            text,
+            revision,
+            server_id,
+            session_root,
+            None,
+        )
+    }
+
+    /// Syncs a buffer onto an exact Language Server Session, with an optional edit chain.
+    pub fn sync_buffer_onto_session_with_edits(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        server_id: &str,
+        session_root: Option<&Path>,
+        edits: Option<&[editor_buffer::TextEdit]>,
+    ) -> Result<Vec<String>, LspClientError> {
         let handle = self.ensure_session_handle(server_id, session_root)?;
-        self.sync_buffer_to_sessions(path, text.into(), revision, vec![handle])
+        self.sync_buffer_to_sessions(path, text.into(), revision, vec![handle], edits)
     }
 
     fn ensure_session_handle(
@@ -1972,6 +2027,7 @@ impl LspClientManager {
         text: String,
         revision: u64,
         sessions: Vec<Arc<LspSessionHandle>>,
+        edits: Option<&[editor_buffer::TextEdit]>,
     ) -> Result<Vec<String>, LspClientError> {
         if sessions.is_empty() {
             if let Ok(mut state) = self.state.lock() {
@@ -1984,38 +2040,53 @@ impl LspClientManager {
             .iter()
             .map(|session| session.key.clone())
             .collect::<BTreeSet<_>>();
-        let version = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
-            let tracked = state
-                .tracked_buffers
-                .entry(path.to_path_buf())
-                .or_insert_with(TrackedBufferState::default);
-            tracked.version = tracked.version.saturating_add(1).max(1);
-            tracked.revision = revision;
-            tracked.sessions = session_keys;
-            tracked.version
-        };
-
-        let session_count = sessions.len();
-        let mut text = Some(text);
-        for (index, session) in sessions.iter().enumerate() {
-            let text = if index + 1 == session_count {
-                text.take().unwrap_or_default()
-            } else {
-                text.as_ref().cloned().unwrap_or_default()
-            };
-            session.sync_text_document(path, version, text)?;
-        }
-
         let mut labels = sessions
             .iter()
             .map(|session| session.server_id().to_owned())
             .collect::<Vec<_>>();
         labels.sort();
         labels.dedup();
+        let (version, last_revision) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            let last_revision = state
+                .tracked_buffers
+                .get(path)
+                .map(|tracked| tracked.revision);
+            let already_synced = last_revision == Some(revision)
+                && sessions.iter().all(|session| {
+                    session.has_open_document(path) && !session.path_needs_full_document(path)
+                });
+            let tracked = state
+                .tracked_buffers
+                .entry(path.to_path_buf())
+                .or_insert_with(TrackedBufferState::default);
+            tracked.sessions = session_keys;
+            if already_synced {
+                return Ok(labels);
+            }
+            tracked.version = tracked.version.saturating_add(1).max(1);
+            tracked.revision = revision;
+            (tracked.version, last_revision)
+        };
+
+        let usable_edits = usable_edit_chain(edits, last_revision, revision);
+        let previous_text = sessions
+            .iter()
+            .find_map(|session| session.open_document_text(path));
+        let incremental_changes = match (previous_text.as_deref(), usable_edits) {
+            (Some(previous_text), Some(edits)) => {
+                incremental_content_changes(previous_text, &text, edits)
+            }
+            _ => None,
+        };
+
+        for session in &sessions {
+            session.sync_text_document(path, version, &text, incremental_changes.as_deref())?;
+        }
+
         Ok(labels)
     }
 
@@ -2263,6 +2334,9 @@ impl LspSessionHandle {
             next_request_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
             disconnected: Arc::clone(&disconnected),
+            #[cfg(test)]
+            fail_next_send: AtomicBool::new(false),
+            needs_full_document: Mutex::new(BTreeSet::new()),
         });
         record_transport_event(
             &transport_log,
@@ -2394,16 +2468,48 @@ impl LspSessionHandle {
         Ok(())
     }
 
+    fn open_document_text(&self, path: &Path) -> Option<String> {
+        self.open_documents
+            .lock()
+            .ok()
+            .and_then(|open_documents| open_documents.get(path).cloned())
+    }
+
+    #[cfg(test)]
+    fn fail_next_send(&self) {
+        self.fail_next_send.store(true, Ordering::SeqCst);
+    }
+
+    fn path_needs_full_document(&self, path: &Path) -> bool {
+        self.needs_full_document
+            .lock()
+            .map(|paths| paths.contains(path))
+            .unwrap_or(true)
+    }
+
+    fn mark_needs_full_document(&self, path: &Path) {
+        if let Ok(mut paths) = self.needs_full_document.lock() {
+            paths.insert(path.to_path_buf());
+        }
+    }
+
+    fn clear_needs_full_document(&self, path: &Path) {
+        if let Ok(mut paths) = self.needs_full_document.lock() {
+            paths.remove(path);
+        }
+    }
+
     fn sync_text_document(
         &self,
         path: &Path,
         version: i32,
-        text: String,
+        text: &str,
+        incremental_changes: Option<&[TextDocumentContentChangeEvent]>,
     ) -> Result<(), LspClientError> {
         if self.has_open_document(path) {
-            self.did_change(path, version, text)
+            self.did_change(path, version, text, incremental_changes)
         } else {
-            self.did_open(path, version, text)
+            self.did_open(path, version, text.to_owned())
         }
     }
 
@@ -2420,15 +2526,24 @@ impl LspSessionHandle {
             .lock()
             .map_err(|_| LspClientError::Protocol("LSP open documents mutex poisoned".to_owned()))?
             .insert(path.to_path_buf(), text);
+        self.clear_needs_full_document(path);
         Ok(())
     }
 
-    fn did_change(&self, path: &Path, version: i32, text: String) -> Result<(), LspClientError> {
-        let content_change = {
-            let mut open_documents = self.open_documents.lock().map_err(|_| {
+    fn did_change(
+        &self,
+        path: &Path,
+        version: i32,
+        text: &str,
+        incremental_changes: Option<&[TextDocumentContentChangeEvent]>,
+    ) -> Result<(), LspClientError> {
+        let force_full = self.path_needs_full_document(path);
+        let used_incremental = !force_full && incremental_changes.is_some();
+        let content_changes = {
+            let open_documents = self.open_documents.lock().map_err(|_| {
                 LspClientError::Protocol("LSP open documents mutex poisoned".to_owned())
             })?;
-            let previous_text = open_documents.get(path).cloned().ok_or_else(|| {
+            let previous_text = open_documents.get(path).ok_or_else(|| {
                 LspClientError::Protocol(format!(
                     "cannot send didChange for unopened document `{}`",
                     path.display()
@@ -2437,14 +2552,38 @@ impl LspSessionHandle {
             let sync_kind = *self.text_document_sync_kind.lock().map_err(|_| {
                 LspClientError::Protocol("LSP text sync kind mutex poisoned".to_owned())
             })?;
-            let content_change = text_document_content_change(sync_kind, &previous_text, &text);
-            open_documents.insert(path.to_path_buf(), text.clone());
-            content_change
+            if sync_kind == TextDocumentSyncKind::INCREMENTAL
+                && !force_full
+                && let Some(incremental_changes) = incremental_changes
+            {
+                incremental_changes.to_vec()
+            } else {
+                vec![text_document_content_change(sync_kind, previous_text, text)]
+            }
         };
-        self.notify_typed::<DidChangeTextDocument>(DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path)?, version),
-            content_changes: vec![content_change],
-        })
+        let notify_result =
+            self.notify_typed::<DidChangeTextDocument>(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path)?, version),
+                content_changes,
+            });
+        match notify_result {
+            Ok(()) => {
+                self.open_documents
+                    .lock()
+                    .map_err(|_| {
+                        LspClientError::Protocol("LSP open documents mutex poisoned".to_owned())
+                    })?
+                    .insert(path.to_path_buf(), text.to_owned());
+                self.clear_needs_full_document(path);
+                Ok(())
+            }
+            Err(error) => {
+                if used_incremental {
+                    self.mark_needs_full_document(path);
+                }
+                Err(error)
+            }
+        }
     }
 
     fn did_save(&self, path: &Path) -> Result<(), LspClientError> {
@@ -2465,6 +2604,7 @@ impl LspSessionHandle {
             .lock()
             .map_err(|_| LspClientError::Protocol("LSP open documents mutex poisoned".to_owned()))?
             .remove(path);
+        self.clear_needs_full_document(path);
         Ok(())
     }
 
@@ -2844,6 +2984,12 @@ impl LspSessionHandle {
     }
 
     fn send_message(&self, message: &Value) -> Result<(), LspClientError> {
+        #[cfg(test)]
+        if self.fail_next_send.swap(false, Ordering::SeqCst) {
+            return Err(LspClientError::Protocol(
+                "failed to send language server notification".to_owned(),
+            ));
+        }
         if self.is_disconnected() {
             record_transport_event(
                 &self.transport_log,
@@ -3735,6 +3881,130 @@ fn text_document_content_change(
             text: text.to_owned(),
         }
     }
+}
+
+fn usable_edit_chain(
+    edits: Option<&[editor_buffer::TextEdit]>,
+    last_revision: Option<u64>,
+    current_revision: u64,
+) -> Option<&[editor_buffer::TextEdit]> {
+    let edits = edits?;
+    let last_revision = last_revision?;
+    if last_revision == current_revision {
+        return Some(&[]);
+    }
+    let start = edits
+        .iter()
+        .position(|edit| edit.before_revision == last_revision)?;
+    let suffix = &edits[start..];
+    if suffix.last()?.after_revision != current_revision
+        || suffix
+            .windows(2)
+            .any(|pair| pair[0].after_revision != pair[1].before_revision)
+    {
+        return None;
+    }
+    Some(suffix)
+}
+
+fn incremental_content_changes(
+    previous_text: &str,
+    new_text: &str,
+    edits: &[editor_buffer::TextEdit],
+) -> Option<Vec<TextDocumentContentChangeEvent>> {
+    if edits.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut working = previous_text.to_owned();
+    let mut changes = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.start_byte > edit.old_end_byte
+            || edit.old_end_byte > working.len()
+            || edit.start_byte > working.len()
+        {
+            return None;
+        }
+        let inserted = inserted_text_after_edit(new_text, edit, &edits[index + 1..])?;
+        changes.push(TextDocumentContentChangeEvent {
+            range: Some(Range::new(
+                lsp_position_on_text(&working, edit.start_position),
+                lsp_position_on_text(&working, edit.old_end_position),
+            )),
+            range_length: None,
+            text: inserted.clone(),
+        });
+        working.replace_range(edit.start_byte..edit.old_end_byte, &inserted);
+    }
+    (working == new_text).then_some(changes)
+}
+
+fn inserted_text_after_edit(
+    new_text: &str,
+    edit: &editor_buffer::TextEdit,
+    remaining: &[editor_buffer::TextEdit],
+) -> Option<String> {
+    let mut start = edit.start_byte;
+    let mut end = edit.new_end_byte;
+    if start > end {
+        return None;
+    }
+    for later in remaining {
+        (start, end) = map_exclusive_range_through_edit(start, end, later)?;
+    }
+    new_text.get(start..end).map(str::to_owned)
+}
+
+fn map_exclusive_range_through_edit(
+    start: usize,
+    end: usize,
+    edit: &editor_buffer::TextEdit,
+) -> Option<(usize, usize)> {
+    let delta = edit.new_end_byte as isize - edit.old_end_byte as isize;
+    if end <= edit.start_byte {
+        Some((start, end))
+    } else if start >= edit.old_end_byte {
+        Some((
+            usize::try_from(start as isize + delta).ok()?,
+            usize::try_from(end as isize + delta).ok()?,
+        ))
+    } else {
+        None
+    }
+}
+
+fn lsp_position_on_text(text: &str, point: TextPoint) -> Position {
+    let line = line_slice(text, point.line);
+    Position::new(point.line as u32, utf16_column(line, point.column))
+}
+
+fn line_slice(text: &str, line_index: usize) -> &str {
+    let mut remaining = text;
+    for _ in 0..line_index {
+        let Some(index) = remaining.find('\n') else {
+            return "";
+        };
+        remaining = remaining.get(index.saturating_add(1)..).unwrap_or("");
+    }
+    remaining
+        .split_once('\n')
+        .map(|(line, _)| line)
+        .unwrap_or(remaining)
+}
+
+fn utf16_column(line: &str, char_column: usize) -> u32 {
+    let mut character = 0u32;
+    for (index, ch) in line.chars().enumerate() {
+        if index >= char_column {
+            break;
+        }
+        if ch == '\n' {
+            break;
+        }
+        if ch != '\r' {
+            character = character.saturating_add(ch.len_utf16() as u32);
+        }
+    }
+    character
 }
 
 fn full_document_range(text: &str) -> Range {
@@ -6358,6 +6628,9 @@ mod tests {
             next_request_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
             disconnected: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_send: AtomicBool::new(false),
+            needs_full_document: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -6619,20 +6892,453 @@ mod tests {
         assert_eq!(upper, lower);
     }
 
+    fn attach_session(manager: &LspClientManager, session: &Arc<LspSessionHandle>) {
+        manager
+            .state
+            .lock()
+            .expect("state lock")
+            .sessions
+            .insert(session.key.clone(), Arc::clone(session));
+    }
+
+    fn incremental_test_session(server_id: &str, path: &Path) -> Arc<LspSessionHandle> {
+        let session = test_session_handle(server_id, path, BTreeMap::new());
+        *session
+            .text_document_sync_kind
+            .lock()
+            .expect("text document sync kind lock") = TextDocumentSyncKind::INCREMENTAL;
+        session
+    }
+
+    fn last_notification_params(session: &LspSessionHandle, method: &str) -> Option<Value> {
+        let log = session.transport_log.lock().expect("transport log");
+        log.snapshot()
+            .entries()
+            .iter()
+            .rev()
+            .filter(|entry| entry.direction() == LspLogDirection::Outgoing)
+            .filter_map(|entry| serde_json::from_str::<Value>(entry.body()).ok())
+            .find(|message| message.get("method").and_then(Value::as_str) == Some(method))
+            .and_then(|message| message.get("params").cloned())
+    }
+
+    fn last_did_change_content_changes(session: &LspSessionHandle) -> Vec<Value> {
+        last_notification_params(session, "textDocument/didChange")
+            .and_then(|params| params.get("contentChanges").cloned())
+            .and_then(|changes| changes.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    fn register_test_rust_analyzer(registry: &mut LanguageServerRegistry) {
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust analyzer");
+    }
+
+    fn manager_with_incremental_session(path: &Path) -> (LspClientManager, Arc<LspSessionHandle>) {
+        let mut registry = LanguageServerRegistry::new();
+        register_test_rust_analyzer(&mut registry);
+        let manager = LspClientManager::new(registry);
+        let session = incremental_test_session("rust-analyzer", path);
+        attach_session(&manager, &session);
+        (manager, session)
+    }
+
     #[test]
-    fn incremental_sync_uses_full_document_replacement_range() {
-        let change = text_document_content_change(
-            TextDocumentSyncKind::INCREMENTAL,
-            "line one\nline two",
-            "updated",
+    fn incremental_did_change_emits_one_event_per_contiguous_edit() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("a");
+        buffer.insert_text("b");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some("a"));
+        assert_eq!(changes[1].get("text").and_then(Value::as_str), Some("b"));
+        assert_eq!(
+            changes[1].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 6 },
+                "end": { "line": 0, "character": 6 },
+            }))
+        );
+    }
+
+    #[test]
+    fn incremental_did_change_sends_only_inserted_character() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+
+        let mut buffer = editor_buffer::TextBuffer::from_text("hello");
+        let open_revision = buffer.revision();
+        manager
+            .sync_buffer(&path, buffer.text(), open_revision, None)
+            .expect("didOpen");
+
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+        let edits = buffer
+            .edits_since(open_revision)
+            .expect("contiguous insert chain");
+        manager
+            .sync_buffer_with_edits(
+                &path,
+                buffer.text(),
+                buffer.revision(),
+                None,
+                Some(edits.as_slice()),
+            )
+            .expect("didChange");
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        let change = &changes[0];
+        assert_eq!(
+            change.get("text").and_then(Value::as_str),
+            Some("!"),
+            "incremental didChange must send only the inserted character"
+        );
+        assert_eq!(
+            change.get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 5 },
+                "end": { "line": 0, "character": 5 },
+            }))
+        );
+        assert!(
+            change.get("rangeLength").is_none() || change.get("rangeLength") == Some(&Value::Null)
+        );
+    }
+
+    fn last_did_open_text(session: &LspSessionHandle) -> Option<String> {
+        last_notification_params(session, "textDocument/didOpen").and_then(|params| {
+            params
+                .get("textDocument")
+                .and_then(|text_document| text_document.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    }
+
+    fn open_buffer(
+        manager: &LspClientManager,
+        path: &Path,
+        text: &str,
+    ) -> editor_buffer::TextBuffer {
+        let buffer = editor_buffer::TextBuffer::from_text(text);
+        manager
+            .sync_buffer(path, buffer.text(), buffer.revision(), None)
+            .expect("didOpen");
+        buffer
+    }
+
+    fn sync_buffer_edits(
+        manager: &LspClientManager,
+        path: &Path,
+        buffer: &editor_buffer::TextBuffer,
+        from_revision: u64,
+        edits: Option<&[editor_buffer::TextEdit]>,
+    ) {
+        let chain = edits
+            .map(Vec::from)
+            .or_else(|| buffer.edits_since(from_revision));
+        manager
+            .sync_buffer_with_edits(
+                path,
+                buffer.text(),
+                buffer.revision(),
+                None,
+                chain.as_deref(),
+            )
+            .expect("didChange");
+    }
+
+    #[test]
+    fn incremental_did_change_includes_newline_in_range_and_text() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "ab");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 1));
+        buffer.insert_text("\n");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some("\n"));
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 1 },
+                "end": { "line": 0, "character": 1 },
+            }))
         );
 
+        let after_newline = buffer.revision();
+        buffer.set_cursor(TextPoint::new(1, 0));
+        buffer.insert_text("x");
+        sync_buffer_edits(&manager, &path, &buffer, after_newline, None);
+        let next = last_did_change_content_changes(&session);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].get("text").and_then(Value::as_str), Some("x"));
         assert_eq!(
-            change.range,
-            Some(Range::new(Position::new(0, 0), Position::new(1, 8)))
+            next[0].get("range"),
+            Some(&json!({
+                "start": { "line": 1, "character": 0 },
+                "end": { "line": 1, "character": 0 },
+            }))
         );
-        assert_eq!(change.range_length, None);
-        assert_eq!(change.text, "updated");
+    }
+
+    #[test]
+    fn incremental_did_change_sends_empty_text_for_range_delete() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.delete(TextRange::new(TextPoint::new(0, 1), TextPoint::new(0, 4)));
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some(""));
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 1 },
+                "end": { "line": 0, "character": 4 },
+            }))
+        );
+    }
+
+    #[test]
+    fn incremental_did_change_replace_covers_old_range_and_new_text() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.replace(
+            TextRange::new(TextPoint::new(0, 1), TextPoint::new(0, 4)),
+            "ipp",
+        );
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some("ipp"));
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 1 },
+                "end": { "line": 0, "character": 4 },
+            }))
+        );
+    }
+
+    #[test]
+    fn incremental_did_change_uses_utf16_columns_on_emoji_line() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "a😀b");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 2));
+        buffer.insert_text("x");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some("x"));
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 3 },
+                "end": { "line": 0, "character": 3 },
+            })),
+            "😀 is one TextPoint column and two UTF-16 code units"
+        );
+    }
+
+    #[test]
+    fn incremental_missing_edit_chain_uses_full_document_replacement() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let _buffer = open_buffer(&manager, &path, "hello");
+        manager
+            .sync_buffer_with_edits(&path, "replaced", 99, None, None)
+            .expect("missing chain fallback");
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].get("text").and_then(Value::as_str),
+            Some("replaced")
+        );
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 },
+            }))
+        );
+    }
+
+    #[test]
+    fn full_sync_sends_null_range_and_full_text_even_with_edits() {
+        let path = PathBuf::from("src").join("main.rs");
+        let mut registry = LanguageServerRegistry::new();
+        register_test_rust_analyzer(&mut registry);
+        let manager = LspClientManager::new(registry);
+        let session = test_session_handle("rust-analyzer", &path, BTreeMap::new());
+        attach_session(&manager, &session);
+
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].get("range").is_none() || changes[0].get("range") == Some(&Value::Null));
+        assert_eq!(
+            changes[0].get("text").and_then(Value::as_str),
+            Some("hello!")
+        );
+    }
+
+    #[test]
+    fn did_open_still_sends_full_text() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let _buffer = open_buffer(&manager, &path, "fn main() {}");
+        assert_eq!(
+            last_did_open_text(&session).as_deref(),
+            Some("fn main() {}")
+        );
+        assert!(
+            last_notification_params(&session, "textDocument/didChange").is_none(),
+            "didOpen must not send didChange"
+        );
+    }
+
+    #[test]
+    fn two_sessions_receive_the_same_incremental_content_changes() {
+        let path = PathBuf::from("src").join("main.rs");
+        let mut registry = LanguageServerRegistry::new();
+        register_test_rust_analyzer(&mut registry);
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "biome",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register biome");
+        let manager = LspClientManager::new(registry);
+        let rust_session = incremental_test_session("rust-analyzer", &path);
+        let biome_session = incremental_test_session("biome", &path);
+        attach_session(&manager, &rust_session);
+        attach_session(&manager, &biome_session);
+
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+
+        let rust_changes = last_did_change_content_changes(&rust_session);
+        let biome_changes = last_did_change_content_changes(&biome_session);
+        assert_eq!(rust_changes, biome_changes);
+        assert_eq!(
+            rust_changes[0].get("text").and_then(Value::as_str),
+            Some("!")
+        );
+    }
+
+    #[test]
+    fn incremental_send_error_recovers_with_full_document() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        let open_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+        session.fail_next_send();
+        let failed = manager.sync_buffer_with_edits(
+            &path,
+            buffer.text(),
+            buffer.revision(),
+            None,
+            buffer.edits_since(open_revision).as_deref(),
+        );
+        assert!(failed.is_err(), "injected send failure must surface");
+
+        let failed_revision = buffer.revision();
+        buffer.insert_text("?");
+        manager
+            .sync_buffer_with_edits(
+                &path,
+                buffer.text(),
+                buffer.revision(),
+                None,
+                buffer.edits_since(failed_revision).as_deref(),
+            )
+            .expect("recovery sync");
+
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].get("text").and_then(Value::as_str),
+            Some("hello!?"),
+            "recovery must send the full document, not a stale incremental slice"
+        );
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 },
+            }))
+        );
+    }
+
+    #[test]
+    fn close_then_open_then_incremental_edits_work_again() {
+        let path = PathBuf::from("src").join("main.rs");
+        let (manager, session) = manager_with_incremental_session(&path);
+        let mut buffer = open_buffer(&manager, &path, "hello");
+        manager.close_buffer(&path).expect("didClose");
+
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text("!");
+        manager
+            .sync_buffer(&path, buffer.text(), buffer.revision(), None)
+            .expect("didOpen after close");
+        assert_eq!(last_did_open_text(&session).as_deref(), Some("hello!"));
+
+        let open_revision = buffer.revision();
+        buffer.insert_text("?");
+        sync_buffer_edits(&manager, &path, &buffer, open_revision, None);
+        let changes = last_did_change_content_changes(&session);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].get("text").and_then(Value::as_str), Some("?"));
+        assert_eq!(
+            changes[0].get("range"),
+            Some(&json!({
+                "start": { "line": 0, "character": 6 },
+                "end": { "line": 0, "character": 6 },
+            }))
+        );
     }
 
     #[test]
