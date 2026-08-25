@@ -3118,6 +3118,8 @@ pub enum PluginKeymapScope {
     Hover,
     /// DAP Mode: live Debug Session on the active Workspace.
     Dap,
+    /// Workspace Dock Minor Mode (vertical workspace list focus).
+    WorkspaceDock,
 }
 
 /// Modal Vim state that can activate a keybinding.

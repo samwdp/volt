@@ -159,7 +159,16 @@ pub fn packages() -> Vec<PluginPackage> {
 
 /// Returns syntax languages currently compiled into the user library.
 pub fn syntax_languages() -> Vec<LanguageConfiguration> {
-    lang::syntax_languages()
+    cached_syntax_languages().to_vec()
+}
+
+fn cached_syntax_languages() -> &'static [LanguageConfiguration] {
+    static LANGUAGES: std::sync::OnceLock<Vec<LanguageConfiguration>> = std::sync::OnceLock::new();
+    LANGUAGES.get_or_init(lang::syntax_languages)
+}
+
+pub(crate) fn syntax_language_configs() -> &'static [LanguageConfiguration] {
+    cached_syntax_languages()
 }
 
 /// Returns language-server specifications compiled into the user library.

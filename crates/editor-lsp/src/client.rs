@@ -363,29 +363,6 @@ pub struct LspCodeAction {
 }
 
 impl LspCodeAction {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        server_id: impl Into<String>,
-        title: impl Into<String>,
-        kind: Option<String>,
-        disabled_reason: Option<String>,
-        preferred: bool,
-        document_edits: Vec<LspDocumentTextEdits>,
-        command_name: Option<String>,
-        has_resource_operations: bool,
-    ) -> Self {
-        Self {
-            server_id: server_id.into(),
-            title: title.into(),
-            kind,
-            disabled_reason,
-            preferred,
-            document_edits,
-            command_name,
-            has_resource_operations,
-        }
-    }
-
     pub fn server_id(&self) -> &str {
         &self.server_id
     }
@@ -627,32 +604,6 @@ pub struct LspNotification {
 }
 
 impl LspNotification {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        key: impl Into<String>,
-        server_id: impl Into<String>,
-        root: Option<PathBuf>,
-        level: LspNotificationLevel,
-        title: impl Into<String>,
-        body_lines: Vec<String>,
-        progress: Option<LspNotificationProgress>,
-        active: bool,
-        action: Option<LspNotificationAction>,
-    ) -> Self {
-        Self {
-            key: key.into(),
-            server_id: server_id.into(),
-            root,
-            level,
-            title: title.into(),
-            body_lines,
-            progress,
-            active,
-            action,
-        }
-    }
-
-    /// Returns the deduplication key for this notification.
     pub fn key(&self) -> &str {
         &self.key
     }
@@ -932,6 +883,7 @@ pub struct LspClientManager {
     state: Arc<Mutex<LspClientState>>,
     transport_log: TransportLog,
     notifications: NotificationLog,
+    diagnostics_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default)]
@@ -1100,6 +1052,7 @@ impl LspClientManager {
             notifications: Arc::new(Mutex::new(LspNotificationLog::new(
                 NOTIFICATION_LOG_MAX_ENTRIES,
             ))),
+            diagnostics_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1623,6 +1576,7 @@ impl LspClientManager {
             initialization_options_override,
             Arc::clone(&self.transport_log),
             Arc::clone(&self.notifications),
+            Arc::clone(&self.diagnostics_generation),
         )?;
         let mut state = self
             .state
@@ -1716,6 +1670,11 @@ impl LspClientManager {
             )
         });
         diagnostics
+    }
+
+    /// Monotonic generation bumped whenever published diagnostics change.
+    pub fn diagnostics_generation(&self) -> u64 {
+        self.diagnostics_generation.load(Ordering::Acquire)
     }
 
     pub fn workspace_diagnostics(&self) -> Vec<LspWorkspaceDiagnostic> {
@@ -2187,6 +2146,7 @@ impl LspClientManager {
                 initialization_options_override,
                 Arc::clone(&self.transport_log),
                 Arc::clone(&self.notifications),
+                Arc::clone(&self.diagnostics_generation),
             ) {
                 Ok(handle) => {
                     self.state
@@ -2242,6 +2202,7 @@ impl LspSessionHandle {
         initialization_options_override: Option<Value>,
         transport_log: TransportLog,
         notifications: NotificationLog,
+        diagnostics_generation: Arc<AtomicU64>,
     ) -> Result<Arc<Self>, LspClientError> {
         let launch = session.launch();
         let launch_program = launch.program().to_owned();
@@ -2325,16 +2286,19 @@ impl LspSessionHandle {
             ),
         );
         spawn_reader_thread(
-            handle.server_id().to_owned(),
-            handle.key.root.clone(),
             stdout,
-            writer,
-            pending,
-            diagnostics,
-            workspace_configuration,
-            disconnected,
-            transport_log,
-            Arc::clone(&notifications),
+            LspReaderSession {
+                server_id: handle.server_id().to_owned(),
+                root: handle.key.root.clone(),
+                writer,
+                pending,
+                diagnostics,
+                workspace_configuration,
+                disconnected,
+                transport_log,
+                notifications: Arc::clone(&notifications),
+                diagnostics_generation,
+            },
         );
         handle.initialize()?;
         record_notification(
@@ -2380,7 +2344,6 @@ impl LspSessionHandle {
         #[allow(deprecated)]
         let initialize_params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_path: None,
             root_uri,
             initialization_options: self.initialization_options.clone(),
             capabilities,
@@ -2392,6 +2355,7 @@ impl LspSessionHandle {
             }),
             locale: None,
             work_done_progress_params: self.work_done_progress_params(Initialize::METHOD),
+            ..InitializeParams::default()
         };
         let initialize_result = self.request_typed::<Initialize>(initialize_params)?;
         let initialize_result: InitializeResult = serde_json::from_value(initialize_result)
@@ -2908,11 +2872,9 @@ impl LspSessionHandle {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_reader_thread(
+struct LspReaderSession {
     server_id: String,
     root: Option<PathBuf>,
-    stdout: impl Read + Send + 'static,
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingResponseMap,
     diagnostics: DiagnosticsByPath,
@@ -2920,8 +2882,23 @@ fn spawn_reader_thread(
     disconnected: Arc<AtomicBool>,
     transport_log: TransportLog,
     notifications: NotificationLog,
-) {
+    diagnostics_generation: Arc<AtomicU64>,
+}
+
+fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: LspReaderSession) {
     thread::spawn(move || {
+        let LspReaderSession {
+            server_id,
+            root,
+            writer,
+            pending,
+            diagnostics,
+            workspace_configuration,
+            disconnected,
+            transport_log,
+            notifications,
+            diagnostics_generation,
+        } = session;
         let mut reader = BufReader::new(stdout);
         let mut progress_tracks = BTreeMap::<String, ProgressTrack>::new();
         loop {
@@ -3008,6 +2985,7 @@ fn spawn_reader_thread(
                     && let Ok(mut guard) = diagnostics.lock()
                 {
                     guard.insert(path, parsed);
+                    diagnostics_generation.fetch_add(1, Ordering::Release);
                     continue;
                 }
                 if method == "$/progress"
@@ -3936,17 +3914,17 @@ fn session_lifecycle_notification(
     if let Some(root) = root {
         lines.push(root.display().to_string());
     }
-    LspNotification::new(
-        session_notification_key(server_id, root),
-        server_id,
-        root.map(Path::to_path_buf),
+    LspNotification {
+        key: session_notification_key(server_id, root),
+        server_id: server_id.to_owned(),
+        root: root.map(Path::to_path_buf),
         level,
-        format!("LSP · {server_id}"),
-        lines,
-        None,
+        title: format!("LSP · {server_id}"),
+        body_lines: lines,
+        progress: None,
         active,
-        None,
-    )
+        action: None,
+    }
 }
 
 fn progress_notification_key(server_id: &str, root: Option<&Path>, token: &str) -> String {
@@ -4034,17 +4012,17 @@ fn parse_progress_notification(
             let progress = track.percentage.map(Some).unwrap_or(None);
             let body_lines = progress_body_lines(&track);
             progress_tracks.insert(token.clone(), track);
-            Some(LspNotification::new(
-                progress_notification_key(server_id, root, &token),
-                server_id,
-                root.map(Path::to_path_buf),
-                LspNotificationLevel::Info,
-                format!("LSP · {server_id}"),
+            Some(LspNotification {
+                key: progress_notification_key(server_id, root, &token),
+                server_id: server_id.to_owned(),
+                root: root.map(Path::to_path_buf),
+                level: LspNotificationLevel::Info,
+                title: format!("LSP · {server_id}"),
                 body_lines,
-                Some(LspNotificationProgress::new(progress)),
-                true,
-                None,
-            ))
+                progress: Some(LspNotificationProgress::new(progress)),
+                active: true,
+                action: None,
+            })
         }
         "report" => {
             let track = progress_tracks.entry(token.clone()).or_default();
@@ -4057,36 +4035,36 @@ fn parse_progress_notification(
             if let Some(percentage) = parse_progress_percentage(value.get("percentage")) {
                 track.percentage = percentage;
             }
-            Some(LspNotification::new(
-                progress_notification_key(server_id, root, &token),
-                server_id,
-                root.map(Path::to_path_buf),
-                LspNotificationLevel::Info,
-                format!("LSP · {server_id}"),
-                progress_body_lines(track),
-                Some(LspNotificationProgress::new(track.percentage)),
-                true,
-                None,
-            ))
+            Some(LspNotification {
+                key: progress_notification_key(server_id, root, &token),
+                server_id: server_id.to_owned(),
+                root: root.map(Path::to_path_buf),
+                level: LspNotificationLevel::Info,
+                title: format!("LSP · {server_id}"),
+                body_lines: progress_body_lines(track),
+                progress: Some(LspNotificationProgress::new(track.percentage)),
+                active: true,
+                action: None,
+            })
         }
         "end" => {
             let mut track = progress_tracks.remove(&token).unwrap_or_default();
             if let Some(message) = parse_optional_progress_text(value.get("message")) {
                 track.message = message;
             }
-            Some(LspNotification::new(
-                progress_notification_key(server_id, root, &token),
-                server_id,
-                root.map(Path::to_path_buf),
-                completion_level_for_message(track.message.as_deref()),
-                format!("LSP · {server_id}"),
-                progress_body_lines(&track),
-                track
+            Some(LspNotification {
+                key: progress_notification_key(server_id, root, &token),
+                server_id: server_id.to_owned(),
+                root: root.map(Path::to_path_buf),
+                level: completion_level_for_message(track.message.as_deref()),
+                title: format!("LSP · {server_id}"),
+                body_lines: progress_body_lines(&track),
+                progress: track
                     .percentage
                     .map(|percentage| LspNotificationProgress::new(Some(percentage))),
-                false,
-                None,
-            ))
+                active: false,
+                action: None,
+            })
         }
         _ => None,
     }
@@ -4131,20 +4109,20 @@ fn parse_show_message_notification(
     if let Some(root) = root {
         lines.push(root.display().to_string());
     }
-    Some(LspNotification::new(
-        format!(
+    Some(LspNotification {
+        key: format!(
             "message:{server_id}:{}:{level:?}:{message}",
             notification_root_key(root)
         ),
-        server_id,
-        root.map(Path::to_path_buf),
+        server_id: server_id.to_owned(),
+        root: root.map(Path::to_path_buf),
         level,
-        format!("LSP · {server_id}"),
-        lines,
-        None,
-        false,
-        None,
-    ))
+        title: format!("LSP · {server_id}"),
+        body_lines: lines,
+        progress: None,
+        active: false,
+        action: None,
+    })
 }
 
 fn status_notification_key(server_id: &str, root: Option<&Path>) -> String {
@@ -4183,17 +4161,17 @@ fn parse_copilot_status_notification(
     }
     let action = (is_copilot_server(server_id) && kind == "Error")
         .then_some(LspNotificationAction::CopilotSignIn);
-    Some(LspNotification::new(
-        status_notification_key(server_id, root),
-        server_id,
-        root.map(Path::to_path_buf),
+    Some(LspNotification {
+        key: status_notification_key(server_id, root),
+        server_id: server_id.to_owned(),
+        root: root.map(Path::to_path_buf),
         level,
-        format!("LSP · {server_id}"),
-        lines,
-        None,
-        matches!(kind, "Error" | "Warning" | "Inactive"),
+        title: format!("LSP · {server_id}"),
+        body_lines: lines,
+        progress: None,
+        active: matches!(kind, "Error" | "Warning" | "Inactive"),
         action,
-    ))
+    })
 }
 
 struct ServerRequestHandling {
@@ -4259,20 +4237,20 @@ fn show_document_notification(
     if let Some(root) = root {
         lines.push(root.display().to_string());
     }
-    Some(LspNotification::new(
-        format!(
+    Some(LspNotification {
+        key: format!(
             "show-document:{server_id}:{}:{uri}",
             notification_root_key(root)
         ),
-        server_id,
-        root.map(Path::to_path_buf),
-        LspNotificationLevel::Info,
-        format!("LSP · {server_id}"),
-        lines,
-        None,
-        false,
-        Some(LspNotificationAction::OpenBrowserPopup { url: uri }),
-    ))
+        server_id: server_id.to_owned(),
+        root: root.map(Path::to_path_buf),
+        level: LspNotificationLevel::Info,
+        title: format!("LSP · {server_id}"),
+        body_lines: lines,
+        progress: None,
+        active: false,
+        action: Some(LspNotificationAction::OpenBrowserPopup { url: uri }),
+    })
 }
 
 fn parse_publish_diagnostics(params: &Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
@@ -4444,16 +4422,16 @@ fn parse_code_action_item(server_id: &str, value: &Value) -> Option<LspCodeActio
     let (document_edits, has_resource_operations) =
         parse_code_action_workspace_edit(value.get("edit"));
     let command_name = parse_code_action_command_name(value);
-    Some(LspCodeAction::new(
-        server_id,
-        title,
+    Some(LspCodeAction {
+        server_id: server_id.to_owned(),
+        title: title.to_owned(),
         kind,
         disabled_reason,
         preferred,
         document_edits,
         command_name,
         has_resource_operations,
-    ))
+    })
 }
 
 fn parse_code_action_command_name(value: &Value) -> Option<String> {
@@ -6059,39 +6037,39 @@ mod tests {
     #[test]
     fn notification_log_snapshot_is_bounded_and_tracks_revision() {
         let mut log = LspNotificationLog::new(2);
-        log.record(LspNotification::new(
-            "session:rust-analyzer:global",
-            "rust-analyzer",
-            None,
-            LspNotificationLevel::Info,
-            "LSP · rust-analyzer",
-            vec!["Starting".to_owned()],
-            None,
-            true,
-            None,
-        ));
-        log.record(LspNotification::new(
-            "progress:rust-analyzer:token-1",
-            "rust-analyzer",
-            None,
-            LspNotificationLevel::Info,
-            "LSP · rust-analyzer",
-            vec!["Indexing".to_owned()],
-            Some(LspNotificationProgress::new(Some(25))),
-            true,
-            None,
-        ));
-        log.record(LspNotification::new(
-            "session:rust-analyzer:global",
-            "rust-analyzer",
-            None,
-            LspNotificationLevel::Success,
-            "LSP · rust-analyzer",
-            vec!["Ready".to_owned()],
-            None,
-            false,
-            None,
-        ));
+        log.record(LspNotification {
+            key: "session:rust-analyzer:global".to_owned(),
+            server_id: "rust-analyzer".to_owned(),
+            root: None,
+            level: LspNotificationLevel::Info,
+            title: "LSP · rust-analyzer".to_owned(),
+            body_lines: vec!["Starting".to_owned()],
+            progress: None,
+            active: true,
+            action: None,
+        });
+        log.record(LspNotification {
+            key: "progress:rust-analyzer:token-1".to_owned(),
+            server_id: "rust-analyzer".to_owned(),
+            root: None,
+            level: LspNotificationLevel::Info,
+            title: "LSP · rust-analyzer".to_owned(),
+            body_lines: vec!["Indexing".to_owned()],
+            progress: Some(LspNotificationProgress::new(Some(25))),
+            active: true,
+            action: None,
+        });
+        log.record(LspNotification {
+            key: "session:rust-analyzer:global".to_owned(),
+            server_id: "rust-analyzer".to_owned(),
+            root: None,
+            level: LspNotificationLevel::Success,
+            title: "LSP · rust-analyzer".to_owned(),
+            body_lines: vec!["Ready".to_owned()],
+            progress: None,
+            active: false,
+            action: None,
+        });
 
         let snapshot = log.snapshot();
         assert_eq!(snapshot.revision(), 3);

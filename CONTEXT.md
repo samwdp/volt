@@ -27,8 +27,16 @@ A project root path recorded in the Mark List for quick jump. List order matters
 _Avoid_: favorite, bookmark, pin, starred workspace
 
 **Minor Mode**:
-A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, autocomplete, hover, and DAP Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
+A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, Workspace Dock, autocomplete, hover, and DAP Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
 _Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
+
+**Popup**:
+The horizontal overlay that holds pickers, Command Stream, terminal, and similar buffers. Distinct from Workspace Dock.
+_Avoid_: dock (when meaning this overlay), modal (as the spoken product term)
+
+**Workspace Dock**:
+The vertical list of open Workspaces along the window edge. Distinct from Popup. While focused, it is its own Minor Mode so chords such as j/k cycle Workspaces without claiming Popup bindings.
+_Avoid_: popup (when meaning this dock), sidebar (as the spoken product term)
 
 **Worktree**:
 A git worktree checkout path that can be opened as a Project Workspace root. Distinct from the open editor Workspace itself.

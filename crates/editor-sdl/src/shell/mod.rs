@@ -7,6 +7,7 @@ mod dap;
 mod db;
 mod diagnostics;
 mod directory;
+mod draw;
 mod git;
 mod git_editor;
 mod issues;
@@ -28,6 +29,7 @@ use dap::*;
 use db::*;
 use diagnostics::*;
 use directory::*;
+use draw::*;
 use git::*;
 use git_editor::*;
 use issues::*;
@@ -1269,7 +1271,6 @@ struct IconFont<'ttf> {
     pixel_size: f32,
 }
 
-#[allow(dead_code)]
 struct EmojiFont<'ttf> {
     font: Font<'ttf>,
     raster_font: RasterFont,
@@ -1429,26 +1430,17 @@ impl<'ttf> FontSet<'ttf> {
         self.icon_chars.contains(&character)
     }
 
-    /// Returns the emoji font when configured.
-    #[allow(dead_code)]
-    pub(super) fn emoji_font(&self) -> Option<&EmojiFont<'ttf>> {
-        self.emoji_font.as_ref()
-    }
-
     /// Returns the emoji font's raster font when configured.
-    #[allow(dead_code)]
     pub(super) fn emoji_raster_font(&self) -> Option<&RasterFont> {
         self.emoji_font.as_ref().map(|emoji| &emoji.raster_font)
     }
 
     /// Returns the emoji font's shaping face when configured.
-    #[allow(dead_code)]
     pub(super) fn emoji_shape_face(&self) -> Option<&ShapeFace<'static>> {
         self.emoji_font.as_ref().map(|emoji| &emoji.shape_face)
     }
 
     /// Returns the emoji font's pixel size when configured.
-    #[allow(dead_code)]
     pub(super) fn emoji_pixel_size(&self) -> Option<f32> {
         self.emoji_font.as_ref().map(|emoji| emoji.pixel_size)
     }
@@ -1482,8 +1474,8 @@ impl<'ttf> FontSet<'ttf> {
 struct LineSyntaxSpan {
     start: usize,
     end: usize,
-    capture_name: String,
-    theme_token: String,
+    capture_name: Arc<str>,
+    theme_token: Arc<str>,
 }
 
 type IndexedSyntaxLines = BTreeMap<usize, Vec<LineSyntaxSpan>>;
@@ -7532,12 +7524,14 @@ impl ShellBuffer {
         let paint = markdown_pretty_paint_plan(
             self,
             user_library,
-            start,
-            end.max(start.saturating_add(1)),
-            visual_selection,
-            input_mode,
-            pane_width_px,
-            line_height,
+            MarkdownPrettyPaintArgs {
+                visible_start: start,
+                visible_end: end.max(start.saturating_add(1)),
+                visual_selection,
+                input_mode,
+                pane_width_px,
+                line_height,
+            },
         );
         let mut rows = BTreeMap::new();
         for (line_index, image) in paint.images {
@@ -11381,7 +11375,7 @@ impl ShellState {
         Self::new_with_user_library(default_error_log_path(), false, user_library)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn new_with_user_library(
         log_file_path: PathBuf,
         profile_input_latency: bool,
@@ -11712,13 +11706,19 @@ impl ShellState {
                 let pane_height = render_height.saturating_sub(popup_height);
                 let browser_plan = browser_sync_plan(
                     self.ui()?,
-                    runtime_popup.as_ref(),
-                    &*user_library,
-                    render_width,
-                    render_height,
-                    cell_width,
-                    line_height,
-                    Instant::now(),
+                    BrowserSyncView {
+                        runtime_popup: runtime_popup.as_ref(),
+                        user_library: &*user_library,
+                        size: WindowSize {
+                            width: render_width,
+                            height: render_height,
+                        },
+                        metrics: CellMetrics {
+                            cell_width,
+                            line_height,
+                        },
+                        now: Instant::now(),
+                    },
                 )?;
                 let clicked_browser_buffer =
                     browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
@@ -11772,11 +11772,15 @@ impl ShellState {
                             self.begin_mouse_selection(
                                 buffer_id,
                                 pane_rect,
-                                mouse_x,
-                                mouse_y,
-                                clicks,
-                                cell_width,
-                                line_height,
+                                MouseClick {
+                                    x: mouse_x,
+                                    y: mouse_y,
+                                    clicks,
+                                },
+                                CellMetrics {
+                                    cell_width,
+                                    line_height,
+                                },
                             )?;
                         } else {
                             self.mouse_drag = None;
@@ -11829,13 +11833,19 @@ impl ShellState {
                 }
                 let browser_plan = browser_sync_plan(
                     self.ui()?,
-                    runtime_popup.as_ref(),
-                    &*shell_user_library(&self.runtime),
-                    render_width,
-                    render_height,
-                    cell_width,
-                    line_height,
-                    Instant::now(),
+                    BrowserSyncView {
+                        runtime_popup: runtime_popup.as_ref(),
+                        user_library: &*shell_user_library(&self.runtime),
+                        size: WindowSize {
+                            width: render_width,
+                            height: render_height,
+                        },
+                        metrics: CellMetrics {
+                            cell_width,
+                            line_height,
+                        },
+                        now: Instant::now(),
+                    },
                 )?;
                 if browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y).is_some() {
                     return Ok(false);
@@ -12534,17 +12544,22 @@ impl ShellState {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn begin_mouse_selection(
         &mut self,
         buffer_id: BufferId,
         rect: PixelRect,
-        mouse_x: i32,
-        mouse_y: i32,
-        clicks: u8,
-        cell_width: i32,
-        line_height: i32,
+        mouse: MouseClick,
+        metrics: CellMetrics,
     ) -> Result<(), ShellError> {
+        let MouseClick {
+            x: mouse_x,
+            y: mouse_y,
+            clicks,
+        } = mouse;
+        let CellMetrics {
+            cell_width,
+            line_height,
+        } = metrics;
         {
             let has_sections = shell_buffer(&self.runtime, buffer_id)
                 .map_err(ShellError::Runtime)?
@@ -12586,12 +12601,16 @@ impl ShellState {
                 PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                 &*shell_user_library(&self.runtime),
                 theme_registry,
-                mouse_x,
-                mouse_y,
-                cell_width,
-                line_height,
-                false,
-                false,
+                ScreenHit {
+                    x: mouse_x,
+                    y: mouse_y,
+                    clamp_body: false,
+                    typing_active: false,
+                },
+                CellMetrics {
+                    cell_width,
+                    line_height,
+                },
             )
         };
         let Some(point) = point else {
@@ -12642,12 +12661,16 @@ impl ShellState {
                 PixelRectToRect::rect(drag.rect.x, drag.rect.y, drag.rect.width, drag.rect.height),
                 &*shell_user_library(&self.runtime),
                 theme_registry,
-                mouse_x,
-                mouse_y,
-                cell_width,
-                line_height,
-                true,
-                false,
+                ScreenHit {
+                    x: mouse_x,
+                    y: mouse_y,
+                    clamp_body: true,
+                    typing_active: false,
+                },
+                CellMetrics {
+                    cell_width,
+                    line_height,
+                },
             )
         };
         let Some(point) = point else {
@@ -12739,18 +12762,20 @@ impl ShellState {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         target: &mut DrawTarget<'_>,
         fonts: &FontSet<'_>,
-        width: u32,
-        height: u32,
-        cell_width: i32,
-        line_height: i32,
-        ascent: i32,
+        size: WindowSize,
+        metrics: TextMetrics,
         fps_overlay: Option<&FpsOverlaySnapshot>,
     ) -> Result<(), ShellError> {
+        let WindowSize { width, height } = size;
+        let TextMetrics {
+            cell_width,
+            line_height,
+            ascent,
+        } = metrics;
         self.refresh_picker_preview_syntax();
         let runtime_popup = self.runtime_popup()?;
         let now = Instant::now();
@@ -12783,20 +12808,24 @@ impl ShellState {
             ui,
             runtime_popup.as_ref(),
             &dock_entries,
-            &*shell_user_library(&self.runtime),
-            &workspace_name,
-            ui.attached_lsp_server(),
-            lsp_workspace_loaded,
-            acp_connected,
-            theme_registry,
-            width,
-            height,
-            fps_overlay,
-            cell_width,
-            line_height,
-            ascent,
-            now,
-            typing_active,
+            ShellChrome {
+                user_library: &*shell_user_library(&self.runtime),
+                theme_registry,
+                workspace_name: &workspace_name,
+                lsp_server: ui.attached_lsp_server(),
+                lsp_workspace_loaded,
+                acp_connected,
+            },
+            ShellFrameView {
+                size: WindowSize { width, height },
+                fps_overlay,
+                metrics: TextMetrics {
+                    cell_width,
+                    line_height,
+                    ascent,
+                },
+                pulse: FramePulse { now, typing_active },
+            },
         )
     }
 
@@ -12811,13 +12840,16 @@ impl ShellState {
         let runtime_popup = self.runtime_popup()?;
         let plan = browser_sync_plan(
             self.ui()?,
-            runtime_popup.as_ref(),
-            &*shell_user_library(&self.runtime),
-            width,
-            height,
-            cell_width,
-            line_height,
-            Instant::now(),
+            BrowserSyncView {
+                runtime_popup: runtime_popup.as_ref(),
+                user_library: &*shell_user_library(&self.runtime),
+                size: WindowSize { width, height },
+                metrics: CellMetrics {
+                    cell_width,
+                    line_height,
+                },
+                now: Instant::now(),
+            },
         )?;
         let updates = self
             .browser_host
@@ -13245,15 +13277,15 @@ impl ShellState {
     fn overlay_minor_modes(&self) -> Result<Vec<KeymapScope>, ShellError> {
         let ui = self.ui()?;
         let mut modes = Vec::new();
-        if ui.picker_visible()
-            || ui.workspace_dock_focus_active(&*shell_user_library(&self.runtime))
-        {
+        if ui.picker_visible() {
             modes.push(KeymapScope::Popup);
         } else if let Some(popup) =
             active_runtime_popup(&self.runtime).map_err(ShellError::Runtime)?
             && ui.popup_focus_active(&popup)
         {
             modes.push(KeymapScope::Popup);
+        } else if ui.workspace_dock_focus_active(&*shell_user_library(&self.runtime)) {
+            modes.push(KeymapScope::WorkspaceDock);
         }
         if ui
             .autocomplete()
@@ -13263,7 +13295,10 @@ impl ShellState {
         } else if ui.hover().is_some() {
             modes.push(KeymapScope::Hover);
         }
-        if !modes.contains(&KeymapScope::Popup) && active_workspace_has_debug_session(&self.runtime)
+        if !modes
+            .iter()
+            .any(|mode| matches!(mode, KeymapScope::Popup | KeymapScope::WorkspaceDock))
+            && active_workspace_has_debug_session(&self.runtime)
         {
             modes.push(KeymapScope::Dap);
         }
@@ -15531,13 +15566,15 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     &state,
                     &config,
                     canvas.window().display_scale(),
-                    &mut theme_settings,
-                    &mut fonts,
-                    &mut font_path,
-                    &mut text_texture_cache,
-                    &mut line_height,
-                    &mut ascent,
-                    &mut cell_width,
+                    ThemeRuntimeSlots {
+                        theme_settings: &mut theme_settings,
+                        fonts: &mut fonts,
+                        font_path: &mut font_path,
+                        text_texture_cache: &mut text_texture_cache,
+                        line_height: &mut line_height,
+                        ascent: &mut ascent,
+                        cell_width: &mut cell_width,
+                    },
                 ) {
                     Ok(changed) => changed,
                     Err(error) => {
@@ -15938,11 +15975,15 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     if let Err(error) = state.render(
                         &mut DrawTarget::Scene(&mut scene),
                         &fonts,
-                        render_width,
-                        render_height,
-                        cell_width,
-                        line_height as i32,
-                        ascent,
+                        WindowSize {
+                            width: render_width,
+                            height: render_height,
+                        },
+                        TextMetrics {
+                            cell_width,
+                            line_height: line_height as i32,
+                            ascent,
+                        },
                         fps_overlay.as_ref(),
                     ) {
                         state.record_shell_error("shell.render", error);
@@ -16079,20 +16120,22 @@ fn load_deferred_emoji_font<'ttf>(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
-fn update_theme_runtime<'ttf>(
+fn update_theme_runtime<'ttf, 'texture>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     state: &ShellState,
     config: &ShellConfig,
     display_scale: f32,
-    theme_settings: &mut ThemeRuntimeSettings,
-    fonts: &mut FontSet<'ttf>,
-    font_path: &mut PathBuf,
-    text_texture_cache: &mut TextTextureCache<'_>,
-    line_height: &mut usize,
-    ascent: &mut i32,
-    cell_width: &mut i32,
+    slots: ThemeRuntimeSlots<'_, 'ttf, 'texture>,
 ) -> Result<bool, ShellError> {
+    let ThemeRuntimeSlots {
+        theme_settings,
+        fonts,
+        font_path,
+        text_texture_cache,
+        line_height,
+        ascent,
+        cell_width,
+    } = slots;
     let updated = theme_runtime_settings(
         state.runtime.services().get::<ThemeRegistry>(),
         config,
@@ -16734,7 +16777,7 @@ fn styled_font_candidates(path: &Path, style: TextStyle) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn load_font_set<'ttf>(
     ttf: &'ttf sdl3::ttf::Sdl3TtfContext,
     settings: &ThemeRuntimeSettings,
@@ -25219,7 +25262,7 @@ fn hover_test_provider_lines(
     }
     if let Some(span) = hover_syntax_span_at_cursor(buffer, token_info) {
         let capture_name = if span.capture_name.starts_with('@') {
-            span.capture_name.clone()
+            span.capture_name.to_string()
         } else {
             format!("@{}", span.capture_name)
         };
@@ -25353,14 +25396,16 @@ fn render_markdown_ephemeral_content(
         return rendered;
     }
     let plan = markdown_pretty::build_markdown_pretty_plan(
-        &normalized,
-        config,
-        buffer_enabled,
-        None,
-        None,
-        None,
-        None,
-        None,
+        &editor_markdown::MarkdownPrettyRequest {
+            text: &normalized,
+            config,
+            buffer_enabled,
+            buffer_path: None,
+            workspace_root: None,
+            cursor_line: None,
+            visual_lines: None,
+            visible_lines: None,
+        },
         registry.as_deref_mut(),
     );
     if !plan.skipped_by_kill_switch {
@@ -36546,7 +36591,8 @@ fn plugin_buffer_binding_scope_active(
         editor_plugin_api::PluginKeymapScope::Popup => popup_focused,
         editor_plugin_api::PluginKeymapScope::Autocomplete
         | editor_plugin_api::PluginKeymapScope::Hover
-        | editor_plugin_api::PluginKeymapScope::Dap => false,
+        | editor_plugin_api::PluginKeymapScope::Dap
+        | editor_plugin_api::PluginKeymapScope::WorkspaceDock => false,
     }
 }
 

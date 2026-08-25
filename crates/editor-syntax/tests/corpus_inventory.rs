@@ -9,7 +9,6 @@
 //!
 //! To update the expected set after an intentional corpus change, update the
 //! constant at the top of each test and leave a note in the commit message.
-#![allow(unused_crate_dependencies)]
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},

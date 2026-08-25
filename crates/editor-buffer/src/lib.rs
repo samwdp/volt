@@ -223,6 +223,101 @@ impl<'a> Iterator for TextByteChunks<'a> {
     }
 }
 
+/// Rope-backed text used by tree-sitter parse and highlight without requiring undo history.
+pub trait SyntaxText {
+    /// Logical revision identifier for incremental parse sessions.
+    fn revision(&self) -> u64;
+    /// Total UTF-8 byte count.
+    fn byte_count(&self) -> usize;
+    /// Number of logical lines.
+    fn line_count(&self) -> usize;
+    /// One line without its trailing line ending.
+    fn line(&self, line_index: usize) -> Option<String>;
+    /// Starting byte offset for a line.
+    fn line_start_byte(&self, line_index: usize) -> Option<usize>;
+    /// UTF-8 chunk containing `byte_index` and that chunk's starting byte offset.
+    fn chunk_at_byte(&self, byte_index: usize) -> Option<(&str, usize)>;
+    /// UTF-8 chunks covering a byte range.
+    fn byte_slice_chunks(&self, byte_range: Range<usize>) -> TextByteChunks<'_>;
+    /// Forward edit chain from `revision` to the current state, when contiguous.
+    fn edits_since(&self, revision: u64) -> Option<Vec<TextEdit>>;
+}
+
+/// Snapshot plus the edit chain needed for incremental highlighting on a worker.
+#[derive(Debug, Clone)]
+pub struct HighlightDocument {
+    snapshot: TextSnapshot,
+    revision: u64,
+    edits_from: u64,
+    edits: Vec<TextEdit>,
+}
+
+impl HighlightDocument {
+    /// Captures buffer text and, when possible, edits since `from_revision`.
+    pub fn from_buffer(buffer: &TextBuffer, from_revision: u64) -> Self {
+        let revision = buffer.revision();
+        match buffer.edits_since(from_revision) {
+            Some(edits) => Self {
+                snapshot: buffer.snapshot(),
+                revision,
+                edits_from: from_revision,
+                edits,
+            },
+            None => Self {
+                snapshot: buffer.snapshot(),
+                revision,
+                edits_from: revision,
+                edits: Vec::new(),
+            },
+        }
+    }
+
+    /// Returns the captured snapshot.
+    pub const fn snapshot(&self) -> &TextSnapshot {
+        &self.snapshot
+    }
+}
+
+impl SyntaxText for HighlightDocument {
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn byte_count(&self) -> usize {
+        self.snapshot.byte_count()
+    }
+
+    fn line_count(&self) -> usize {
+        self.snapshot.line_count()
+    }
+
+    fn line(&self, line_index: usize) -> Option<String> {
+        self.snapshot.line(line_index)
+    }
+
+    fn line_start_byte(&self, line_index: usize) -> Option<usize> {
+        self.snapshot.line_start_byte(line_index)
+    }
+
+    fn chunk_at_byte(&self, byte_index: usize) -> Option<(&str, usize)> {
+        self.snapshot.chunk_at_byte(byte_index)
+    }
+
+    fn byte_slice_chunks(&self, byte_range: Range<usize>) -> TextByteChunks<'_> {
+        self.snapshot.byte_slice_chunks(byte_range)
+    }
+
+    fn edits_since(&self, revision: u64) -> Option<Vec<TextEdit>> {
+        if revision == self.revision {
+            return Some(Vec::new());
+        }
+        if revision == self.edits_from {
+            return Some(self.edits.clone());
+        }
+        None
+    }
+}
+
 /// Lightweight read-only snapshot of a [`TextBuffer`] for background work.
 #[derive(Debug, Clone)]
 pub struct TextSnapshot {
@@ -275,6 +370,34 @@ impl TextSnapshot {
     /// Returns the full normalized text backing the snapshot.
     pub fn text(&self) -> String {
         self.rope.to_string()
+    }
+
+    /// Returns the total UTF-8 byte count.
+    pub fn byte_count(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
+    /// Returns the starting byte offset for a line.
+    pub fn line_start_byte(&self, line_index: usize) -> Option<usize> {
+        (line_index < self.line_count()).then(|| self.rope.line_to_byte(line_index))
+    }
+
+    /// Returns the UTF-8 chunk containing a byte index and the chunk's starting byte offset.
+    pub fn chunk_at_byte(&self, byte_index: usize) -> Option<(&str, usize)> {
+        (byte_index <= self.byte_count()).then(|| {
+            let (chunk, chunk_start_byte, _, _) = self.rope.chunk_at_byte(byte_index);
+            (chunk, chunk_start_byte)
+        })
+    }
+
+    /// Returns an iterator over UTF-8 chunks for a byte range.
+    pub fn byte_slice_chunks(&self, byte_range: Range<usize>) -> TextByteChunks<'_> {
+        debug_assert!(byte_range.start <= byte_range.end);
+        debug_assert!(byte_range.end <= self.byte_count());
+        if byte_range.start == byte_range.end {
+            return TextByteChunks::empty();
+        }
+        TextByteChunks::from_chunks(self.rope.byte_slice(byte_range).chunks())
     }
 
     fn line_len_chars_impl(&self, line_index: usize) -> usize {
@@ -2021,6 +2144,40 @@ impl TextBuffer {
     }
 }
 
+impl SyntaxText for TextBuffer {
+    fn revision(&self) -> u64 {
+        TextBuffer::revision(self)
+    }
+
+    fn byte_count(&self) -> usize {
+        TextBuffer::byte_count(self)
+    }
+
+    fn line_count(&self) -> usize {
+        TextBuffer::line_count(self)
+    }
+
+    fn line(&self, line_index: usize) -> Option<String> {
+        TextBuffer::line(self, line_index)
+    }
+
+    fn line_start_byte(&self, line_index: usize) -> Option<usize> {
+        TextBuffer::line_start_byte(self, line_index)
+    }
+
+    fn chunk_at_byte(&self, byte_index: usize) -> Option<(&str, usize)> {
+        TextBuffer::chunk_at_byte(self, byte_index)
+    }
+
+    fn byte_slice_chunks(&self, byte_range: Range<usize>) -> TextByteChunks<'_> {
+        TextBuffer::byte_slice_chunks(self, byte_range)
+    }
+
+    fn edits_since(&self, revision: u64) -> Option<Vec<TextEdit>> {
+        TextBuffer::edits_since(self, revision)
+    }
+}
+
 impl Default for TextBuffer {
     fn default() -> Self {
         Self::new()
@@ -2279,7 +2436,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{LineEnding, TextBuffer, TextPoint, TextRange, WordKind};
+    use super::{
+        HighlightDocument, LineEnding, SyntaxText, TextBuffer, TextEdit, TextPoint, TextRange,
+        WordKind,
+    };
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         match result {
@@ -2382,6 +2542,42 @@ mod tests {
         assert_eq!(edits[0].after_revision + 1, edits[1].after_revision);
         assert_eq!(edits[0].start_position, TextPoint::new(0, 5));
         assert_eq!(edits[1].new_end_position, TextPoint::new(1, 5));
+    }
+
+    #[test]
+    fn highlight_document_captures_edits_without_undo_history() {
+        let mut buffer = TextBuffer::from_text("alpha");
+        let base_revision = buffer.revision();
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text(" beta");
+        let document = HighlightDocument::from_buffer(&buffer, base_revision);
+        let edits = document
+            .edits_since(base_revision)
+            .expect("contiguous edits");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(document.revision(), buffer.revision());
+        assert_eq!(document.snapshot().text(), buffer.text());
+        let unknown_revision = if base_revision == 0 {
+            u64::MAX
+        } else {
+            base_revision - 1
+        };
+        assert!(document.edits_since(unknown_revision).is_none());
+    }
+
+    #[test]
+    fn highlight_document_falls_back_to_full_parse_without_contiguous_edits() {
+        let mut buffer = TextBuffer::from_text("alpha");
+        buffer.set_cursor(TextPoint::new(0, 5));
+        buffer.insert_text(" beta");
+        let current = buffer.revision();
+        let document = HighlightDocument::from_buffer(&buffer, current.saturating_add(10));
+        assert_eq!(document.revision(), current);
+        assert_eq!(
+            document.edits_since(current).expect("same revision"),
+            Vec::<TextEdit>::new()
+        );
+        assert!(document.edits_since(0).is_none());
     }
 
     #[test]

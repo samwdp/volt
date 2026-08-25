@@ -656,7 +656,7 @@ fn syntax_span_segments(line: &str, spans: &[LineSyntaxSpan]) -> Vec<(String, St
         .iter()
         .map(|span| {
             (
-                span.theme_token.clone(),
+                span.theme_token.to_string(),
                 slice_by_columns(line, span.start, span.end),
             )
         })
@@ -3367,18 +3367,20 @@ fn draw_buffer_text_keeps_cursor_line_as_one_text_run() -> Result<(), String> {
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: 3,
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: 3,
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3404,18 +3406,20 @@ fn draw_buffer_text_expands_tabs_to_spaces() -> Result<(), String> {
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: line.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: line.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3500,18 +3504,20 @@ fn draw_buffer_text_omits_variation_selectors_from_scene_text() -> Result<(), St
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: line.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: line.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3537,18 +3543,20 @@ fn draw_buffer_text_renders_escape_controls_as_caret_notation() -> Result<(), St
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: line.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: line.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3574,18 +3582,20 @@ fn draw_buffer_text_omits_byte_order_mark_from_scene_text() -> Result<(), String
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: line.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: line.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3611,18 +3621,20 @@ fn draw_buffer_text_skips_lines_that_only_contain_byte_order_marks() -> Result<(
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        line,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: line.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: line.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: None,
+            default_color,
+            cell_width: 8,
         },
-        &char_map,
         None,
-        None,
-        default_color,
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3655,18 +3667,20 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
 
     draw_buffer_text(
         &mut target,
-        0,
-        0,
-        &formatted,
-        LineWrapSegment {
-            start_col: 0,
-            end_col: formatted.chars().count(),
+        BufferTextRun {
+            x: 0,
+            y: 0,
+            line: &formatted,
+            segment: LineWrapSegment {
+                start_col: 0,
+                end_col: formatted.chars().count(),
+            },
+            char_map: &char_map,
+            line_syntax_spans: Some(&spans),
+            default_color: Color::RGB(240, 240, 240),
+            cell_width: 8,
         },
-        &char_map,
-        Some(&spans),
         None,
-        Color::RGB(240, 240, 240),
-        8,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3804,28 +3818,38 @@ fn render_buffer_headerline_reserves_rows_above_buffer_body() -> Result<(), Stri
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        state.runtime.services().get::<ThemeRegistry>(),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: state.runtime.services().get::<ThemeRegistry>(),
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -3862,28 +3886,38 @@ fn render_buffer_headerline_keeps_cursor_below_sticky_row() -> Result<(), String
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -3960,28 +3994,38 @@ fn render_buffer_headerline_truncates_preserving_tail_scope() -> Result<(), Stri
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -4030,28 +4074,38 @@ fn render_buffer_headerline_divider_sits_below_last_headerline_row() -> Result<(
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -4104,28 +4158,38 @@ fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -
     let mut hidden_scope_target = DrawTarget::Scene(&mut hidden_scope_scene);
     render_buffer(
         &mut hidden_scope_target,
-        shell_buffer(&state.runtime, buffer_id)?,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer: shell_buffer(&state.runtime, buffer_id)?,
+            view_state: (shell_buffer(&state.runtime, buffer_id)?).view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
     assert!(!hidden_scope_scene.iter().any(|command| matches!(
@@ -4143,28 +4207,38 @@ fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -
     let mut sticky_target = DrawTarget::Scene(&mut sticky_scene);
     render_buffer(
         &mut sticky_target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        render_user_library.commandline_enabled(),
-        &render_user_library,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: render_user_library.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
     assert!(sticky_scene.iter().any(|command| matches!(
@@ -4415,12 +4489,14 @@ fn sync_visible_buffer_layouts_counts_markdown_pretty_image_rows_for_scrolloff()
     let pretty_paint = markdown_pretty_paint_plan(
         buffer,
         &*user_library,
-        0,
-        buffer.line_count().max(1),
-        None,
-        InputMode::Normal,
-        text_width_px,
-        line_height,
+        MarkdownPrettyPaintArgs {
+            visible_start: 0,
+            visible_end: buffer.line_count().max(1),
+            visual_selection: None,
+            input_mode: InputMode::Normal,
+            pane_width_px: text_width_px,
+            line_height,
+        },
     );
     let image_rows = pretty_paint
         .images
@@ -4730,20 +4806,19 @@ fn input_field_wrap_keeps_words_intact() {
 fn block_cursor_text_overlay_positions_multibyte_cursor_text() {
     let line = "aéz";
     let char_map = LineCharMap::new(line);
-    let overlay = block_cursor_text_overlay(
-        24,
+    let overlay = block_cursor_text_overlay(CursorOverlayQuery {
+        x: 24,
         line,
-        &char_map,
-        LineWrapSegment {
+        char_map: &char_map,
+        segment: LineWrapSegment {
             start_col: 0,
             end_col: 3,
         },
-        0,
-        0,
-        1,
-        Some(Color::RGB(1, 2, 3)),
-        8,
-    )
+        line_index: 0,
+        cursor: TextPoint::new(0, 1),
+        color: Some(Color::RGB(1, 2, 3)),
+        cell_width: 8,
+    })
     .expect("cursor on a multibyte character should produce an overlay");
 
     assert_eq!(overlay.draw_x, 32);
@@ -4755,20 +4830,19 @@ fn block_cursor_text_overlay_positions_multibyte_cursor_text() {
 fn block_cursor_text_overlay_uses_visible_glyph_for_variation_selector() {
     let line = "⚛️x";
     let char_map = LineCharMap::new(line);
-    let overlay = block_cursor_text_overlay(
-        24,
+    let overlay = block_cursor_text_overlay(CursorOverlayQuery {
+        x: 24,
         line,
-        &char_map,
-        LineWrapSegment {
+        char_map: &char_map,
+        segment: LineWrapSegment {
             start_col: 0,
             end_col: line.chars().count(),
         },
-        0,
-        0,
-        1,
-        Some(Color::RGB(1, 2, 3)),
-        8,
-    )
+        line_index: 0,
+        cursor: TextPoint::new(0, 1),
+        color: Some(Color::RGB(1, 2, 3)),
+        cell_width: 8,
+    })
     .expect("cursor on a variation selector should reuse the visible glyph");
 
     assert_eq!(overlay.draw_x, 24);
@@ -4864,14 +4938,14 @@ fn diagnostic_underlines_expand_to_cover_narrowest_syntax_token() {
         LineSyntaxSpan {
             start: 0,
             end: 10,
-            capture_name: "source_file".to_owned(),
-            theme_token: "syntax.source".to_owned(),
+            capture_name: Arc::from("source_file"),
+            theme_token: Arc::from("syntax.source"),
         },
         LineSyntaxSpan {
             start: 0,
             end: 3,
-            capture_name: "keyword".to_owned(),
-            theme_token: "syntax.keyword".to_owned(),
+            capture_name: Arc::from("keyword"),
+            theme_token: Arc::from("syntax.keyword"),
         },
     ];
 
@@ -7428,21 +7502,28 @@ fn render_browser_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), 
     let mut target = DrawTarget::Scene(&mut scene);
     render_browser_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        InputMode::Normal,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        cursor_color,
-        2,
-        8,
-        16,
+        BrowserBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(55, 71, 99, 255),
+            cursor: cursor_color,
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7504,28 +7585,38 @@ fn render_buffer_draws_command_line_row_without_active_overlay() -> Result<(), S
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        true,
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: true,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7574,28 +7665,38 @@ fn render_buffer_draws_show_paren_match_highlight() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &NullUserLibrary,
-        "test-theme",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "test-theme",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7639,28 +7740,38 @@ fn render_buffer_draws_show_paren_html_tag_highlight() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &NullUserLibrary,
-        "test-theme",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "test-theme",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7724,28 +7835,38 @@ fn render_terminal_buffer_path_draws_command_line_separator_without_footer_fill(
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        true,
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: true,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7796,28 +7917,38 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
     let command_line_input = command_line.input();
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        Some(command_line_input),
-        true,
-        &NullUserLibrary,
-        "test-theme",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: Some(command_line_input),
+                row_visible: true,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "test-theme",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7863,28 +7994,38 @@ fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), 
     let mut active_target = DrawTarget::Scene(&mut active_scene);
     render_buffer(
         &mut active_target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &render_user_library,
-        "test-workspace",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -7898,28 +8039,41 @@ fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), 
     let mut inactive_target = DrawTarget::Scene(&mut inactive_scene);
     render_buffer(
         &mut inactive_target,
-        buffer,
-        rect,
-        false,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &render_user_library,
-        "test-workspace",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot {
+                rect,
+                active: false,
+            },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8004,28 +8158,38 @@ fn render_buffer_paints_modeline_mode_chip_and_right_aligned_segment() -> Result
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &render_user_library,
-        "test-workspace",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8108,28 +8272,38 @@ fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
     let mut active_target = DrawTarget::Scene(&mut active_scene);
     render_buffer(
         &mut active_target,
-        buffer,
-        rect,
-        true,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &render_user_library,
-        "test-workspace",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8143,28 +8317,41 @@ fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
     let mut inactive_target = DrawTarget::Scene(&mut inactive_scene);
     render_buffer(
         &mut inactive_target,
-        buffer,
-        rect,
-        false,
-        None,
-        None,
-        None,
-        InputMode::Normal,
-        false,
-        None,
-        None,
-        false,
-        &render_user_library,
-        "test-workspace",
-        None,
-        false,
-        false,
-        None,
-        Some(&registry),
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot {
+                rect,
+                active: false,
+            },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &render_user_library,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8206,20 +8393,30 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         ui,
         None,
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        320,
-        180,
-        None,
-        8,
-        16,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 320,
+                height: 180,
+            },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8271,20 +8468,30 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         ui,
         None,
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        Some(&registry),
-        320,
-        180,
-        None,
-        8,
-        16,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 320,
+                height: 180,
+            },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8342,20 +8549,30 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
         ui,
         None,
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        640,
-        360,
-        Some(&fps_overlay),
-        8,
-        16,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            fps_overlay: Some(&fps_overlay),
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8410,20 +8627,27 @@ fn render_shell_state_scene_with_docked_runtime_popup(
         ui,
         Some(&popup),
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        theme_registry,
-        width,
-        height,
-        None,
-        cell_width,
-        line_height,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize { width, height },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width,
+                line_height,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8546,20 +8770,27 @@ fn render_shell_state_scene_with_notification_overlay(
         ui,
         None,
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        theme_registry,
-        width,
-        height,
-        None,
-        cell_width,
-        line_height,
-        12,
-        now,
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize { width, height },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width,
+                line_height,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now,
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8677,13 +8908,17 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
     picker::render_picker_overlay(
         &mut target,
         &fonts,
-        &picker,
-        320,
-        180,
-        16,
-        Some(&registry),
-        editor_plugin_api::PickerLayout::default(),
-        editor_plugin_api::PickerTruncateStrategy::Auto,
+        PickerOverlayDraw {
+            picker: &picker,
+            size: WindowSize {
+                width: 320,
+                height: 180,
+            },
+            line_height: 16,
+            theme_registry: Some(&registry),
+            picker_layout: editor_plugin_api::PickerLayout::default(),
+            truncate_strategy: editor_plugin_api::PickerTruncateStrategy::Auto,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8775,12 +9010,16 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
         &mut target,
         shell_ui(&state.runtime)?,
         &overlay,
-        PixelRectToRect::rect(0, 0, 640, 360),
-        &NullUserLibrary,
-        Some(&registry),
-        8,
-        16,
-        false,
+        OverlayAnchorContext {
+            pane_rect: PixelRectToRect::rect(0, 0, 640, 360),
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 16,
+            },
+            typing_active: false,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8866,12 +9105,16 @@ fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
         &mut target,
         shell_ui(&state.runtime)?,
         &hover,
-        PixelRectToRect::rect(0, 0, 640, 360),
-        &NullUserLibrary,
-        Some(&registry),
-        8,
-        16,
-        false,
+        OverlayAnchorContext {
+            pane_rect: PixelRectToRect::rect(0, 0, 640, 360),
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 16,
+            },
+            typing_active: false,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -8975,13 +9218,17 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
     picker::render_picker_overlay(
         &mut target,
         &fonts,
-        &picker,
-        640,
-        360,
-        16,
-        Some(&registry),
-        editor_plugin_api::PickerLayout::default(),
-        editor_plugin_api::PickerTruncateStrategy::Auto,
+        PickerOverlayDraw {
+            picker: &picker,
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            line_height: 16,
+            theme_registry: Some(&registry),
+            picker_layout: editor_plugin_api::PickerLayout::default(),
+            truncate_strategy: editor_plugin_api::PickerTruncateStrategy::Auto,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -9425,24 +9672,30 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
     let mut target = DrawTarget::Scene(&mut scene);
     render_plugin_section_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        None,
-        base_background,
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        PluginSectionDraw {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            layout,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background,
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -9489,24 +9742,30 @@ fn render_plugin_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_plugin_section_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        Some(&registry),
-        base_background,
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        PluginSectionDraw {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            layout,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: Some(&registry),
+            base_background,
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -9555,24 +9814,30 @@ fn render_acp_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        Some(&registry),
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: Some(&registry),
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -9628,21 +9893,28 @@ fn render_browser_selected_section_border_stays_opaque() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_browser_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        InputMode::Normal,
-        Some(&registry),
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        BrowserBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: Some(&registry),
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(55, 71, 99, 255),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -9676,27 +9948,33 @@ fn render_plugin_sections_draw_visual_selection_highlight() -> Result<(), String
     let mut target = DrawTarget::Scene(&mut scene);
     render_plugin_section_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        Some(VisualSelection::Range(TextRange::new(
-            TextPoint::new(0, 0),
-            TextPoint::new(0, 5),
-        ))),
-        None,
-        InputMode::Visual,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        selection_color,
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        PluginSectionDraw {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            layout,
+            visual_selection: Some(VisualSelection::Range(TextRange::new(
+                TextPoint::new(0, 0),
+                TextPoint::new(0, 5),
+            ))),
+            yank_flash: None,
+            input_mode: InputMode::Visual,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: selection_color,
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -10158,27 +10436,33 @@ fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        Some(VisualSelection::Range(TextRange::new(
-            TextPoint::new(line_index, 0),
-            TextPoint::new(line_index, 5),
-        ))),
-        None,
-        InputMode::Visual,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        selection_color,
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: Some(VisualSelection::Range(TextRange::new(
+                TextPoint::new(line_index, 0),
+                TextPoint::new(line_index, 5),
+            ))),
+            yank_flash: None,
+            input_mode: InputMode::Visual,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: selection_color,
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -10209,24 +10493,30 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -10264,24 +10554,30 @@ fn render_acp_output_header_shows_live_when_tool_in_progress() -> Result<(), Str
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -10323,24 +10619,30 @@ fn render_acp_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), Stri
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Normal,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        cursor_color,
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: cursor_color,
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -10417,24 +10719,30 @@ fn render_acp_buffer_with_tall_multiline_input_keeps_footer_on_screen() -> Resul
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
         &mut target,
-        buffer,
-        rect,
-        layout,
-        true,
-        None,
-        None,
-        InputMode::Insert,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(215, 221, 232),
-        Color::RGB(140, 144, 152),
-        Color::RGB(40, 44, 52),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        Color::RGB(110, 170, 255),
-        2,
-        8,
-        16,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Insert,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -11293,8 +11601,8 @@ fn hover_test_provider_lines_include_theme_and_treesitter_tokens() -> Result<(),
             vec![LineSyntaxSpan {
                 start: 0,
                 end: 5,
-                capture_name: "function".to_owned(),
-                theme_token: "syntax.function".to_owned(),
+                capture_name: Arc::from("function"),
+                theme_token: Arc::from("syntax.function"),
             }],
         );
     }
@@ -11343,7 +11651,7 @@ fn render_markdown_hover_content_highlights_registered_code_fences() -> Result<(
     assert!(rendered.syntax_lines.get(&3).is_some_and(|spans| {
         spans
             .iter()
-            .any(|span| span.theme_token == "syntax.keyword")
+            .any(|span| span.theme_token.as_ref() == "syntax.keyword")
     }));
     Ok(())
 }
@@ -11400,8 +11708,8 @@ fn index_syntax_lines_preserves_capture_names() {
                 end_byte: 5,
                 start_position: editor_syntax::SyntaxPoint::new(0, 0),
                 end_position: editor_syntax::SyntaxPoint::new(0, 5),
-                capture_name: "function".to_owned(),
-                theme_token: "syntax.function".to_owned(),
+                capture_name: Arc::from("function"),
+                theme_token: Arc::from("syntax.function"),
             }],
         },
         &text,
@@ -11409,8 +11717,8 @@ fn index_syntax_lines_preserves_capture_names() {
 
     let spans = lines.get(&0).expect("expected indexed syntax line");
     assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].capture_name, "function");
-    assert_eq!(spans[0].theme_token, "syntax.function");
+    assert_eq!(spans[0].capture_name.as_ref(), "function");
+    assert_eq!(spans[0].theme_token.as_ref(), "syntax.function");
 }
 
 #[test]
@@ -11429,8 +11737,8 @@ fn index_syntax_lines_converts_byte_columns_after_variation_selector() {
                 end_byte,
                 start_position: editor_syntax::SyntaxPoint::new(0, start_byte),
                 end_position: editor_syntax::SyntaxPoint::new(0, end_byte),
-                capture_name: "text.literal".to_owned(),
-                theme_token: "syntax.string".to_owned(),
+                capture_name: Arc::from("text.literal"),
+                theme_token: Arc::from("syntax.string"),
             }],
         },
         &text,
@@ -11495,7 +11803,7 @@ fn line_color_segments_colors_opening_brace_from_rust_highlight_pipeline() {
     assert!(
         overlapping
             .iter()
-            .all(|span| span.theme_token == "rainbow.paren.depth.1"),
+            .all(|span| span.theme_token.as_ref() == "rainbow.paren.depth.1"),
         "opening brace captures should all share depth 1, got {overlapping:?}"
     );
 
@@ -11547,14 +11855,14 @@ fn line_color_segments_prefers_rainbow_paren_token_for_equal_width_spans() {
         LineSyntaxSpan {
             start: 0,
             end: 1,
-            capture_name: "type".to_owned(),
-            theme_token: "syntax.type".to_owned(),
+            capture_name: Arc::from("type"),
+            theme_token: Arc::from("syntax.type"),
         },
         LineSyntaxSpan {
             start: 0,
             end: 1,
-            capture_name: "rainbow.paren.open.2".to_owned(),
-            theme_token: "rainbow.paren.depth.2".to_owned(),
+            capture_name: Arc::from("rainbow.paren.open.2"),
+            theme_token: Arc::from("rainbow.paren.depth.2"),
         },
     ];
 
@@ -14732,13 +15040,19 @@ fn browser_surface_hit_testing_excludes_prompt_footer() -> Result<(), String> {
     let buffer_id = install_browser_test_buffer(&mut state)?;
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
-        None,
-        &*state.user_library,
-        480,
-        180,
-        8,
-        18,
-        Instant::now(),
+        BrowserSyncView {
+            runtime_popup: None,
+            user_library: &*state.user_library,
+            size: WindowSize {
+                width: 480,
+                height: 180,
+            },
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 18,
+            },
+            now: Instant::now(),
+        },
     )
     .map_err(|error| error.to_string())?;
     let surface = plan
@@ -14772,13 +15086,19 @@ fn browser_sync_plan_excludes_pdf_buffers() -> Result<(), String> {
     let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
-        None,
-        &*state.user_library,
-        800,
-        400,
-        8,
-        18,
-        Instant::now(),
+        BrowserSyncView {
+            runtime_popup: None,
+            user_library: &*state.user_library,
+            size: WindowSize {
+                width: 800,
+                height: 400,
+            },
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 18,
+            },
+            now: Instant::now(),
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -14808,13 +15128,19 @@ fn browser_sync_plan_hides_surfaces_while_picker_is_visible() -> Result<(), Stri
 
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
-        None,
-        &*state.user_library,
-        800,
-        400,
-        8,
-        18,
-        Instant::now(),
+        BrowserSyncView {
+            runtime_popup: None,
+            user_library: &*state.user_library,
+            size: WindowSize {
+                width: 800,
+                height: 400,
+            },
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 18,
+            },
+            now: Instant::now(),
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -14852,13 +15178,19 @@ fn browser_sync_plan_avoids_notification_overlays() -> Result<(), String> {
 
     let plan = browser_sync_plan(
         state.ui().map_err(|error| error.to_string())?,
-        None,
-        &*state.user_library,
-        800,
-        260,
-        8,
-        18,
-        now,
+        BrowserSyncView {
+            runtime_popup: None,
+            user_library: &*state.user_library,
+            size: WindowSize {
+                width: 800,
+                height: 260,
+            },
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 18,
+            },
+            now,
+        },
     )
     .map_err(|error| error.to_string())?;
     let notifications = state
@@ -17246,29 +17578,38 @@ fn render_terminal_buffer_prefers_terminal_render_snapshot() -> Result<(), Strin
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(
         &mut target,
-        buffer,
-        buffer
-            .terminal_render()
-            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
-        rect,
-        layout,
-        true,
-        InputMode::Normal,
-        None,
-        None,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(110, 170, 255),
-        Color::RGB(215, 221, 232),
-        Color::RGB(40, 44, 52),
-        "status".to_owned(),
-        Color::RGB(110, 170, 255),
-        Color::RGB(140, 144, 152),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        2,
-        8,
-        16,
+        TerminalBufferDraw {
+            buffer,
+            terminal_render: buffer
+                .terminal_render()
+                .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Normal,
+            visual_selection: None,
+            yank_flash: None,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(215, 221, 232),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        TerminalStatusline {
+            text: "status".to_owned(),
+            active: Color::RGB(110, 170, 255),
+            inactive: Color::RGB(140, 144, 152),
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -17367,32 +17708,41 @@ fn render_terminal_buffer_draws_visual_selection_highlight() -> Result<(), Strin
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(
         &mut target,
-        buffer,
-        buffer
-            .terminal_render()
-            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
-        rect,
-        layout,
-        true,
-        InputMode::Visual,
-        Some(VisualSelection::Range(TextRange::new(
-            TextPoint::new(0, 0),
-            TextPoint::new(0, 4),
-        ))),
-        None,
-        None,
-        Color::RGB(15, 16, 20),
-        Color::RGB(110, 170, 255),
-        Color::RGB(215, 221, 232),
-        Color::RGB(40, 44, 52),
-        "status".to_owned(),
-        Color::RGB(110, 170, 255),
-        Color::RGB(140, 144, 152),
-        selection_color,
-        Color::RGBA(112, 196, 255, 120),
-        2,
-        8,
-        16,
+        TerminalBufferDraw {
+            buffer,
+            terminal_render: buffer
+                .terminal_render()
+                .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Visual,
+            visual_selection: Some(VisualSelection::Range(TextRange::new(
+                TextPoint::new(0, 0),
+                TextPoint::new(0, 4),
+            ))),
+            yank_flash: None,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(215, 221, 232),
+            border_color: Color::RGB(40, 44, 52),
+            selection: selection_color,
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        TerminalStatusline {
+            text: "status".to_owned(),
+            active: Color::RGB(110, 170, 255),
+            inactive: Color::RGB(140, 144, 152),
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -17457,29 +17807,38 @@ fn render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity() ->
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(
         &mut target,
-        buffer,
-        buffer
-            .terminal_render()
-            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
-        rect,
-        layout,
-        true,
-        InputMode::Insert,
-        None,
-        None,
-        Some(&registry),
-        Color::RGB(15, 16, 20),
-        Color::RGB(110, 170, 255),
-        Color::RGB(215, 221, 232),
-        Color::RGB(40, 44, 52),
-        "status".to_owned(),
-        Color::RGB(110, 170, 255),
-        Color::RGB(140, 144, 152),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        2,
-        8,
-        16,
+        TerminalBufferDraw {
+            buffer,
+            terminal_render: buffer
+                .terminal_render()
+                .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Insert,
+            visual_selection: None,
+            yank_flash: None,
+        },
+        BufferBodyPalette {
+            theme_registry: Some(&registry),
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(215, 221, 232),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        TerminalStatusline {
+            text: "status".to_owned(),
+            active: Color::RGB(110, 170, 255),
+            inactive: Color::RGB(140, 144, 152),
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -17540,28 +17899,38 @@ fn render_buffer_multicursor_draws_one_cursor_per_range() -> Result<(), String> 
     let mut target = DrawTarget::Scene(&mut scene);
     render_buffer(
         &mut target,
-        buffer,
-        rect,
-        true,
-        None,
-        Some(&multicursor),
-        None,
-        InputMode::Insert,
-        true,
-        None,
-        None,
-        NullUserLibrary.commandline_enabled(),
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        None,
-        false,
-        8,
-        16,
-        12,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Insert,
+                multicursor: Some(&multicursor),
+                vim_targets_input: true,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: NullUserLibrary.commandline_enabled(),
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -17657,29 +18026,38 @@ fn render_terminal_buffer_uses_buffer_cursor_in_normal_mode() -> Result<(), Stri
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(
         &mut target,
-        buffer,
-        buffer
-            .terminal_render()
-            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
-        rect,
-        layout,
-        true,
-        InputMode::Normal,
-        None,
-        None,
-        None,
-        Color::RGB(15, 16, 20),
-        cursor_color,
-        Color::RGB(215, 221, 232),
-        Color::RGB(40, 44, 52),
-        "status".to_owned(),
-        Color::RGB(110, 170, 255),
-        Color::RGB(140, 144, 152),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        2,
-        8,
-        16,
+        TerminalBufferDraw {
+            buffer,
+            terminal_render: buffer
+                .terminal_render()
+                .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Normal,
+            visual_selection: None,
+            yank_flash: None,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(215, 221, 232),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: cursor_color,
+            cursor_roundness: 2,
+        },
+        TerminalStatusline {
+            text: "status".to_owned(),
+            active: Color::RGB(110, 170, 255),
+            inactive: Color::RGB(140, 144, 152),
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -17750,29 +18128,38 @@ fn render_terminal_buffer_uses_editor_insert_cursor_style() -> Result<(), String
     let mut target = DrawTarget::Scene(&mut scene);
     render_terminal_buffer(
         &mut target,
-        buffer,
-        buffer
-            .terminal_render()
-            .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
-        rect,
-        layout,
-        true,
-        InputMode::Insert,
-        None,
-        None,
-        None,
-        Color::RGB(15, 16, 20),
-        cursor_color,
-        Color::RGB(215, 221, 232),
-        Color::RGB(40, 44, 52),
-        "status".to_owned(),
-        Color::RGB(110, 170, 255),
-        Color::RGB(140, 144, 152),
-        Color::RGBA(55, 71, 99, 255),
-        Color::RGBA(112, 196, 255, 120),
-        4,
-        8,
-        16,
+        TerminalBufferDraw {
+            buffer,
+            terminal_render: buffer
+                .terminal_render()
+                .ok_or_else(|| "terminal render snapshot missing".to_owned())?,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Insert,
+            visual_selection: None,
+            yank_flash: None,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(215, 221, 232),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: cursor_color,
+            cursor_roundness: 4,
+        },
+        TerminalStatusline {
+            text: "status".to_owned(),
+            active: Color::RGB(110, 170, 255),
+            inactive: Color::RGB(140, 144, 152),
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -18183,6 +18570,87 @@ fn popup_focus_ctrl_n_cycles_popup_buffers_instead_of_marked_workspace() -> Resu
 }
 
 #[test]
+fn popup_focus_j_k_do_not_cycle_workspace_dock() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("popup-jk-dock-a");
+    let second_root = unique_temp_dir("popup-jk-dock-b");
+    let first = open_workspace_from_project(&mut state.runtime, "popup-jk-a", &first_root)?;
+    let _second = open_workspace_from_project(&mut state.runtime, "popup-jk-b", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let popup_buffer = state
+        .runtime
+        .model_mut()
+        .create_popup_buffer(workspace_id, "*popup*", BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .open_popup(workspace_id, "Popup", vec![popup_buffer], popup_buffer)
+        .map_err(|error| error.to_string())?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.ensure_popup_buffer(popup_buffer, "*popup*", BufferKind::Scratch, &*user_library);
+        ui.set_popup_buffer(popup_buffer);
+        ui.set_popup_focus(true);
+        ui.enter_normal_mode();
+    }
+
+    let modes = state
+        .overlay_minor_modes()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        modes.contains(&KeymapScope::Popup),
+        "popup focus must activate Popup Minor Mode: {modes:?}"
+    );
+    assert!(
+        !modes.contains(&KeymapScope::WorkspaceDock),
+        "popup focus must not activate Workspace Dock Minor Mode: {modes:?}"
+    );
+    for chord in ["j", "k"] {
+        let overlay = state
+            .runtime
+            .keymaps()
+            .find_in_scopes(&modes, KeymapVimMode::Normal, chord)
+            .map(|binding| binding.command_name().to_owned());
+        assert_ne!(
+            overlay.as_deref(),
+            Some("workspace.dock.next"),
+            "popup {chord} must not fire workspace dock cycle"
+        );
+        assert_ne!(
+            overlay.as_deref(),
+            Some("workspace.dock.previous"),
+            "popup {chord} must not fire workspace dock cycle"
+        );
+    }
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        first,
+        "popup j must not cycle the workspace dock"
+    );
+    state
+        .handle_text_input("k")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.active_workspace(),
+        first,
+        "popup k must not cycle the workspace dock"
+    );
+    Ok(())
+}
+
+#[test]
 fn picker_extra_keybind_falls_through_for_shared_popup_navigation() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     shell_ui_mut(&mut state.runtime)?.set_picker(
@@ -18582,20 +19050,30 @@ fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
         ui,
         None,
         &[],
-        &NullUserLibrary,
-        "default",
-        None,
-        false,
-        false,
-        None,
-        640,
-        360,
-        None,
-        8,
-        16,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -19297,20 +19775,30 @@ fn workspace_dock_render_marks_active_row() -> Result<(), String> {
         ui,
         None,
         &entries,
-        &*shell_user_library(&state.runtime),
-        "default",
-        None,
-        false,
-        false,
-        None,
-        640,
-        360,
-        None,
-        8,
-        16,
-        12,
-        Instant::now(),
-        false,
+        ShellChrome {
+            user_library: &*shell_user_library(&state.runtime),
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
     )
     .map_err(|error| error.to_string())?;
     let layout = workspace_dock_layout(&*shell_user_library(&state.runtime), ui, 640, 360, 8);
@@ -19379,6 +19867,47 @@ fn workspace_dock_h_j_cycles_workspaces_when_focused() -> Result<(), String> {
     state
         .runtime
         .emit_hook(HOOK_WORKSPACE_DOCK_PREVIOUS, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), first);
+    Ok(())
+}
+
+#[test]
+fn workspace_dock_focus_j_k_cycle_workspaces() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first_root = unique_temp_dir("workspace-dock-jk-a");
+    let second_root = unique_temp_dir("workspace-dock-jk-b");
+    let first = open_workspace_from_project(&mut state.runtime, "dock-jk-a", &first_root)?;
+    let second = open_workspace_from_project(&mut state.runtime, "dock-jk-b", &second_root)?;
+    switch_runtime_workspace(&mut state.runtime, first)?;
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_TOGGLE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_workspace_dock_focus(true);
+        ui.enter_normal_mode();
+    }
+
+    let modes = state
+        .overlay_minor_modes()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        modes.contains(&KeymapScope::WorkspaceDock),
+        "dock focus must activate Workspace Dock Minor Mode: {modes:?}"
+    );
+    assert!(
+        !modes.contains(&KeymapScope::Popup),
+        "dock focus must not activate Popup Minor Mode: {modes:?}"
+    );
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), second);
+    state
+        .handle_text_input("k")
         .map_err(|error| error.to_string())?;
     assert_eq!(shell_ui(&state.runtime)?.active_workspace(), first);
     Ok(())

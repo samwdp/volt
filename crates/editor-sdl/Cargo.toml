@@ -111,6 +111,9 @@ version = "2.12.1"
 default-features = false
 features = ["tls"]
 
+[dependencies.rustc-hash]
+version = "2.1.1"
+
 [dev-dependencies]
 tree-sitter-rust = "0.24.1"
 

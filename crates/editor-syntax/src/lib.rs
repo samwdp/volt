@@ -16,11 +16,11 @@ use std::{
     ops::ControlFlow,
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use editor_buffer::{TextBuffer, TextByteChunks, TextEdit, TextPoint};
+use editor_buffer::{SyntaxText, TextBuffer, TextByteChunks, TextEdit, TextPoint};
 use editor_path::PathMatcher;
 pub use tree_sitter::Language;
 use tree_sitter::{
@@ -796,9 +796,9 @@ pub struct HighlightSpan {
     /// End line/column pair from tree-sitter.
     pub end_position: SyntaxPoint,
     /// Original tree-sitter capture name.
-    pub capture_name: String,
+    pub capture_name: Arc<str>,
     /// Resolved theme token.
-    pub theme_token: String,
+    pub theme_token: Arc<str>,
 }
 
 /// Syntax parse result for a single buffer snapshot.
@@ -1053,7 +1053,8 @@ struct LoadedLanguage {
     injections_query: DeferredQuery,
     locals_query: DeferredQuery,
     folds_query: DeferredQuery,
-    capture_mappings: BTreeMap<String, String>,
+    capture_names: Vec<Arc<str>>,
+    capture_tokens: Vec<Arc<str>>,
     // Query values must drop before their language handle.
     language: Language,
     // Must drop after every tree-sitter value above; destructors may still access grammar data.
@@ -1091,11 +1092,11 @@ struct InjectionRegion {
     end_position: SyntaxPoint,
 }
 
-struct TextBufferProvider<'a> {
-    buffer: &'a TextBuffer,
+struct SyntaxTextProvider<'a, B: SyntaxText + ?Sized> {
+    buffer: &'a B,
 }
 
-impl<'a> TextProvider<&'a [u8]> for TextBufferProvider<'a> {
+impl<'a, B: SyntaxText + ?Sized> TextProvider<&'a [u8]> for SyntaxTextProvider<'a, B> {
     type I = TextByteChunks<'a>;
 
     fn text(&mut self, node: tree_sitter::Node) -> Self::I {
@@ -1104,11 +1105,11 @@ impl<'a> TextProvider<&'a [u8]> for TextBufferProvider<'a> {
 }
 
 impl LoadedLanguage {
-    fn theme_token_for_capture(&self, capture_name: &str) -> String {
-        self.capture_mappings
-            .get(capture_name)
-            .cloned()
-            .unwrap_or_else(|| format!("syntax.{capture_name}"))
+    fn interned_capture(&self, index: usize) -> Option<(&Arc<str>, &Arc<str>)> {
+        Some((
+            self.capture_names.get(index)?,
+            self.capture_tokens.get(index)?,
+        ))
     }
 
     fn has_injections(&self) -> bool {
@@ -1433,7 +1434,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_extension(
         &mut self,
         extension: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_extension_impl(extension, buffer, None, None)
     }
@@ -1442,7 +1443,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_extension_window(
         &mut self,
         extension: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: HighlightWindow,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_extension_impl(extension, buffer, Some(highlight_window), None)
@@ -1451,7 +1452,7 @@ impl SyntaxRegistry {
     fn highlight_buffer_for_extension_impl(
         &mut self,
         extension: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: Option<HighlightWindow>,
         parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
@@ -1473,7 +1474,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_language(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_language_impl(language_id, buffer, None, None)
     }
@@ -1482,7 +1483,7 @@ impl SyntaxRegistry {
     pub fn structure_nodes_for_language(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
     ) -> Result<Vec<SyntaxStructureNode>, SyntaxError> {
         let language_id = language_id.to_owned();
         if !self.languages.contains_key(&language_id) {
@@ -1501,7 +1502,7 @@ impl SyntaxRegistry {
     pub fn ancestor_contexts_for_language(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         point: TextPoint,
     ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
         self.ancestor_contexts_for_language_impl(language_id, buffer, point, None)
@@ -1512,7 +1513,7 @@ impl SyntaxRegistry {
     pub fn ancestor_contexts_for_language_with_parse_session(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         point: TextPoint,
         parse_session: &mut Option<SyntaxParseSession>,
     ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
@@ -1522,7 +1523,7 @@ impl SyntaxRegistry {
     fn ancestor_contexts_for_language_impl(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         point: TextPoint,
         parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
@@ -1570,7 +1571,7 @@ impl SyntaxRegistry {
     pub fn desired_indent_for_language(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         line_index: usize,
         indent_width: usize,
     ) -> Result<Option<usize>, SyntaxError> {
@@ -1581,7 +1582,7 @@ impl SyntaxRegistry {
     pub fn desired_indent_for_language_with_session(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         line_index: usize,
         indent_width: usize,
         parse_session: &mut Option<SyntaxParseSession>,
@@ -1598,7 +1599,7 @@ impl SyntaxRegistry {
     fn desired_indent_for_language_impl(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         line_index: usize,
         indent_width: usize,
         parse_session: Option<&mut Option<SyntaxParseSession>>,
@@ -1626,7 +1627,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_language_window(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: HighlightWindow,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_language_impl(language_id, buffer, Some(highlight_window), None)
@@ -1636,7 +1637,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_language_with_session(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         parse_session: &mut Option<SyntaxParseSession>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_language_impl(language_id, buffer, None, Some(parse_session))
@@ -1646,7 +1647,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_language_window_with_session(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: HighlightWindow,
         parse_session: &mut Option<SyntaxParseSession>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
@@ -1661,7 +1662,7 @@ impl SyntaxRegistry {
     fn highlight_buffer_for_language_impl(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: Option<HighlightWindow>,
         parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
@@ -1677,7 +1678,7 @@ impl SyntaxRegistry {
     fn highlight_buffer_for_language_impl_with_depth(
         &mut self,
         language_id: &str,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: Option<HighlightWindow>,
         mut parse_session: Option<&mut Option<SyntaxParseSession>>,
         injection_depth: usize,
@@ -1791,7 +1792,7 @@ impl SyntaxRegistry {
         host_config: &LanguageConfiguration,
         host_language_id: &str,
         tree: &Tree,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: Option<HighlightWindow>,
         injection_depth: usize,
     ) -> Result<InjectionHighlights, SyntaxError> {
@@ -1965,7 +1966,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_path(
         &mut self,
         path: impl AsRef<Path>,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_path_impl(path, buffer, None, None)
     }
@@ -1974,7 +1975,7 @@ impl SyntaxRegistry {
     pub fn highlight_buffer_for_path_window(
         &mut self,
         path: impl AsRef<Path>,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: HighlightWindow,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
         self.highlight_buffer_for_path_impl(path, buffer, Some(highlight_window), None)
@@ -1983,7 +1984,7 @@ impl SyntaxRegistry {
     fn highlight_buffer_for_path_impl(
         &mut self,
         path: impl AsRef<Path>,
-        buffer: &TextBuffer,
+        buffer: &impl SyntaxText,
         highlight_window: Option<HighlightWindow>,
         parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<SyntaxSnapshot, SyntaxError> {
@@ -2040,6 +2041,7 @@ fn load_language(
             let query_source =
                 append_query_source(highlight_query.to_owned(), config.extra_highlight_query());
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
+            let (capture_names, capture_tokens) = intern_query_captures(&query, &capture_mappings);
             Ok(LoadedLanguage {
                 _library: None,
                 language,
@@ -2060,7 +2062,8 @@ fn load_language(
                     "folds",
                     config.extra_folds_query().map(str::to_owned),
                 ),
-                capture_mappings,
+                capture_names,
+                capture_tokens,
             })
         }
         LanguageLoader::Grammar { grammar } => {
@@ -2107,6 +2110,7 @@ fn load_language(
             };
             let language = Language::new(language_fn);
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
+            let (capture_names, capture_tokens) = intern_query_captures(&query, &capture_mappings);
             Ok(LoadedLanguage {
                 _library: Some(ManuallyDrop::new(library)),
                 language,
@@ -2147,10 +2151,35 @@ fn load_language(
                         config.extra_folds_query(),
                     )?,
                 ),
-                capture_mappings,
+                capture_names,
+                capture_tokens,
             })
         }
     }
+}
+
+fn intern_query_captures(
+    query: &Query,
+    capture_mappings: &BTreeMap<String, String>,
+) -> (Vec<Arc<str>>, Vec<Arc<str>>) {
+    let capture_names = query
+        .capture_names()
+        .iter()
+        .copied()
+        .map(Arc::<str>::from)
+        .collect::<Vec<_>>();
+    let capture_tokens = capture_names
+        .iter()
+        .map(|name| intern_theme_token(name, capture_mappings))
+        .collect();
+    (capture_names, capture_tokens)
+}
+
+fn intern_theme_token(capture_name: &str, mappings: &BTreeMap<String, String>) -> Arc<str> {
+    mappings
+        .get(capture_name)
+        .map(|token| Arc::<str>::from(token.as_str()))
+        .unwrap_or_else(|| Arc::from(format!("syntax.{capture_name}")))
 }
 
 fn append_query_source(mut source: String, extra_query: Option<&str>) -> String {
@@ -2360,7 +2389,7 @@ fn remove_legacy_grammar_install_directory(
 ///
 /// Out-of-bounds coordinates are clamped to the nearest valid line/column in the
 /// provided buffer before converting character columns into byte columns.
-fn text_point_to_tree_sitter_point(buffer: &TextBuffer, point: TextPoint) -> Point {
+fn text_point_to_tree_sitter_point(buffer: &impl SyntaxText, point: TextPoint) -> Point {
     let max_line = buffer.line_count().saturating_sub(1);
     let line = point.line.min(max_line);
     let text = buffer.line(line).unwrap_or_default();
@@ -2384,7 +2413,7 @@ fn tree_sitter_column_to_char_column(line: &str, byte_column: usize) -> usize {
 fn desired_indent_for_loaded_language(
     language_id: &str,
     loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     line_index: usize,
     indent_width: usize,
     parse_session: Option<&mut Option<SyntaxParseSession>>,
@@ -2430,7 +2459,7 @@ fn desired_indent_for_loaded_language(
     let mut matches = query_cursor.matches_with_options(
         indent_query,
         parse_result.tree.root_node(),
-        TextBufferProvider { buffer },
+        SyntaxTextProvider { buffer },
         query_options,
     );
     let mut aborted = false;
@@ -2523,7 +2552,7 @@ fn aligned_indent_column(
     node: Node<'_>,
     line_index: usize,
     properties: &[QueryProperty],
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
 ) -> Option<usize> {
     if line_index <= node.start_position().row || line_index > node.end_position().row {
         return None;
@@ -2618,7 +2647,11 @@ fn first_content_column_after(line: &str, start_column: usize) -> Option<usize> 
         .find_map(|(column, character)| (!character.is_whitespace()).then_some(column))
 }
 
-fn current_line_starts_with_token(buffer: &TextBuffer, line_index: usize, token: &str) -> bool {
+fn current_line_starts_with_token(
+    buffer: &impl SyntaxText,
+    line_index: usize,
+    token: &str,
+) -> bool {
     let line = buffer.line(line_index).unwrap_or_default();
     line.trim_start().starts_with(token)
 }
@@ -2632,7 +2665,7 @@ fn general_predicates_match(
     query: &Query,
     pattern_index: usize,
     captures: &[tree_sitter::QueryCapture<'_>],
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
 ) -> bool {
     query
         .general_predicates(pattern_index)
@@ -2651,7 +2684,7 @@ fn evaluate_general_predicate(
     operator: &str,
     args: &[QueryPredicateArg],
     captures: &[tree_sitter::QueryCapture<'_>],
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
 ) -> bool {
     match operator.trim_start_matches('#') {
         "kind-eq?" => {
@@ -2789,7 +2822,7 @@ fn predicate_capture_node<'tree>(
 fn predicate_capture_text(
     argument: Option<&QueryPredicateArg>,
     captures: &[tree_sitter::QueryCapture<'_>],
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
 ) -> Option<String> {
     let node = predicate_capture_node(argument, captures)?;
     let mut text = String::new();
@@ -3092,7 +3125,7 @@ fn text_edit_to_input_edit(edit: TextEdit) -> InputEdit {
 fn parse_with_parser(
     language_id: &str,
     parser: &mut Parser,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     old_tree: Option<&Tree>,
 ) -> Result<Tree, SyntaxError> {
     let byte_count = buffer.byte_count();
@@ -3116,7 +3149,7 @@ fn parse_with_parser(
 fn parse_tree(
     language_id: &str,
     loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<ParseTreeResult, SyntaxError> {
     let Some(parse_session) = parse_session else {
@@ -3189,7 +3222,7 @@ fn parse_tree(
 fn highlight_tree(
     loaded: &LoadedLanguage,
     tree: &Tree,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     highlight_window: Option<HighlightWindow>,
 ) -> Vec<HighlightSpan> {
     let mut query_cursor = QueryCursor::new();
@@ -3204,12 +3237,11 @@ fn highlight_tree(
             },
         );
     }
-    let capture_names = loaded.query.capture_names();
     let mut highlight_spans = Vec::new();
     let mut matches = query_cursor.matches(
         &loaded.query,
         tree.root_node(),
-        TextBufferProvider { buffer },
+        SyntaxTextProvider { buffer },
     );
     loop {
         matches.advance();
@@ -3231,11 +3263,11 @@ fn highlight_tree(
             let node = capture.node;
             let start = node.start_position();
             let end = node.end_position();
-            let capture_name = capture_names
-                .get(capture.index as usize)
-                .map(|name| name.to_string())
-                .unwrap_or_default();
-            if capture_name.is_empty() || !capture_requires_theme_token(&capture_name) {
+            let Some((capture_name, theme_token)) = loaded.interned_capture(capture.index as usize)
+            else {
+                continue;
+            };
+            if capture_name.is_empty() || !capture_requires_theme_token(capture_name) {
                 continue;
             }
 
@@ -3244,8 +3276,8 @@ fn highlight_tree(
                 end_byte: node.end_byte(),
                 start_position: SyntaxPoint::new(start.row, start.column),
                 end_position: SyntaxPoint::new(end.row, end.column),
-                theme_token: loaded.theme_token_for_capture(&capture_name),
-                capture_name,
+                theme_token: Arc::clone(theme_token),
+                capture_name: Arc::clone(capture_name),
             });
         }
     }
@@ -3255,7 +3287,7 @@ fn highlight_tree(
 fn collect_injection_regions(
     injections_query: &Query,
     tree: &Tree,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     highlight_window: Option<HighlightWindow>,
 ) -> Vec<InjectionRegion> {
     let mut query_cursor = QueryCursor::new();
@@ -3275,7 +3307,7 @@ fn collect_injection_regions(
     let mut matches = query_cursor.matches(
         injections_query,
         tree.root_node(),
-        TextBufferProvider { buffer },
+        SyntaxTextProvider { buffer },
     );
     loop {
         matches.advance();
@@ -3442,7 +3474,7 @@ fn changed_range_windows(
 fn highlight_loaded_language_with_tree(
     language_id: &str,
     loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     highlight_window: Option<HighlightWindow>,
     parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<ParsedHighlight, SyntaxError> {
@@ -3518,7 +3550,7 @@ fn highlight_loaded_language_with_tree(
 fn highlight_loaded_language(
     language_id: &str,
     loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     highlight_window: Option<HighlightWindow>,
     parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<SyntaxSnapshot, SyntaxError> {
@@ -3575,7 +3607,7 @@ fn collect_structure_nodes(root: tree_sitter::Node<'_>) -> Vec<SyntaxStructureNo
 }
 
 fn buffer_text_for_byte_range(
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     start_byte: usize,
     end_byte: usize,
 ) -> Option<String> {
@@ -3623,7 +3655,7 @@ fn translate_injected_highlight_span(
 fn highlight_inline_language_per_line(
     language_id: &str,
     loaded: &LoadedLanguage,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     line_indices: &[usize],
 ) -> Result<SyntaxSnapshot, SyntaxError> {
     let mut highlight_spans = Vec::new();
@@ -3848,6 +3880,7 @@ mod tests {
     use std::{
         env, fs,
         path::{Path, PathBuf},
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -4089,14 +4122,40 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.keyword")
+                .any(|span| span.theme_token.as_ref() == "syntax.keyword")
         );
         assert!(
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.string")
+                .any(|span| span.theme_token.as_ref() == "syntax.string")
         );
+    }
+
+    #[test]
+    fn highlight_spans_reuse_interned_capture_and_theme_tokens() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+        let buffer = TextBuffer::from_text("fn first() {}\nfn second() {}\n");
+        let snapshot = must(registry.highlight_buffer_for_language("rust", &buffer));
+        let keyword_spans = snapshot
+            .highlight_spans
+            .iter()
+            .filter(|span| span.theme_token.as_ref() == "syntax.keyword")
+            .collect::<Vec<_>>();
+        assert!(
+            keyword_spans.len() >= 2,
+            "expected repeated keyword spans, got {}",
+            keyword_spans.len()
+        );
+        assert!(Arc::ptr_eq(
+            &keyword_spans[0].capture_name,
+            &keyword_spans[1].capture_name
+        ));
+        assert!(Arc::ptr_eq(
+            &keyword_spans[0].theme_token,
+            &keyword_spans[1].theme_token
+        ));
     }
 
     #[test]
@@ -4179,7 +4238,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.string.inline")
+                .any(|span| span.theme_token.as_ref() == "syntax.string.inline")
         );
     }
 
@@ -4217,7 +4276,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.function"
+                .any(|span| span.theme_token.as_ref() == "syntax.function"
                     && span.start_byte <= injected_fn_byte
                     && injected_fn_byte < span.end_byte),
             "expected injected Rust function highlight at byte {injected_fn_byte}, got {:?}",
@@ -4227,7 +4286,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.string.inline"
+                .any(|span| span.theme_token.as_ref() == "syntax.string.inline"
                     && span.start_byte <= injected_string_byte
                     && injected_string_byte < span.end_byte),
             "expected injected additional highlight at byte {injected_string_byte}, got {:?}",
@@ -4264,7 +4323,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|span| span.theme_token == "syntax.function"
+                .any(|span| span.theme_token.as_ref() == "syntax.function"
                     && span.start_byte <= main_byte
                     && main_byte < span.end_byte),
             "expected host Rust function highlight at byte {main_byte}, got {:?}",
@@ -4274,7 +4333,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .all(|span| !(span.theme_token == "syntax.function"
+                .all(|span| !(span.theme_token.as_ref() == "syntax.function"
                     && span.start_byte <= injected_byte
                     && injected_byte < span.end_byte)),
             "unexpected injected function highlight at byte {injected_byte}: {:?}",
@@ -4297,7 +4356,7 @@ fn main() {
         let function_spans = snapshot
             .highlight_spans
             .iter()
-            .filter(|span| span.capture_name == "function")
+            .filter(|span| span.capture_name.as_ref() == "function")
             .count();
 
         assert_eq!(function_spans, 1);
@@ -5373,7 +5432,10 @@ fn main() {
             1,
             "expected exactly one span for the identifier `main`"
         );
-        assert_eq!(snapshot.highlight_spans[0].capture_name, "function");
+        assert_eq!(
+            snapshot.highlight_spans[0].capture_name.as_ref(),
+            "function"
+        );
     }
 
     #[test]
@@ -5391,7 +5453,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .all(|span| span.capture_name != "function"
+                .all(|span| span.capture_name.as_ref() != "function"
                     || span.start_byte != buffer.text().find("main").unwrap_or(usize::MAX)),
             "identifier `main` should have been removed by #not-lua-match?"
         );
@@ -5446,7 +5508,10 @@ fn main() {
         let buffer = TextBuffer::from_text("fn main() {}");
         let snapshot = must(registry.highlight_buffer_for_extension("__rust_pred_test__", &buffer));
         assert_eq!(snapshot.highlight_spans.len(), 1);
-        assert_eq!(snapshot.highlight_spans[0].capture_name, "function");
+        assert_eq!(
+            snapshot.highlight_spans[0].capture_name.as_ref(),
+            "function"
+        );
     }
 
     #[test]
@@ -5481,7 +5546,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|s| s.capture_name == "fn"),
+                .any(|s| s.capture_name.as_ref() == "fn"),
             "#not-has-parent? must not reject nodes whose immediate parent does not match; \
              `foo` lives under function_item, not source_file"
         );
@@ -5502,7 +5567,7 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .all(|s| s.capture_name != "fn" || s.start_byte != fn_name_byte),
+                .all(|s| s.capture_name.as_ref() != "fn" || s.start_byte != fn_name_byte),
             "#not-has-parent? must reject a node whose immediate parent matches"
         );
     }
@@ -5646,14 +5711,14 @@ fn main() {
             snapshot
                 .highlight_spans
                 .iter()
-                .any(|s| s.capture_name == "fn" && s.start_byte == my_func_byte),
+                .any(|s| s.capture_name.as_ref() == "fn" && s.start_byte == my_func_byte),
             "#lua-match? ^[A-Z] should keep 'MyFunc'"
         );
         assert!(
             snapshot
                 .highlight_spans
                 .iter()
-                .all(|s| s.capture_name != "fn" || s.start_byte != lower_byte),
+                .all(|s| s.capture_name.as_ref() != "fn" || s.start_byte != lower_byte),
             "#lua-match? ^[A-Z] should reject 'lowercase'"
         );
     }

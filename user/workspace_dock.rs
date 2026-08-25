@@ -45,8 +45,12 @@ pub fn package() -> PluginPackage {
         ),
     ])
     .with_key_bindings(vec![
-        PluginKeyBinding::new("j", "workspace.dock.next", PluginKeymapScope::Popup),
-        PluginKeyBinding::new("k", "workspace.dock.previous", PluginKeymapScope::Popup),
+        PluginKeyBinding::new("j", "workspace.dock.next", PluginKeymapScope::WorkspaceDock),
+        PluginKeyBinding::new(
+            "k",
+            "workspace.dock.previous",
+            PluginKeymapScope::WorkspaceDock,
+        ),
     ])
 }
 
@@ -79,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn package_binds_j_and_k_in_popup_scope() {
+    fn package_binds_j_and_k_in_workspace_dock_scope() {
         let package = package();
         for (chord, command) in [
             ("j", "workspace.dock.next"),
@@ -89,7 +93,7 @@ mod tests {
                 package.key_bindings().iter().any(|binding| {
                     binding.chord() == chord
                         && binding.command_name() == command
-                        && binding.scope() == PluginKeymapScope::Popup
+                        && binding.scope() == PluginKeymapScope::WorkspaceDock
                 }),
                 "missing binding for {chord} -> {command}"
             );

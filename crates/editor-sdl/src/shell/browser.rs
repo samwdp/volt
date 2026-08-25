@@ -606,20 +606,20 @@ mod tests {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "browser sync needs the full viewport and overlay context"
-)]
 pub(super) fn browser_sync_plan(
     state: &ShellUiState,
-    runtime_popup: Option<&RuntimePopupSnapshot>,
-    user_library: &dyn UserLibrary,
-    width: u32,
-    height: u32,
-    cell_width: i32,
-    line_height: i32,
-    now: Instant,
+    view: BrowserSyncView<'_>,
 ) -> Result<BrowserSyncPlan, ShellError> {
+    let BrowserSyncView {
+        runtime_popup,
+        user_library,
+        size: WindowSize { width, height },
+        metrics: CellMetrics {
+            cell_width,
+            line_height,
+        },
+        now,
+    } = view;
     let buffers = state
         .buffers
         .iter()
@@ -864,25 +864,34 @@ pub(super) fn browser_buffer_layout(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_browser_buffer_body(
     target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    base_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    selection: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: BrowserBufferDraw<'_>,
+    palette: BufferBodyPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let BrowserBufferDraw {
+        buffer,
+        rect,
+        layout,
+        active,
+        input_mode,
+    } = draw;
+    let BufferBodyPalette {
+        theme_registry,
+        base_background,
+        foreground,
+        muted,
+        border_color,
+        selection,
+        cursor,
+        cursor_roundness,
+        ..
+    } = palette;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let Some(state) = buffer.browser_state.as_ref() else {
         return Ok(());
     };
@@ -914,22 +923,31 @@ pub(super) fn render_browser_buffer_body(
     )?;
     render_input_panel(
         target,
-        &state.input,
-        active && state.active_pane == BrowserPane::Input,
-        browser_layout.input,
-        input_mode,
-        window_effects,
-        corner_radius,
-        panel_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
+        InputPanelDraw {
+            input: &state.input,
+            pane_active: active && state.active_pane == BrowserPane::Input,
+            pane_layout: browser_layout.input,
+            input_mode,
+            window_effects,
+            corner_radius,
+        },
+        PanelPalette {
+            theme_registry,
+            panel_background,
+            header_background: panel_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            yank_flash_color: selection,
+            cursor,
+            cursor_roundness,
+        },
+        CellMetrics {
+            cell_width,
+            line_height,
+        },
     )?;
     if state.is_loading {
         let input_rect = browser_layout.input.rect;
@@ -948,30 +966,36 @@ pub(super) fn render_browser_buffer_body(
     if browser_layout.footer.rect.height() > 0 {
         render_text_panel(
             target,
-            &state.footer_pane.text,
-            Some(&state.footer_pane.syntax_lines),
-            state.footer_pane.scroll_row,
-            (active && state.active_pane == BrowserPane::Footer)
-                .then_some(state.footer_pane.cursor()),
-            active && state.active_pane == BrowserPane::Footer,
-            browser_layout.footer,
-            "",
-            None,
-            None,
-            InputMode::Normal,
-            theme_registry,
-            panel_background,
-            panel_background,
-            foreground,
-            muted,
-            border_color,
-            active_border,
-            selection,
-            selection,
-            cursor,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            TextPanelDraw {
+                text: &state.footer_pane.text,
+                syntax_lines: Some(&state.footer_pane.syntax_lines),
+                scroll_row: state.footer_pane.scroll_row,
+                cursor_point: (active && state.active_pane == BrowserPane::Footer)
+                    .then_some(state.footer_pane.cursor()),
+                pane_active: active && state.active_pane == BrowserPane::Footer,
+                pane_layout: browser_layout.footer,
+                title: "",
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+            },
+            PanelPalette {
+                theme_registry,
+                panel_background,
+                header_background: panel_background,
+                foreground,
+                muted,
+                border_color,
+                active_border,
+                selection,
+                yank_flash_color: selection,
+                cursor,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     }
     Ok(())

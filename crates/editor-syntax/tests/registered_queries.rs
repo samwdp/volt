@@ -6,7 +6,6 @@
 //! the pre-built grammar from `user/lang/grammars/` (committed for development)
 //! and uses the bundled `markdown-inline/highlights.scm` query; this is the
 //! explicit regression guard requested for that language pair.
-#![allow(unused_crate_dependencies)]
 use std::path::PathBuf;
 
 use editor_buffer::TextBuffer;
@@ -482,7 +481,7 @@ fn razor_bundled_highlights_query_compiles() {
         snapshot
             .highlight_spans
             .iter()
-            .any(|span| span.capture_name == "keyword.coroutine"),
+            .any(|span| span.capture_name.as_ref() == "keyword.coroutine"),
         "expected @await to produce a keyword.coroutine span, got {:?}",
         snapshot.highlight_spans
     );
@@ -668,7 +667,7 @@ fn markdown_fenced_code_blocks_use_injected_language_highlighting() {
         snapshot
             .highlight_spans
             .iter()
-            .any(|span| span.capture_name == "markup.strong"
+            .any(|span| span.capture_name.as_ref() == "markup.strong"
                 && span.start_byte <= bold_byte
                 && bold_byte < span.end_byte),
         "expected markdown-inline strong emphasis span covering byte {bold_byte}, got {:?}",
@@ -678,7 +677,7 @@ fn markdown_fenced_code_blocks_use_injected_language_highlighting() {
         snapshot
             .highlight_spans
             .iter()
-            .any(|span| span.theme_token == "syntax.function"
+            .any(|span| span.theme_token.as_ref() == "syntax.function"
                 && span.start_byte <= injected_fn_byte
                 && injected_fn_byte < span.end_byte),
         "expected injected Rust function span covering byte {injected_fn_byte}, got {:?}",
@@ -688,7 +687,7 @@ fn markdown_fenced_code_blocks_use_injected_language_highlighting() {
         snapshot
             .highlight_spans
             .iter()
-            .any(|span| span.theme_token == "syntax.string.inline"
+            .any(|span| span.theme_token.as_ref() == "syntax.string.inline"
                 && span.start_byte <= injected_string_byte
                 && injected_string_byte < span.end_byte),
         "expected injected Rust inline string span covering byte {injected_string_byte}, got {:?}",

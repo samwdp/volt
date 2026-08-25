@@ -174,6 +174,8 @@ pub enum KeymapScope {
     Hover,
     /// DAP Mode: live Debug Session on the active Workspace.
     Dap,
+    /// Workspace Dock Minor Mode (vertical workspace list focus).
+    WorkspaceDock,
 }
 
 impl fmt::Display for KeymapScope {
@@ -185,6 +187,7 @@ impl fmt::Display for KeymapScope {
             Self::Autocomplete => formatter.write_str("autocomplete"),
             Self::Hover => formatter.write_str("hover"),
             Self::Dap => formatter.write_str("dap"),
+            Self::WorkspaceDock => formatter.write_str("workspace-dock"),
         }
     }
 }
@@ -840,6 +843,35 @@ mod tests {
             .resolve_with_minor_modes(&[], KeymapVimMode::Any, "F5")
             .expect("Global F5 should start when DAP Mode is inactive");
         assert_eq!(started.command_name(), "dap.start");
+        Ok(())
+    }
+
+    #[test]
+    fn popup_mode_does_not_claim_workspace_dock_chords() -> Result<(), KeymapError> {
+        let mut registry = KeymapRegistry::new();
+        registry.register(
+            "j",
+            "workspace.dock.next",
+            KeymapScope::WorkspaceDock,
+            CommandSource::Core,
+        )?;
+        registry.register(
+            "j",
+            "vim.move-down",
+            KeymapScope::Workspace,
+            CommandSource::Core,
+        )?;
+
+        assert!(
+            registry
+                .find_in_scopes(&[KeymapScope::Popup], KeymapVimMode::Any, "j")
+                .is_none(),
+            "Popup Minor Mode must not claim Workspace Dock j"
+        );
+        let dock = registry
+            .resolve_with_minor_modes(&[KeymapScope::WorkspaceDock], KeymapVimMode::Any, "j")
+            .expect("Workspace Dock Minor Mode should claim j");
+        assert_eq!(dock.command_name(), "workspace.dock.next");
         Ok(())
     }
 }

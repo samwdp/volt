@@ -31,7 +31,6 @@ pub(super) enum StreamedCommandExitAction {
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
     ContinueToolInstall(Box<ToolInstallState>),
     /// Keep the popup buffer open after the process exits; no git refresh, no close.
-    #[allow(dead_code)]
     LeaveOpen,
     /// Keep the popup buffer open; if the build succeeded and the command targets
     /// `volt-user`, trigger a user-library hot-reload into the running runtime.
@@ -67,14 +66,8 @@ pub(super) struct ExternalCommandSpec {
 
 #[derive(Debug)]
 pub(super) enum ExternalCommandResult {
-    Streamed {
-        #[expect(dead_code)]
-        buffer_id: BufferId,
-    },
-    Silent {
-        #[expect(dead_code)]
-        stdout: String,
-    },
+    Streamed,
+    Silent,
 }
 
 impl ExternalCommandSpec {
@@ -295,21 +288,11 @@ pub(super) fn run_command(
             notify_on_success: spec.notify_on_success,
             notify_on_failure: spec.notify_on_failure,
         };
-        let buffer_id = open_streamed_command_popup(runtime, streamed)?;
-        return Ok(ExternalCommandResult::Streamed { buffer_id });
+        open_streamed_command_popup(runtime, streamed)?;
+        return Ok(ExternalCommandResult::Streamed);
     }
 
-    run_silent_external_command(
-        runtime,
-        &spec.popup_title,
-        &command_label,
-        &program,
-        &args,
-        &spec.env,
-        &spec.cwd,
-        spec.notify_on_success,
-        spec.notify_on_failure,
-    )
+    run_silent_external_command(runtime, &spec, &program, &args, &command_label)
 }
 
 pub(super) fn resolve_external_invocation(
@@ -340,19 +323,14 @@ pub(super) fn resolve_external_invocation(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn run_silent_external_command(
     runtime: &mut EditorRuntime,
-    popup_title: &str,
-    command_label: &str,
+    spec: &ExternalCommandSpec,
     program: &str,
     args: &[String],
-    env: &[(String, String)],
-    cwd: &Path,
-    notify_on_success: bool,
-    notify_on_failure: bool,
+    command_label: &str,
 ) -> Result<ExternalCommandResult, String> {
-    let env = enrich_env_with_node_manager(Some(cwd), env.to_vec());
+    let env = enrich_env_with_node_manager(Some(&spec.cwd), spec.env.clone());
     let (program, args) = supervised_command_if_resolved(
         program,
         args,
@@ -364,7 +342,7 @@ fn run_silent_external_command(
     command
         .args(&args)
         .envs(env)
-        .current_dir(cwd)
+        .current_dir(&spec.cwd)
         .stdin(Stdio::null());
     configure_background_command(&mut command);
     let output = command
@@ -374,7 +352,7 @@ fn run_silent_external_command(
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let success = output.status.success();
     let exit_code = output.status.code();
-    if (success && notify_on_success) || (!success && notify_on_failure) {
+    if (success && spec.notify_on_success) || (!success && spec.notify_on_failure) {
         let error = (!success).then(|| {
             let transcript = if stderr.is_empty() {
                 stdout.clone()
@@ -404,9 +382,9 @@ fn run_silent_external_command(
                     NotificationSeverity::Error
                 },
                 title: if success {
-                    format!("{popup_title} succeeded")
+                    format!("{} succeeded", spec.popup_title)
                 } else {
-                    format!("{popup_title} failed")
+                    format!("{} failed", spec.popup_title)
                 },
                 body_lines,
                 progress: None,
@@ -432,7 +410,7 @@ fn run_silent_external_command(
         };
         return Err(format!("{command_label} failed: {detail}"));
     }
-    Ok(ExternalCommandResult::Silent { stdout })
+    Ok(ExternalCommandResult::Silent)
 }
 
 pub(super) fn continue_streamed_command_popup(
@@ -950,7 +928,6 @@ fn drain_completed_output_lines(pending: &mut Vec<u8>) -> Vec<String> {
 /// `dotnet build`, `package.json` → `npm run build`, `Makefile` → `make`.
 /// Returns an empty string if no marker is found. Detection is shallow (no
 /// recursion into sub-directories).
-#[allow(dead_code)]
 pub(super) fn detect_build_command(dir: &std::path::Path) -> String {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,

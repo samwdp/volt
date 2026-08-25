@@ -549,18 +549,19 @@ pub(super) fn buffer_close_confirm_overlay(
     PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_picker_overlay(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
-    picker: &PickerOverlay,
-    width: u32,
-    height: u32,
-    line_height: i32,
-    theme_registry: Option<&ThemeRegistry>,
-    picker_layout: editor_plugin_api::PickerLayout,
-    truncate_strategy: PickerTruncateStrategy,
+    draw: PickerOverlayDraw<'_>,
 ) -> Result<(), ShellError> {
+    let PickerOverlayDraw {
+        picker,
+        size: WindowSize { width, height },
+        line_height,
+        theme_registry,
+        picker_layout,
+        truncate_strategy,
+    } = draw;
     let popup_rect = picker_card_rect(width, height, picker_layout);
     let window_effects = current_window_effect_settings(theme_registry);
     let cell_width = fonts
@@ -618,12 +619,14 @@ pub(super) fn render_picker_overlay(
     paint_overlay_card(
         target,
         card_rect,
-        corner_radius,
-        border,
-        popup_background,
-        window_effects,
-        Some(accent),
-        false,
+        OverlayCardStyle {
+            radius: corner_radius,
+            border,
+            background: popup_background,
+            window_effects,
+            accent: Some(accent),
+            shadow: false,
+        },
     )?;
 
     draw_text(
@@ -831,18 +834,20 @@ pub(super) fn render_picker_overlay(
                 .map(Vec::as_slice);
             draw_buffer_text(
                 target,
-                layout.x,
-                layout.y + index as i32 * line_height,
-                line,
-                LineWrapSegment {
-                    start_col: 0,
-                    end_col,
+                BufferTextRun {
+                    x: layout.x,
+                    y: layout.y + index as i32 * line_height,
+                    line,
+                    segment: LineWrapSegment {
+                        start_col: 0,
+                        end_col,
+                    },
+                    char_map: &char_map,
+                    line_syntax_spans: syntax_spans,
+                    default_color: subtle,
+                    cell_width,
                 },
-                &char_map,
-                syntax_spans,
                 theme_registry,
-                subtle,
-                cell_width,
             )?;
         }
     }

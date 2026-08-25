@@ -354,7 +354,7 @@ pub fn package() -> PluginPackage {
     ])
     .with_key_bindings(vec![
         PluginKeyBinding::new(
-            "Space d a",
+            "Space t b",
             "dap.toggle-breakpoint",
             PluginKeymapScope::Workspace,
         ),
@@ -634,11 +634,11 @@ mod tests {
             .collect();
         assert!(
             bindings.contains(&(
-                "Space d a",
+                "Space t b",
                 "dap.toggle-breakpoint",
                 PluginKeymapScope::Workspace
             )),
-            "Workspace <leader> da must toggle Breakpoint"
+            "Workspace <leader> tb must toggle Breakpoint"
         );
         assert!(
             bindings.contains(&("F5", "dap.start", PluginKeymapScope::Global)),

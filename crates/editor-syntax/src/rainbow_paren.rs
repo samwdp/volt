@@ -1,5 +1,6 @@
 use crate::{HighlightSpan, SyntaxSnapshot};
-use editor_buffer::TextBuffer;
+use editor_buffer::SyntaxText;
+use std::sync::Arc;
 
 /// Maximum rainbow depth with a dedicated theme token (cycles after this).
 pub const MAX_DEPTH: usize = 9;
@@ -80,7 +81,7 @@ pub fn apply_rainbow_delimiter_spans(
 /// Applies rainbow delimiter coloring without flattening the rope into a `String`.
 pub fn apply_rainbow_delimiter_spans_for_buffer(
     snapshot: &mut SyntaxSnapshot,
-    buffer: &TextBuffer,
+    buffer: &impl SyntaxText,
     enabled: bool,
 ) {
     if !enabled {
@@ -115,7 +116,7 @@ fn apply_rainbow_delimiter_spans_inner(
         .highlight_spans
         .iter()
         .enumerate()
-        .filter(|(_, span)| span.capture_name == BRACKET_CAPTURE)
+        .filter(|(_, span)| span.capture_name.as_ref() == BRACKET_CAPTURE)
         .map(|(index, span)| (index, span.start_byte))
         .collect::<Vec<_>>();
 
@@ -176,8 +177,8 @@ fn apply_rainbow_delimiter_spans_inner(
             let Some(span) = snapshot.highlight_spans.get_mut(bracket.index) else {
                 continue;
             };
-            span.theme_token = theme_token.to_owned();
-            span.capture_name = capture_name.to_owned();
+            span.theme_token = Arc::from(theme_token);
+            span.capture_name = Arc::from(capture_name);
         }
         group_start = group_end;
     }
@@ -288,12 +289,12 @@ mod tests {
         assert_eq!(bracket_tokens(&from_text), bracket_tokens(&from_buffer));
     }
 
-    fn bracket_tokens(snapshot: &SyntaxSnapshot) -> Vec<String> {
+    fn bracket_tokens(snapshot: &SyntaxSnapshot) -> Vec<&str> {
         snapshot
             .highlight_spans
             .iter()
             .filter(|span| span.capture_name.starts_with("rainbow.paren."))
-            .map(|span| span.theme_token.clone())
+            .map(|span| span.theme_token.as_ref())
             .collect()
     }
 
@@ -308,29 +309,21 @@ mod tests {
     fn nested_parens_receive_increasing_depth_tokens() {
         let snapshot = highlight_nested_parens("fn main() { if true { () } }");
         let tokens = bracket_tokens(&snapshot);
-        assert!(tokens.iter().any(|token| token == "rainbow.paren.depth.1"));
-        assert!(tokens.iter().any(|token| token == "rainbow.paren.depth.2"));
-        assert!(tokens.iter().any(|token| token == "rainbow.paren.depth.3"));
+        assert!(tokens.contains(&"rainbow.paren.depth.1"));
+        assert!(tokens.contains(&"rainbow.paren.depth.2"));
+        assert!(tokens.contains(&"rainbow.paren.depth.3"));
     }
 
     #[test]
     fn unmatched_closing_paren_uses_unmatched_token() {
         let snapshot = highlight_nested_parens("fn main() )");
-        assert!(
-            bracket_tokens(&snapshot)
-                .iter()
-                .any(|token| token == TOKEN_UNMATCHED)
-        );
+        assert!(bracket_tokens(&snapshot).contains(&TOKEN_UNMATCHED));
     }
 
     #[test]
     fn mismatched_closing_delimiter_uses_mismatched_token() {
         let snapshot = highlight_nested_parens("fn main() { ]");
-        assert!(
-            bracket_tokens(&snapshot)
-                .iter()
-                .any(|token| token == TOKEN_MISMATCHED)
-        );
+        assert!(bracket_tokens(&snapshot).contains(&TOKEN_MISMATCHED));
     }
 
     #[test]
@@ -344,14 +337,14 @@ mod tests {
             .filter(|span| {
                 span.start_byte == brace_byte && span.capture_name.starts_with("rainbow.paren.")
             })
-            .map(|span| span.theme_token.clone())
+            .map(|span| span.theme_token.as_ref())
             .collect::<Vec<_>>();
         assert!(
             tokens.len() >= 2,
             "expected duplicate bracket captures in test setup, got {tokens:?}"
         );
         assert!(
-            tokens.iter().all(|token| token == "rainbow.paren.depth.1"),
+            tokens.iter().all(|token| *token == "rainbow.paren.depth.1"),
             "duplicate captures at the same delimiter should share depth, got {tokens:?}"
         );
     }
@@ -370,8 +363,8 @@ mod tests {
             snapshot
                 .highlight_spans
                 .iter()
-                .filter(|span| span.capture_name == "punctuation.bracket")
-                .all(|span| span.theme_token == "syntax.punctuation.bracket")
+                .filter(|span| span.capture_name.as_ref() == "punctuation.bracket")
+                .all(|span| span.theme_token.as_ref() == "syntax.punctuation.bracket")
         );
     }
 
@@ -393,7 +386,7 @@ mod tests {
         let bracket_spans = snapshot
             .highlight_spans
             .iter()
-            .filter(|span| span.capture_name == "punctuation.bracket")
+            .filter(|span| span.capture_name.as_ref() == "punctuation.bracket")
             .count();
 
         const ITERATIONS: u32 = 20;

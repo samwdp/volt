@@ -24,23 +24,11 @@ fn image_cache() -> &'static Mutex<HashMap<String, MarkdownImageCacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Host-side Pretty state placeholder (image cache is process-global).
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub(super) struct MarkdownPrettyHostState;
-
 #[derive(Debug, Clone)]
 pub(super) enum MarkdownImageCacheEntry {
     Loading,
     Ready(DecodedImage),
     Failed(String),
-}
-
-impl MarkdownPrettyHostState {
-    #[allow(dead_code)]
-    pub(super) fn new() -> Self {
-        Self
-    }
 }
 
 pub(super) fn plan_config_from_user(config: editor_plugin_api::MarkdownPrettyConfig) -> PlanConfig {
@@ -62,29 +50,11 @@ pub(super) fn plan_config_from_user(config: editor_plugin_api::MarkdownPrettyCon
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_markdown_pretty_plan(
-    text: &str,
-    config: &PlanConfig,
-    buffer_enabled: Option<bool>,
-    buffer_path: Option<&Path>,
-    workspace_root: Option<&Path>,
-    cursor_line: Option<usize>,
-    visual_lines: Option<std::ops::Range<usize>>,
-    visible_lines: Option<std::ops::Range<usize>>,
+    request: &MarkdownPrettyRequest<'_>,
     registry: Option<&mut SyntaxRegistry>,
 ) -> MarkdownPrettyPlan {
-    let request = MarkdownPrettyRequest {
-        text,
-        config,
-        buffer_enabled,
-        buffer_path,
-        workspace_root,
-        cursor_line,
-        visual_lines,
-        visible_lines,
-    };
-    plan_markdown_pretty(&request, registry)
+    plan_markdown_pretty(request, registry)
 }
 
 pub(super) fn pretty_display_line(

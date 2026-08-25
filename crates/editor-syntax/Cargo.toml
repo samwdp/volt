@@ -25,6 +25,7 @@ path = "../editor-buffer"
 path = "../editor-path"
 
 [dev-dependencies]
+criterion = "0.5.1"
 tree-sitter-html = "0.23.2"
 tree-sitter-rust = "0.24.1"
 
@@ -56,3 +57,7 @@ path = "src/lib.rs"
 name = "editor_syntax"
 required-features = []
 crate-type = ["lib"]
+
+[[bench]]
+name = "highlight"
+harness = false

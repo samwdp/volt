@@ -486,15 +486,15 @@ mod tests {
         ];
         let syntax = dap_variable_syntax_lines(&lines, false);
         assert_eq!(
-            syntax.get(&0).map(|spans| spans[0].theme_token.as_str()),
+            syntax.get(&0).map(|spans| spans[0].theme_token.as_ref()),
             Some(TOKEN_DEBUG_VARIABLE_EMPTY)
         );
         assert_eq!(
-            syntax.get(&1).map(|spans| spans[0].theme_token.as_str()),
+            syntax.get(&1).map(|spans| spans[0].theme_token.as_ref()),
             Some(TOKEN_DEBUG_VARIABLE_HEADER)
         );
         assert_eq!(
-            syntax.get(&2).map(|spans| spans[0].theme_token.as_str()),
+            syntax.get(&2).map(|spans| spans[0].theme_token.as_ref()),
             Some(TOKEN_DEBUG_VARIABLE_WATCH)
         );
     }

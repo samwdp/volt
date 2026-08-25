@@ -20,22 +20,6 @@ struct SharedThemeConfig {
     language_options: BTreeMap<String, BTreeMap<String, ThemeOption>>,
 }
 
-#[allow(dead_code)]
-impl SharedThemeConfig {
-    /// Returns the emoji font name when configured.
-    pub fn emoji_font(&self) -> Option<&str> {
-        self.options.get("emoji_font").and_then(ThemeOption::as_str)
-    }
-
-    /// Returns the emoji font size when configured.
-    pub fn emoji_font_size(&self) -> Option<u32> {
-        self.options
-            .get("emoji_font_size")
-            .and_then(ThemeOption::as_number)
-            .and_then(|v| u32::try_from(v as i64).ok())
-    }
-}
-
 impl SharedThemeConfig {
     fn apply_to_theme(&self, mut theme: Theme) -> Theme {
         for (option, value) in &self.options {

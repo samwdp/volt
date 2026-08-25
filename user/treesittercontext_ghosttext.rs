@@ -7,7 +7,7 @@ use crate::treesittercontext_shared::format_context_label_from_header;
 /// Returns inline ghost-text breadcrumbs derived from tree-sitter contexts.
 pub fn ghost_text_lines(context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
     let contexts = treesitter::ancestor_contexts_for_cursor(
-        &crate::syntax_languages(),
+        crate::syntax_language_configs(),
         context.language_id,
         context.buffer_text,
         context.buffer_id,

@@ -40,17 +40,19 @@ fn markdown_inline_image_rows(
     rows.min(max_rows.max(1))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn markdown_pretty_paint_plan(
     buffer: &ShellBuffer,
     user_library: &dyn UserLibrary,
-    visible_start: usize,
-    visible_end: usize,
-    visual_selection: Option<VisualSelection>,
-    input_mode: InputMode,
-    pane_width_px: u32,
-    line_height: i32,
+    args: MarkdownPrettyPaintArgs,
 ) -> MarkdownPrettyPaintPlan {
+    let MarkdownPrettyPaintArgs {
+        visible_start,
+        visible_end,
+        visual_selection,
+        input_mode,
+        pane_width_px,
+        line_height,
+    } = args;
     let mut paint = MarkdownPrettyPaintPlan::default();
     if buffer.language_id() != Some("markdown") {
         return paint;
@@ -78,20 +80,6 @@ pub(super) fn markdown_pretty_paint_plan(
     } else {
         None
     };
-    let plan = markdown_pretty::build_markdown_pretty_plan(
-        &text,
-        &config,
-        Some(enabled),
-        buffer.text.path(),
-        None,
-        Some(cursor_line),
-        visual_range.clone(),
-        Some(visible_start..visible_end.max(visible_start.saturating_add(1))),
-        None,
-    );
-    if plan.skipped_by_kill_switch || plan.lines.is_empty() {
-        return paint;
-    }
     let request = editor_markdown::MarkdownPrettyRequest {
         text: &text,
         config: &config,
@@ -102,6 +90,10 @@ pub(super) fn markdown_pretty_paint_plan(
         visual_lines: visual_range,
         visible_lines: Some(visible_start..visible_end.max(visible_start.saturating_add(1))),
     };
+    let plan = markdown_pretty::build_markdown_pretty_plan(&request, None);
+    if plan.skipped_by_kill_switch || plan.lines.is_empty() {
+        return paint;
+    }
     let line_count = buffer.line_count();
     for line_index in visible_start..visible_end.min(line_count) {
         let source = buffer.text.line(line_index).unwrap_or_default();
@@ -157,28 +149,31 @@ pub(super) fn markdown_pretty_paint_plan(
     paint
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_shell_state(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
     workspace_dock_entries: &[WorkspaceDockEntry],
-    user_library: &dyn UserLibrary,
-    workspace_name: &str,
-    lsp_server: Option<&str>,
-    lsp_workspace_loaded: bool,
-    acp_connected: bool,
-    theme_registry: Option<&ThemeRegistry>,
-    width: u32,
-    height: u32,
-    fps_overlay: Option<&FpsOverlaySnapshot>,
-    cell_width: i32,
-    line_height: i32,
-    ascent: i32,
-    now: Instant,
-    typing_active: bool,
+    chrome: ShellChrome<'_>,
+    view: ShellFrameView<'_>,
 ) -> Result<(), ShellError> {
+    let ShellChrome {
+        user_library,
+        theme_registry,
+        ..
+    } = chrome;
+    let ShellFrameView {
+        size: WindowSize { width, height },
+        fps_overlay,
+        metrics,
+        pulse: FramePulse { now, typing_active },
+    } = view;
+    let TextMetrics {
+        cell_width,
+        line_height,
+        ascent,
+    } = metrics;
     let dock = workspace_dock_layout(user_library, state, width, height, cell_width);
     let content_height = height;
     let popup_height = runtime_popup
@@ -268,31 +263,31 @@ pub(super) fn render_shell_state(
                     .buffer_view_state(pane.pane_id, buffer.id())
                     .unwrap_or_else(|| buffer.view_state())
             };
-            render_buffer_with_view_state(
+            render_buffer(
                 target,
-                buffer,
-                view_state,
-                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
-                active,
-                visual_range,
-                multicursor.as_ref(),
-                yank_flash,
-                input_mode,
-                vim_targets_input,
-                state.vim().recording_macro,
-                command_line_input,
-                command_line_row_visible,
-                user_library,
-                workspace_name,
-                lsp_server,
-                lsp_workspace_loaded,
-                acp_connected,
-                git_summary.as_ref(),
-                theme_registry,
-                typing_active,
-                cell_width,
-                line_height,
-                ascent,
+                BufferDrawRequest {
+                    buffer,
+                    view_state,
+                    pane: PaneSlot {
+                        rect: PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                        active,
+                    },
+                    decorations: BufferDecorations {
+                        visual_selection: visual_range,
+                        yank_flash,
+                        input_mode,
+                        multicursor: multicursor.as_ref(),
+                        vim_targets_input,
+                        recording_macro: state.vim().recording_macro,
+                        typing_active,
+                    },
+                    command_line: CommandLineSlot {
+                        input: command_line_input,
+                        row_visible: command_line_row_visible,
+                    },
+                },
+                BufferChrome::from_shell(&chrome, git_summary.as_ref()),
+                metrics,
             )?;
         }
     }
@@ -300,7 +295,6 @@ pub(super) fn render_shell_state(
     if let Some(popup) = runtime_popup {
         render_runtime_popup_overlay(
             target,
-            fonts,
             state,
             popup,
             PixelRectToRect::rect(
@@ -309,17 +303,9 @@ pub(super) fn render_shell_state(
                 dock.content_width,
                 popup_height,
             ),
-            user_library,
-            workspace_name,
-            lsp_server,
-            lsp_workspace_loaded,
-            acp_connected,
-            theme_registry,
-            cell_width,
-            line_height,
-            ascent,
-            now,
-            typing_active,
+            chrome,
+            metrics,
+            FramePulse { now, typing_active },
         )?;
     }
 
@@ -355,8 +341,7 @@ pub(super) fn render_shell_state(
                 ),
                 commandline_y,
                 theme_registry,
-                cell_width,
-                line_height,
+                metrics.cells(),
             )?;
         }
     }
@@ -370,17 +355,18 @@ pub(super) fn render_shell_state(
             target,
             state,
             autocomplete,
-            PixelRectToRect::rect(
-                active_rect.x,
-                active_rect.y,
-                active_rect.width,
-                active_rect.height,
-            ),
-            user_library,
-            theme_registry,
-            cell_width,
-            line_height,
-            typing_active,
+            OverlayAnchorContext {
+                pane_rect: PixelRectToRect::rect(
+                    active_rect.x,
+                    active_rect.y,
+                    active_rect.width,
+                    active_rect.height,
+                ),
+                user_library,
+                theme_registry,
+                metrics: metrics.cells(),
+                typing_active,
+            },
         )?;
     }
 
@@ -391,17 +377,18 @@ pub(super) fn render_shell_state(
             target,
             state,
             hover,
-            PixelRectToRect::rect(
-                active_rect.x,
-                active_rect.y,
-                active_rect.width,
-                active_rect.height,
-            ),
-            user_library,
-            theme_registry,
-            cell_width,
-            line_height,
-            typing_active,
+            OverlayAnchorContext {
+                pane_rect: PixelRectToRect::rect(
+                    active_rect.x,
+                    active_rect.y,
+                    active_rect.width,
+                    active_rect.height,
+                ),
+                user_library,
+                theme_registry,
+                metrics: metrics.cells(),
+                typing_active,
+            },
         )?;
     }
 
@@ -409,24 +396,23 @@ pub(super) fn render_shell_state(
         picker::render_picker_overlay(
             target,
             fonts,
-            picker,
-            width,
-            height,
-            line_height,
-            theme_registry,
-            user_library.picker_layout(),
-            user_library.picker_truncate_strategy(),
+            PickerOverlayDraw {
+                picker,
+                size: WindowSize { width, height },
+                line_height,
+                theme_registry,
+                picker_layout: user_library.picker_layout(),
+                truncate_strategy: user_library.picker_truncate_strategy(),
+            },
         )?;
     }
 
     render_notification_overlay(
         target,
         state,
-        width,
-        height,
+        WindowSize { width, height },
         theme_registry,
-        cell_width,
-        line_height,
+        metrics.cells(),
         now,
     )?;
     render_fps_overlay(
@@ -515,12 +501,14 @@ fn render_fps_overlay(
     paint_overlay_card(
         target,
         rect,
-        radius,
-        border,
-        background,
-        window_effects,
-        Some(accent),
-        false,
+        OverlayCardStyle {
+            radius,
+            border,
+            background,
+            window_effects,
+            accent: Some(accent),
+            shadow: false,
+        },
     )?;
     draw_text(target, rect.x() + 14, rect.y() + 8, &text, base_foreground)?;
     Ok(())
@@ -569,17 +557,19 @@ fn paint_overlay_shadow(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn paint_overlay_card(
     target: &mut DrawTarget<'_>,
     rect: Rect,
-    radius: u32,
-    border: Color,
-    background: Color,
-    window_effects: WindowEffects,
-    accent: Option<Color>,
-    shadow: bool,
+    style: OverlayCardStyle,
 ) -> Result<(), ShellError> {
+    let OverlayCardStyle {
+        radius,
+        border,
+        background,
+        window_effects,
+        accent,
+        shadow,
+    } = style;
     if shadow {
         paint_overlay_shadow(target, rect, radius, window_effects)?;
     }
@@ -701,25 +691,17 @@ pub(super) fn popup_content_rect(popup_rect: Rect) -> Rect {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_runtime_popup_overlay(
     target: &mut DrawTarget<'_>,
-    _fonts: &FontSet<'_>,
     state: &ShellUiState,
     popup: &RuntimePopupSnapshot,
     popup_rect: Rect,
-    user_library: &dyn UserLibrary,
-    workspace_name: &str,
-    lsp_server: Option<&str>,
-    lsp_workspace_loaded: bool,
-    acp_connected: bool,
-    theme_registry: Option<&ThemeRegistry>,
-    cell_width: i32,
-    line_height: i32,
-    ascent: i32,
-    now: Instant,
-    typing_active: bool,
+    chrome: ShellChrome<'_>,
+    metrics: TextMetrics,
+    pulse: FramePulse,
 ) -> Result<(), ShellError> {
+    let ShellChrome { theme_registry, .. } = chrome;
+    let FramePulse { now, typing_active } = pulse;
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
@@ -757,49 +739,53 @@ pub(super) fn render_runtime_popup_overlay(
             .multicursor_for_buffer(buffer.id(), popup_focus)
             .cloned();
         let yank_flash = state.yank_flash(buffer.id(), now);
-        render_buffer_with_view_state(
+        render_buffer(
             target,
-            buffer,
-            view_state,
-            popup_content_rect(popup_rect),
-            popup_focus,
-            visual_range,
-            multicursor.as_ref(),
-            yank_flash,
-            input_mode,
-            vim_targets_input,
-            state.vim().recording_macro,
-            None,
-            false,
-            user_library,
-            workspace_name,
-            lsp_server,
-            lsp_workspace_loaded,
-            acp_connected,
-            git_summary.as_ref(),
-            theme_registry,
-            typing_active,
-            cell_width,
-            line_height,
-            ascent,
+            BufferDrawRequest {
+                buffer,
+                view_state,
+                pane: PaneSlot {
+                    rect: popup_content_rect(popup_rect),
+                    active: popup_focus,
+                },
+                decorations: BufferDecorations {
+                    visual_selection: visual_range,
+                    yank_flash,
+                    input_mode,
+                    multicursor: multicursor.as_ref(),
+                    vim_targets_input,
+                    recording_macro: state.vim().recording_macro,
+                    typing_active,
+                },
+                command_line: CommandLineSlot {
+                    input: None,
+                    row_visible: false,
+                },
+            },
+            BufferChrome::from_shell(&chrome, git_summary.as_ref()),
+            metrics,
         )?;
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_autocomplete_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
     autocomplete: &AutocompleteOverlay,
-    pane_rect: Rect,
-    user_library: &dyn UserLibrary,
-    theme_registry: Option<&ThemeRegistry>,
-    cell_width: i32,
-    line_height: i32,
-    typing_active: bool,
+    layout: OverlayAnchorContext<'_>,
 ) -> Result<(), ShellError> {
+    let OverlayAnchorContext {
+        pane_rect,
+        user_library,
+        theme_registry,
+        metrics: CellMetrics {
+            cell_width,
+            line_height,
+        },
+        typing_active,
+    } = layout;
     let Some(buffer) = state.buffer(autocomplete.buffer_id) else {
         return Ok(());
     };
@@ -897,12 +883,14 @@ pub(super) fn render_autocomplete_overlay(
     paint_overlay_card(
         target,
         outer_rect,
-        radius,
-        border,
-        panel_background,
-        window_effects,
-        None,
-        false,
+        OverlayCardStyle {
+            radius,
+            border,
+            background: panel_background,
+            window_effects,
+            accent: None,
+            shadow: false,
+        },
     )?;
     fill_overlay_surface_rect(
         target,
@@ -984,18 +972,22 @@ fn autocomplete_visible_start(
         .min(entry_count - visible_rows)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_hover_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
     hover: &HoverOverlay,
-    pane_rect: Rect,
-    user_library: &dyn UserLibrary,
-    theme_registry: Option<&ThemeRegistry>,
-    cell_width: i32,
-    line_height: i32,
-    typing_active: bool,
+    layout: OverlayAnchorContext<'_>,
 ) -> Result<(), ShellError> {
+    let OverlayAnchorContext {
+        pane_rect,
+        user_library,
+        theme_registry,
+        metrics: CellMetrics {
+            cell_width,
+            line_height,
+        },
+        typing_active,
+    } = layout;
     let Some(buffer) = state.buffer(hover.buffer_id) else {
         return Ok(());
     };
@@ -1109,12 +1101,14 @@ pub(super) fn render_hover_overlay(
     paint_overlay_card(
         target,
         outer_rect,
-        radius,
-        focus_border,
-        background,
-        window_effects,
-        None,
-        false,
+        OverlayCardStyle {
+            radius,
+            border: focus_border,
+            background,
+            window_effects,
+            accent: None,
+            shadow: false,
+        },
     )?;
     fill_overlay_top_header_band(
         target,
@@ -1188,15 +1182,17 @@ pub(super) fn render_hover_overlay(
             let row_y = title_y + row_height + index as i32 * row_height;
             draw_buffer_text(
                 target,
-                x + 12,
-                row_y,
-                &line.line,
-                line.segment,
-                &line.char_map,
-                provider.line_syntax_spans(line.source_line_index),
+                BufferTextRun {
+                    x: x + 12,
+                    y: row_y,
+                    line: &line.line,
+                    segment: line.segment,
+                    char_map: &line.char_map,
+                    line_syntax_spans: provider.line_syntax_spans(line.source_line_index),
+                    default_color: foreground,
+                    cell_width,
+                },
                 theme_registry,
-                foreground,
-                cell_width,
             )?;
         }
     }
@@ -1345,17 +1341,19 @@ pub(super) fn notification_action_at_point(
         .and_then(|layout| layout.action)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_notification_overlay(
     target: &mut DrawTarget<'_>,
     state: &ShellUiState,
-    width: u32,
-    height: u32,
+    size: WindowSize,
     theme_registry: Option<&ThemeRegistry>,
-    cell_width: i32,
-    line_height: i32,
+    metrics: CellMetrics,
     now: Instant,
 ) -> Result<(), ShellError> {
+    let WindowSize { width, height } = size;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let notifications = state.visible_notifications(now);
     let layouts =
         notification_overlay_layouts(&notifications, width, height, cell_width, line_height);
@@ -1410,12 +1408,14 @@ pub(super) fn render_notification_overlay(
         paint_overlay_card(
             target,
             outer_rect,
-            radius,
-            border,
-            background,
-            window_effects,
-            Some(accent),
-            false,
+            OverlayCardStyle {
+                radius,
+                border,
+                background,
+                window_effects,
+                accent: Some(accent),
+                shadow: false,
+            },
         )?;
 
         let title_y = layout.rect.y() + 10;
@@ -1972,24 +1972,26 @@ pub(super) fn statusline_icon_colors(
     icon_colors
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_modeline(
     target: &mut DrawTarget<'_>,
     segments: &[ModelineSegment],
-    x: i32,
-    y: i32,
-    max_width: u32,
-    default_color: Color,
-    apply_tokens: bool,
-    theme_registry: Option<&ThemeRegistry>,
-    user_library: &dyn UserLibrary,
-    acp_connected: bool,
-    lsp_server_visible: bool,
-    lsp_workspace_loaded: bool,
-    connected_color: Color,
-    cell_width: i32,
-    line_height: Option<i32>,
+    draw: ModelineDraw<'_>,
 ) -> Result<(), ShellError> {
+    let ModelineDraw {
+        x,
+        y,
+        max_width,
+        default_color,
+        apply_tokens,
+        theme_registry,
+        user_library,
+        acp_connected,
+        lsp_server_visible,
+        lsp_workspace_loaded,
+        connected_color,
+        cell_width,
+        line_height,
+    } = draw;
     let cell_width = cell_width.max(1);
     let gap_width = monospace_text_width(" ", cell_width);
     let chip_height = line_height.unwrap_or(cell_width).max(1) as u32;
@@ -2024,18 +2026,20 @@ fn draw_modeline(
     draw_modeline_side(
         target,
         &left,
-        x,
-        y,
-        left_budget,
-        default_color,
-        apply_tokens,
-        theme_registry,
-        &icon_colors,
-        &highlighted_icons,
-        cell_width,
-        gap_width,
-        chip_height,
-        false,
+        ModelineSideDraw {
+            x,
+            y,
+            max_width: left_budget,
+            default_color,
+            apply_tokens,
+            theme_registry,
+            icon_colors: &icon_colors,
+            highlighted_icons: &highlighted_icons,
+            cell_width,
+            gap_width,
+            chip_height,
+            preserve_end: false,
+        },
     )?;
 
     if right_width > 0 && right_width <= max_width {
@@ -2043,18 +2047,20 @@ fn draw_modeline(
         draw_modeline_side(
             target,
             &right,
-            right_x,
-            y,
-            right_width,
-            default_color,
-            apply_tokens,
-            theme_registry,
-            &icon_colors,
-            &highlighted_icons,
-            cell_width,
-            gap_width,
-            chip_height,
-            true,
+            ModelineSideDraw {
+                x: right_x,
+                y,
+                max_width: right_width,
+                default_color,
+                apply_tokens,
+                theme_registry,
+                icon_colors: &icon_colors,
+                highlighted_icons: &highlighted_icons,
+                cell_width,
+                gap_width,
+                chip_height,
+                preserve_end: true,
+            },
         )?;
     }
     Ok(())
@@ -2076,23 +2082,25 @@ fn modeline_side_width(segments: &[&ModelineSegment], gap_width: u32, cell_width
     width
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_modeline_side(
     target: &mut DrawTarget<'_>,
     segments: &[&ModelineSegment],
-    x: i32,
-    y: i32,
-    max_width: u32,
-    default_color: Color,
-    apply_tokens: bool,
-    theme_registry: Option<&ThemeRegistry>,
-    icon_colors: &[(&str, Color)],
-    highlighted_icons: &[&str],
-    cell_width: i32,
-    gap_width: u32,
-    chip_height: u32,
-    preserve_end: bool,
+    draw: ModelineSideDraw<'_>,
 ) -> Result<(), ShellError> {
+    let ModelineSideDraw {
+        x,
+        y,
+        max_width,
+        default_color,
+        apply_tokens,
+        theme_registry,
+        icon_colors,
+        highlighted_icons,
+        cell_width,
+        gap_width,
+        chip_height,
+        preserve_end,
+    } = draw;
     let mut draw_x = x;
     let mut remaining_width = max_width;
     for (index, segment) in segments.iter().enumerate() {
@@ -2201,12 +2209,14 @@ pub(super) fn buffer_cursor_screen_anchor(
     let cursor_col = buffer.cursor_col();
     let wrapped_lines = collect_wrapped_lines(
         buffer,
-        buffer.scroll_row,
-        visible_rows,
-        wrap_cols,
-        indent_size,
-        buffer.scroll_col,
-        buffer.line_wrap(),
+        WrapCollect {
+            start_line: buffer.scroll_row,
+            max_rows: visible_rows,
+            wrap_cols,
+            indent_size,
+            scroll_col: buffer.scroll_col,
+            line_wrap: buffer.line_wrap(),
+        },
     );
     let mut cursor_row_on_screen = None;
     let mut cursor_col_on_screen = None;
@@ -2274,23 +2284,27 @@ pub(super) fn pretty_cursor_body_row(
     let pretty_paint = markdown_pretty_paint_plan(
         buffer,
         user_library,
-        buffer.scroll_row,
-        buffer
-            .scroll_row
-            .saturating_add(visible_rows.saturating_add(8)),
-        None,
-        InputMode::Normal,
-        text_width_px,
-        line_height,
+        MarkdownPrettyPaintArgs {
+            visible_start: buffer.scroll_row,
+            visible_end: buffer
+                .scroll_row
+                .saturating_add(visible_rows.saturating_add(8)),
+            visual_selection: None,
+            input_mode: InputMode::Normal,
+            pane_width_px: text_width_px,
+            line_height,
+        },
     );
     let wrapped_lines = collect_wrapped_lines_with_display(
         buffer,
-        buffer.scroll_row,
-        visible_rows,
-        wrap_cols,
-        indent_size,
-        buffer.scroll_col,
-        buffer.line_wrap(),
+        WrapCollect {
+            start_line: buffer.scroll_row,
+            max_rows: visible_rows,
+            wrap_cols,
+            indent_size,
+            scroll_col: buffer.scroll_col,
+            line_wrap: buffer.line_wrap(),
+        },
         Some(&pretty_paint.text_overrides),
         Some(&pretty_paint.images),
     );
@@ -2308,19 +2322,24 @@ pub(super) fn pretty_cursor_body_row(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn buffer_point_at_screen(
     buffer: &ShellBuffer,
     rect: Rect,
     user_library: &dyn UserLibrary,
     theme_registry: Option<&ThemeRegistry>,
-    x: i32,
-    y: i32,
-    cell_width: i32,
-    line_height: i32,
-    clamp_body: bool,
-    typing_active: bool,
+    hit: ScreenHit,
+    metrics: CellMetrics,
 ) -> Option<TextPoint> {
+    let ScreenHit {
+        x,
+        y,
+        clamp_body,
+        typing_active,
+    } = hit;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let line_height = line_height.max(1);
     let layout = buffer_footer_layout_with_command_line(
         buffer,
@@ -2356,12 +2375,14 @@ pub(super) fn buffer_point_at_screen(
     let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
     let wrapped_lines = collect_wrapped_lines(
         buffer,
-        buffer.scroll_row,
-        visible_rows,
-        wrap_cols,
-        indent_size,
-        buffer.scroll_col,
-        buffer.line_wrap(),
+        WrapCollect {
+            start_line: buffer.scroll_row,
+            max_rows: visible_rows,
+            wrap_cols,
+            indent_size,
+            scroll_col: buffer.scroll_col,
+            line_wrap: buffer.line_wrap(),
+        },
     );
     let mut visual_row = 0usize;
     for wrapped in wrapped_lines {
@@ -2438,40 +2459,24 @@ impl WrappedLine {
     }
 }
 
-pub(super) fn collect_wrapped_lines(
+pub(super) fn collect_wrapped_lines(buffer: &ShellBuffer, wrap: WrapCollect) -> Vec<WrappedLine> {
+    collect_wrapped_lines_with_display(buffer, wrap, None, None)
+}
+
+pub(super) fn collect_wrapped_lines_with_display(
     buffer: &ShellBuffer,
-    start_line: usize,
-    max_rows: usize,
-    wrap_cols: usize,
-    indent_size: usize,
-    scroll_col: usize,
-    line_wrap: bool,
+    wrap: WrapCollect,
+    display_overrides: Option<&BTreeMap<usize, String>>,
+    inline_images: Option<&BTreeMap<usize, MarkdownInlineImageDraw>>,
 ) -> Vec<WrappedLine> {
-    collect_wrapped_lines_with_display(
-        buffer,
+    let WrapCollect {
         start_line,
         max_rows,
         wrap_cols,
         indent_size,
         scroll_col,
         line_wrap,
-        None,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn collect_wrapped_lines_with_display(
-    buffer: &ShellBuffer,
-    start_line: usize,
-    max_rows: usize,
-    wrap_cols: usize,
-    indent_size: usize,
-    scroll_col: usize,
-    line_wrap: bool,
-    display_overrides: Option<&BTreeMap<usize, String>>,
-    inline_images: Option<&BTreeMap<usize, MarkdownInlineImageDraw>>,
-) -> Vec<WrappedLine> {
+    } = wrap;
     if max_rows == 0 {
         return Vec::new();
     }
@@ -2547,88 +2552,46 @@ pub(super) fn collect_wrapped_lines_with_display(
     lines
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_buffer(
     target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    rect: Rect,
-    active: bool,
-    visual_selection: Option<VisualSelection>,
-    multicursor: Option<&MulticursorState>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    vim_targets_input: bool,
-    recording_macro: Option<char>,
-    command_line_input: Option<&InputField>,
-    command_line_row_visible: bool,
-    user_library: &dyn UserLibrary,
-    workspace_name: &str,
-    lsp_server: Option<&str>,
-    lsp_workspace_loaded: bool,
-    acp_connected: bool,
-    git_summary: Option<&GitSummarySnapshot>,
-    theme_registry: Option<&ThemeRegistry>,
-    typing_active: bool,
-    cell_width: i32,
-    line_height: i32,
-    ascent: i32,
+    request: BufferDrawRequest<'_>,
+    chrome: BufferChrome<'_>,
+    metrics: TextMetrics,
 ) -> Result<(), ShellError> {
-    render_buffer_with_view_state(
-        target,
+    let BufferDrawRequest {
         buffer,
-        buffer.view_state(),
-        rect,
-        active,
-        visual_selection,
-        multicursor,
-        yank_flash,
-        input_mode,
-        vim_targets_input,
-        recording_macro,
-        command_line_input,
-        command_line_row_visible,
+        view_state,
+        pane: PaneSlot { rect, active },
+        decorations:
+            BufferDecorations {
+                visual_selection,
+                yank_flash,
+                input_mode,
+                multicursor,
+                vim_targets_input,
+                recording_macro,
+                typing_active,
+            },
+        command_line:
+            CommandLineSlot {
+                input: command_line_input,
+                row_visible: command_line_row_visible,
+            },
+    } = request;
+    let BufferChrome {
         user_library,
+        theme_registry,
         workspace_name,
         lsp_server,
         lsp_workspace_loaded,
         acp_connected,
         git_summary,
-        theme_registry,
-        typing_active,
+    } = chrome;
+    let TextMetrics {
         cell_width,
         line_height,
         ascent,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_buffer_with_view_state(
-    target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    view_state: BufferViewState,
-    rect: Rect,
-    active: bool,
-    visual_selection: Option<VisualSelection>,
-    multicursor: Option<&MulticursorState>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    vim_targets_input: bool,
-    recording_macro: Option<char>,
-    command_line_input: Option<&InputField>,
-    command_line_row_visible: bool,
-    user_library: &dyn UserLibrary,
-    workspace_name: &str,
-    lsp_server: Option<&str>,
-    lsp_workspace_loaded: bool,
-    acp_connected: bool,
-    git_summary: Option<&GitSummarySnapshot>,
-    theme_registry: Option<&ThemeRegistry>,
-    typing_active: bool,
-    cell_width: i32,
-    line_height: i32,
-    ascent: i32,
-) -> Result<(), ShellError> {
+    } = metrics;
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
     let foreground = theme_color(
@@ -2810,27 +2773,36 @@ fn render_buffer_with_view_state(
     {
         render_terminal_buffer(
             target,
-            buffer,
-            terminal_render,
-            rect,
-            layout,
-            active,
-            input_mode,
-            visual_selection,
-            yank_flash,
-            theme_registry,
-            base_background,
-            cursor,
-            text_color,
-            border_color,
-            statusline,
-            statusline_active,
-            statusline_inactive,
-            selection,
-            yank_flash_color,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            TerminalBufferDraw {
+                buffer,
+                terminal_render,
+                rect,
+                layout,
+                active,
+                input_mode,
+                visual_selection,
+                yank_flash,
+            },
+            BufferBodyPalette {
+                theme_registry,
+                base_background,
+                foreground: text_color,
+                muted: text_color,
+                border_color,
+                selection,
+                yank_flash_color,
+                cursor,
+                cursor_roundness,
+            },
+            TerminalStatusline {
+                text: statusline,
+                active: statusline_active,
+                inactive: statusline_inactive,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
         if let Some(commandline_y) = layout.commandline_y {
             render_footer_separator(
@@ -2843,20 +2815,26 @@ fn render_buffer_with_view_state(
         }
         render_command_line_overlay(
             target,
-            command_line_input,
-            rect,
-            layout,
-            active,
-            input_mode,
-            window_effects,
-            commandline_background,
-            text_color,
-            muted,
-            cursor,
-            cursor_roundness,
-            overlay_radius(theme_registry).min(8),
-            cell_width,
-            line_height,
+            CommandLineOverlayDraw {
+                input: command_line_input,
+                rect,
+                layout,
+                active,
+                input_mode,
+                paint: CommandLinePaint {
+                    window_effects,
+                    background: commandline_background,
+                    foreground: text_color,
+                    muted,
+                    cursor,
+                    cursor_roundness,
+                    chip_radius: overlay_radius(theme_registry).min(8),
+                },
+                metrics: CellMetrics {
+                    cell_width,
+                    line_height,
+                },
+            },
         )?;
         return Ok(());
     }
@@ -2864,45 +2842,58 @@ fn render_buffer_with_view_state(
     if buffer_is_browser(&buffer.kind) {
         render_browser_buffer_body(
             target,
-            buffer,
-            rect,
-            layout,
-            active,
-            input_mode,
-            theme_registry,
-            base_background,
-            foreground,
-            muted,
-            border_color,
-            selection,
-            cursor,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            BrowserBufferDraw {
+                buffer,
+                rect,
+                layout,
+                active,
+                input_mode,
+            },
+            BufferBodyPalette {
+                theme_registry,
+                base_background,
+                foreground,
+                muted,
+                border_color,
+                selection,
+                yank_flash_color: selection,
+                cursor,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     } else if buffer.has_pdf_preview_surface() {
         render_pdf_buffer_body(target, rect, layout, theme_registry, base_background)?;
     } else if buffer.is_acp_buffer() {
         render_acp_buffer_body(
             target,
-            buffer,
-            rect,
-            layout,
-            active,
-            visual_selection,
-            yank_flash,
-            input_mode,
-            theme_registry,
-            base_background,
-            foreground,
-            muted,
-            border_color,
-            selection,
-            yank_flash_color,
-            cursor,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            AcpBufferDraw {
+                buffer,
+                rect,
+                layout,
+                active,
+                visual_selection,
+                yank_flash,
+                input_mode,
+            },
+            BufferBodyPalette {
+                theme_registry,
+                base_background,
+                foreground,
+                muted,
+                border_color,
+                selection,
+                yank_flash_color,
+                cursor,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     } else if buffer.is_rendered_image_buffer() {
         render_image_buffer_body(
@@ -2914,27 +2905,32 @@ fn render_buffer_with_view_state(
             base_background,
         )?;
     } else if buffer.has_plugin_sections() {
-        render_plugin_section_buffer_body_with_view_state(
+        render_plugin_section_buffer_body(
             target,
-            buffer,
-            view_state,
-            rect,
-            layout,
-            active,
-            visual_selection,
-            yank_flash,
-            input_mode,
-            theme_registry,
-            base_background,
-            foreground,
-            muted,
-            border_color,
-            selection,
-            yank_flash_color,
-            cursor,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            PluginSectionDraw {
+                buffer,
+                view_state,
+                pane: PaneSlot { rect, active },
+                layout,
+                visual_selection,
+                yank_flash,
+                input_mode,
+            },
+            BufferBodyPalette {
+                theme_registry,
+                base_background,
+                foreground,
+                muted,
+                border_color,
+                selection,
+                yank_flash_color,
+                cursor,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     } else {
         let debug_fringe_live = buffer.dap_fringe_live();
@@ -2964,23 +2960,27 @@ fn render_buffer_with_view_state(
         let pretty_paint = markdown_pretty_paint_plan(
             buffer,
             user_library,
-            view_state.scroll_row,
-            view_state
-                .scroll_row
-                .saturating_add(visible_rows.saturating_add(8)),
-            visual_selection,
-            input_mode,
-            text_width_px,
-            line_height,
+            MarkdownPrettyPaintArgs {
+                visible_start: view_state.scroll_row,
+                visible_end: view_state
+                    .scroll_row
+                    .saturating_add(visible_rows.saturating_add(8)),
+                visual_selection,
+                input_mode,
+                pane_width_px: text_width_px,
+                line_height,
+            },
         );
         let wrapped_lines = collect_wrapped_lines_with_display(
             buffer,
-            scroll_row,
-            visible_rows,
-            wrap_cols,
-            indent_size,
-            view_state.scroll_col,
-            buffer.line_wrap(),
+            WrapCollect {
+                start_line: scroll_row,
+                max_rows: visible_rows,
+                wrap_cols,
+                indent_size,
+                scroll_col: view_state.scroll_col,
+                line_wrap: buffer.line_wrap(),
+            },
             Some(&pretty_paint.text_overrides),
             Some(&pretty_paint.images),
         );
@@ -3340,46 +3340,51 @@ fn render_buffer_with_view_state(
                 }
                 draw_buffer_text(
                     target,
-                    segment_x,
-                    y,
-                    &wrapped.line,
-                    *segment,
-                    &wrapped.char_map,
-                    buffer.line_syntax_spans(line_index),
+                    BufferTextRun {
+                        x: segment_x,
+                        y,
+                        line: &wrapped.line,
+                        segment: *segment,
+                        char_map: &wrapped.char_map,
+                        line_syntax_spans: buffer.line_syntax_spans(line_index),
+                        default_color: text_color,
+                        cell_width,
+                    },
                     theme_registry,
-                    text_color,
-                    cell_width,
                 )?;
                 if primary_cursor_text_overlay.is_none()
-                    && let Some(overlay) = block_cursor_text_overlay(
-                        segment_x,
-                        &wrapped.line,
-                        &wrapped.char_map,
-                        *segment,
+                    && let Some(overlay) = block_cursor_text_overlay(CursorOverlayQuery {
+                        x: segment_x,
+                        line: &wrapped.line,
+                        char_map: &wrapped.char_map,
+                        segment: *segment,
                         line_index,
-                        cursor_row,
-                        cursor_col,
-                        (matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                        cursor: TextPoint::new(cursor_row, cursor_col),
+                        color: (matches!(input_mode, InputMode::Normal | InputMode::Visual)
                             && !vim_targets_input)
                             .then_some(base_background),
                         cell_width,
-                    )
+                    })
                 {
                     primary_cursor_text_overlay = Some((y, overlay));
                 }
                 if user_library.lsp_show_buffer_diagnostics() && buffer.lsp_enabled() {
                     draw_diagnostic_underlines_for_segment(
                         target,
-                        buffer.lsp_diagnostic_line_spans(line_index),
-                        buffer.line_syntax_spans(line_index),
-                        &wrapped.char_map,
-                        segment_x,
-                        y,
-                        line_len,
-                        *segment,
-                        cell_width,
-                        line_height,
-                        theme_registry,
+                        DiagnosticUnderlineDraw {
+                            diagnostics: buffer.lsp_diagnostic_line_spans(line_index),
+                            syntax_spans: buffer.line_syntax_spans(line_index),
+                            char_map: &wrapped.char_map,
+                            segment_x,
+                            y,
+                            line_len,
+                            segment: *segment,
+                            metrics: CellMetrics {
+                                cell_width,
+                                line_height,
+                            },
+                            theme_registry,
+                        },
                     )?;
                 }
                 draw_line_ghost_text_for_segment(
@@ -3468,14 +3473,20 @@ fn render_buffer_with_view_state(
         }
         paint_buffer_scrollbar(
             target,
-            rect,
-            body_y,
-            visible_rows,
-            line_height,
-            view_state.scroll_row,
-            buffer.max_scroll_row_for_wrapped_rows(visible_rows, wrap_cols, indent_size),
-            muted,
-            window_effects,
+            ScrollbarPaint {
+                pane_rect: rect,
+                body_y,
+                visible_rows,
+                line_height,
+                scroll_row: view_state.scroll_row,
+                max_scroll: buffer.max_scroll_row_for_wrapped_rows(
+                    visible_rows,
+                    wrap_cols,
+                    indent_size,
+                ),
+                color: muted,
+                window_effects,
+            },
         )?;
     }
 
@@ -3648,19 +3659,21 @@ fn render_buffer_with_view_state(
     draw_modeline(
         target,
         &modeline_segments,
-        statusline_x,
-        layout.statusline_y,
-        rect.width().saturating_sub(24),
-        statusline_text_color,
-        active,
-        theme_registry,
-        user_library,
-        acp_connected,
-        lsp_server.is_some(),
-        lsp_workspace_loaded,
-        git_added_fallback,
-        cell_width,
-        Some(line_height),
+        ModelineDraw {
+            x: statusline_x,
+            y: layout.statusline_y,
+            max_width: rect.width().saturating_sub(24),
+            default_color: statusline_text_color,
+            apply_tokens: active,
+            theme_registry,
+            user_library,
+            acp_connected,
+            lsp_server_visible: lsp_server.is_some(),
+            lsp_workspace_loaded,
+            connected_color: git_added_fallback,
+            cell_width,
+            line_height: Some(line_height),
+        },
     )?;
     if let Some(commandline_y) = layout.commandline_y {
         render_footer_separator(
@@ -3673,20 +3686,26 @@ fn render_buffer_with_view_state(
     }
     render_command_line_overlay(
         target,
-        command_line_input,
-        rect,
-        layout,
-        active,
-        input_mode,
-        window_effects,
-        commandline_background,
-        foreground,
-        muted,
-        cursor,
-        cursor_roundness,
-        overlay_radius(theme_registry).min(8),
-        cell_width,
-        line_height,
+        CommandLineOverlayDraw {
+            input: command_line_input,
+            rect,
+            layout,
+            active,
+            input_mode,
+            paint: CommandLinePaint {
+                window_effects,
+                background: commandline_background,
+                foreground,
+                muted,
+                cursor,
+                cursor_roundness,
+                chip_radius: overlay_radius(theme_registry).min(8),
+            },
+            metrics: CellMetrics {
+                cell_width,
+                line_height,
+            },
+        },
     )?;
 
     let _ = ascent;
@@ -3704,24 +3723,31 @@ fn render_buffer_with_view_state(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_command_line_overlay(
     target: &mut DrawTarget<'_>,
-    command_line_input: Option<&InputField>,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    input_mode: InputMode,
-    window_effects: WindowEffects,
-    background: Color,
-    foreground: Color,
-    muted: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    chip_radius: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: CommandLineOverlayDraw<'_>,
 ) -> Result<(), ShellError> {
+    let CommandLineOverlayDraw {
+        input: command_line_input,
+        rect,
+        layout,
+        active,
+        input_mode,
+        paint:
+            CommandLinePaint {
+                window_effects,
+                background,
+                foreground,
+                muted,
+                cursor,
+                cursor_roundness,
+                chip_radius,
+            },
+        metrics: CellMetrics {
+            cell_width,
+            line_height,
+        },
+    } = draw;
     let Some(commandline_y) = layout.commandline_y else {
         return Ok(());
     };
@@ -3784,7 +3810,6 @@ pub(super) fn render_command_line_overlay(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_command_line_completion_popup(
     target: &mut DrawTarget<'_>,
     matches: &[String],
@@ -3792,9 +3817,12 @@ fn render_command_line_completion_popup(
     pane_rect: Rect,
     commandline_y: i32,
     theme_registry: Option<&ThemeRegistry>,
-    cell_width: i32,
-    line_height: i32,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     if matches.is_empty() {
         return Ok(());
     }
@@ -3822,12 +3850,14 @@ fn render_command_line_completion_popup(
     paint_overlay_card(
         target,
         PixelRectToRect::rect(x, y, width, height),
-        radius,
-        adjust_color(background, if is_dark { 24 } else { -24 }),
-        background,
-        window_effects,
-        None,
-        false,
+        OverlayCardStyle {
+            radius,
+            border: adjust_color(background, if is_dark { 24 } else { -24 }),
+            background,
+            window_effects,
+            accent: None,
+            shadow: false,
+        },
     )?;
     let start = selected_index.saturating_sub(visible.saturating_sub(1));
     for (row, (index, label)) in matches
@@ -4092,39 +4122,22 @@ fn plugin_layout_axis(axis: PluginBufferLayoutAxis) -> SplitAxis {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_plugin_section_buffer_body(
     target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    base_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    selection: Color,
-    yank_flash_color: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: PluginSectionDraw<'_>,
+    palette: BufferBodyPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
-    render_plugin_section_buffer_body_with_view_state(
-        target,
+    let PluginSectionDraw {
         buffer,
-        buffer.view_state(),
-        rect,
+        view_state: base_view_state,
+        pane: PaneSlot { rect, active },
         layout,
-        active,
         visual_selection,
         yank_flash,
         input_mode,
+    } = draw;
+    let BufferBodyPalette {
         theme_registry,
         base_background,
         foreground,
@@ -4134,34 +4147,11 @@ pub(super) fn render_plugin_section_buffer_body(
         yank_flash_color,
         cursor,
         cursor_roundness,
+    } = palette;
+    let CellMetrics {
         cell_width,
         line_height,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_plugin_section_buffer_body_with_view_state(
-    target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    base_view_state: BufferViewState,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    base_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    selection: Color,
-    yank_flash_color: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
-) -> Result<(), ShellError> {
+    } = metrics;
     let Some(state) = buffer.plugin_sections() else {
         return Ok(());
     };
@@ -4239,61 +4229,75 @@ fn render_plugin_section_buffer_body_with_view_state(
         };
         render_text_panel(
             target,
-            text,
-            pane_syntax,
-            scroll_row,
-            cursor_point,
-            pane_active,
-            pane_layout,
-            title,
-            pane_visual_selection,
-            pane_yank_flash,
-            pane_mode,
-            theme_registry,
-            panel_background,
-            header_background,
-            foreground,
-            muted,
-            border_color,
-            active_border,
-            selection,
-            yank_flash_color,
-            cursor,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            TextPanelDraw {
+                text,
+                syntax_lines: pane_syntax,
+                scroll_row,
+                cursor_point,
+                pane_active,
+                pane_layout,
+                title,
+                visual_selection: pane_visual_selection,
+                yank_flash: pane_yank_flash,
+                input_mode: pane_mode,
+            },
+            PanelPalette {
+                theme_registry,
+                panel_background,
+                header_background,
+                foreground,
+                muted,
+                border_color,
+                active_border,
+                selection,
+                yank_flash_color,
+                cursor,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_text_panel(
     target: &mut DrawTarget<'_>,
-    text: &TextBuffer,
-    syntax_lines: Option<&IndexedSyntaxLines>,
-    scroll_row: usize,
-    cursor_point: Option<TextPoint>,
-    pane_active: bool,
-    pane_layout: TextPaneLayout,
-    title: &str,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    panel_background: Color,
-    header_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    active_border: Color,
-    selection: Color,
-    yank_flash_color: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: TextPanelDraw<'_>,
+    palette: PanelPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let TextPanelDraw {
+        text,
+        syntax_lines,
+        scroll_row,
+        cursor_point,
+        pane_active,
+        pane_layout,
+        title,
+        visual_selection,
+        yank_flash,
+        input_mode,
+    } = draw;
+    let PanelPalette {
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        selection,
+        yank_flash_color,
+        cursor,
+        cursor_roundness,
+    } = palette;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let window_effects = current_window_effect_settings(theme_registry);
     let corner_radius = shared_corner_radius(theme_registry);
     let rect = pane_layout.rect;
@@ -4408,17 +4412,19 @@ pub(super) fn render_text_panel(
             }
             draw_buffer_text(
                 target,
-                body_x,
-                y,
-                &line,
-                *segment,
-                &char_map,
-                syntax_lines
-                    .and_then(|lines| lines.get(&line_index))
-                    .map(Vec::as_slice),
+                BufferTextRun {
+                    x: body_x,
+                    y,
+                    line: &line,
+                    segment: *segment,
+                    char_map: &char_map,
+                    line_syntax_spans: syntax_lines
+                        .and_then(|lines| lines.get(&line_index))
+                        .map(Vec::as_slice),
+                    default_color: foreground,
+                    cell_width,
+                },
                 theme_registry,
-                foreground,
-                cell_width,
             )?;
             visual_row = visual_row.saturating_add(1);
         }
@@ -4451,26 +4457,35 @@ pub(super) fn render_text_panel(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_input_panel(
     target: &mut DrawTarget<'_>,
-    input: &InputField,
-    pane_active: bool,
-    pane_layout: TextPaneLayout,
-    input_mode: InputMode,
-    window_effects: WindowEffects,
-    corner_radius: u32,
-    panel_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    active_border: Color,
-    selection: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: InputPanelDraw<'_>,
+    palette: PanelPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let InputPanelDraw {
+        input,
+        pane_active,
+        pane_layout,
+        input_mode,
+        window_effects,
+        corner_radius,
+    } = draw;
+    let PanelPalette {
+        panel_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        selection,
+        cursor,
+        cursor_roundness,
+        ..
+    } = palette;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let rect = pane_layout.rect;
     let border = if pane_active {
         active_border
@@ -4690,28 +4705,36 @@ pub(super) fn acp_buffer_layout(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_acp_buffer_body(
     target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    base_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    selection: Color,
-    yank_flash_color: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: AcpBufferDraw<'_>,
+    palette: BufferBodyPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let AcpBufferDraw {
+        buffer,
+        rect,
+        layout,
+        active,
+        visual_selection,
+        yank_flash,
+        input_mode,
+    } = draw;
+    let BufferBodyPalette {
+        theme_registry,
+        base_background,
+        foreground,
+        muted,
+        border_color,
+        selection,
+        yank_flash_color,
+        cursor,
+        cursor_roundness,
+    } = palette;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let Some(state) = buffer.acp_state.as_ref() else {
         return Ok(());
     };
@@ -4749,149 +4772,185 @@ pub(super) fn render_acp_buffer_body(
 
     render_acp_pane(
         target,
-        &state.plan_pane,
-        active_pane == AcpPane::Plan,
-        acp_layout.plan,
-        "Plan",
-        active,
-        if active_pane == AcpPane::Plan {
-            visual_selection
-        } else {
-            None
+        AcpPaneDraw {
+            pane: &state.plan_pane,
+            pane_active: active_pane == AcpPane::Plan,
+            pane_layout: acp_layout.plan,
+            title: "Plan",
+            shell_active: active,
+            visual_selection: if active_pane == AcpPane::Plan {
+                visual_selection
+            } else {
+                None
+            },
+            yank_flash: if active_pane == AcpPane::Plan {
+                yank_flash
+            } else {
+                None
+            },
+            input_mode,
         },
-        if active_pane == AcpPane::Plan {
-            yank_flash
-        } else {
-            None
+        PanelPalette {
+            theme_registry,
+            panel_background,
+            header_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            yank_flash_color,
+            cursor,
+            cursor_roundness,
         },
-        input_mode,
-        theme_registry,
-        panel_background,
-        header_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        yank_flash_color,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
+        CellMetrics {
+            cell_width,
+            line_height,
+        },
     )?;
     render_acp_pane(
         target,
-        &state.output_pane,
-        active_pane == AcpPane::Output,
-        acp_layout.output,
-        &acp_output_header_title(state),
-        active,
-        if active_pane == AcpPane::Output {
-            visual_selection
-        } else {
-            None
+        AcpPaneDraw {
+            pane: &state.output_pane,
+            pane_active: active_pane == AcpPane::Output,
+            pane_layout: acp_layout.output,
+            title: &acp_output_header_title(state),
+            shell_active: active,
+            visual_selection: if active_pane == AcpPane::Output {
+                visual_selection
+            } else {
+                None
+            },
+            yank_flash: if active_pane == AcpPane::Output {
+                yank_flash
+            } else {
+                None
+            },
+            input_mode,
         },
-        if active_pane == AcpPane::Output {
-            yank_flash
-        } else {
-            None
+        PanelPalette {
+            theme_registry,
+            panel_background,
+            header_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            yank_flash_color,
+            cursor,
+            cursor_roundness,
         },
-        input_mode,
-        theme_registry,
-        panel_background,
-        header_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        yank_flash_color,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
+        CellMetrics {
+            cell_width,
+            line_height,
+        },
     )?;
     render_input_panel(
         target,
-        &state.input,
-        active && active_pane == AcpPane::Input,
-        acp_layout.input,
-        input_mode,
-        window_effects,
-        corner_radius,
-        panel_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
+        InputPanelDraw {
+            input: &state.input,
+            pane_active: active && active_pane == AcpPane::Input,
+            pane_layout: acp_layout.input,
+            input_mode,
+            window_effects,
+            corner_radius,
+        },
+        PanelPalette {
+            theme_registry,
+            panel_background,
+            header_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            yank_flash_color,
+            cursor,
+            cursor_roundness,
+        },
+        CellMetrics {
+            cell_width,
+            line_height,
+        },
     )?;
     render_text_panel(
         target,
-        &state.footer_pane.text,
-        Some(&state.footer_pane.syntax_lines),
-        state.footer_pane.scroll_row,
-        (active && active_pane == AcpPane::Footer).then_some(state.footer_pane.cursor()),
-        active && active_pane == AcpPane::Footer,
-        acp_layout.footer,
-        "",
-        if active_pane == AcpPane::Footer {
-            visual_selection
-        } else {
-            None
+        TextPanelDraw {
+            text: &state.footer_pane.text,
+            syntax_lines: Some(&state.footer_pane.syntax_lines),
+            scroll_row: state.footer_pane.scroll_row,
+            cursor_point: (active && active_pane == AcpPane::Footer)
+                .then_some(state.footer_pane.cursor()),
+            pane_active: active && active_pane == AcpPane::Footer,
+            pane_layout: acp_layout.footer,
+            title: "",
+            visual_selection: if active_pane == AcpPane::Footer {
+                visual_selection
+            } else {
+                None
+            },
+            yank_flash: if active_pane == AcpPane::Footer {
+                yank_flash
+            } else {
+                None
+            },
+            input_mode: InputMode::Normal,
         },
-        if active_pane == AcpPane::Footer {
-            yank_flash
-        } else {
-            None
+        PanelPalette {
+            theme_registry,
+            panel_background,
+            header_background,
+            foreground,
+            muted,
+            border_color,
+            active_border,
+            selection,
+            yank_flash_color,
+            cursor,
+            cursor_roundness,
         },
-        InputMode::Normal,
-        theme_registry,
-        panel_background,
-        header_background,
-        foreground,
-        muted,
-        border_color,
-        active_border,
-        selection,
-        yank_flash_color,
-        cursor,
-        cursor_roundness,
-        cell_width,
-        line_height,
+        CellMetrics {
+            cell_width,
+            line_height,
+        },
     )?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_acp_pane(
     target: &mut DrawTarget<'_>,
-    pane: &AcpPaneState,
-    pane_active: bool,
-    pane_layout: AcpPaneLayout,
-    title: &str,
-    shell_active: bool,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    input_mode: InputMode,
-    theme_registry: Option<&ThemeRegistry>,
-    panel_background: Color,
-    header_background: Color,
-    foreground: Color,
-    muted: Color,
-    border_color: Color,
-    active_border: Color,
-    selection: Color,
-    yank_flash_color: Color,
-    cursor: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: AcpPaneDraw<'_>,
+    palette: PanelPalette<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let AcpPaneDraw {
+        pane,
+        pane_active,
+        pane_layout,
+        title,
+        shell_active,
+        visual_selection,
+        yank_flash,
+        input_mode,
+    } = draw;
+    let PanelPalette {
+        theme_registry,
+        panel_background,
+        header_background,
+        foreground,
+        muted,
+        border_color,
+        active_border,
+        selection,
+        yank_flash_color,
+        cursor,
+        cursor_roundness,
+    } = palette;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let window_effects = current_window_effect_settings(theme_registry);
     let corner_radius = acp_chat_corner_radius(theme_registry);
     let rect = pane_layout.rect;
@@ -5101,15 +5160,17 @@ pub(super) fn render_acp_pane(
                     if segment_index == 0 {
                         acp_draw_prefix_segments(
                             target,
-                            origin_x,
-                            y,
-                            &line.prefix,
-                            spinner_frame,
-                            theme_registry,
-                            foreground,
-                            muted,
-                            cursor,
-                            cell_width,
+                            AcpPrefixDraw {
+                                x: origin_x,
+                                y,
+                                segments: &line.prefix,
+                                spinner_frame,
+                                theme_registry,
+                                foreground,
+                                muted,
+                                accent: cursor,
+                                cell_width,
+                            },
                         )?;
                     }
                     let segment_text =
@@ -5122,15 +5183,17 @@ pub(super) fn render_acp_pane(
                         let char_map = LineCharMap::new(&line.text);
                         draw_buffer_text(
                             target,
-                            segment_x,
-                            y,
-                            &line.text,
-                            *segment,
-                            &char_map,
-                            Some(line.syntax_spans.as_slice()),
+                            BufferTextRun {
+                                x: segment_x,
+                                y,
+                                line: &line.text,
+                                segment: *segment,
+                                char_map: &char_map,
+                                line_syntax_spans: Some(line.syntax_spans.as_slice()),
+                                default_color,
+                                cell_width,
+                            },
                             theme_registry,
-                            default_color,
-                            cell_width,
                         )?;
                     }
                     drawn_rows = drawn_rows.saturating_add(1);
@@ -5279,19 +5342,21 @@ fn acp_bubble_remaining_rows(
     rows.max(1)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn acp_draw_prefix_segments(
     target: &mut DrawTarget<'_>,
-    x: i32,
-    y: i32,
-    segments: &[AcpRenderedSegment],
-    spinner_frame: &str,
-    theme_registry: Option<&ThemeRegistry>,
-    foreground: Color,
-    muted: Color,
-    accent: Color,
-    cell_width: i32,
+    draw: AcpPrefixDraw<'_>,
 ) -> Result<(), ShellError> {
+    let AcpPrefixDraw {
+        x,
+        y,
+        segments,
+        spinner_frame,
+        theme_registry,
+        foreground,
+        muted,
+        accent,
+        cell_width,
+    } = draw;
     let mut draw_x = x;
     for segment in segments {
         let text = if segment.animate {
@@ -5404,21 +5469,23 @@ pub(super) fn acp_slice_chars(text: &str, start: usize, end: usize) -> String {
         .to_owned()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn block_cursor_text_overlay(
-    x: i32,
-    line: &str,
-    char_map: &LineCharMap,
-    segment: LineWrapSegment,
-    line_index: usize,
-    cursor_row: usize,
-    cursor_col: usize,
-    color: Option<Color>,
-    cell_width: i32,
+    query: CursorOverlayQuery<'_>,
 ) -> Option<CursorTextOverlay> {
-    let cursor_col = char_map.cursor_anchor_col(cursor_col);
+    let CursorOverlayQuery {
+        x,
+        line,
+        char_map,
+        segment,
+        line_index,
+        cursor,
+        color,
+        cell_width,
+    } = query;
+    let cursor_col = char_map.cursor_anchor_col(cursor.column);
     let color = color?;
-    if line_index != cursor_row || cursor_col < segment.start_col || cursor_col >= segment.end_col {
+    if line_index != cursor.line || cursor_col < segment.start_col || cursor_col >= segment.end_col
+    {
         return None;
     }
     if cursor_col >= char_map.len() {
@@ -5433,19 +5500,21 @@ pub(super) fn block_cursor_text_overlay(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_buffer_text(
     target: &mut DrawTarget<'_>,
-    x: i32,
-    y: i32,
-    line: &str,
-    segment: LineWrapSegment,
-    char_map: &LineCharMap,
-    line_syntax_spans: Option<&[LineSyntaxSpan]>,
+    run: BufferTextRun<'_>,
     theme_registry: Option<&ThemeRegistry>,
-    default_color: Color,
-    cell_width: i32,
 ) -> Result<(), ShellError> {
+    let BufferTextRun {
+        x,
+        y,
+        line,
+        segment,
+        char_map,
+        line_syntax_spans,
+        default_color,
+        cell_width,
+    } = run;
     let segment_end_col = segment.end_col.min(char_map.len());
     let segment_start_col = segment.start_col.min(segment_end_col);
     let segment_text = char_map.slice(line, segment_start_col, segment_end_col);
@@ -5586,7 +5655,7 @@ pub(super) fn line_color_segments(
                 return None;
             }
 
-            Some((start, end, span.theme_token.as_str()))
+            Some((start, end, span.theme_token.as_ref()))
         })
         .collect::<Vec<_>>();
     if relevant_spans.is_empty() {
@@ -6048,6 +6117,14 @@ const PRIMARY_TEXT_RUN_CACHE_MAX_ENTRIES: usize = 4096;
 
 type WindowTextureCreator = TextureCreator<WindowContext>;
 
+pub(super) struct CanvasTextSink<'a, 'texture, 'ttf> {
+    pub canvas: &'a mut Canvas<Window>,
+    pub texture_creator: &'texture WindowTextureCreator,
+    pub cache: &'a mut TextTextureCache<'texture>,
+    pub cache_mode: TextTextureCacheMode,
+    pub fonts: &'a FontSet<'ttf>,
+}
+
 pub(super) fn render_color_cache_key(color: RenderColor) -> u32 {
     u32::from_be_bytes([color.r, color.g, color.b, color.a])
 }
@@ -6497,11 +6574,13 @@ pub(super) fn present_scene_to_canvas<'texture>(
                 from_render_color(*color),
             )?,
             DrawCommand::Text { x, y, text, color } => render_text_with_fonts(
-                canvas,
-                texture_creator,
-                text_texture_cache,
-                text_texture_cache_mode,
-                fonts,
+                &mut CanvasTextSink {
+                    canvas,
+                    texture_creator,
+                    cache: text_texture_cache,
+                    cache_mode: text_texture_cache_mode,
+                    fonts,
+                },
                 *x,
                 *y,
                 text,
@@ -6515,11 +6594,13 @@ pub(super) fn present_scene_to_canvas<'texture>(
                 color,
                 style,
             } => render_text_with_fonts(
-                canvas,
-                texture_creator,
-                text_texture_cache,
-                text_texture_cache_mode,
-                fonts,
+                &mut CanvasTextSink {
+                    canvas,
+                    texture_creator,
+                    cache: text_texture_cache,
+                    cache_mode: text_texture_cache_mode,
+                    fonts,
+                },
                 *x,
                 *y,
                 text,
@@ -7404,13 +7485,8 @@ pub(super) fn render_cached_ligature_texture<'texture>(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_primary_ligature_texture_if_available<'texture>(
-    canvas: &mut Canvas<Window>,
-    texture_creator: &'texture WindowTextureCreator,
-    text_texture_cache: &mut TextTextureCache<'texture>,
-    text_texture_cache_mode: TextTextureCacheMode,
-    fonts: &FontSet<'_>,
+    sink: &mut CanvasTextSink<'_, 'texture, '_>,
     x: i32,
     y: i32,
     text: &str,
@@ -7421,16 +7497,16 @@ pub(super) fn draw_primary_ligature_texture_if_available<'texture>(
         text: text.to_owned(),
         color: render_color_cache_key(color),
     };
-    if let Some(rendered) = text_texture_cache.get(&key) {
-        return Ok(Some(rendered.blit(canvas, x, y)?));
+    if let Some(rendered) = sink.cache.get(&key) {
+        return Ok(Some(rendered.blit(sink.canvas, x, y)?));
     }
 
-    let shape = if let Some(shape) = text_texture_cache.get_ligature_shape(text) {
+    let shape = if let Some(shape) = sink.cache.get_ligature_shape(text) {
         shape
     } else {
-        let shape = cached_ligature_layout(fonts, text, primary_ascent);
-        if text_texture_cache_mode.allows_inserts() {
-            text_texture_cache.insert_ligature_shape(text.to_owned(), shape)
+        let shape = cached_ligature_layout(sink.fonts, text, primary_ascent);
+        if sink.cache_mode.allows_inserts() {
+            sink.cache.insert_ligature_shape(text.to_owned(), shape)
         } else {
             shape
         }
@@ -7438,32 +7514,25 @@ pub(super) fn draw_primary_ligature_texture_if_available<'texture>(
     let LigatureShapeCacheValue::Layout(layout) = shape else {
         return Ok(None);
     };
-    let rendered = render_cached_ligature_texture(texture_creator, fonts, &layout, color)?;
-    if !text_texture_cache_mode.allows_inserts() || !TextTextureCache::can_cache(&rendered) {
-        return Ok(Some(rendered.blit(canvas, x, y)?));
+    let rendered =
+        render_cached_ligature_texture(sink.texture_creator, sink.fonts, &layout, color)?;
+    if !sink.cache_mode.allows_inserts() || !TextTextureCache::can_cache(&rendered) {
+        return Ok(Some(rendered.blit(sink.canvas, x, y)?));
     }
 
-    let rendered = text_texture_cache.insert(key, rendered)?;
-    Ok(Some(rendered.blit(canvas, x, y)?))
+    let rendered = sink.cache.insert(key, rendered)?;
+    Ok(Some(rendered.blit(sink.canvas, x, y)?))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "text rendering needs the live canvas, cache, font set, and draw coordinates together"
-)]
 pub(super) fn render_text_with_fonts<'texture>(
-    canvas: &mut Canvas<Window>,
-    texture_creator: &'texture WindowTextureCreator,
-    text_texture_cache: &mut TextTextureCache<'texture>,
-    text_texture_cache_mode: TextTextureCacheMode,
-    fonts: &FontSet<'_>,
+    sink: &mut CanvasTextSink<'_, 'texture, '_>,
     x: i32,
     y: i32,
     text: &str,
     color: RenderColor,
     style: TextStyle,
 ) -> Result<(), ShellError> {
-    let runs = if fonts.icon_fonts().is_empty() || text.is_ascii() {
+    let runs = if sink.fonts.icon_fonts().is_empty() || text.is_ascii() {
         let text = strip_zero_width_display_characters(text);
         let text = text.as_ref();
         if text.is_empty() {
@@ -7474,7 +7543,7 @@ pub(super) fn render_text_with_fonts<'texture>(
             text: text.to_owned(),
         }]
     } else {
-        let runs = font_runs(text, fonts);
+        let runs = font_runs(text, sink.fonts);
         if runs.is_empty() {
             return Ok(());
         }
@@ -7484,8 +7553,8 @@ pub(super) fn render_text_with_fonts<'texture>(
         return Ok(());
     }
     let mut draw_x = x;
-    let primary_line_height = fonts.primary().height().max(1);
-    let primary_ascent = fonts.primary().ascent();
+    let primary_line_height = sink.fonts.primary().height().max(1);
+    let primary_ascent = sink.fonts.primary().ascent();
     let color_key = render_color_cache_key(color);
     for run in runs {
         if run.text.is_empty() {
@@ -7494,12 +7563,7 @@ pub(super) fn render_text_with_fonts<'texture>(
         match run.role {
             FontRole::Primary => {
                 let primary_runs = if style == TextStyle::plain() {
-                    cached_primary_text_runs(
-                        text_texture_cache,
-                        text_texture_cache_mode,
-                        fonts,
-                        &run.text,
-                    )
+                    cached_primary_text_runs(sink.cache, sink.cache_mode, sink.fonts, &run.text)
                 } else {
                     vec![PrimaryTextRun {
                         render_mode: PrimaryTextRenderMode::Normal,
@@ -7510,11 +7574,7 @@ pub(super) fn render_text_with_fonts<'texture>(
                     let advance = match subrun.render_mode {
                         PrimaryTextRenderMode::Ligature => {
                             if let Some(advance) = draw_primary_ligature_texture_if_available(
-                                canvas,
-                                texture_creator,
-                                text_texture_cache,
-                                text_texture_cache_mode,
-                                fonts,
+                                sink,
                                 draw_x,
                                 y,
                                 &subrun.text,
@@ -7524,9 +7584,9 @@ pub(super) fn render_text_with_fonts<'texture>(
                                 advance
                             } else {
                                 draw_text_texture_with_cache(
-                                    canvas,
-                                    text_texture_cache,
-                                    text_texture_cache_mode,
+                                    sink.canvas,
+                                    sink.cache,
+                                    sink.cache_mode,
                                     TextTextureCacheKey::Primary {
                                         text: subrun.text.clone(),
                                         color: color_key,
@@ -7534,8 +7594,8 @@ pub(super) fn render_text_with_fonts<'texture>(
                                     },
                                     || {
                                         render_primary_text_texture(
-                                            texture_creator,
-                                            fonts,
+                                            sink.texture_creator,
+                                            sink.fonts,
                                             &subrun.text,
                                             color,
                                             style,
@@ -7548,9 +7608,9 @@ pub(super) fn render_text_with_fonts<'texture>(
                         }
                         PrimaryTextRenderMode::Normal => {
                             let advance = draw_text_texture_with_cache(
-                                canvas,
-                                text_texture_cache,
-                                text_texture_cache_mode,
+                                sink.canvas,
+                                sink.cache,
+                                sink.cache_mode,
                                 TextTextureCacheKey::Primary {
                                     text: subrun.text.clone(),
                                     color: color_key,
@@ -7558,8 +7618,8 @@ pub(super) fn render_text_with_fonts<'texture>(
                                 },
                                 || {
                                     render_primary_text_texture(
-                                        texture_creator,
-                                        fonts,
+                                        sink.texture_creator,
+                                        sink.fonts,
                                         &subrun.text,
                                         color,
                                         style,
@@ -7568,14 +7628,14 @@ pub(super) fn render_text_with_fonts<'texture>(
                                 draw_x,
                                 y,
                             )?;
-                            if fonts.primary_style_uses_synthetic_bold(style) {
+                            if sink.fonts.primary_style_uses_synthetic_bold(style) {
                                 let overlay =
                                     RenderColor::rgba(color.r, color.g, color.b, color.a / 2);
                                 let overlay_key = render_color_cache_key(overlay);
                                 let _ = draw_text_texture_with_cache(
-                                    canvas,
-                                    text_texture_cache,
-                                    text_texture_cache_mode,
+                                    sink.canvas,
+                                    sink.cache,
+                                    sink.cache_mode,
                                     TextTextureCacheKey::Primary {
                                         text: subrun.text.clone(),
                                         color: overlay_key,
@@ -7583,8 +7643,8 @@ pub(super) fn render_text_with_fonts<'texture>(
                                     },
                                     || {
                                         render_primary_text_texture(
-                                            texture_creator,
-                                            fonts,
+                                            sink.texture_creator,
+                                            sink.fonts,
                                             &subrun.text,
                                             overlay,
                                             style,
@@ -7601,28 +7661,28 @@ pub(super) fn render_text_with_fonts<'texture>(
                 }
             }
             FontRole::Icon(index) => {
-                let icon_font = fonts.icon_font(index).ok_or_else(|| {
+                let icon_font = sink.fonts.icon_font(index).ok_or_else(|| {
                     ShellError::Runtime(format!("icon font missing at index {index}"))
                 })?;
                 let style = IconGlyphRenderStyle {
                     icon_font,
                     icon_pixel_size: icon_font.pixel_size,
-                    cell_width: fonts.cell_width(),
+                    cell_width: sink.fonts.cell_width(),
                     primary_line_height,
                     primary_ascent,
                     color,
                 };
                 for character in run.text.chars() {
                     draw_x += draw_text_texture_with_cache(
-                        canvas,
-                        text_texture_cache,
-                        text_texture_cache_mode,
+                        sink.canvas,
+                        sink.cache,
+                        sink.cache_mode,
                         TextTextureCacheKey::Icon {
                             font_index: index,
                             character,
                             color: color_key,
                         },
-                        || render_icon_glyph_texture(texture_creator, style, character),
+                        || render_icon_glyph_texture(sink.texture_creator, style, character),
                         draw_x,
                         y,
                     )?;
@@ -7630,9 +7690,9 @@ pub(super) fn render_text_with_fonts<'texture>(
             }
             FontRole::Emoji => {
                 draw_x += draw_text_texture_with_cache(
-                    canvas,
-                    text_texture_cache,
-                    text_texture_cache_mode,
+                    sink.canvas,
+                    sink.cache,
+                    sink.cache_mode,
                     TextTextureCacheKey::Emoji {
                         text: run.text.clone(),
                         color: color_key,
@@ -7641,8 +7701,8 @@ pub(super) fn render_text_with_fonts<'texture>(
                         // SDL_ttf still returns tofu for Segoe UI Emoji here on Windows,
                         // so emoji runs go through the fontdue/rustybuzz compositor path.
                         render_emoji_text_texture(
-                            texture_creator,
-                            fonts,
+                            sink.texture_creator,
+                            sink.fonts,
                             &run.text,
                             primary_ascent,
                             color,
@@ -7807,18 +7867,20 @@ pub(super) fn fill_overlay_surface_rect(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_buffer_scrollbar(
     target: &mut DrawTarget<'_>,
-    pane_rect: Rect,
-    body_y: i32,
-    visible_rows: usize,
-    line_height: i32,
-    scroll_row: usize,
-    max_scroll: usize,
-    color: Color,
-    window_effects: WindowEffects,
+    paint: ScrollbarPaint,
 ) -> Result<(), ShellError> {
+    let ScrollbarPaint {
+        pane_rect,
+        body_y,
+        visible_rows,
+        line_height,
+        scroll_row,
+        max_scroll,
+        color,
+        window_effects,
+    } = paint;
     if max_scroll == 0 {
         return Ok(());
     }

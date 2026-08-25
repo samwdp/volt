@@ -201,6 +201,7 @@ normalized (`"C-c C-c"` resolves the same as `"Ctrl+c Ctrl+c"`).
 | `PluginKeymapScope::Global`  | Always, regardless of focus             |
 | `PluginKeymapScope::Workspace` | Only when a workspace pane is focused |
 | `PluginKeymapScope::Popup`   | Only inside a popup window              |
+| `PluginKeymapScope::WorkspaceDock` | Only while the workspace dock is focused |
 
 Bindings can also be restricted to a **Vim mode**:
 

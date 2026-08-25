@@ -13,7 +13,7 @@ pub fn headerline_lines(context: &GhostTextContext<'_>) -> Vec<String> {
         return vec![line];
     }
     let contexts = treesitter::ancestor_contexts_for_cursor(
-        &crate::syntax_languages(),
+        crate::syntax_language_configs(),
         context.language_id,
         context.buffer_text,
         context.buffer_id,

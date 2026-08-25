@@ -506,31 +506,43 @@ pub(super) fn terminal_key_for_event(keycode: Keycode, keymod: Mod) -> Option<Te
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_terminal_buffer(
     target: &mut DrawTarget<'_>,
-    buffer: &ShellBuffer,
-    terminal_render: &TerminalRenderSnapshot,
-    rect: Rect,
-    layout: BufferFooterLayout,
-    active: bool,
-    input_mode: InputMode,
-    visual_selection: Option<VisualSelection>,
-    yank_flash: Option<VisualSelection>,
-    theme_registry: Option<&ThemeRegistry>,
-    base_background: Color,
-    cursor_color: Color,
-    text_color: Color,
-    border_color: Color,
-    statusline: String,
-    statusline_active: Color,
-    statusline_inactive: Color,
-    selection_color: Color,
-    yank_flash_color: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: TerminalBufferDraw<'_>,
+    palette: BufferBodyPalette<'_>,
+    statusline: TerminalStatusline,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let TerminalBufferDraw {
+        buffer,
+        terminal_render,
+        rect,
+        layout,
+        active,
+        input_mode,
+        visual_selection,
+        yank_flash,
+    } = draw;
+    let BufferBodyPalette {
+        theme_registry,
+        base_background,
+        foreground: text_color,
+        border_color,
+        selection: selection_color,
+        yank_flash_color,
+        cursor: cursor_color,
+        cursor_roundness,
+        ..
+    } = palette;
+    let TerminalStatusline {
+        text: statusline,
+        active: statusline_active,
+        inactive: statusline_inactive,
+    } = statusline;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let window_effects = current_window_effect_settings(theme_registry);
     let text_x = rect.x() + 12;
     for (row_index, line) in terminal_render
@@ -639,15 +651,19 @@ pub(super) fn render_terminal_buffer(
     if let Some(cursor) = live_terminal_cursor.or(buffer_cursor.as_ref()) {
         draw_terminal_cursor(
             target,
-            text_x,
-            layout.body_y,
-            cursor,
-            terminal_cursor_shape_for_input_mode(input_mode, cursor),
-            cursor_color,
-            base_background,
-            cursor_roundness,
-            cell_width,
-            line_height,
+            TerminalCursorDraw {
+                text_x,
+                body_y: layout.body_y,
+                cursor,
+                shape: terminal_cursor_shape_for_input_mode(input_mode, cursor),
+                cursor_color,
+                text_override_color: base_background,
+                cursor_roundness,
+            },
+            CellMetrics {
+                cell_width,
+                line_height,
+            },
         )?;
     }
 
@@ -849,19 +865,24 @@ fn terminal_cursor_shape_for_input_mode(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_terminal_cursor(
     target: &mut DrawTarget<'_>,
-    text_x: i32,
-    body_y: i32,
-    cursor: &editor_terminal::TerminalCursorSnapshot,
-    shape: editor_terminal::TerminalCursorShape,
-    cursor_color: Color,
-    text_override_color: Color,
-    cursor_roundness: u32,
-    cell_width: i32,
-    line_height: i32,
+    draw: TerminalCursorDraw<'_>,
+    metrics: CellMetrics,
 ) -> Result<(), ShellError> {
+    let TerminalCursorDraw {
+        text_x,
+        body_y,
+        cursor,
+        shape,
+        cursor_color,
+        text_override_color,
+        cursor_roundness,
+    } = draw;
+    let CellMetrics {
+        cell_width,
+        line_height,
+    } = metrics;
     let x = text_x + cursor.col() as i32 * cell_width;
     let y = body_y + cursor.row() as i32 * line_height;
     let width = (cursor.width_cells() as i32 * cell_width).max(1);

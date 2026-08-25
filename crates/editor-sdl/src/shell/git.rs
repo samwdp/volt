@@ -637,8 +637,8 @@ pub(super) fn push_span_bytes(
         spans.push(LineSyntaxSpan {
             start: start_col,
             end: end_col,
-            capture_name: token.to_owned(),
-            theme_token: token.to_owned(),
+            capture_name: Arc::from(token),
+            theme_token: Arc::from(token),
         });
     }
 }
@@ -721,6 +721,12 @@ pub(super) type GitPrefix = editor_plugin_api::GitStatusPrefix;
 pub(super) struct GitPrefixState {
     prefix: GitPrefix,
     started_at: Instant,
+}
+
+impl GitPrefixState {
+    pub(super) fn prefix(&self) -> GitPrefix {
+        self.prefix
+    }
 }
 
 pub(super) fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -3190,7 +3196,9 @@ pub(super) fn take_git_prefix(runtime: &mut EditorRuntime) -> Result<Option<GitP
     let now = Instant::now();
     let ui = shell_ui_mut(runtime)?;
     let prefix = match ui.pending_git_prefix.take() {
-        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT => Some(state.prefix),
+        Some(state) if now.duration_since(state.started_at) <= PREFIX_TIMEOUT => {
+            Some(state.prefix())
+        }
         _ => None,
     };
     Ok(prefix)

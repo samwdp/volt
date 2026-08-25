@@ -149,20 +149,24 @@ pub(super) fn diagnostic_underlines_for_segment(
     spans
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_diagnostic_underlines_for_segment(
     target: &mut DrawTarget<'_>,
-    diagnostics: &[DiagnosticLineSpan],
-    syntax_spans: Option<&[LineSyntaxSpan]>,
-    char_map: &LineCharMap,
-    segment_x: i32,
-    y: i32,
-    line_len: usize,
-    segment: LineWrapSegment,
-    cell_width: i32,
-    line_height: i32,
-    theme_registry: Option<&ThemeRegistry>,
+    draw: DiagnosticUnderlineDraw<'_>,
 ) -> Result<(), ShellError> {
+    let DiagnosticUnderlineDraw {
+        diagnostics,
+        syntax_spans,
+        char_map,
+        segment_x,
+        y,
+        line_len,
+        segment,
+        metrics: CellMetrics {
+            cell_width,
+            line_height,
+        },
+        theme_registry,
+    } = draw;
     for severity in [
         LspDiagnosticSeverity::Information,
         LspDiagnosticSeverity::Warning,

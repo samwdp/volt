@@ -1544,15 +1544,17 @@ impl DapClientManager {
         let stop_state = Arc::new(Mutex::new(SessionStopState::default()));
 
         let reader_handle = spawn_reader_thread(
-            workspace_id,
-            adapter.id().to_owned(),
             reader,
-            Arc::clone(&pending),
-            Arc::clone(&disconnected),
-            Arc::clone(&self.transport_log),
-            Arc::clone(&initialized),
-            Arc::clone(&stop_state),
-            Arc::clone(&self.events),
+            DapReaderSession {
+                workspace_id,
+                adapter_id: adapter.id().to_owned(),
+                pending: Arc::clone(&pending),
+                disconnected: Arc::clone(&disconnected),
+                transport_log: Arc::clone(&self.transport_log),
+                initialized: Arc::clone(&initialized),
+                stop_state: Arc::clone(&stop_state),
+                events: Arc::clone(&self.events),
+            },
         );
 
         let next_request_id = AtomicU64::new(1);
@@ -1920,19 +1922,29 @@ fn spawn_adapter_command(adapter: &DebugAdapterSpec) -> Result<Child, DapClientE
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_reader_thread(
+struct DapReaderSession {
     workspace_id: u64,
     adapter_id: String,
-    reader: Box<dyn Read + Send>,
     pending: Arc<Mutex<BTreeMap<u64, PendingResponse>>>,
     disconnected: Arc<AtomicBool>,
     transport_log: TransportLog,
     initialized: Arc<Mutex<bool>>,
     stop_state: Arc<Mutex<SessionStopState>>,
     events: Arc<Mutex<VecDeque<DapSessionEvent>>>,
-) -> JoinHandle<()> {
+}
+
+fn spawn_reader_thread(reader: Box<dyn Read + Send>, session: DapReaderSession) -> JoinHandle<()> {
     thread::spawn(move || {
+        let DapReaderSession {
+            workspace_id,
+            adapter_id,
+            pending,
+            disconnected,
+            transport_log,
+            initialized,
+            stop_state,
+            events,
+        } = session;
         let mut reader = BufReader::new(reader);
         loop {
             if disconnected.load(Ordering::Acquire) {

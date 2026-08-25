@@ -296,27 +296,27 @@ mod tests {
         assert!(syntax.get(&0).is_some_and(|spans| {
             spans
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_RESULTS_TITLE)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_RESULTS_TITLE)
         }));
         assert!(syntax.get(&3).is_some_and(|spans| {
             spans
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_RESULTS_HEADER)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_RESULTS_HEADER)
         }));
         assert!(syntax.get(&5).is_some_and(|spans| {
             spans
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_RESULTS_NUMBER)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_RESULTS_NUMBER)
         }));
         assert!(syntax.get(&6).is_some_and(|spans| {
             spans
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_RESULTS_NULL)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_RESULTS_NULL)
         }));
         assert!(syntax.get(&9).is_some_and(|spans| {
             spans
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_RESULTS_FOOTER)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_RESULTS_FOOTER)
         }));
     }
 
@@ -327,12 +327,12 @@ mod tests {
         assert!(
             header
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_BROWSER_HEADER)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_BROWSER_HEADER)
         );
         assert!(
             table
                 .iter()
-                .any(|span| span.theme_token == TOKEN_DB_BROWSER_TABLE)
+                .any(|span| span.theme_token.as_ref() == TOKEN_DB_BROWSER_TABLE)
         );
     }
 }
