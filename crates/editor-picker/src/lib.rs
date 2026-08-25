@@ -93,6 +93,11 @@ impl PickerItem {
         self.preview.as_deref()
     }
 
+    /// Sets or replaces the preview content without changing search text.
+    pub fn set_preview(&mut self, preview: impl Into<String>) {
+        self.preview = Some(preview.into());
+    }
+
     /// Attaches optional left-fringe content such as an icon glyph.
     pub fn with_fringe(mut self, fringe: impl Into<String>) -> Self {
         self.fringe = Some(fringe.into());
@@ -242,6 +247,22 @@ impl PickerSession {
     pub fn set_items(&mut self, items: Vec<PickerItem>) {
         self.items = items;
         self.recompute_matches();
+    }
+
+    /// Updates preview text for one item in both the backing list and current matches.
+    pub fn set_item_preview(&mut self, item_id: &str, preview: impl Into<String>) {
+        let preview = preview.into();
+        let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) else {
+            return;
+        };
+        item.set_preview(preview.clone());
+        if let Some(matched) = self
+            .matches
+            .iter_mut()
+            .find(|matched| matched.item.id == item_id)
+        {
+            matched.item.set_preview(preview);
+        }
     }
 
     /// Updates the selected match index when matches are available.
@@ -789,6 +810,28 @@ mod tests {
         assert_eq!(
             session.selected().map(|matched| matched.item().label()),
             Some("main.rs")
+        );
+    }
+
+    #[test]
+    fn set_item_preview_updates_selected_match_without_filling_other_rows() {
+        let mut session =
+            PickerSession::new("Files", vec![item("a", "alpha.rs"), item("b", "beta.rs")]);
+
+        session.set_item_preview("a", "fn alpha() {}");
+        assert_eq!(
+            session
+                .selected()
+                .and_then(|matched| matched.item().preview()),
+            Some("fn alpha() {}")
+        );
+        assert!(
+            session
+                .matches()
+                .iter()
+                .find(|matched| matched.item().id() == "b")
+                .and_then(|matched| matched.item().preview())
+                .is_none()
         );
     }
 }

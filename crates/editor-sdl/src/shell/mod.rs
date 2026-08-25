@@ -110,8 +110,9 @@ use editor_db::{
 };
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
-    GitLogEntry, GitStatusSnapshot, detect_in_progress, list_repository_files, parse_log_oneline,
-    parse_stash_list, parse_status,
+    GitLogEntry, GitStatusSnapshot, detect_in_progress, invalidate_repository_file_list_cache_for,
+    list_repository_files, parse_log_oneline, parse_stash_list, parse_status,
+    repository_file_preview,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
@@ -9290,6 +9291,7 @@ impl PickerOverlay {
         let mut query = self.session.query().to_owned();
         query.push_str(text);
         self.session.set_query(query);
+        self.ensure_selected_workspace_file_preview();
     }
 
     fn backspace_query(&mut self) {
@@ -9297,7 +9299,37 @@ impl PickerOverlay {
         if query.pop().is_some() {
             self.session
                 .set_query(query.into_iter().collect::<String>());
+            self.ensure_selected_workspace_file_preview();
         }
+    }
+
+    fn ensure_selected_workspace_file_preview(&mut self) {
+        if self.source != Some(PickerSource::WorkspaceFiles) {
+            return;
+        }
+        let Some(selected) = self.session.selected() else {
+            return;
+        };
+        if selected.item().preview().is_some() {
+            return;
+        }
+        let path = PathBuf::from(selected.item().id());
+        if !path.is_absolute() {
+            return;
+        }
+        let item_id = selected.item().id().to_owned();
+        let preview = repository_file_preview(&path);
+        self.session.set_item_preview(&item_id, preview);
+    }
+
+    fn select_next(&mut self) {
+        self.session.select_next();
+        self.ensure_selected_workspace_file_preview();
+    }
+
+    fn select_previous(&mut self) {
+        self.session.select_previous();
+        self.ensure_selected_workspace_file_preview();
     }
 }
 
@@ -12785,6 +12817,11 @@ impl ShellState {
     }
 
     fn refresh_picker_preview_syntax(&mut self) {
+        if let Ok(ui) = self.ui_mut()
+            && let Some(picker) = ui.picker_mut()
+        {
+            picker.ensure_selected_workspace_file_preview();
+        }
         let preview = self
             .ui()
             .ok()
@@ -18776,7 +18813,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     runtime
         .subscribe_hook(HOOK_PICKER_NEXT, "shell.picker-next", |_, runtime| {
             if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
-                picker.session.select_next();
+                picker.select_next();
             }
             Ok(())
         })
@@ -18787,7 +18824,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.picker-previous",
             |_, runtime| {
                 if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
-                    picker.session.select_previous();
+                    picker.select_previous();
                 }
                 Ok(())
             },
@@ -18926,7 +18963,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(HOOK_POPUP_NEXT, "shell.popup-next", |_, runtime| {
             if shell_ui(runtime)?.picker_visible() {
                 if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
-                    picker.session.select_next();
+                    picker.select_next();
                 }
                 return Ok(());
             }
@@ -18938,7 +18975,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .subscribe_hook(HOOK_POPUP_PREVIOUS, "shell.popup-previous", |_, runtime| {
             if shell_ui(runtime)?.picker_visible() {
                 if let Some(picker) = shell_ui_mut(runtime)?.picker_mut() {
-                    picker.session.select_previous();
+                    picker.select_previous();
                 }
                 return Ok(());
             }
@@ -35246,6 +35283,7 @@ pub(crate) fn open_workspace_from_project(
     }
     prepare_workspace_enter_for_debug_layout(runtime)?;
 
+    invalidate_repository_file_list_cache_for(root);
     queue_workspace_syntax_prewarm(runtime, root);
     // Flush immediately so the shared highlight worker has grammars loaded before any
     // file open (readme / picker) can race a cold DLL load.

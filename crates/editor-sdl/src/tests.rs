@@ -1509,6 +1509,25 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
             .iter()
             .all(|matched| !matched.item().label().contains("ignored.txt"))
     );
+    let selected = picker
+        .session()
+        .selected()
+        .ok_or("missing selected workspace file")?;
+    let selected_preview = selected
+        .item()
+        .preview()
+        .ok_or("selected Workspace Files row should load a preview")?;
+    assert!(
+        selected_preview.contains(selected.item().id())
+            || selected_preview.contains(selected.item().label())
+    );
+    let selected_id = selected.item().id().to_owned();
+    assert!(
+        picker.session().matches().iter().any(|matched| {
+            matched.item().id() != selected_id && matched.item().preview().is_none()
+        }),
+        "unselected Workspace Files rows must not load file bodies"
+    );
 
     state.handle_text_input("main.rs")?;
     assert!(state.try_runtime_keybinding(Keycode::Return, Mod::NOMOD)?);
@@ -1517,6 +1536,79 @@ fn workspace_file_picker_lists_visible_files_and_opens_selection()
     assert_eq!(active.kind, BufferKind::File);
     assert!(active.display_name().contains("main.rs"));
     assert_eq!(active.text.line(0).as_deref(), Some("fn main() {"));
+
+    drop(state);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_file_picker_loads_preview_for_selection_only() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !git_available() {
+        return Ok(());
+    }
+
+    let mut state = user_shell_state()?;
+    let root = temp_workspace_root("files-lazy-preview");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(
+        root.join("src").join("main.rs"),
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    )?;
+    fs::write(root.join("README.md"), "# files\n")?;
+
+    run_git(&root, &["init", "-q"])?;
+    run_git(&root, &["add", "."])?;
+    open_workspace_from_project(&mut state.runtime, "files-lazy-preview", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.list-files")
+        .map_err(|error| error.to_string())?;
+    let picker = state
+        .ui()?
+        .picker()
+        .ok_or("missing workspace file picker")?;
+    let initially_selected_id = picker
+        .session()
+        .selected()
+        .ok_or("missing selected workspace file")?
+        .item()
+        .id()
+        .to_owned();
+    assert!(
+        picker.session().matches().iter().any(|matched| {
+            matched.item().id() != initially_selected_id && matched.item().preview().is_none()
+        }),
+        "only the selected Workspace Files row should have a preview"
+    );
+
+    state.handle_text_input("main.rs")?;
+    let picker = state
+        .ui()?
+        .picker()
+        .ok_or("missing workspace file picker")?;
+    let selected = picker
+        .session()
+        .selected()
+        .ok_or("missing selected main.rs")?;
+    assert_eq!(selected.item().label(), "src/main.rs");
+    let preview = selected
+        .item()
+        .preview()
+        .ok_or("selected main.rs should load a preview")?;
+    assert!(preview.contains("fn main() {"));
+    let now_selected_id = selected.item().id().to_owned();
+    assert!(
+        picker.session().matches().iter().all(|matched| {
+            let id = matched.item().id();
+            id == initially_selected_id
+                || id == now_selected_id
+                || matched.item().preview().is_none()
+        }),
+        "rows that were never selected must not load file bodies"
+    );
 
     drop(state);
     fs::remove_dir_all(root)?;
@@ -1591,6 +1683,10 @@ fn workspace_file_picker_searches_and_shows_full_relative_path()
         .ok_or("missing selected workspace file")?;
     assert_eq!(item.label(), "src/deep/nested/really-long-name.rs");
     assert!(item.detail().is_empty());
+    let preview = item
+        .preview()
+        .ok_or("selected nested file should load a preview")?;
+    assert!(preview.contains("// test"));
 
     drop(state);
     fs::remove_dir_all(root)?;

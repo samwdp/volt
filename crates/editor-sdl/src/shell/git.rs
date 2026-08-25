@@ -4423,6 +4423,9 @@ pub(super) fn refresh_pending_git_summary(
 ) -> Result<(), String> {
     if shell_ui(runtime)?.take_git_summary_changed() {
         mark_git_fringe_snapshots_stale(runtime)?;
+        if let Ok(root) = git_root(runtime) {
+            invalidate_repository_file_list_cache_for(&root);
+        }
     }
     if typing_active {
         return Ok(());

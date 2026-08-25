@@ -116,6 +116,7 @@ fn user_picker_overlay(
             overlay.session.set_selected_index(selected_index);
         }
     }
+    overlay.ensure_selected_workspace_file_preview();
     Ok(with_provider_extras(overlay, spec))
 }
 

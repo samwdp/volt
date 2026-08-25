@@ -1,6 +1,4 @@
 use std::{
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -380,34 +378,10 @@ fn workspace_file_picker_items(context: &PickerProviderContext) -> Vec<PickerIte
                 "",
                 PickerActionSpec::open_file(path.display().to_string()),
             )
-            .with_preview(file_picker_preview(&path))
             .with_search_text(search_text)
             .with_fringe(editor_icons::seti_file_icon(&path))
         })
         .collect()
-}
-
-fn file_picker_preview(path: &Path) -> String {
-    const MAX_BYTES: u64 = 16 * 1024;
-    const MAX_LINES: usize = 24;
-
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return path.display().to_string(),
-    };
-    let mut buffer = String::new();
-    if file.take(MAX_BYTES).read_to_string(&mut buffer).is_err() {
-        return path.display().to_string();
-    }
-    let mut lines = Vec::new();
-    lines.push(path.display().to_string());
-    lines.extend(
-        buffer
-            .lines()
-            .take(MAX_LINES)
-            .map(|line| line.trim_end().to_owned()),
-    );
-    lines.join("\n")
 }
 
 fn message_item(
@@ -449,10 +423,13 @@ mod tests {
         ProjectSearchRoot, reset_project_discovery_cache,
         set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
     };
-    use editor_plugin_api::{PickerActionSpec, PickerProviderContext, PickerWorkspaceContext};
+    use editor_plugin_api::{
+        PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
+    };
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
+        process::Command,
         sync::{Mutex, MutexGuard},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -699,6 +676,74 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         set_project_discovery_worker_blocked_for_test(false);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok()
+    }
+
+    fn run_git(root: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("git").args(args).current_dir(root).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("git {:?} failed with status {status}", args).into())
+        }
+    }
+
+    #[test]
+    fn workspace_file_picker_items_report_no_project_root() {
+        let context = PickerProviderContext::new(
+            "workspace.files",
+            "Workspace Files",
+            PickerSource::WorkspaceFiles,
+        );
+        let items = picker_items(&context).expect("file picker items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "Workspace has no project root");
+        assert!(items[0].preview().is_some());
+    }
+
+    #[test]
+    fn workspace_file_picker_items_list_paths_without_previews()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !git_available() {
+            return Ok(());
+        }
+
+        let root = temp_dir("files-lazy-preview");
+        let nested = root.join("src").join("deep");
+        fs::create_dir_all(&nested)?;
+        fs::write(root.join(".gitignore"), "ignored.txt\n")?;
+        fs::write(nested.join("nested.rs"), "fn nested() {}\n")?;
+        fs::write(root.join("ignored.txt"), "ignored\n")?;
+        fs::write(root.join("notes.txt"), "notes\n")?;
+        run_git(&root, &["init", "-q"])?;
+        run_git(&root, &["add", ".gitignore", "src/deep/nested.rs"])?;
+
+        let mut context = PickerProviderContext::new(
+            "workspace.files",
+            "Workspace Files",
+            PickerSource::WorkspaceFiles,
+        );
+        context.workspace_root = ROption::RSome(root.display().to_string().into());
+        let items = picker_items(&context).expect("file picker items");
+
+        assert!(
+            items.iter().all(|item| item.preview().is_none()),
+            "Workspace Files rows must not read file bodies in the user library"
+        );
+        assert!(items.iter().any(|item| {
+            item.label() == "src/deep/nested.rs"
+                && item.search_text() == Some("src/deep/nested.rs")
+                && item.detail().is_empty()
+                && item.fringe() == Some(editor_icons::seti_file_icon(&nested.join("nested.rs")))
+        }));
+        assert!(items.iter().any(|item| item.label() == "notes.txt"));
+        assert!(items.iter().all(|item| item.label() != "ignored.txt"));
+
         fs::remove_dir_all(root)?;
         Ok(())
     }
