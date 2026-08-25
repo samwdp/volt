@@ -6,6 +6,16 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+mod project_discovery;
+
+pub use project_discovery::{
+    PROJECT_DISCOVERY_TTL, ProjectDiscoveryFingerprint, ProjectDiscoverySnapshot,
+    cancel_project_discovery_scan, current_project_discovery_snapshot,
+    invalidate_project_discovery_cache, project_discovery_request_scan, project_discovery_snapshot,
+    reset_project_discovery_cache, set_project_discovery_ttl_for_test,
+    set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+};
+
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str = "Workspace file system scanning and editable directory buffer helpers.";
 
@@ -509,13 +519,25 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        sync::{Mutex, MutexGuard},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, compact_project_path,
-        discover_projects,
+        discover_projects, project_discovery_request_scan, project_discovery_snapshot,
+        reset_project_discovery_cache, set_project_discovery_ttl_for_test,
+        set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
     };
+
+    fn discovery_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn wait_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -645,6 +667,245 @@ mod tests {
             Some("project")
         );
         assert_eq!(worktree_project.display_name(), "project [feature]");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discover_projects_max_depth_zero_considers_only_the_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir("discover-depth-zero");
+        fs::create_dir_all(root.join(".git"))?;
+        fs::create_dir_all(root.join("nested").join(".git"))?;
+
+        let as_repo = discover_projects(&[ProjectSearchRoot::new(&root, 0)])?;
+        assert_eq!(as_repo.len(), 1);
+        assert_eq!(as_repo[0].root(), root.as_path());
+        assert_eq!(as_repo[0].kind(), ProjectKind::Git);
+
+        fs::remove_dir_all(&root)?;
+        let nested_only = temp_dir("discover-depth-zero-nested");
+        fs::create_dir_all(nested_only.join("nested").join(".git"))?;
+        let skipped = discover_projects(&[ProjectSearchRoot::new(&nested_only, 0)])?;
+        assert!(skipped.is_empty());
+
+        fs::remove_dir_all(nested_only)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discover_projects_skips_missing_roots_without_failing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir("discover-missing-root");
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git"))?;
+        let missing = root.join("missing-search-root");
+
+        let projects = discover_projects(&[
+            ProjectSearchRoot::new(&missing, 2),
+            ProjectSearchRoot::new(&root, 2),
+        ])?;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].root(), repo.as_path());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn git_and_worktree_tree(
+        label: &str,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let root = temp_dir(label);
+        let repo = root.join("repo");
+        let worktree = root.join("trees").join("feature");
+        fs::create_dir_all(repo.join(".git"))?;
+        fs::create_dir_all(&worktree)?;
+        fs::write(worktree.join(".git"), "gitdir: ../.git/worktrees/feature\n")?;
+        Ok((root, repo, worktree))
+    }
+
+    #[test]
+    fn project_discovery_snapshot_returns_git_and_worktree_candidates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, repo, worktree) = git_and_worktree_tree("discover-cache-candidates")?;
+        let missing = root.join("missing-search-root");
+        let roots = [
+            ProjectSearchRoot::new(&missing, 3),
+            ProjectSearchRoot::new(&root, 3),
+        ];
+
+        let immediate = project_discovery_snapshot(&roots);
+        assert!(immediate.in_progress() || !immediate.candidates().is_empty());
+        let snapshot = wait_for_project_discovery(immediate.request_id(), wait_timeout())?;
+        assert!(!snapshot.in_progress());
+        assert_eq!(snapshot.last_walk_id(), 1);
+        assert_eq!(snapshot.candidates().len(), 2);
+        assert!(
+            snapshot
+                .candidates()
+                .iter()
+                .any(|project| project.root() == repo && project.kind() == ProjectKind::Git)
+        );
+        assert!(snapshot.candidates().iter().any(|project| {
+            project.root() == worktree && project.kind() == ProjectKind::GitWorktree
+        }));
+        assert_eq!(
+            snapshot
+                .candidates()
+                .iter()
+                .find(|project| project.root() == worktree)
+                .map(super::ProjectCandidate::display_name)
+                .as_deref(),
+            Some("feature")
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_cache_preserves_worktree_display_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let root = temp_dir("discover-cache-worktree-name");
+        let repo = root.join("repo-store");
+        let gitdir = repo.join(".git").join("worktrees").join("feature");
+        let worktree = root.join("project").join("feature");
+        fs::create_dir_all(&gitdir)?;
+        fs::create_dir_all(&worktree)?;
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../repo-store/.git/worktrees/feature\n",
+        )?;
+        fs::write(gitdir.join("commondir"), "../../\n")?;
+
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        let scanning = project_discovery_snapshot(&roots);
+        let snapshot = wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+        let worktree_project = snapshot
+            .candidates()
+            .iter()
+            .find(|project| project.root() == worktree)
+            .expect("worktree should be discovered");
+        assert_eq!(worktree_project.display_name(), "project [feature]");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_second_snapshot_with_same_roots_is_cache_hit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, _, _) = git_and_worktree_tree("discover-cache-hit")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+
+        let first = project_discovery_snapshot(&roots);
+        let ready = wait_for_project_discovery(first.request_id(), wait_timeout())?;
+        assert_eq!(ready.last_walk_id(), 1);
+
+        let second = project_discovery_snapshot(&roots);
+        assert!(!second.in_progress());
+        assert_eq!(second.last_walk_id(), 1);
+        assert_eq!(second.request_id(), ready.request_id());
+        assert_eq!(second.candidates().len(), ready.candidates().len());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_fingerprint_change_invalidates_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, _, _) = git_and_worktree_tree("discover-cache-fingerprint")?;
+        let first_roots = [ProjectSearchRoot::new(&root, 3)];
+        let first = project_discovery_snapshot(&first_roots);
+        wait_for_project_discovery(first.request_id(), wait_timeout())?;
+
+        let second_roots = [ProjectSearchRoot::new(&root, 0)];
+        set_project_discovery_worker_blocked_for_test(true);
+        let invalidated = project_discovery_snapshot(&second_roots);
+        assert!(invalidated.candidates().is_empty());
+        assert!(invalidated.in_progress());
+        set_project_discovery_worker_blocked_for_test(false);
+        let ready = wait_for_project_discovery(invalidated.request_id(), wait_timeout())?;
+        assert_eq!(ready.last_walk_id(), 2);
+        assert_eq!(
+            ready.fingerprint(),
+            &super::ProjectDiscoveryFingerprint::from_roots(&second_roots)
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_stale_snapshot_returns_candidates_while_rescan_runs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, _, _) = git_and_worktree_tree("discover-cache-ttl")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        let first = project_discovery_snapshot(&roots);
+        wait_for_project_discovery(first.request_id(), wait_timeout())?;
+        set_project_discovery_ttl_for_test(Duration::ZERO);
+        set_project_discovery_worker_blocked_for_test(true);
+
+        let stale = project_discovery_snapshot(&roots);
+        assert!(stale.in_progress());
+        assert_eq!(stale.last_walk_id(), 1);
+        assert!(!stale.candidates().is_empty());
+
+        set_project_discovery_worker_blocked_for_test(false);
+        let refreshed = wait_for_project_discovery(stale.request_id(), wait_timeout())?;
+        assert_eq!(refreshed.last_walk_id(), 2);
+        assert!(!refreshed.candidates().is_empty());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_superseded_scan_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, _, _) = git_and_worktree_tree("discover-cache-cancel")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        set_project_discovery_worker_blocked_for_test(true);
+        let first_id = project_discovery_request_scan(&roots);
+        let second_id = project_discovery_request_scan(&roots);
+        assert_ne!(first_id, second_id);
+        set_project_discovery_worker_blocked_for_test(false);
+        let ready = wait_for_project_discovery(second_id, wait_timeout())?;
+        assert_eq!(ready.request_id(), second_id);
+        assert_eq!(ready.last_walk_id(), 1);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_blocked_snapshot_is_empty_until_scan_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        reset_project_discovery_cache();
+        let (root, _, _) = git_and_worktree_tree("discover-cache-blocked")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        set_project_discovery_worker_blocked_for_test(true);
+        let scanning = project_discovery_snapshot(&roots);
+        assert!(scanning.candidates().is_empty());
+        assert!(scanning.in_progress());
+        set_project_discovery_worker_blocked_for_test(false);
+        let ready = wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+        assert_eq!(ready.last_walk_id(), 1);
+        assert_eq!(ready.candidates().len(), 2);
 
         fs::remove_dir_all(root)?;
         Ok(())

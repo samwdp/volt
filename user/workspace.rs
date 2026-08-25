@@ -2,9 +2,10 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
-use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
+use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_snapshot};
 use editor_git::list_repository_files;
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
@@ -132,7 +133,28 @@ pub fn package() -> PluginPackage {
     ])
 }
 
+const PROJECT_DISCOVERY_SCANNING_ID: &str = "project-discovery-scanning";
+
+fn project_search_roots_override() -> &'static Mutex<Option<Vec<ProjectSearchRoot>>> {
+    static OVERRIDE: OnceLock<Mutex<Option<Vec<ProjectSearchRoot>>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Overrides configured discovery roots. Intended for tests.
+pub fn override_project_search_roots_for_test(roots: Option<Vec<ProjectSearchRoot>>) {
+    *project_search_roots_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = roots;
+}
+
 pub fn project_search_roots() -> Vec<ProjectSearchRoot> {
+    if let Some(roots) = project_search_roots_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return roots;
+    }
     crate::config::load().workspace.project_search_roots()
 }
 
@@ -157,8 +179,12 @@ pub fn picker_items(context: &PickerProviderContext) -> Option<Vec<PickerItemSpe
 fn workspace_project_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let roots = project_search_roots();
-    let mut projects = discover_projects(&roots).map_err(|error| error.to_string())?;
+    let snapshot = project_discovery_snapshot(&project_search_roots());
+    if snapshot.candidates().is_empty() && snapshot.in_progress() {
+        return Ok(vec![project_discovery_scanning_item()]);
+    }
+
+    let mut projects = snapshot.candidates().to_vec();
     projects.sort_by_key(|project| {
         (
             existing_workspace_for_project(context, project).is_none(),
@@ -175,11 +201,13 @@ fn workspace_project_picker_items(
 fn workspace_switch_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let roots = project_search_roots();
-    let mut projects = discover_projects(&roots)
-        .map_err(|error| error.to_string())?
-        .into_iter()
+    let snapshot = project_discovery_snapshot(&project_search_roots());
+    let scanning = snapshot.candidates().is_empty() && snapshot.in_progress();
+    let mut projects = snapshot
+        .candidates()
+        .iter()
         .filter(|project| existing_workspace_for_project(context, project).is_none())
+        .cloned()
         .collect::<Vec<_>>();
     projects.sort_by_key(|project| project.display_name().to_ascii_lowercase());
 
@@ -188,15 +216,28 @@ fn workspace_switch_picker_items(
         .iter()
         .map(workspace_picker_item)
         .collect::<Vec<_>>();
-    if !items.is_empty() && !projects.is_empty() {
+    if !items.is_empty() && (!projects.is_empty() || scanning) {
         items.push(PickerItemSpec::divider());
     }
-    items.extend(
-        projects
-            .iter()
-            .map(|project| project_picker_item(context, project)),
-    );
+    if scanning && projects.is_empty() {
+        items.push(project_discovery_scanning_item());
+    } else {
+        items.extend(
+            projects
+                .iter()
+                .map(|project| project_picker_item(context, project)),
+        );
+    }
     Ok(items)
+}
+
+fn project_discovery_scanning_item() -> PickerItemSpec {
+    PickerItemSpec::new(
+        PROJECT_DISCOVERY_SCANNING_ID,
+        "Scanning for projects...",
+        "project discovery in progress",
+        PickerActionSpec::no_op(),
+    )
 }
 
 fn project_picker_item(
@@ -403,6 +444,62 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abi_stable::std_types::ROption;
+    use editor_fs::{
+        ProjectSearchRoot, reset_project_discovery_cache,
+        set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+    };
+    use editor_plugin_api::{PickerActionSpec, PickerProviderContext, PickerWorkspaceContext};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Mutex, MutexGuard},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    fn discovery_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct DiscoveryOverrideGuard;
+
+    impl Drop for DiscoveryOverrideGuard {
+        fn drop(&mut self) {
+            override_project_search_roots_for_test(None);
+            reset_project_discovery_cache();
+            set_project_discovery_worker_blocked_for_test(false);
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("volt-user-workspace-{label}-{unique}"))
+    }
+
+    fn wait_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
+
+    fn two_repo_tree() -> Result<(PathBuf, PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let root = temp_dir("picker-projects");
+        let alpha = root.join("alpha");
+        let zeta = root.join("zeta");
+        fs::create_dir_all(alpha.join(".git"))?;
+        fs::create_dir_all(zeta.join(".git"))?;
+        Ok((root, alpha, zeta))
+    }
+
+    fn begin_discovery_override(
+        roots: Vec<ProjectSearchRoot>,
+    ) -> Result<DiscoveryOverrideGuard, Box<dyn std::error::Error>> {
+        reset_project_discovery_cache();
+        override_project_search_roots_for_test(Some(roots));
+        Ok(DiscoveryOverrideGuard)
+    }
 
     #[test]
     fn package_exports_format_command() {
@@ -461,5 +558,148 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "workspace.worktree-remove")
         );
+    }
+
+    #[test]
+    fn workspace_project_picker_items_sort_open_workspace_first()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let (root, alpha, zeta) = two_repo_tree()?;
+        let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
+        let scanning = project_discovery_snapshot(&project_search_roots());
+        wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+
+        let mut context = PickerProviderContext::new(
+            "workspace.projects",
+            "Projects",
+            PickerSource::WorkspaceProjects,
+        );
+        context.workspaces = vec![PickerWorkspaceContext {
+            id: 7,
+            name: "zeta".into(),
+            root: ROption::RSome(zeta.display().to_string().into()),
+            is_default: false,
+        }]
+        .into();
+
+        let items = picker_items(&context).expect("project picker items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label(), "zeta");
+        assert_eq!(items[0].action(), &PickerActionSpec::switch_workspace(7));
+        assert_eq!(items[1].label(), "alpha");
+        assert!(matches!(
+            items[1].action(),
+            PickerActionSpec::CreateWorkspace { .. }
+        ));
+        assert_eq!(items[1].id(), alpha.display().to_string());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_switch_picker_items_list_open_workspaces_then_projects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let (root, alpha, zeta) = two_repo_tree()?;
+        let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
+        let scanning = project_discovery_snapshot(&project_search_roots());
+        wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+
+        let mut context = PickerProviderContext::new(
+            "workspace.switch",
+            "Workspaces and Projects",
+            PickerSource::WorkspaceSwitch,
+        );
+        context.workspaces = vec![
+            PickerWorkspaceContext {
+                id: 1,
+                name: "default".into(),
+                root: ROption::RNone,
+                is_default: true,
+            },
+            PickerWorkspaceContext {
+                id: 7,
+                name: "zeta".into(),
+                root: ROption::RSome(zeta.display().to_string().into()),
+                is_default: false,
+            },
+        ]
+        .into();
+
+        let items = picker_items(&context).expect("switch picker items");
+        assert_eq!(items[0].label(), "default");
+        assert_eq!(items[1].label(), "zeta");
+        assert!(items[2].is_divider());
+        assert_eq!(items[3].label(), "alpha");
+        assert!(matches!(
+            items[3].action(),
+            PickerActionSpec::CreateWorkspace { .. }
+        ));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.id() != alpha.display().to_string()
+                    || matches!(item.action(), PickerActionSpec::CreateWorkspace { .. }))
+        );
+        assert!(items.iter().all(|item| {
+            item.label() != "zeta"
+                || matches!(item.action(), PickerActionSpec::SwitchWorkspace { .. })
+        }));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_project_picker_items_show_scanning_row_when_cache_empty()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let (root, _, _) = two_repo_tree()?;
+        let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
+        set_project_discovery_worker_blocked_for_test(true);
+
+        let context = PickerProviderContext::new(
+            "workspace.projects",
+            "Projects",
+            PickerSource::WorkspaceProjects,
+        );
+        let items = picker_items(&context).expect("scanning items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id(), PROJECT_DISCOVERY_SCANNING_ID);
+        assert_eq!(items[0].action(), &PickerActionSpec::no_op());
+
+        set_project_discovery_worker_blocked_for_test(false);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_project_picker_items_keep_candidates_while_rescan_runs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let (root, _, _) = two_repo_tree()?;
+        let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
+        let scanning = project_discovery_snapshot(&project_search_roots());
+        wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+        editor_fs::set_project_discovery_ttl_for_test(Duration::ZERO);
+        set_project_discovery_worker_blocked_for_test(true);
+
+        let context = PickerProviderContext::new(
+            "workspace.projects",
+            "Projects",
+            PickerSource::WorkspaceProjects,
+        );
+        let items = picker_items(&context).expect("stale candidates");
+        assert!(
+            items
+                .iter()
+                .all(|item| item.id() != PROJECT_DISCOVERY_SCANNING_ID)
+        );
+        assert_eq!(items.len(), 2);
+
+        set_project_discovery_worker_blocked_for_test(false);
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

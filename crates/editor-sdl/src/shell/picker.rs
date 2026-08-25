@@ -84,7 +84,10 @@ fn user_picker_overlay(
         .iter()
         .map(|item| static_picker_entry(runtime, item))
         .collect::<Result<Vec<_>, String>>()?;
-    let mut overlay = PickerOverlay::from_entries(spec.title(), entries).with_title(spec.title());
+    let mut overlay = PickerOverlay::from_entries(spec.title(), entries)
+        .with_title(spec.title())
+        .with_source(spec.source())
+        .with_provider_id(spec.id());
     if matches!(
         spec.source(),
         PickerSource::Buffers
@@ -114,6 +117,25 @@ fn user_picker_overlay(
         }
     }
     Ok(with_provider_extras(overlay, spec))
+}
+
+pub(super) fn picker_entries(
+    runtime: &EditorRuntime,
+    provider: &str,
+) -> Result<Vec<PickerEntry>, String> {
+    let spec = shell_user_library(runtime)
+        .picker_providers()
+        .into_iter()
+        .find(|spec| spec.id() == provider)
+        .ok_or_else(|| format!("unknown picker provider `{provider}`"))?;
+    let context = picker_provider_context(runtime, &spec)?;
+    let items = shell_user_library(runtime)
+        .picker_provider_items(&context)
+        .unwrap_or_else(|| spec.items().to_vec());
+    items
+        .iter()
+        .map(|item| static_picker_entry(runtime, item))
+        .collect()
 }
 
 fn workspace_dashboard_unavailable_overlay(error: String) -> PickerOverlay {

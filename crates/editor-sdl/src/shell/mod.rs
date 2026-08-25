@@ -8999,6 +8999,9 @@ pub(crate) struct PickerOverlay {
     preview_syntax_lines: IndexedSyntaxLines,
     mode: PickerMode,
     kind: PickerKind,
+    source: Option<PickerSource>,
+    provider_id: Option<String>,
+    project_discovery_revision: Option<u64>,
 }
 
 impl PickerOverlay {
@@ -9028,6 +9031,9 @@ impl PickerOverlay {
             preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::Static,
             kind: PickerKind::Generic,
+            source: None,
+            provider_id: None,
+            project_discovery_revision: None,
         }
     }
 
@@ -9082,6 +9088,9 @@ impl PickerOverlay {
             preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::VimSearch(direction),
             kind: PickerKind::Generic,
+            source: None,
+            provider_id: None,
+            project_discovery_revision: None,
         }
     }
 
@@ -9099,6 +9108,9 @@ impl PickerOverlay {
             preview_syntax_lines: IndexedSyntaxLines::new(),
             mode: PickerMode::WorkspaceSearch { root },
             kind: PickerKind::Generic,
+            source: None,
+            provider_id: None,
+            project_discovery_revision: None,
         }
     }
 
@@ -9113,6 +9125,49 @@ impl PickerOverlay {
     fn with_kind(mut self, kind: PickerKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    fn with_source(mut self, source: PickerSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    fn source(&self) -> Option<PickerSource> {
+        self.source
+    }
+
+    fn provider_id(&self) -> Option<&str> {
+        self.provider_id.as_deref()
+    }
+
+    fn project_discovery_revision(&self) -> Option<u64> {
+        self.project_discovery_revision
+    }
+
+    fn set_project_discovery_revision(&mut self, revision: u64) {
+        self.project_discovery_revision = Some(revision);
+    }
+
+    fn replace_entries_preserving_selection(&mut self, entries: Vec<PickerEntry>) {
+        let selected_id = self
+            .session
+            .selected()
+            .map(|selected| selected.item().id().to_owned());
+        self.set_entries(entries, 0);
+        if let Some(selected_id) = selected_id
+            && let Some(index) = self
+                .session
+                .matches()
+                .iter()
+                .position(|matched| matched.item().id() == selected_id)
+        {
+            self.session.set_selected_index(index);
+        }
     }
 
     fn with_preview(mut self) -> Self {
@@ -13972,7 +14027,56 @@ impl ShellState {
             }
         }
 
+        if self.refresh_pending_project_discovery()? {
+            changed = true;
+        }
+
         Ok(changed)
+    }
+
+    fn refresh_pending_project_discovery(&mut self) -> Result<bool, ShellError> {
+        let (source, provider_id) = {
+            let Some(picker) = self.ui()?.picker() else {
+                return Ok(false);
+            };
+            let Some(source) = picker.source() else {
+                return Ok(false);
+            };
+            if !matches!(
+                source,
+                PickerSource::WorkspaceProjects | PickerSource::WorkspaceSwitch
+            ) {
+                return Ok(false);
+            }
+            if picker.project_discovery_revision()
+                == Some(editor_fs::current_project_discovery_snapshot().revision())
+            {
+                return Ok(false);
+            }
+            (
+                source,
+                picker
+                    .provider_id()
+                    .unwrap_or(if source == PickerSource::WorkspaceSwitch {
+                        "workspace.switch"
+                    } else {
+                        "workspace.projects"
+                    })
+                    .to_owned(),
+            )
+        };
+        let entries =
+            picker::picker_entries(&self.runtime, &provider_id).map_err(ShellError::Runtime)?;
+        let revision = editor_fs::current_project_discovery_snapshot().revision();
+        let Some(picker) = self.ui_mut()?.picker_mut() else {
+            return Ok(false);
+        };
+        if picker.source() != Some(source) {
+            return Ok(false);
+        }
+        picker.replace_entries_preserving_selection(entries);
+        picker.set_project_discovery_revision(revision);
+        Ok(true)
     }
 
     fn schedule_autocomplete_refresh_if_active(&mut self) -> Result<(), ShellError> {
@@ -14696,6 +14800,13 @@ impl ShellState {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_pending_project_discovery_for_test(
+        &mut self,
+    ) -> Result<bool, ShellError> {
+        self.refresh_pending_project_discovery()
     }
 
     fn try_runtime_keybinding_cached(

@@ -1786,3 +1786,193 @@ fn workspace_open_volt_project_timing_probe() -> Result<(), Box<dyn std::error::
     );
     Ok(())
 }
+
+fn project_discovery_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ProjectDiscoveryTestGuard;
+
+impl Drop for ProjectDiscoveryTestGuard {
+    fn drop(&mut self) {
+        user::workspace::override_project_search_roots_for_test(None);
+        editor_fs::reset_project_discovery_cache();
+        editor_fs::set_project_discovery_worker_blocked_for_test(false);
+    }
+}
+
+fn begin_project_discovery_test(
+    roots: Vec<editor_fs::ProjectSearchRoot>,
+) -> Result<ProjectDiscoveryTestGuard, Box<dyn std::error::Error>> {
+    editor_fs::reset_project_discovery_cache();
+    user::workspace::override_project_search_roots_for_test(Some(roots));
+    Ok(ProjectDiscoveryTestGuard)
+}
+
+fn discovery_fixture() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let root = temp_workspace_root("project-discovery");
+    let feature = root.join("feature-app");
+    fs::create_dir_all(feature.join(".git"))?;
+    fs::create_dir_all(root.join("other").join(".git"))?;
+    Ok((root, feature))
+}
+
+#[test]
+fn workspace_project_picker_refreshes_in_place_and_preserves_query()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = project_discovery_test_lock();
+    let (root, feature) = discovery_fixture()?;
+    let _guard = begin_project_discovery_test(vec![editor_fs::ProjectSearchRoot::new(&root, 2)])?;
+    editor_fs::set_project_discovery_worker_blocked_for_test(true);
+
+    let mut state = user_shell_state()?;
+    state
+        .runtime
+        .execute_command("workspace.new")
+        .map_err(|error| error.to_string())?;
+    {
+        let picker = state.ui()?.picker().ok_or("missing project picker")?;
+        assert_eq!(picker.session().title(), "Projects");
+        assert!(
+            picker
+                .session()
+                .matches()
+                .iter()
+                .any(|matched| matched.item().id() == "project-discovery-scanning")
+        );
+    }
+    state.handle_text_input("feat")?;
+    assert_eq!(
+        state
+            .ui()?
+            .picker()
+            .ok_or("missing project picker")?
+            .session()
+            .query(),
+        "feat"
+    );
+
+    editor_fs::set_project_discovery_worker_blocked_for_test(false);
+    editor_fs::wait_for_project_discovery(
+        editor_fs::current_project_discovery_snapshot().request_id(),
+        Duration::from_secs(2),
+    )?;
+    assert!(state.refresh_pending_project_discovery_for_test()?);
+
+    let picker = state.ui()?.picker().ok_or("picker closed during refresh")?;
+    assert_eq!(picker.session().query(), "feat");
+    assert_eq!(picker.session().title(), "Projects");
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .any(|matched| matched.item().label() == "feature-app")
+    );
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .all(|matched| matched.item().id() != "project-discovery-scanning")
+    );
+    assert_eq!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .filter(|matched| !matched.item().is_divider())
+            .count(),
+        1,
+        "query should keep only the feature-app match"
+    );
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .any(|matched| matched.item().id() == feature.display().to_string())
+    );
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_project_picker_late_scan_does_not_reopen_after_close()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = project_discovery_test_lock();
+    let (root, _) = discovery_fixture()?;
+    let _guard = begin_project_discovery_test(vec![editor_fs::ProjectSearchRoot::new(&root, 2)])?;
+    editor_fs::set_project_discovery_worker_blocked_for_test(true);
+
+    let mut state = user_shell_state()?;
+    state
+        .runtime
+        .execute_command("workspace.new")
+        .map_err(|error| error.to_string())?;
+    assert!(state.ui()?.picker().is_some());
+    state
+        .runtime
+        .execute_command("picker.cancel")
+        .map_err(|error| error.to_string())?;
+    assert!(state.ui()?.picker().is_none());
+
+    editor_fs::set_project_discovery_worker_blocked_for_test(false);
+    editor_fs::wait_for_project_discovery(
+        editor_fs::current_project_discovery_snapshot().request_id(),
+        Duration::from_secs(2),
+    )?;
+    assert!(!state.refresh_pending_project_discovery_for_test()?);
+    assert!(state.ui()?.picker().is_none());
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn workspace_project_picker_late_scan_does_not_replace_other_picker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = project_discovery_test_lock();
+    let (root, _) = discovery_fixture()?;
+    let _guard = begin_project_discovery_test(vec![editor_fs::ProjectSearchRoot::new(&root, 2)])?;
+    editor_fs::set_project_discovery_worker_blocked_for_test(true);
+
+    let mut state = user_shell_state()?;
+    state
+        .runtime
+        .execute_command("workspace.new")
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .execute_command("picker.open-commands")
+        .map_err(|error| error.to_string())?;
+    let title = state
+        .ui()?
+        .picker()
+        .ok_or("missing command picker")?
+        .session()
+        .title()
+        .to_owned();
+    assert_ne!(title, "Projects");
+
+    editor_fs::set_project_discovery_worker_blocked_for_test(false);
+    editor_fs::wait_for_project_discovery(
+        editor_fs::current_project_discovery_snapshot().request_id(),
+        Duration::from_secs(2),
+    )?;
+    assert!(!state.refresh_pending_project_discovery_for_test()?);
+    let picker = state.ui()?.picker().ok_or("command picker closed")?;
+    assert_eq!(picker.session().title(), title);
+    assert!(
+        picker
+            .session()
+            .matches()
+            .iter()
+            .all(|matched| matched.item().id() != "project-discovery-scanning")
+    );
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
