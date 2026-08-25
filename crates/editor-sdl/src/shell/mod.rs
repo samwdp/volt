@@ -9382,6 +9382,7 @@ pub(crate) struct ShellUiState {
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
+    git_head_blobs: GitHeadBlobCache,
     autocomplete_worker: AutocompleteWorkerState,
     inline_completion_worker: InlineCompletionWorkerState,
     vim_search_worker: VimSearchWorkerState,
@@ -9455,6 +9456,7 @@ impl ShellUiState {
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
+            git_head_blobs: GitHeadBlobCache::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
             inline_completion_worker: InlineCompletionWorkerState::new(),
             vim_search_worker: VimSearchWorkerState::new(),
@@ -9615,6 +9617,10 @@ impl ShellUiState {
 
     fn git_summary_state(&self) -> GitSummaryState {
         self.git_summary.clone()
+    }
+
+    fn git_head_blob_cache(&self) -> GitHeadBlobCache {
+        self.git_head_blobs.clone()
     }
 
     fn take_git_summary_changed(&self) -> bool {

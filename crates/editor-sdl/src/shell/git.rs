@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 use std::process::Stdio;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +133,48 @@ impl GitSummaryState {
 
     pub(super) fn snapshot_revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GitHeadBlobKey {
+    root: PathBuf,
+    relative: String,
+    head: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct GitHeadBlobCache {
+    entries: Arc<Mutex<HashMap<GitHeadBlobKey, String>>>,
+}
+
+impl GitHeadBlobCache {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, root: &Path, relative: &str, head: &str) -> Option<String> {
+        let key = GitHeadBlobKey {
+            root: root.to_path_buf(),
+            relative: relative.to_owned(),
+            head: head.to_owned(),
+        };
+        self.entries.lock().ok()?.get(&key).cloned()
+    }
+
+    fn insert(&self, root: &Path, relative: &str, head: &str, text: String) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.retain(|key, _| key.root != root || key.head == head);
+        entries.insert(
+            GitHeadBlobKey {
+                root: root.to_path_buf(),
+                relative: relative.to_owned(),
+                head: head.to_owned(),
+            },
+            text,
+        );
     }
 }
 
@@ -4460,6 +4503,13 @@ pub(super) fn refresh_git_fringe(
     if !fringe_state.try_begin_refresh() {
         return Ok(());
     }
+    let (head_id, blob_cache) = {
+        let ui = shell_ui(runtime)?;
+        (
+            ui.git_summary().and_then(|snapshot| snapshot.head.clone()),
+            ui.git_head_blob_cache(),
+        )
+    };
     let text_snapshot = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         buffer.text.snapshot()
@@ -4471,7 +4521,14 @@ pub(super) fn refresh_git_fringe(
     std::thread::spawn(move || {
         let buffer_text = text_snapshot.text();
         let snapshot = if git_repository_present(&root) {
-            build_git_fringe_snapshot(&root, &relative_path, &buffer_text, line_count)
+            build_git_fringe_snapshot_with_cache(
+                &root,
+                &relative_path,
+                &buffer_text,
+                line_count,
+                head_id.as_deref(),
+                Some(&blob_cache),
+            )
         } else {
             GitFringeSnapshot::default()
         };
@@ -4482,75 +4539,325 @@ pub(super) fn refresh_git_fringe(
     Ok(())
 }
 
-pub(super) fn build_git_fringe_snapshot(
+fn build_git_fringe_snapshot_with_cache(
     root: &Path,
     relative_path: &Path,
+    buffer_text: &str,
+    line_count: usize,
+    head_id: Option<&str>,
+    cache: Option<&GitHeadBlobCache>,
+) -> GitFringeSnapshot {
+    if line_count == 0 {
+        return GitFringeSnapshot::default();
+    }
+    match head_blob_text(root, relative_path, head_id, cache) {
+        HeadBlob::Missing => {
+            let mut snapshot = GitFringeSnapshot::default();
+            for line_index in 0..line_count {
+                snapshot.lines.insert(line_index, GitFringeKind::Added);
+            }
+            snapshot
+        }
+        HeadBlob::Binary => GitFringeSnapshot::default(),
+        HeadBlob::Text(head_text) => {
+            git_fringe_snapshot_from_texts(&head_text, buffer_text, line_count)
+        }
+    }
+}
+
+enum HeadBlob {
+    Missing,
+    Binary,
+    Text(String),
+}
+
+fn head_blob_text(
+    root: &Path,
+    relative_path: &Path,
+    head_id: Option<&str>,
+    cache: Option<&GitHeadBlobCache>,
+) -> HeadBlob {
+    let relative_spec = relative_path.to_string_lossy().replace('\\', "/");
+    let Some(head) = head_id
+        .map(str::trim)
+        .filter(|head| !head.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            git_command_output_background(root, &["rev-parse", "--verify", "HEAD"], &[0])
+                .map(|output| output.trim().to_owned())
+                .filter(|output| !output.is_empty())
+        })
+    else {
+        return HeadBlob::Missing;
+    };
+    if let Some(cache) = cache
+        && let Some(text) = cache.get(root, &relative_spec, &head)
+    {
+        return classify_head_blob(text);
+    }
+    let spec = format!("{head}:{relative_spec}");
+    let Some(text) = git_command_output_background(root, &["show", &spec], &[0]) else {
+        return HeadBlob::Missing;
+    };
+    if let Some(cache) = cache {
+        cache.insert(root, &relative_spec, &head, text.clone());
+    }
+    classify_head_blob(text)
+}
+
+fn classify_head_blob(text: String) -> HeadBlob {
+    if text.as_bytes().contains(&0) {
+        HeadBlob::Binary
+    } else {
+        HeadBlob::Text(text)
+    }
+}
+
+pub(super) fn git_fringe_snapshot_from_texts(
+    head_text: &str,
     buffer_text: &str,
     line_count: usize,
 ) -> GitFringeSnapshot {
     if line_count == 0 {
         return GitFringeSnapshot::default();
     }
-    let relative_spec = relative_path.to_string_lossy().replace('\\', "/");
-    let head_spec = format!("HEAD:{relative_spec}");
-    let head_text = git_command_output_background(root, &["show", &head_spec], &[0]);
-    let Some(head_text) = head_text else {
-        let mut snapshot = GitFringeSnapshot::default();
-        for line_index in 0..line_count {
-            snapshot.lines.insert(line_index, GitFringeKind::Added);
-        }
-        return snapshot;
-    };
-    let normalized_head_text = normalize_git_fringe_text(&head_text);
+    let normalized_head_text = normalize_git_fringe_text(head_text);
     let normalized_buffer_text = normalize_git_fringe_text(buffer_text);
     if normalized_head_text == normalized_buffer_text {
         return GitFringeSnapshot::default();
     }
-    let head_path = git_fringe_temp_path("head");
-    let buffer_path = git_fringe_temp_path("buffer");
-    if fs::write(&head_path, normalized_head_text).is_err()
-        || fs::write(&buffer_path, normalized_buffer_text).is_err()
-    {
-        let _ = fs::remove_file(&head_path);
-        let _ = fs::remove_file(&buffer_path);
-        return GitFringeSnapshot::default();
+    let old_lines = split_git_fringe_lines(&normalized_head_text);
+    let new_lines = split_git_fringe_lines(&normalized_buffer_text);
+    let mut snapshot = GitFringeSnapshot::default();
+    for (old_count, new_start, new_count) in line_diff_hunks(&old_lines, &new_lines) {
+        apply_git_fringe_hunk(&mut snapshot, line_count, old_count, new_start, new_count);
     }
-    let head_path_str = head_path.to_string_lossy().to_string();
-    let buffer_path_str = buffer_path.to_string_lossy().to_string();
-    let diff_output = git_command_output_background(
-        root,
-        &[
-            "diff",
-            "--no-index",
-            "--unified=0",
-            "--no-color",
-            head_path_str.as_str(),
-            buffer_path_str.as_str(),
-        ],
-        &[0, 1],
-    )
-    .unwrap_or_default();
-    let _ = fs::remove_file(&head_path);
-    let _ = fs::remove_file(&buffer_path);
-    parse_git_fringe_diff(&diff_output, line_count)
+    snapshot
+}
+
+fn split_git_fringe_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
+    }
 }
 
 fn normalize_git_fringe_text(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\r' {
-            if chars.peek() == Some(&'\n') {
-                chars.next();
-            }
-            normalized.push('\n');
-        } else {
-            normalized.push(ch);
-        }
-    }
-    normalized
+    normalize_git_fringe_bytes(text.as_bytes())
 }
 
+fn normalize_git_fringe_bytes(bytes: &[u8]) -> String {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            normalized.push(b'\n');
+            if bytes.get(index + 1) == Some(&b'\n') {
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        normalized.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(normalized)
+        .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned())
+}
+
+#[derive(Clone, Copy)]
+enum FringeDiffOp {
+    Equal,
+    Delete,
+    Insert,
+}
+
+fn line_diff_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize, usize)> {
+    let n = old_lines.len();
+    let m = new_lines.len();
+    if n == 0 && m == 0 {
+        return Vec::new();
+    }
+    const MAX_DP_CELLS: usize = 8_000_000;
+    let ops = if n.saturating_mul(m) > MAX_DP_CELLS {
+        myers_diff_ops(old_lines, new_lines)
+    } else {
+        lcs_diff_ops(old_lines, new_lines)
+    };
+    hunks_from_ops(&ops)
+}
+
+fn lcs_diff_ops(old_lines: &[&str], new_lines: &[&str]) -> Vec<FringeDiffOp> {
+    let n = old_lines.len();
+    let m = new_lines.len();
+    let mut dp = vec![vec![0u32; m.saturating_add(1)]; n.saturating_add(1)];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i][j] = if old_lines[i - 1] == new_lines[j - 1] {
+                dp[i - 1][j - 1].saturating_add(1)
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+    let mut ops = Vec::new();
+    let mut i = n;
+    let mut j = m;
+    while i > 0 && j > 0 {
+        if old_lines[i - 1] == new_lines[j - 1] {
+            ops.push(FringeDiffOp::Equal);
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            ops.push(FringeDiffOp::Delete);
+            i -= 1;
+        } else {
+            ops.push(FringeDiffOp::Insert);
+            j -= 1;
+        }
+    }
+    ops.extend(std::iter::repeat_n(FringeDiffOp::Delete, i));
+    ops.extend(std::iter::repeat_n(FringeDiffOp::Insert, j));
+    ops.reverse();
+    ops
+}
+
+fn myers_diff_ops(old_lines: &[&str], new_lines: &[&str]) -> Vec<FringeDiffOp> {
+    let n = old_lines.len();
+    let m = new_lines.len();
+    let max = n.saturating_add(m);
+    let offset = max as i32;
+    let mut v = vec![0i32; max.saturating_mul(2).saturating_add(1)];
+    let mut trace = Vec::with_capacity(max.saturating_add(1));
+    let mut done_d = 0usize;
+    'search: for d in 0..=max {
+        for k in (-(d as i32)..=d as i32).step_by(2) {
+            let down = k == -(d as i32)
+                || (k != d as i32 && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]);
+            let mut x = if down {
+                v[(k + 1 + offset) as usize]
+            } else {
+                v[(k - 1 + offset) as usize] + 1
+            };
+            let mut y = x - k;
+            while x >= 0
+                && y >= 0
+                && (x as usize) < n
+                && (y as usize) < m
+                && old_lines[x as usize] == new_lines[y as usize]
+            {
+                x += 1;
+                y += 1;
+            }
+            v[(k + offset) as usize] = x;
+            if x >= n as i32 && y >= m as i32 {
+                trace.push(v.clone());
+                done_d = d;
+                break 'search;
+            }
+        }
+        trace.push(v.clone());
+    }
+
+    let mut x = n as i32;
+    let mut y = m as i32;
+    let mut ops = Vec::new();
+    for d in (0..=done_d).rev() {
+        let v = &trace[d];
+        let k = x - y;
+        let down = k == -(d as i32)
+            || (k != d as i32 && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]);
+        let prev_k = if down { k + 1 } else { k - 1 };
+        let prev_x = if d == 0 {
+            0
+        } else {
+            v[(prev_k + offset) as usize]
+        };
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            ops.push(FringeDiffOp::Equal);
+            x -= 1;
+            y -= 1;
+        }
+        if d > 0 {
+            if x == prev_x {
+                ops.push(FringeDiffOp::Insert);
+            } else {
+                ops.push(FringeDiffOp::Delete);
+            }
+            x = prev_x;
+            y = prev_y;
+        }
+    }
+    ops.reverse();
+    ops
+}
+
+fn hunks_from_ops(ops: &[FringeDiffOp]) -> Vec<(usize, usize, usize)> {
+    let mut hunks = Vec::new();
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+    let mut new_start = 0usize;
+    let mut consumed_new = 0usize;
+    let mut in_hunk = false;
+
+    let flush = |hunks: &mut Vec<(usize, usize, usize)>,
+                 in_hunk: &mut bool,
+                 old_count: &mut usize,
+                 new_count: &mut usize,
+                 new_start: usize| {
+        if *in_hunk {
+            hunks.push((*old_count, new_start, *new_count));
+            *in_hunk = false;
+            *old_count = 0;
+            *new_count = 0;
+        }
+    };
+
+    for op in ops {
+        match op {
+            FringeDiffOp::Equal => {
+                flush(
+                    &mut hunks,
+                    &mut in_hunk,
+                    &mut old_count,
+                    &mut new_count,
+                    new_start,
+                );
+                consumed_new = consumed_new.saturating_add(1);
+            }
+            FringeDiffOp::Delete => {
+                if !in_hunk {
+                    in_hunk = true;
+                    new_start = consumed_new.saturating_add(1);
+                }
+                old_count = old_count.saturating_add(1);
+            }
+            FringeDiffOp::Insert => {
+                if !in_hunk {
+                    in_hunk = true;
+                    new_start = consumed_new.saturating_add(1);
+                } else if new_count == 0 {
+                    new_start = consumed_new.saturating_add(1);
+                }
+                new_count = new_count.saturating_add(1);
+                consumed_new = consumed_new.saturating_add(1);
+            }
+        }
+    }
+    flush(
+        &mut hunks,
+        &mut in_hunk,
+        &mut old_count,
+        &mut new_count,
+        new_start,
+    );
+    hunks
+}
+
+#[cfg(test)]
 pub(super) fn parse_git_fringe_diff(diff_output: &str, line_count: usize) -> GitFringeSnapshot {
     let mut snapshot = GitFringeSnapshot::default();
     if line_count == 0 {
@@ -4593,6 +4900,7 @@ pub(super) fn apply_git_fringe_hunk(
     }
 }
 
+#[cfg(test)]
 pub(super) fn parse_diff_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
     let trimmed = line.strip_prefix("@@")?.trim();
     let mut parts = trimmed.split_whitespace();
@@ -4603,6 +4911,7 @@ pub(super) fn parse_diff_hunk_header(line: &str) -> Option<(usize, usize, usize,
     Some((old_start, old_count, new_start, new_count))
 }
 
+#[cfg(test)]
 pub(super) fn parse_hunk_range(part: &str) -> Option<(usize, usize)> {
     let part = part.strip_prefix('-').or_else(|| part.strip_prefix('+'))?;
     let mut pieces = part.split(',');
@@ -4663,17 +4972,6 @@ pub(super) fn git_command_output_background(
 
 pub(super) fn git_repository_present(root: &Path) -> bool {
     git_command_output_background(root, &["rev-parse", "--git-dir"], &[0]).is_some()
-}
-
-pub(super) fn git_fringe_temp_path(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0))
-        .as_nanos();
-    env::temp_dir().join(format!(
-        "volt-git-fringe-{label}-{}-{unique}.tmp",
-        std::process::id()
-    ))
 }
 
 pub(super) fn git_command_output(
@@ -5092,7 +5390,14 @@ mod tests {
         git_read_command_output(&root, "add", &["add", "main.rs"]).expect("git add");
         git_read_command_output(&root, "commit", &["commit", "-qm", "init"]).expect("git commit");
 
-        let snapshot = build_git_fringe_snapshot(&root, Path::new("main.rs"), "fn main() {}", 1);
+        let snapshot = build_git_fringe_snapshot_with_cache(
+            &root,
+            Path::new("main.rs"),
+            "fn main() {}",
+            1,
+            None,
+            None,
+        );
         assert!(snapshot.lines.is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -5120,14 +5425,96 @@ mod tests {
         git_read_command_output(&root, "add", &["add", "main.rs"]).expect("git add");
         git_read_command_output(&root, "commit", &["commit", "-qm", "init"]).expect("git commit");
 
-        let snapshot = build_git_fringe_snapshot(
+        let snapshot = build_git_fringe_snapshot_with_cache(
             &root,
             Path::new("main.rs"),
             "fn main() {\n    println!(\"hi\");\n}\n",
             3,
+            None,
+            None,
         );
         assert!(snapshot.lines.is_empty());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_is_empty_when_identical() {
+        let snapshot = git_fringe_snapshot_from_texts("fn main() {}\n", "fn main() {}\n", 1);
+        assert!(snapshot.lines.is_empty());
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_ignores_crlf_only_difference() {
+        let snapshot = git_fringe_snapshot_from_texts(
+            "fn main() {\r\n    println!(\"hi\");\r\n}\r\n",
+            "fn main() {\n    println!(\"hi\");\n}\n",
+            3,
+        );
+        assert!(snapshot.lines.is_empty());
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_marks_modified_middle_line() {
+        let snapshot = git_fringe_snapshot_from_texts("a\nb\nc\n", "a\nx\nc\n", 3);
+        assert_eq!(snapshot.line_kind(1), Some(GitFringeKind::Modified));
+        assert_eq!(snapshot.lines.len(), 1);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_marks_removed_on_adjacent_line() {
+        let snapshot = git_fringe_snapshot_from_texts("a\nb\nc\n", "a\nc\n", 2);
+        assert_eq!(snapshot.line_kind(1), Some(GitFringeKind::Removed));
+        assert_eq!(snapshot.lines.len(), 1);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_marks_inserted_line_added() {
+        let snapshot = git_fringe_snapshot_from_texts("a\nc\n", "a\nx\nc\n", 3);
+        assert_eq!(snapshot.line_kind(1), Some(GitFringeKind::Added));
+        assert_eq!(snapshot.lines.len(), 1);
+    }
+
+    #[test]
+    fn git_fringe_snapshot_from_texts_marks_all_lines_added_without_head() {
+        let snapshot = git_fringe_snapshot_from_texts("", "a\nb\n", 2);
+        assert_eq!(snapshot.line_kind(0), Some(GitFringeKind::Added));
+        assert_eq!(snapshot.line_kind(1), Some(GitFringeKind::Added));
+        assert_eq!(snapshot.lines.len(), 2);
+    }
+
+    #[test]
+    fn git_head_blob_cache_reuses_text_for_same_head() {
+        let cache = GitHeadBlobCache::new();
+        let root = Path::new("P:\\repo");
+        cache.insert(root, "main.rs", "abc123", "fn main() {}".to_owned());
+        cache.insert(root, "lib.rs", "abc123", "pub fn lib() {}".to_owned());
+        assert_eq!(
+            cache.get(root, "main.rs", "abc123").as_deref(),
+            Some("fn main() {}")
+        );
+        cache.insert(root, "main.rs", "def456", "fn main() { 1 }".to_owned());
+        assert!(cache.get(root, "main.rs", "abc123").is_none());
+        assert_eq!(
+            cache.get(root, "main.rs", "def456").as_deref(),
+            Some("fn main() { 1 }")
+        );
+    }
+
+    #[test]
+    fn parse_git_fringe_diff_marks_modified_hunk() {
+        let snapshot = parse_git_fringe_diff("@@ -2,1 +2,1 @@\n", 3);
+        assert_eq!(snapshot.line_kind(1), Some(GitFringeKind::Modified));
+        assert_eq!(snapshot.lines.len(), 1);
+    }
+
+    #[test]
+    fn myers_diff_ops_match_lcs_for_middle_replace() {
+        let old = ["a", "b", "c"];
+        let new = ["a", "x", "c"];
+        let myers = hunks_from_ops(&myers_diff_ops(&old, &new));
+        let lcs = hunks_from_ops(&lcs_diff_ops(&old, &new));
+        assert_eq!(myers, lcs);
+        assert_eq!(myers, vec![(1, 2, 1)]);
     }
 }
