@@ -1,5 +1,6 @@
 use super::git::{leading_indent_bytes, push_span_bytes, split_icon_prefixed_content};
 use super::*;
+use editor_fs::DirectoryBuffer;
 
 const TOKEN_OIL_HEADER: &str = "oil.header";
 const TOKEN_OIL_DIRECTORY: &str = "oil.directory";
@@ -842,8 +843,99 @@ pub(super) fn apply_directory_edit_queue(
         }
     }
     apply_directory_edit_actions(&actions)?;
-    refresh_directory_buffer(runtime, buffer_id)?;
+    if apply_directory_listing_patch(runtime, buffer_id, &actions).is_err() {
+        refresh_directory_buffer(runtime, buffer_id)?;
+    }
     Ok(())
+}
+
+fn apply_directory_listing_patch(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    actions: &[DirectoryEditAction],
+) -> Result<(), String> {
+    let mut state = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        buffer
+            .directory_state()
+            .cloned()
+            .ok_or_else(|| "directory state is missing".to_owned())?
+    };
+    patch_directory_listing(&mut state, actions)?;
+    apply_directory_state(runtime, buffer_id, state)?;
+    move_cursor_after_directory_actions(runtime, buffer_id, actions)
+}
+
+fn patch_directory_listing(
+    state: &mut DirectoryViewState,
+    actions: &[DirectoryEditAction],
+) -> Result<(), String> {
+    let mut listing =
+        DirectoryBuffer::from_entries(state.root.clone(), std::mem::take(&mut state.entries));
+    for action in actions {
+        let patched = match action {
+            DirectoryEditAction::Rename { from, to } => listing.patch_renamed(from, to),
+            DirectoryEditAction::Delete { path, .. } => listing.patch_deleted(path),
+            DirectoryEditAction::CreateFile(path) | DirectoryEditAction::CreateDir(path) => listing
+                .patch_created(path)
+                .map_err(|error| error.to_string())?,
+            DirectoryEditAction::CreateGitWorktree { path, .. } => listing
+                .patch_created(path)
+                .map_err(|error| error.to_string())?,
+        };
+        if !patched {
+            state.entries = listing.into_entries();
+            return Err("directory listing patch inapplicable".to_owned());
+        }
+    }
+    state.entries = listing.into_entries();
+    Ok(())
+}
+
+fn move_cursor_after_directory_actions(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    actions: &[DirectoryEditAction],
+) -> Result<(), String> {
+    let Some(name) = actions.iter().rev().find_map(|action| match action {
+        DirectoryEditAction::Rename { to, .. }
+        | DirectoryEditAction::CreateFile(to)
+        | DirectoryEditAction::CreateDir(to)
+        | DirectoryEditAction::CreateGitWorktree { path: to, .. } => to
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        DirectoryEditAction::Delete { .. } => None,
+    }) else {
+        return Ok(());
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    if let Some(line) = (0..buffer.line_count()).find(|&index| {
+        buffer
+            .text
+            .line(index)
+            .is_some_and(|line| line.contains(&name))
+    }) {
+        buffer.set_cursor(TextPoint::new(line, 0));
+    }
+    Ok(())
+}
+
+pub(super) fn patch_directory_created_paths(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    let actions = paths
+        .iter()
+        .map(|path| {
+            if path.is_dir() {
+                DirectoryEditAction::CreateDir(path.clone())
+            } else {
+                DirectoryEditAction::CreateFile(path.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    apply_directory_listing_patch(runtime, buffer_id, &actions)
 }
 
 pub(super) fn update_directory_state(

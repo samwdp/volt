@@ -1774,6 +1774,93 @@ fn oil_insert_creates_directory_file_and_nested_paths_on_normal() -> Result<(), 
 }
 
 #[test]
+fn oil_insert_patches_listing_without_rereading_siblings() -> Result<(), String> {
+    let root = unique_temp_dir("oil-insert-patch");
+    std::fs::write(root.join("existing.txt"), "keep\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    std::fs::write(root.join("sneaky.txt"), "external\n").map_err(|error| error.to_string())?;
+    oil_type_new_entry_and_leave_insert(&mut state, "abc.txt")?;
+
+    assert!(root.join("abc.txt").is_file());
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "abc.txt").is_ok(),
+        "created file should appear in the patched listing"
+    );
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "sneaky.txt").is_err(),
+        "insert must not reread siblings created on disk after open"
+    );
+
+    state
+        .runtime
+        .execute_command("oil.refresh")
+        .map_err(|error| error.to_string())?;
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "sneaky.txt").is_ok(),
+        "explicit refresh should reread the directory"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_toggle_hidden_filters_cached_entries_without_reread() -> Result<(), String> {
+    let root = unique_temp_dir("oil-hidden-cache");
+    std::fs::write(root.join(".hidden"), "hidden\n").map_err(|error| error.to_string())?;
+    std::fs::write(root.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    std::fs::write(root.join("sneaky.txt"), "external\n").map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .execute_command("oil.toggle-hidden")
+        .map_err(|error| error.to_string())?;
+
+    assert!(oil_line_index_containing(&state.runtime, buffer_id, ".hidden").is_ok());
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "sneaky.txt").is_err(),
+        "hidden toggle must filter the cached listing"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_root_change_rereads_the_new_directory() -> Result<(), String> {
+    let root = unique_temp_dir("oil-root-reread");
+    let child = root.join("child");
+    std::fs::create_dir(&child).map_err(|error| error.to_string())?;
+    std::fs::write(child.join("inside.txt"), "inside\n").map_err(|error| error.to_string())?;
+    std::fs::write(root.join("outside.txt"), "outside\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    let child_line = oil_line_index_containing(&state.runtime, buffer_id, "child")?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(child_line, 0));
+    state
+        .runtime
+        .execute_command("oil.set-root")
+        .map_err(|error| error.to_string())?;
+
+    assert!(oil_line_index_containing(&state.runtime, buffer_id, "inside.txt").is_ok());
+    assert!(oil_line_index_containing(&state.runtime, buffer_id, "outside.txt").is_err());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
     let root = unique_temp_dir("oil-normal-delete");
     let file_path = root.join("alpha.txt");

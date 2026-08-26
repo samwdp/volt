@@ -32901,7 +32901,13 @@ fn put_yank(runtime: &mut EditorRuntime, after: bool) -> Result<(), String> {
                 .root
                 .clone();
             copy_directory_yank_entries(entries, &root)?;
-            refresh_directory_buffer(runtime, buffer_id)?;
+            let copied_paths = entries
+                .iter()
+                .filter_map(|entry| entry.path.file_name().map(|name| root.join(name)))
+                .collect::<Vec<_>>();
+            if patch_directory_created_paths(runtime, buffer_id, &copied_paths).is_err() {
+                refresh_directory_buffer(runtime, buffer_id)?;
+            }
             shell_ui_mut(runtime)?.vim_mut().clear_transient();
             return Ok(());
         }
@@ -33108,7 +33114,13 @@ fn put_yank_over_visual_selection(runtime: &mut EditorRuntime, after: bool) -> R
                 .root
                 .clone();
             copy_directory_yank_entries(entries, &root)?;
-            refresh_directory_buffer(runtime, buffer_id)?;
+            let copied_paths = entries
+                .iter()
+                .filter_map(|entry| entry.path.file_name().map(|name| root.join(name)))
+                .collect::<Vec<_>>();
+            if patch_directory_created_paths(runtime, buffer_id, &copied_paths).is_err() {
+                refresh_directory_buffer(runtime, buffer_id)?;
+            }
             shell_ui_mut(runtime)?.vim_mut().clear_transient();
             shell_ui_mut(runtime)?.enter_normal_mode();
             return Ok(());

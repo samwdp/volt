@@ -186,6 +186,23 @@ impl DirectoryEntry {
     pub const fn kind(&self) -> DirectoryEntryKind {
         self.kind
     }
+
+    /// Reads a single filesystem entry without listing its siblings.
+    pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+        let kind = if metadata.is_dir() {
+            DirectoryEntryKind::Directory
+        } else {
+            DirectoryEntryKind::File
+        };
+        Ok(Self::new(name, path, kind))
+    }
 }
 
 /// Editable directory buffer model.
@@ -215,14 +232,17 @@ impl DirectoryBuffer {
             });
         }
 
-        entries.sort_by_key(|entry| {
-            (
-                matches!(entry.kind, DirectoryEntryKind::File),
-                entry.name.to_ascii_lowercase(),
-            )
-        });
+        sort_directory_buffer_entries(&mut entries);
 
         Ok(Self { root, entries })
+    }
+
+    /// Builds a buffer from an already-loaded listing without touching the disk.
+    pub fn from_entries(root: impl Into<PathBuf>, entries: Vec<DirectoryEntry>) -> Self {
+        Self {
+            root: root.into(),
+            entries,
+        }
     }
 
     /// Returns the root directory path.
@@ -235,13 +255,123 @@ impl DirectoryBuffer {
         &self.entries
     }
 
-    /// Renames an entry inside the backing directory and refreshes the listing.
+    /// Consumes the buffer and returns the cached entries.
+    pub fn into_entries(self) -> Vec<DirectoryEntry> {
+        self.entries
+    }
+
+    /// Renames an entry inside the backing directory and patches that row.
     pub fn rename_entry(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
         let old_path = self.root.join(old_name);
         let new_path = self.root.join(new_name);
-        fs::rename(old_path, new_path)?;
-        *self = Self::read(&self.root)?;
+        fs::rename(&old_path, &new_path)?;
+        if !self.patch_renamed(&old_path, &new_path) {
+            *self = Self::read(&self.root)?;
+        }
         Ok(())
+    }
+
+    /// Creates a file in the backing directory and patches the listing.
+    pub fn create_file(&mut self, name: &str) -> io::Result<()> {
+        let path = self.root.join(name);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        self.patch_created(&path)?;
+        Ok(())
+    }
+
+    /// Creates a directory in the backing directory and patches the listing.
+    pub fn create_dir(&mut self, name: &str) -> io::Result<()> {
+        let path = self.root.join(name);
+        fs::create_dir(&path)?;
+        self.patch_created(&path)?;
+        Ok(())
+    }
+
+    /// Deletes an entry from the backing directory and patches the listing.
+    pub fn delete_entry(&mut self, name: &str) -> io::Result<()> {
+        let path = self.root.join(name);
+        let kind = self
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(DirectoryEntry::kind);
+        match kind {
+            Some(DirectoryEntryKind::Directory) => fs::remove_dir_all(&path)?,
+            Some(DirectoryEntryKind::File) => fs::remove_file(&path)?,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("directory entry `{name}` is missing"),
+                ));
+            }
+        }
+        self.patch_deleted(&path);
+        Ok(())
+    }
+
+    /// Patches a renamed direct child after a successful on-disk rename.
+    pub fn patch_renamed(&mut self, from: &Path, to: &Path) -> bool {
+        if !is_direct_child(&self.root, from) || !is_direct_child(&self.root, to) {
+            return false;
+        }
+        let Some(name) = to
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return false;
+        };
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == from) else {
+            return false;
+        };
+        entry.name = name;
+        entry.path = to.to_path_buf();
+        sort_directory_buffer_entries(&mut self.entries);
+        true
+    }
+
+    /// Inserts the listing child for `path` by statting that one path.
+    pub fn patch_created(&mut self, path: &Path) -> io::Result<bool> {
+        let Some(child) = first_child_path(&self.root, path) else {
+            return Ok(false);
+        };
+        if self.entries.iter().any(|entry| entry.path == child) {
+            return Ok(true);
+        }
+        self.entries.push(DirectoryEntry::from_path(&child)?);
+        sort_directory_buffer_entries(&mut self.entries);
+        Ok(true)
+    }
+
+    /// Removes a direct child from the cached listing.
+    pub fn patch_deleted(&mut self, path: &Path) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|entry| entry.path != path);
+        before != self.entries.len() || !is_direct_child(&self.root, path)
+    }
+}
+
+fn sort_directory_buffer_entries(entries: &mut [DirectoryEntry]) {
+    entries.sort_by_key(|entry| {
+        (
+            matches!(entry.kind, DirectoryEntryKind::File),
+            entry.name.to_ascii_lowercase(),
+        )
+    });
+}
+
+fn is_direct_child(root: &Path, path: &Path) -> bool {
+    path.parent() == Some(root)
+}
+
+fn first_child_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    let first = relative.components().next()?;
+    match first {
+        Component::Normal(name) => Some(root.join(name)),
+        _ => None,
     }
 }
 
@@ -565,6 +695,61 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name() == "beta.txt")
         );
+        assert!(
+            !buffer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "alpha.txt")
+        );
+        let reread = DirectoryBuffer::read(&root)?;
+        assert_eq!(buffer.entries(), reread.entries());
+
+        fs::write(root.join("sneaky.txt"), "sneaky")?;
+        buffer.create_file("gamma.txt")?;
+        assert!(
+            buffer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "gamma.txt")
+        );
+        assert!(
+            !buffer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "sneaky.txt"),
+            "create must patch the listing instead of rereading siblings"
+        );
+        let reread = DirectoryBuffer::read(&root)?;
+        assert!(
+            reread
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "sneaky.txt")
+        );
+        assert!(
+            reread
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "gamma.txt")
+        );
+
+        buffer.delete_entry("gamma.txt")?;
+        assert!(
+            !buffer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "gamma.txt")
+        );
+        assert!(
+            !buffer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "sneaky.txt")
+        );
+
+        let before_failed_rename = buffer.entries().to_vec();
+        assert!(buffer.rename_entry("missing.txt", "nope.txt").is_err());
+        assert_eq!(buffer.entries(), before_failed_rename);
 
         fs::remove_dir_all(root)?;
         Ok(())
