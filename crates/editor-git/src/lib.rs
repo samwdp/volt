@@ -1,9 +1,15 @@
-#![doc = r#"Git status parsing, repository file discovery, and magit-style section modeling."#]
+#![doc = r#"Git status parsing, repository file discovery, identity probes, and magit-style section modeling."#]
 
+mod probe;
 mod repository_files;
 
 use std::{error::Error, fmt, io, path::Path, process::Command};
 
+pub use probe::{
+    GitProbeSnapshot, git_probe_generation, git_probe_snapshot, git_probe_snapshot_with_numstat,
+    invalidate_git_probe_cache, invalidate_git_probe_cache_for, last_probe_generation,
+    parse_git_numstat,
+};
 pub use repository_files::{
     REPOSITORY_FILE_PREVIEW_MAX_BYTES, REPOSITORY_FILE_PREVIEW_MAX_LINES,
     invalidate_repository_file_list_cache, invalidate_repository_file_list_cache_for,
@@ -12,8 +18,7 @@ pub use repository_files::{
 };
 
 /// Human-readable summary of this crate's responsibility.
-pub const ROLE: &str =
-    "Git status parsing, repository file discovery, and magit-style section modeling.";
+pub const ROLE: &str = "Git status parsing, repository file discovery, identity probes, and magit-style section modeling.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {

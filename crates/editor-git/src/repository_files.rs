@@ -19,7 +19,7 @@ pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
 pub const REPOSITORY_FILE_PREVIEW_MAX_LINES: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FileFingerprint {
+pub(crate) struct FileFingerprint {
     modified: Option<SystemTime>,
     len: u64,
 }
@@ -168,7 +168,7 @@ pub fn repository_file_preview(path: &Path) -> String {
     lines.join("\n")
 }
 
-fn cache_key(root: &Path) -> PathBuf {
+pub(crate) fn cache_key(root: &Path) -> PathBuf {
     fs::canonicalize(root).unwrap_or_else(|_| normalize_path(root))
 }
 
@@ -197,7 +197,7 @@ fn symbolic_ref_name(head: &[u8]) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
-fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+pub(crate) fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     let metadata = fs::metadata(path).ok()?;
     Some(FileFingerprint {
         modified: metadata.modified().ok(),
@@ -205,7 +205,7 @@ fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     })
 }
 
-fn resolve_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn resolve_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
     let marker = root.join(".git");
     if marker.is_dir() {
         return Some((marker.clone(), marker));
@@ -228,7 +228,7 @@ fn parse_gitdir_reference(contents: &str) -> Option<&str> {
         .filter(|reference| !reference.is_empty())
 }
 
-fn worktree_common_dir(gitdir: &Path) -> Option<PathBuf> {
+pub(crate) fn worktree_common_dir(gitdir: &Path) -> Option<PathBuf> {
     let commondir_path = gitdir.join("commondir");
     let common_dir = match fs::read_to_string(&commondir_path) {
         Ok(contents) => parse_relative_git_path(gitdir, &contents)
@@ -257,7 +257,7 @@ fn parse_relative_git_path(base: &Path, contents: &str) -> Option<PathBuf> {
         .map(|reference| resolve_git_path(base, reference))
 }
 
-fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
+pub(crate) fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
     #[cfg(windows)]
     if let Some(path) = windows_git_absolute_path(reference) {
         return normalize_path(&path);

@@ -306,6 +306,21 @@
                         </div>
 
                         <div class="cl-section">
+                            <p class="cl-section-label">Performance</p>
+                            <ul>
+                                <li>
+                                    <strong>Git identity probes share one snapshot per Project Workspace root.</strong>
+                                    Statusline summary, Workspace Dock branch labels, and
+                                    repo-present checks read cached HEAD/branch/present (and
+                                    numstat when HEAD or the index changed) instead of overlapping
+                                    <code>git rev-parse</code> polls. git-status buffers refresh on
+                                    demand or after External Commands, not on a stacked 2s timer.
+                                    <span class="cl-pr">#77</span>
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="cl-section">
                             <p class="cl-section-label">Rendering</p>
                             <ul>
                                 <li>

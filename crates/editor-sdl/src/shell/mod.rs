@@ -114,9 +114,10 @@ use editor_db::{
 };
 use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
 use editor_git::{
-    GitLogEntry, GitStatusSnapshot, detect_in_progress, invalidate_repository_file_list_cache_for,
-    list_repository_files, parse_log_oneline, parse_stash_list, parse_status,
-    repository_file_preview,
+    GitLogEntry, GitStatusSnapshot, detect_in_progress, git_probe_snapshot,
+    git_probe_snapshot_with_numstat, invalidate_git_probe_cache_for,
+    invalidate_repository_file_list_cache_for, list_repository_files, parse_log_oneline,
+    parse_stash_list, parse_status, repository_file_preview,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
@@ -668,7 +669,6 @@ const LSP_SYNC_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(150);
 const TYPING_EVENT_BATCH_LIMIT: usize = 24;
 const TYPING_EVENT_BATCH_TIME_BUDGET: Duration = Duration::from_millis(2);
 const GIT_SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const GIT_STATUS_BUFFER_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const GIT_FRINGE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GIT_REFRESH_TYPING_IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 const SYNTAX_WINDOW_MIN_LINES: usize = 256;
@@ -3830,7 +3830,7 @@ pub(crate) struct ShellBuffer {
     acp_state: Option<AcpBufferState>,
     git_snapshot: Option<GitStatusSnapshot>,
     git_status_root: Option<PathBuf>,
-    git_status_last_refresh_at: Option<Instant>,
+    git_status_probe_revision: Option<u64>,
     git_view: Option<GitViewState>,
     git_fringe: Option<GitFringeState>,
     git_fringe_dirty: bool,
@@ -4790,7 +4790,7 @@ impl ShellBuffer {
             acp_state: None,
             git_snapshot: None,
             git_status_root: None,
-            git_status_last_refresh_at: None,
+            git_status_probe_revision: None,
             git_view: None,
             git_fringe: None,
             git_fringe_dirty: false,
@@ -4874,7 +4874,7 @@ impl ShellBuffer {
             acp_state: None,
             git_snapshot: None,
             git_status_root: None,
-            git_status_last_refresh_at: None,
+            git_status_probe_revision: None,
             git_view: None,
             git_fringe,
             git_fringe_dirty,
@@ -4961,7 +4961,7 @@ impl ShellBuffer {
             acp_state: None,
             git_snapshot: None,
             git_status_root: None,
-            git_status_last_refresh_at: None,
+            git_status_probe_revision: None,
             git_view: None,
             git_fringe: None,
             git_fringe_dirty: false,
@@ -5977,18 +5977,15 @@ impl ShellBuffer {
         self.git_snapshot = Some(snapshot);
     }
 
-    fn git_status_refresh_due(&self, root: &Path, now: Instant) -> bool {
+    fn git_status_refresh_due(&self, root: &Path, _now: Instant) -> bool {
         self.git_snapshot.is_none()
             || self.git_status_root.as_deref() != Some(root)
-            || self
-                .git_status_last_refresh_at
-                .map(|last| now.duration_since(last) >= GIT_STATUS_BUFFER_REFRESH_INTERVAL)
-                .unwrap_or(true)
+            || self.git_status_probe_revision != Some(git_probe_snapshot(root).revision())
     }
 
-    fn mark_git_status_refreshed(&mut self, root: &Path, now: Instant) {
+    fn mark_git_status_refreshed(&mut self, root: &Path, _now: Instant) {
         self.git_status_root = Some(root.to_path_buf());
-        self.git_status_last_refresh_at = Some(now);
+        self.git_status_probe_revision = Some(git_probe_snapshot(root).revision());
     }
 
     fn git_view(&self) -> Option<&GitViewState> {
@@ -9741,6 +9738,10 @@ impl ShellUiState {
         self.git_summary.mark_refreshed(now);
     }
 
+    fn mark_git_summary_stale(&mut self) {
+        self.git_summary.mark_stale();
+    }
+
     fn clear_git_summary(&self) {
         self.git_summary.set_snapshot(None);
     }
@@ -11776,9 +11777,6 @@ impl ShellState {
                         .map(|last| last + GIT_FRINGE_REFRESH_DEBOUNCE)
                         .unwrap_or(now),
                 );
-            }
-            if let Some(last) = buffer.git_status_last_refresh_at {
-                deadlines.push(last + GIT_STATUS_BUFFER_REFRESH_INTERVAL);
             }
         }
         if let Some(due_at) = ui.autocomplete_worker.next_due_at() {

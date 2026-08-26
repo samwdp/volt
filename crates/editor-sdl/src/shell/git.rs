@@ -122,6 +122,10 @@ impl GitSummaryState {
         self.last_refresh_at = Some(now);
     }
 
+    pub(super) fn mark_stale(&mut self) {
+        self.last_refresh_at = None;
+    }
+
     pub(super) fn next_refresh_at(&self) -> Instant {
         self.last_refresh_at
             .map(|last| last + GIT_SUMMARY_REFRESH_INTERVAL)
@@ -815,6 +819,7 @@ pub(super) fn refresh_git_status_if_active_if_due(
 
 pub(super) fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
     mark_git_fringe_snapshots_stale(runtime)?;
+    invalidate_git_identity_for_active_workspace(runtime);
     let buffer_ids = {
         let ui = shell_ui(runtime)?;
         ui.buffers
@@ -1028,6 +1033,7 @@ pub(super) fn commit_git_buffer(
     fs::remove_file(&temp_path).ok();
     result?;
     mark_git_fringe_snapshots_stale(runtime)?;
+    invalidate_git_identity_for_active_workspace(runtime);
     close_buffer_discard(runtime, buffer_id)?;
     refresh_git_status_if_active(runtime)?;
     Ok(())
@@ -4454,9 +4460,9 @@ pub(super) fn refresh_pending_git_summary(
         ui.mark_git_summary_refreshed(now);
         summary_state
     };
-    let root = match git_root(runtime) {
-        Ok(root) => root,
-        Err(_) => {
+    let root = match active_workspace_root(runtime) {
+        Ok(Some(root)) => root,
+        Ok(None) | Err(_) => {
             if let Ok(ui) = shell_ui(runtime) {
                 ui.clear_git_summary();
             }
@@ -4518,12 +4524,9 @@ pub(super) fn refresh_git_fringe(
     if !fringe_state.try_begin_refresh() {
         return Ok(());
     }
-    let (head_id, blob_cache) = {
+    let blob_cache = {
         let ui = shell_ui(runtime)?;
-        (
-            ui.git_summary().and_then(|snapshot| snapshot.head.clone()),
-            ui.git_head_blob_cache(),
-        )
+        ui.git_head_blob_cache()
     };
     let text_snapshot = {
         let buffer = shell_buffer(runtime, buffer_id)?;
@@ -4536,12 +4539,13 @@ pub(super) fn refresh_git_fringe(
     std::thread::spawn(move || {
         let buffer_text = text_snapshot.text();
         let snapshot = if git_repository_present(&root) {
+            let probe = git_probe_snapshot(&root);
             build_git_fringe_snapshot_with_cache(
                 &root,
                 &relative_path,
                 &buffer_text,
                 line_count,
-                head_id.as_deref(),
+                probe.head(),
                 Some(&blob_cache),
             )
         } else {
@@ -4939,37 +4943,20 @@ pub(super) fn parse_hunk_range(part: &str) -> Option<(usize, usize)> {
 }
 
 pub(super) fn build_git_summary_snapshot(root: &Path) -> Option<GitSummarySnapshot> {
-    let branch_output =
-        git_command_output_background(root, &["rev-parse", "--abbrev-ref", "HEAD"], &[0])?;
-    let head = git_command_output_background(root, &["rev-parse", "--verify", "HEAD"], &[0])
-        .map(|head| head.trim().to_owned())
-        .filter(|head| !head.is_empty());
-    let branch = branch_output.trim();
+    let probe = git_probe_snapshot_with_numstat(root);
+    if !probe.present() {
+        return None;
+    }
+    let branch = probe.branch()?.trim();
     if branch.is_empty() {
         return None;
     }
-    let diff_output = git_command_output_background(root, &["diff", "--numstat", "HEAD"], &[0, 1])
-        .unwrap_or_default();
-    let (added, removed) = parse_git_numstat(&diff_output);
     Some(GitSummarySnapshot {
         branch: Some(branch.to_owned()),
-        head,
-        added,
-        removed,
+        head: probe.head().map(str::to_owned),
+        added: probe.added(),
+        removed: probe.removed(),
     })
-}
-
-pub(super) fn parse_git_numstat(output: &str) -> (usize, usize) {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in output.lines() {
-        let mut parts = line.split('\t');
-        let add_raw = parts.next().unwrap_or_default();
-        let remove_raw = parts.next().unwrap_or_default();
-        added = added.saturating_add(add_raw.parse::<usize>().unwrap_or(0));
-        removed = removed.saturating_add(remove_raw.parse::<usize>().unwrap_or(0));
-    }
-    (added, removed)
 }
 
 pub(super) fn git_command_output_background(
@@ -4986,7 +4973,7 @@ pub(super) fn git_command_output_background(
 }
 
 pub(super) fn git_repository_present(root: &Path) -> bool {
-    git_command_output_background(root, &["rev-parse", "--git-dir"], &[0]).is_some()
+    git_probe_snapshot(root).present()
 }
 
 pub(super) fn git_command_output(
@@ -5094,6 +5081,13 @@ fn command_output_transcript(output: &std::process::Output) -> String {
 }
 
 pub(super) fn git_dir_path(_runtime: &mut EditorRuntime, root: &Path) -> Option<PathBuf> {
+    let probe = git_probe_snapshot(root);
+    if let Some(git_dir) = probe.git_dir() {
+        return Some(git_dir.to_path_buf());
+    }
+    if !probe.present() {
+        return None;
+    }
     let output =
         git_read_command_output_optional(root, "rev-parse --git-dir", &["rev-parse", "--git-dir"])?;
     let trimmed = output.trim();
@@ -5105,6 +5099,15 @@ pub(super) fn git_dir_path(_runtime: &mut EditorRuntime, root: &Path) -> Option<
         Some(path)
     } else {
         Some(root.join(path))
+    }
+}
+
+fn invalidate_git_identity_for_active_workspace(runtime: &mut EditorRuntime) {
+    if let Ok(Some(root)) = active_workspace_root(runtime) {
+        invalidate_git_probe_cache_for(&root);
+    }
+    if let Ok(ui) = shell_ui_mut(runtime) {
+        ui.mark_git_summary_stale();
     }
 }
 
@@ -5197,9 +5200,9 @@ pub(super) fn git_remote_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_git::GitStatusSnapshot;
+    use editor_git::{GitStatusSnapshot, invalidate_git_probe_cache};
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     fn summary(branch: &str, head: &str, added: usize, removed: usize) -> GitSummarySnapshot {
         GitSummarySnapshot {
@@ -5225,6 +5228,90 @@ mod tests {
 
         state.set_snapshot(Some(summary("main", "def456", 0, 0)));
         assert!(state.take_changed());
+    }
+
+    #[test]
+    fn git_summary_refresh_due_until_interval_or_stale() {
+        let mut state = GitSummaryState::new();
+        let now = Instant::now();
+        assert!(state.refresh_due(now));
+        state.mark_refreshed(now);
+        assert!(!state.refresh_due(now));
+        assert!(state.refresh_due(now + GIT_SUMMARY_REFRESH_INTERVAL));
+        state.mark_stale();
+        assert!(state.refresh_due(now));
+    }
+
+    #[test]
+    fn parse_git_numstat_sums_changed_lines() {
+        assert_eq!(
+            editor_git::parse_git_numstat("10\t2\ta.rs\n1\t0\tb.rs\n"),
+            (11, 2)
+        );
+        assert_eq!(editor_git::parse_git_numstat("-\t-\tbin\n"), (0, 0));
+    }
+
+    #[test]
+    fn git_summary_snapshot_branch_matches_rev_parse_without_three_spawns_on_retry() {
+        invalidate_git_probe_cache();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        git_read_command_output(&root, "init", &["init", "-q"]).expect("git init");
+        git_read_command_output(
+            &root,
+            "config user.email",
+            &["config", "user.email", "volt@example.com"],
+        )
+        .expect("user email");
+        git_read_command_output(
+            &root,
+            "config user.name",
+            &["config", "user.name", "Volt Tests"],
+        )
+        .expect("user name");
+        fs::write(root.join("main.txt"), "hello\n").expect("write");
+        git_read_command_output(&root, "add", &["add", "main.txt"]).expect("add");
+        git_read_command_output(&root, "commit", &["commit", "-qm", "init"]).expect("commit");
+
+        let expected_branch = git_read_command_output(
+            &root,
+            "rev-parse --abbrev-ref HEAD",
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        )
+        .expect("branch")
+        .trim()
+        .to_owned();
+        let expected_head = git_read_command_output(
+            &root,
+            "rev-parse --verify HEAD",
+            &["rev-parse", "--verify", "HEAD"],
+        )
+        .expect("head")
+        .trim()
+        .to_owned();
+
+        let first = build_git_summary_snapshot(&root).expect("first snapshot");
+        let second = build_git_summary_snapshot(&root).expect("second snapshot");
+
+        assert_eq!(first.branch.as_deref(), Some(expected_branch.as_str()));
+        assert_eq!(first.head.as_deref(), Some(expected_head.as_str()));
+        assert_eq!(second.branch, first.branch);
+        assert_eq!(second.head, first.head);
+        assert_eq!(second.added, first.added);
+        assert_eq!(second.removed, first.removed);
+        assert!(git_repository_present(&root));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_summary_snapshot_non_git_root_is_none() {
+        invalidate_git_probe_cache();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        assert!(build_git_summary_snapshot(&root).is_none());
+        assert!(!git_repository_present(&root));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]

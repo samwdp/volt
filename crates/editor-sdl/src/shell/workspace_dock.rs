@@ -1,9 +1,6 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use editor_core::WorkspaceId;
@@ -18,7 +15,6 @@ const WORKSPACE_DOCK_MIN_CELLS: u32 = 28;
 const WORKSPACE_DOCK_MAX_CELLS: u32 = 36;
 const WORKSPACE_DOCK_CARD_LINE_COUNT: u32 = 3;
 const WORKSPACE_DOCK_CARD_GAP_LINES: u32 = 1;
-const WORKSPACE_DOCK_BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceDockEntry {
@@ -55,69 +51,16 @@ impl WorkspaceDockLayout {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct WorkspaceDockBranchCache {
-    branches: Arc<Mutex<HashMap<PathBuf, Option<String>>>>,
-    inflight: Arc<Mutex<HashMap<PathBuf, ()>>>,
-    last_refresh_at: Option<Instant>,
-}
+#[derive(Debug, Clone, Default)]
+pub(super) struct WorkspaceDockBranchCache;
 
 impl WorkspaceDockBranchCache {
     pub(super) fn new() -> Self {
-        Self {
-            branches: Arc::new(Mutex::new(HashMap::new())),
-            inflight: Arc::new(Mutex::new(HashMap::new())),
-            last_refresh_at: None,
-        }
+        Self
     }
 
     pub(super) fn branch_for_root(&self, root: &Path) -> Option<String> {
-        let guard = self.branches.lock().ok()?;
-        guard.get(root).cloned().flatten()
-    }
-
-    fn refresh_due(&self, now: Instant) -> bool {
-        self.last_refresh_at
-            .map(|last| now.duration_since(last) >= WORKSPACE_DOCK_BRANCH_REFRESH_INTERVAL)
-            .unwrap_or(true)
-    }
-
-    fn mark_refreshed(&mut self, now: Instant) {
-        self.last_refresh_at = Some(now);
-    }
-
-    fn queue_roots(&self, roots: &[PathBuf]) {
-        let Ok(mut inflight) = self.inflight.lock() else {
-            return;
-        };
-        let Ok(branches) = self.branches.lock() else {
-            return;
-        };
-        for root in roots {
-            if branches.contains_key(root) || inflight.contains_key(root) {
-                continue;
-            }
-            inflight.insert(root.clone(), ());
-            let root = root.clone();
-            let branches = Arc::clone(&self.branches);
-            let inflight_map = Arc::clone(&self.inflight);
-            thread::spawn(move || {
-                let branch = git_command_output_background(
-                    &root,
-                    &["rev-parse", "--abbrev-ref", "HEAD"],
-                    &[0],
-                )
-                .map(|output| output.trim().to_owned())
-                .filter(|branch| !branch.is_empty() && branch != "HEAD");
-                if let Ok(mut guard) = branches.lock() {
-                    guard.insert(root.clone(), branch);
-                }
-                if let Ok(mut guard) = inflight_map.lock() {
-                    guard.remove(&root);
-                }
-                super::ping_shell_wakeup();
-            });
-        }
+        git_probe_snapshot(root).dock_branch().map(str::to_owned)
     }
 }
 
@@ -200,17 +143,12 @@ pub(super) fn workspace_dock_entry_at_point(
 }
 
 pub(super) fn refresh_workspace_dock_branches(
-    cache: &mut WorkspaceDockBranchCache,
+    _cache: &mut WorkspaceDockBranchCache,
     roots: &[PathBuf],
-    now: Instant,
+    _now: Instant,
 ) {
-    if roots.is_empty() {
-        return;
-    }
-    cache.queue_roots(roots);
-    if cache.refresh_due(now) {
-        cache.mark_refreshed(now);
-        cache.queue_roots(roots);
+    for root in roots {
+        let _ = git_probe_snapshot(root);
     }
 }
 
@@ -365,4 +303,88 @@ fn truncate_dock_text(text: &str, max_chars: usize) -> String {
     let mut truncated: String = text.chars().take(keep).collect();
     truncated.push('…');
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use editor_git::{git_probe_snapshot, invalidate_git_probe_cache};
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("volt-shell-dock-probe-{name}-{unique}"))
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn init_repo(name: &str, branch: Option<&str>) -> PathBuf {
+        let root = temp_root(name);
+        fs::create_dir_all(&root).expect("temp dir");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "volt@example.com"]);
+        run_git(&root, &["config", "user.name", "volt"]);
+        fs::write(root.join("file.txt"), "ok\n").expect("write");
+        run_git(&root, &["add", "file.txt"]);
+        run_git(&root, &["commit", "-qm", "init"]);
+        if let Some(branch) = branch {
+            run_git(&root, &["checkout", "-qb", branch]);
+        }
+        root
+    }
+
+    #[test]
+    fn workspace_dock_branch_for_two_roots_shares_probe_cache() {
+        invalidate_git_probe_cache();
+        let first = init_repo("dock-a", Some("alpha"));
+        let second = init_repo("dock-b", Some("beta"));
+        let cache = WorkspaceDockBranchCache::new();
+
+        assert_eq!(cache.branch_for_root(&first).as_deref(), Some("alpha"));
+        assert_eq!(cache.branch_for_root(&second).as_deref(), Some("beta"));
+        let first_revision = git_probe_snapshot(&first).revision();
+        assert_eq!(
+            cache.branch_for_root(&first).as_deref(),
+            Some("alpha"),
+            "second Dock read must reuse the same snapshot"
+        );
+        assert_eq!(git_probe_snapshot(&first).revision(), first_revision);
+
+        let _ = fs::remove_dir_all(first);
+        let _ = fs::remove_dir_all(second);
+    }
+
+    #[test]
+    fn workspace_dock_hides_detached_head_label() {
+        invalidate_git_probe_cache();
+        let root = init_repo("dock-detach", None);
+        run_git(&root, &["checkout", "--detach", "-q"]);
+        let cache = WorkspaceDockBranchCache::new();
+        assert!(cache.branch_for_root(&root).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_dock_non_git_root_has_no_branch() {
+        invalidate_git_probe_cache();
+        let root = temp_root("dock-non-git");
+        fs::create_dir_all(&root).expect("temp dir");
+        let cache = WorkspaceDockBranchCache::new();
+        assert!(cache.branch_for_root(&root).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
 }
