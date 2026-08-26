@@ -3530,6 +3530,60 @@ fn changed_range_windows(
     merged
 }
 
+fn highlight_windows_missing_from(
+    old_window: HighlightWindow,
+    new_window: HighlightWindow,
+) -> Vec<HighlightWindow> {
+    if new_window.is_empty() {
+        return Vec::new();
+    }
+    if old_window.is_empty()
+        || new_window.end_line_exclusive() <= old_window.start_line()
+        || new_window.start_line() >= old_window.end_line_exclusive()
+    {
+        return vec![new_window];
+    }
+
+    let mut missing = Vec::new();
+    if new_window.start_line() < old_window.start_line() {
+        missing.push(HighlightWindow::new(
+            new_window.start_line(),
+            old_window.start_line() - new_window.start_line(),
+        ));
+    }
+    if new_window.end_line_exclusive() > old_window.end_line_exclusive() {
+        missing.push(HighlightWindow::new(
+            old_window.end_line_exclusive(),
+            new_window.end_line_exclusive() - old_window.end_line_exclusive(),
+        ));
+    }
+    missing
+}
+
+fn reuse_highlight_spans_for_window(
+    previous_highlight_spans: Vec<HighlightSpan>,
+    last_window: Option<HighlightWindow>,
+    highlight_window: Option<HighlightWindow>,
+    loaded: &LoadedLanguage,
+    tree: &Tree,
+    buffer: &impl SyntaxText,
+) -> Option<Vec<HighlightSpan>> {
+    match (last_window, highlight_window) {
+        (None, None) => Some(previous_highlight_spans),
+        (Some(old_window), Some(new_window)) => {
+            let mut spans = previous_highlight_spans
+                .into_iter()
+                .filter(|span| span_intersects_window(span, new_window))
+                .collect::<Vec<_>>();
+            for missing in highlight_windows_missing_from(old_window, new_window) {
+                spans.extend(highlight_tree(loaded, tree, buffer, Some(missing)));
+            }
+            Some(spans)
+        }
+        _ => None,
+    }
+}
+
 fn highlight_spans_for_tree(
     session: Option<&SyntaxParseSession>,
     loaded: &LoadedLanguage,
@@ -3541,9 +3595,6 @@ fn highlight_spans_for_tree(
     session
         .and_then(|session| {
             let previous_snapshot = session.last_snapshot.as_ref()?;
-            if session.last_highlight_window != highlight_window {
-                return None;
-            }
             let changed_ranges = parse_result.changed_ranges.as_ref()?;
             let applied_edits = parse_result.applied_edits.as_deref().unwrap_or(&[]);
             let previous_highlight_spans = previous_snapshot
@@ -3553,7 +3604,17 @@ fn highlight_spans_for_tree(
                 .map(|span| apply_text_edits_to_span(span, applied_edits))
                 .collect::<Vec<_>>();
             if changed_ranges.is_empty() {
-                return Some(previous_highlight_spans);
+                return reuse_highlight_spans_for_window(
+                    previous_highlight_spans,
+                    session.last_highlight_window,
+                    highlight_window,
+                    loaded,
+                    tree,
+                    buffer,
+                );
+            }
+            if session.last_highlight_window != highlight_window {
+                return None;
             }
             let highlight_window = highlight_window?;
             let changed_windows = changed_range_windows(changed_ranges, highlight_window);
@@ -4544,6 +4605,86 @@ fn main() {
             must(registry.highlight_buffer_for_language_window("rust", &buffer, window));
 
         assert_eq!(incremental_snapshot, cold_snapshot);
+    }
+
+    #[test]
+    fn windowed_session_reuses_spans_when_window_expands_at_same_revision() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut source = String::new();
+        for index in 0..512 {
+            source.push_str(&format!(
+                "fn demo_{index}() {{ let value = \"line_{index}\"; }}\n"
+            ));
+        }
+        let buffer = TextBuffer::from_text(source);
+        let initial_window = HighlightWindow::new(240, 16);
+        let expanded_window = HighlightWindow::new(240, 24);
+        let mut parse_session: Option<SyntaxParseSession> = None;
+
+        let initial_snapshot = must(registry.highlight_buffer_for_language_window_with_session(
+            "rust",
+            &buffer,
+            initial_window,
+            &mut parse_session,
+        ));
+        let expanded_snapshot = must(registry.highlight_buffer_for_language_window_with_session(
+            "rust",
+            &buffer,
+            expanded_window,
+            &mut parse_session,
+        ));
+        let cold_snapshot =
+            must(registry.highlight_buffer_for_language_window("rust", &buffer, expanded_window));
+
+        assert!(
+            initial_snapshot
+                .highlight_spans
+                .iter()
+                .all(|span| { expanded_snapshot.highlight_spans.contains(span) })
+        );
+        assert!(expanded_snapshot.highlight_spans.len() > initial_snapshot.highlight_spans.len());
+        assert_eq!(expanded_snapshot, cold_snapshot);
+    }
+
+    #[test]
+    fn windowed_session_clips_spans_when_window_shrinks_at_same_revision() {
+        let mut registry = SyntaxRegistry::new();
+        must(registry.register(rust_configuration()));
+
+        let mut source = String::new();
+        for index in 0..512 {
+            source.push_str(&format!(
+                "fn demo_{index}() {{ let value = \"line_{index}\"; }}\n"
+            ));
+        }
+        let buffer = TextBuffer::from_text(source);
+        let initial_window = HighlightWindow::new(240, 24);
+        let shrunk_window = HighlightWindow::new(240, 16);
+        let mut parse_session: Option<SyntaxParseSession> = None;
+
+        let initial_snapshot = must(registry.highlight_buffer_for_language_window_with_session(
+            "rust",
+            &buffer,
+            initial_window,
+            &mut parse_session,
+        ));
+        let shrunk_snapshot = must(registry.highlight_buffer_for_language_window_with_session(
+            "rust",
+            &buffer,
+            shrunk_window,
+            &mut parse_session,
+        ));
+        let cold_snapshot =
+            must(registry.highlight_buffer_for_language_window("rust", &buffer, shrunk_window));
+
+        assert!(shrunk_snapshot.highlight_spans.iter().all(|span| {
+            span.start_position.line < shrunk_window.end_line_exclusive()
+                && span.end_position.line >= shrunk_window.start_line()
+        }));
+        assert!(shrunk_snapshot.highlight_spans.len() < initial_snapshot.highlight_spans.len());
+        assert_eq!(shrunk_snapshot, cold_snapshot);
     }
 
     #[test]
