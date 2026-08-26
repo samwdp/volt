@@ -19311,6 +19311,16 @@ fn render_terminal_buffer_uses_editor_insert_cursor_style() -> Result<(), String
 }
 
 #[test]
+fn shell_start_does_not_construct_browser_web_context() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    assert!(
+        !state.browser_host.has_live_web_context(),
+        "shell start without a browser buffer must not construct WebContext"
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_host_open_devtools_event_is_ignored_without_a_live_webview() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;

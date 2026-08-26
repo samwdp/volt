@@ -145,6 +145,19 @@ impl BrowserHostService {
             Ok(Vec::new())
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_live_web_context(&self) -> bool {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        {
+            self.inner.has_live_web_context()
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            false
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -310,6 +323,11 @@ fn browser_host_event_for_ipc(buffer_id: BufferId, body: &str) -> Option<Browser
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn browser_host_needs_web_context(plan: &BrowserSyncPlan, instance_count: usize) -> bool {
+    !plan.visible_surfaces.is_empty() || instance_count > 0
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 const BROWSER_NAVIGATION_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -318,7 +336,7 @@ struct DesktopBrowserHostService {
     event_tx: Sender<BrowserHostEvent>,
     event_rx: Receiver<BrowserHostEvent>,
     instances: BTreeMap<BufferId, BrowserInstance>,
-    web_context: wry::WebContext,
+    web_context: Option<wry::WebContext>,
     #[cfg(target_os = "linux")]
     gtk_initialized: bool,
 }
@@ -327,20 +345,29 @@ struct DesktopBrowserHostService {
 impl DesktopBrowserHostService {
     fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel();
-        // On Linux the wry `WebContext` is backed by WebKitGTK, which requires GTK to be
-        // initialized before any webkit2gtk type (such as `ApplicationInfo`) is constructed.
-        // Initialize GTK up front so building the `WebContext` below does not panic.
-        #[cfg(target_os = "linux")]
-        let gtk_initialized = gtk::init().is_ok();
         Self {
             disabled_reason: None,
             event_tx,
             event_rx,
             instances: BTreeMap::new(),
-            web_context: wry::WebContext::new(None),
+            web_context: None,
             #[cfg(target_os = "linux")]
-            gtk_initialized,
+            gtk_initialized: false,
         }
+    }
+
+    #[cfg(test)]
+    fn has_live_web_context(&self) -> bool {
+        self.web_context.is_some()
+    }
+
+    fn ensure_web_context(&mut self) -> Result<(), String> {
+        self.ensure_platform_ready()?;
+        if self.web_context.is_none() {
+            // Linux: GTK must be initialized before WebKitGTK types used by WebContext.
+            self.web_context = Some(wry::WebContext::new(None));
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -381,6 +408,13 @@ impl DesktopBrowserHostService {
             return Ok(Vec::new());
         }
 
+        if !browser_host_needs_web_context(plan, self.instances.len()) {
+            return Ok(Vec::new());
+        }
+        if let Err(error) = self.ensure_web_context() {
+            return Err(self.disable(error));
+        }
+
         let known_buffers = plan
             .buffers
             .iter()
@@ -392,12 +426,6 @@ impl DesktopBrowserHostService {
             .copied()
             .map(|surface| (surface.buffer_id, surface))
             .collect::<BTreeMap<_, _>>();
-
-        if (!visible_surfaces.is_empty() || !self.instances.is_empty())
-            && let Err(error) = self.ensure_platform_ready()
-        {
-            return Err(self.disable(error));
-        }
 
         let known_ids = known_buffers.keys().copied().collect::<BTreeSet<_>>();
         self.instances.retain(|buffer_id, instance| {
@@ -413,13 +441,21 @@ impl DesktopBrowserHostService {
                 continue;
             }
             let current_url = known_buffers.get(buffer_id).copied().flatten();
+            let web_context = match self.web_context.as_mut() {
+                Some(context) => context,
+                None => {
+                    return Err(self.disable(
+                        "embedded browser web context missing after lazy init".to_owned(),
+                    ));
+                }
+            };
             let instance = match BrowserInstance::new(
                 *buffer_id,
                 window,
                 surface.rect,
                 current_url,
                 self.event_tx.clone(),
-                &mut self.web_context,
+                web_context,
             ) {
                 Ok(instance) => instance,
                 Err(error) => return Err(self.disable(error)),
@@ -765,6 +801,42 @@ mod tests {
             browser_host_event_for_ipc(buffer_id, "__volt.unknown__"),
             None
         );
+    }
+
+    #[test]
+    fn browser_host_starts_without_a_live_web_context() {
+        let host = BrowserHostService::new();
+        assert!(
+            !host.has_live_web_context(),
+            "WebContext must stay uninitialized until a browser surface is needed"
+        );
+    }
+
+    #[test]
+    fn empty_browser_sync_plan_does_not_need_web_context() {
+        assert!(!browser_host_needs_web_context(
+            &BrowserSyncPlan::default(),
+            0
+        ));
+        assert!(browser_host_needs_web_context(
+            &BrowserSyncPlan {
+                buffers: Vec::new(),
+                visible_surfaces: vec![BrowserSurfacePlan {
+                    buffer_id: browser_test_buffer_id(),
+                    rect: BrowserViewportRect {
+                        x: 0,
+                        y: 0,
+                        width: 8,
+                        height: 8,
+                    },
+                }],
+            },
+            0
+        ));
+        assert!(browser_host_needs_web_context(
+            &BrowserSyncPlan::default(),
+            1
+        ));
     }
 
     #[test]
