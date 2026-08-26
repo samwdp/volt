@@ -1742,10 +1742,10 @@ fn theme_scrolloff(theme_registry: Option<&ThemeRegistry>) -> usize {
 }
 
 fn cached_context_overlay_snapshot(
-    snapshot: Option<&BufferContextOverlaySnapshot>,
+    snapshot: Option<&Arc<BufferContextOverlaySnapshot>>,
     key: &BufferContextOverlayCacheKey,
     typing_active: bool,
-) -> Option<BufferContextOverlaySnapshot> {
+) -> Option<Arc<BufferContextOverlaySnapshot>> {
     snapshot
         .filter(|snapshot| {
             snapshot.key == *key
@@ -1761,7 +1761,7 @@ fn buffer_context_overlay_snapshot(
     active: bool,
     typing_active: bool,
     user_library: &dyn UserLibrary,
-) -> Option<BufferContextOverlaySnapshot> {
+) -> Option<Arc<BufferContextOverlaySnapshot>> {
     if buffer_is_db_query(&buffer.kind) {
         return None;
     }
@@ -3803,7 +3803,7 @@ struct BufferContextOverlayCacheKey {
     cursor_column: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct BufferContextOverlaySnapshot {
     key: BufferContextOverlayCacheKey,
     headerline_lines: Vec<String>,
@@ -3868,7 +3868,7 @@ pub(crate) struct ShellBuffer {
     wrap_cache: Option<WrapRowCache>,
     pretty_display_rows: BTreeMap<usize, usize>,
     markdown_pretty_plan_cache: Arc<Mutex<editor_markdown::MarkdownPrettyPlanCache>>,
-    context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
+    context_overlay_cache: Arc<Mutex<Option<Arc<BufferContextOverlaySnapshot>>>>,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
     syntax_dirty: bool,
@@ -5089,7 +5089,7 @@ impl ShellBuffer {
         &self,
         user_library: &dyn UserLibrary,
         typing_active: bool,
-    ) -> BufferContextOverlaySnapshot {
+    ) -> Arc<BufferContextOverlaySnapshot> {
         let key = BufferContextOverlayCacheKey {
             buffer_revision: self.text.revision(),
             buffer_name: self.display_name().to_owned(),
@@ -5126,13 +5126,13 @@ impl ShellBuffer {
         if let Some(ghost_text) = self.inline_completion_ghost_text() {
             ghost_text_by_line.insert(key.cursor_line, ghost_text);
         }
-        let snapshot = BufferContextOverlaySnapshot {
+        let snapshot = Arc::new(BufferContextOverlaySnapshot {
             key,
             headerline_lines: user_library.headerline_lines(&context),
             ghost_text_by_line,
-        };
+        });
         if let Ok(mut cache) = self.context_overlay_cache.lock() {
-            *cache = Some(snapshot.clone());
+            *cache = Some(Arc::clone(&snapshot));
         }
         snapshot
     }
@@ -15612,7 +15612,7 @@ impl ShellState {
                 let reserved_top_rows = if active && !is_acp && !has_plugin_sections {
                     buffer_context_overlay_snapshot(buffer, true, typing_active, &*user_library)
                         .map(|snapshot| {
-                            visible_headerline_lines(snapshot.headerline_lines, visible_rows).len()
+                            visible_headerline_row_count(&snapshot.headerline_lines, visible_rows)
                         })
                         .unwrap_or(0)
                 } else {

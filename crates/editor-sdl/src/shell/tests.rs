@@ -4201,22 +4201,22 @@ fn draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments() -> Result
 
 #[test]
 fn visible_headerline_lines_keeps_innermost_contexts_when_space_is_limited() {
+    let lines = [
+        "module app".to_owned(),
+        "impl Demo".to_owned(),
+        "render(value: usize)".to_owned(),
+    ];
     assert_eq!(
-        visible_headerline_lines(
-            vec![
-                "module app".to_owned(),
-                "impl Demo".to_owned(),
-                "render(value: usize)".to_owned(),
-            ],
-            3,
-        ),
-        vec!["impl Demo".to_owned(), "render(value: usize)".to_owned()]
+        visible_headerline_lines(&lines, 3),
+        vec!["impl Demo", "render(value: usize)"]
     );
 }
 
 #[test]
 fn visible_headerline_lines_reserves_at_least_one_buffer_row() {
-    assert!(visible_headerline_lines(vec!["render()".to_owned()], 1).is_empty());
+    let lines = ["render()".to_owned()];
+    assert!(visible_headerline_lines(&lines, 1).is_empty());
+    assert_eq!(visible_headerline_row_count(&lines, 1), 0);
 }
 
 #[test]
@@ -6915,7 +6915,7 @@ fn insert_mode_text_input_activates_typing_budget() -> Result<(), String> {
 
 #[test]
 fn context_overlay_cache_reuses_stale_snapshot_while_typing() {
-    let cached = BufferContextOverlaySnapshot {
+    let cached = Arc::new(BufferContextOverlaySnapshot {
         key: BufferContextOverlayCacheKey {
             buffer_revision: 41,
             buffer_name: "demo.rs".to_owned(),
@@ -6926,7 +6926,7 @@ fn context_overlay_cache_reuses_stale_snapshot_while_typing() {
         },
         headerline_lines: vec!["fn demo".to_owned()],
         ghost_text_by_line: BTreeMap::new(),
-    };
+    });
     let key = BufferContextOverlayCacheKey {
         buffer_revision: 42,
         buffer_name: "demo.rs".to_owned(),
@@ -6939,13 +6939,14 @@ fn context_overlay_cache_reuses_stale_snapshot_while_typing() {
     let snapshot =
         cached_context_overlay_snapshot(Some(&cached), &key, true).expect("stale snapshot");
 
+    assert!(Arc::ptr_eq(&snapshot, &cached));
     assert_eq!(snapshot.key.buffer_revision, 41);
     assert_eq!(snapshot.headerline_lines, vec!["fn demo".to_owned()]);
 }
 
 #[test]
 fn context_overlay_cache_requires_matching_buffer_identity() {
-    let cached = BufferContextOverlaySnapshot {
+    let cached = Arc::new(BufferContextOverlaySnapshot {
         key: BufferContextOverlayCacheKey {
             buffer_revision: 1,
             buffer_name: "demo.rs".to_owned(),
@@ -6956,7 +6957,7 @@ fn context_overlay_cache_requires_matching_buffer_identity() {
         },
         headerline_lines: vec!["fn demo".to_owned()],
         ghost_text_by_line: BTreeMap::new(),
-    };
+    });
     let key = BufferContextOverlayCacheKey {
         buffer_revision: 2,
         buffer_name: "demo.py".to_owned(),
@@ -6968,6 +6969,30 @@ fn context_overlay_cache_requires_matching_buffer_identity() {
 
     assert!(cached_context_overlay_snapshot(Some(&cached), &key, false).is_none());
     assert!(cached_context_overlay_snapshot(Some(&cached), &key, true).is_none());
+}
+
+#[test]
+fn context_overlay_snapshot_reuses_same_arc_when_key_matches() -> Result<(), String> {
+    let user_library = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*headerline-arc-reuse*",
+        vec!["alpha".to_owned()],
+    )?;
+    let first = {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        buffer.context_overlay_snapshot(&*user_library, false)
+    };
+    let second = {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        buffer.context_overlay_snapshot(&*user_library, false)
+    };
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(user_library.headerline_call_count(), 1);
+    Ok(())
 }
 
 #[test]

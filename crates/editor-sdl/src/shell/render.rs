@@ -1653,15 +1653,15 @@ fn render_footer_separator(
     )
 }
 
-fn buffer_visible_headerline_lines(
+fn buffer_visible_headerline_row_count(
     buffer: &ShellBuffer,
     user_library: &dyn UserLibrary,
     visible_rows: usize,
     typing_active: bool,
-) -> Vec<String> {
+) -> usize {
     buffer_context_overlay_snapshot(buffer, true, typing_active, user_library)
-        .map(|snapshot| visible_headerline_lines(snapshot.headerline_lines, visible_rows))
-        .unwrap_or_default()
+        .map(|snapshot| visible_headerline_row_count(&snapshot.headerline_lines, visible_rows))
+        .unwrap_or(0)
 }
 
 pub(super) fn image_buffer_viewport_rect(rect: Rect, layout: BufferFooterLayout) -> Option<Rect> {
@@ -2182,9 +2182,12 @@ pub(super) fn buffer_cursor_screen_anchor(
         cell_width,
         user_library.commandline_enabled(),
     );
-    let headerline_rows =
-        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, typing_active)
-            .len();
+    let headerline_rows = buffer_visible_headerline_row_count(
+        buffer,
+        user_library,
+        layout.visible_rows,
+        typing_active,
+    );
     let body_y = layout.body_y + headerline_rows as i32 * line_height;
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let fringe_width = editor_fringe_width_px(cell_width, buffer.dap_fringe_live());
@@ -2266,7 +2269,7 @@ pub(super) fn pretty_cursor_body_row(
         user_library.commandline_enabled(),
     );
     let headerline_rows =
-        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, false).len();
+        buffer_visible_headerline_row_count(buffer, user_library, layout.visible_rows, false);
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let wrap_cols = wrap_columns_for_width(rect.width(), cell_width);
     let indent_size = theme_lang_indent(theme_registry, buffer.language_id());
@@ -2338,9 +2341,12 @@ pub(super) fn buffer_point_at_screen(
         cell_width,
         user_library.commandline_enabled(),
     );
-    let headerline_rows =
-        buffer_visible_headerline_lines(buffer, user_library, layout.visible_rows, typing_active)
-            .len();
+    let headerline_rows = buffer_visible_headerline_row_count(
+        buffer,
+        user_library,
+        layout.visible_rows,
+        typing_active,
+    );
     let visible_rows = layout.visible_rows.saturating_sub(headerline_rows).max(1);
     let body_top = layout.body_y + headerline_rows as i32 * line_height;
     let body_height = visible_rows as i32 * line_height;
@@ -2937,11 +2943,8 @@ pub(super) fn render_buffer(
         let headerline_lines = context_overlay
             .as_ref()
             .map(|snapshot| {
-                visible_headerline_lines(snapshot.headerline_lines.clone(), layout.visible_rows)
+                visible_headerline_lines(&snapshot.headerline_lines, layout.visible_rows)
             })
-            .unwrap_or_default();
-        let ghost_text_by_line = context_overlay
-            .map(|snapshot| snapshot.ghost_text_by_line)
             .unwrap_or_default();
         let headerline_rows = headerline_lines.len();
         let body_y = layout.body_y + headerline_rows as i32 * line_height;
@@ -3385,7 +3388,10 @@ pub(super) fn render_buffer(
                         segment: *segment,
                         char_map: &wrapped.char_map,
                         line_len,
-                        ghost_text: ghost_text_by_line.get(&line_index).map(String::as_str),
+                        ghost_text: context_overlay
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.ghost_text_by_line.get(&line_index))
+                            .map(String::as_str),
                         color: ghost_text_color,
                         cell_width,
                     },
@@ -5601,17 +5607,37 @@ pub(super) fn draw_line_ghost_text_for_segment(
     draw_text(target, draw_x, draw.y, ghost_text, draw.color)
 }
 
-pub(super) fn visible_headerline_lines(lines: Vec<String>, visible_rows: usize) -> Vec<String> {
-    let max_rows = visible_rows.saturating_sub(1);
+fn headerline_max_rows(visible_rows: usize) -> usize {
+    visible_rows.saturating_sub(1)
+}
+
+pub(super) fn visible_headerline_row_count(lines: &[String], visible_rows: usize) -> usize {
+    let max_rows = headerline_max_rows(visible_rows);
+    if max_rows == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        .min(max_rows)
+}
+
+pub(super) fn visible_headerline_lines(lines: &[String], visible_rows: usize) -> Vec<&str> {
+    let max_rows = headerline_max_rows(visible_rows);
     if max_rows == 0 {
         return Vec::new();
     }
-    let lines = lines
-        .into_iter()
+    let mut kept: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
         .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    let start = lines.len().saturating_sub(max_rows);
-    lines.into_iter().skip(start).collect()
+        .collect();
+    let extra = kept.len().saturating_sub(max_rows);
+    if extra > 0 {
+        kept.drain(..extra);
+    }
+    kept
 }
 
 pub(super) fn line_color_segments(
