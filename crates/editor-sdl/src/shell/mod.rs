@@ -9480,6 +9480,8 @@ pub(crate) struct ShellUiState {
     notifications: NotificationCenter,
     workspace_unread: BTreeMap<WorkspaceId, u32>,
     last_lsp_notification_revision: u64,
+    last_lsp_diagnostics_generation: Option<u64>,
+    last_attached_lsp_label_key: Option<(WorkspaceId, Option<PathBuf>, u64)>,
     popup_focus: bool,
     popup_buffer_id: Option<BufferId>,
     workspace_dock_open: bool,
@@ -9554,6 +9556,8 @@ impl ShellUiState {
             notifications: NotificationCenter::default(),
             workspace_unread: BTreeMap::new(),
             last_lsp_notification_revision: 0,
+            last_lsp_diagnostics_generation: None,
+            last_attached_lsp_label_key: None,
             popup_focus: false,
             popup_buffer_id: None,
             workspace_dock_open: false,
@@ -10492,6 +10496,22 @@ impl ShellUiState {
 
     fn set_last_lsp_notification_revision(&mut self, revision: u64) {
         self.last_lsp_notification_revision = revision;
+    }
+
+    fn last_lsp_diagnostics_generation(&self) -> Option<u64> {
+        self.last_lsp_diagnostics_generation
+    }
+
+    fn set_last_lsp_diagnostics_generation(&mut self, generation: u64) {
+        self.last_lsp_diagnostics_generation = Some(generation);
+    }
+
+    fn last_attached_lsp_label_key(&self) -> Option<&(WorkspaceId, Option<PathBuf>, u64)> {
+        self.last_attached_lsp_label_key.as_ref()
+    }
+
+    fn set_last_attached_lsp_label_key(&mut self, key: (WorkspaceId, Option<PathBuf>, u64)) {
+        self.last_attached_lsp_label_key = Some(key);
     }
 
     fn configure_syntax_refresh_worker(
@@ -34571,37 +34591,70 @@ fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> 
         .get::<LspLogBufferState>()
         .map(LspLogBufferState::has_buffers)
         .unwrap_or(false);
+    let applied_log_revision = runtime
+        .services()
+        .get::<LspLogBufferState>()
+        .map(|state| state.applied_revision)
+        .unwrap_or(0);
+
+    let diagnostics_generation = lsp_client.diagnostics_generation();
+    let sessions_generation = lsp_client.sessions_generation();
+    let last_diagnostics_generation = shell_ui(runtime)?.last_lsp_diagnostics_generation();
+    let last_notification_revision = shell_ui(runtime)?.last_lsp_notification_revision();
+    let last_label_key = shell_ui(runtime)?.last_attached_lsp_label_key().cloned();
+    let diagnostics_changed = last_diagnostics_generation != Some(diagnostics_generation);
 
     let (
         diagnostic_updates,
         active_workspace_id,
-        active_server_label,
+        label_update,
+        label_key,
         log_snapshot,
         notification_snapshot,
     ) = {
         let ui = shell_ui(runtime)?;
-        let updates = ui
-            .buffers
-            .iter()
-            .filter(|buffer| buffer.lsp_enabled())
-            .filter_map(|buffer| {
-                let path = buffer.lsp_path()?;
-                Some((buffer.id(), lsp_client.diagnostics_for_path(path)))
-            })
-            .collect::<Vec<_>>();
-        let active_server_label = ui
+        let updates = if diagnostics_changed {
+            let dirty = lsp_client.take_dirty_diagnostic_paths();
+            ui.buffers
+                .iter()
+                .filter(|buffer| buffer.lsp_enabled())
+                .filter_map(|buffer| {
+                    let path = buffer.lsp_path()?;
+                    if !dirty.is_empty() && !dirty.iter().any(|dirty_path| dirty_path == path) {
+                        return None;
+                    }
+                    Some((buffer.id(), lsp_client.diagnostics_for_path(path)))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let active_path = ui
             .active_buffer_id()
             .and_then(|buffer_id| ui.buffer(buffer_id))
             .and_then(ShellBuffer::lsp_path)
-            .map(|path| lsp_client.session_labels_for_path(path))
-            .filter(|labels| !labels.is_empty())
-            .map(|labels| labels.join(", "));
+            .map(Path::to_path_buf);
+        let label_key = (
+            ui.active_workspace(),
+            active_path.clone(),
+            sessions_generation,
+        );
+        let label_update = (last_label_key.as_ref() != Some(&label_key)).then(|| {
+            active_path
+                .as_ref()
+                .map(|path| lsp_client.session_labels_for_path(path))
+                .filter(|labels| !labels.is_empty())
+                .map(|labels| labels.join(", "))
+        });
         (
             updates,
             ui.active_workspace(),
-            active_server_label,
-            has_log_buffers.then(|| lsp_client.log_snapshot()),
-            lsp_client.notification_snapshot(),
+            label_update,
+            label_key,
+            has_log_buffers
+                .then(|| lsp_client.log_snapshot_if_changed(applied_log_revision))
+                .flatten(),
+            lsp_client.notification_snapshot_if_changed(last_notification_revision),
         )
     };
 
@@ -34613,9 +34666,17 @@ fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> 
                 changed |= buffer.set_lsp_diagnostics(diagnostics);
             }
         }
-        changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
+        if let Some(active_server_label) = label_update {
+            changed |= ui.set_attached_lsp_server(active_workspace_id, active_server_label);
+            ui.set_last_attached_lsp_label_key(label_key);
+        }
+        if diagnostics_changed {
+            ui.set_last_lsp_diagnostics_generation(diagnostics_generation);
+        }
     }
-    changed |= apply_lsp_notifications(runtime, &notification_snapshot, now)?;
+    if let Some(notification_snapshot) = notification_snapshot.as_ref() {
+        changed |= apply_lsp_notifications(runtime, notification_snapshot, now)?;
+    }
     if let Some(log_snapshot) = log_snapshot.as_ref() {
         changed |= refresh_lsp_log_buffers(runtime, log_snapshot)?;
     }

@@ -65,6 +65,15 @@ type DiagnosticsByPath = Arc<Mutex<BTreeMap<PathBuf, Vec<Diagnostic>>>>;
 type TransportLog = Arc<Mutex<LspTransportLog>>;
 type NotificationLog = Arc<Mutex<LspNotificationLog>>;
 
+#[derive(Clone)]
+struct LspSessionSharedState {
+    transport_log: TransportLog,
+    notifications: NotificationLog,
+    diagnostics_generation: Arc<AtomicU64>,
+    dirty_diagnostic_paths: Arc<Mutex<BTreeSet<PathBuf>>>,
+    sessions_generation: Arc<AtomicU64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspCompletionItem {
     server_id: String,
@@ -703,6 +712,10 @@ impl LspTransportLog {
         }
     }
 
+    const fn revision(&self) -> u64 {
+        self.revision
+    }
+
     fn record(&mut self, entry: LspLogEntry) {
         self.revision = self.revision.saturating_add(1);
         self.entries.push(entry);
@@ -734,6 +747,10 @@ impl LspNotificationLog {
             entries: Vec::new(),
             max_entries,
         }
+    }
+
+    const fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn record(&mut self, notification: LspNotification) {
@@ -884,6 +901,9 @@ pub struct LspClientManager {
     transport_log: TransportLog,
     notifications: NotificationLog,
     diagnostics_generation: Arc<AtomicU64>,
+    dirty_diagnostic_paths: Arc<Mutex<BTreeSet<PathBuf>>>,
+    sessions_generation: Arc<AtomicU64>,
+    diagnostics_lookups: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default)]
@@ -1056,12 +1076,25 @@ impl LspClientManager {
                 NOTIFICATION_LOG_MAX_ENTRIES,
             ))),
             diagnostics_generation: Arc::new(AtomicU64::new(0)),
+            dirty_diagnostic_paths: Arc::new(Mutex::new(BTreeSet::new())),
+            sessions_generation: Arc::new(AtomicU64::new(0)),
+            diagnostics_lookups: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Returns the language-server registry.
     pub fn registry(&self) -> &LanguageServerRegistry {
         &self.registry
+    }
+
+    fn session_shared_state(&self) -> LspSessionSharedState {
+        LspSessionSharedState {
+            transport_log: Arc::clone(&self.transport_log),
+            notifications: Arc::clone(&self.notifications),
+            diagnostics_generation: Arc::clone(&self.diagnostics_generation),
+            dirty_diagnostic_paths: Arc::clone(&self.dirty_diagnostic_paths),
+            sessions_generation: Arc::clone(&self.sessions_generation),
+        }
     }
 
     pub fn log_snapshot(&self) -> LspLogSnapshot {
@@ -1071,12 +1104,47 @@ impl LspClientManager {
             .unwrap_or_default()
     }
 
+    /// Transport log revision without cloning log lines.
+    pub fn log_revision(&self) -> u64 {
+        self.transport_log
+            .lock()
+            .map(|log| log.revision())
+            .unwrap_or(0)
+    }
+
+    /// Clones the transport log only when its revision moved.
+    pub fn log_snapshot_if_changed(&self, applied_revision: u64) -> Option<LspLogSnapshot> {
+        let Ok(log) = self.transport_log.lock() else {
+            return None;
+        };
+        (log.revision() != applied_revision).then(|| log.snapshot())
+    }
+
     /// Returns a snapshot of recent UI-facing notifications emitted by the LSP client.
     pub fn notification_snapshot(&self) -> LspNotificationSnapshot {
         self.notifications
             .lock()
             .map(|log| log.snapshot())
             .unwrap_or_default()
+    }
+
+    /// Notification log revision without cloning entries.
+    pub fn notification_revision(&self) -> u64 {
+        self.notifications
+            .lock()
+            .map(|log| log.revision())
+            .unwrap_or(0)
+    }
+
+    /// Clones UI notifications only when their revision moved.
+    pub fn notification_snapshot_if_changed(
+        &self,
+        applied_revision: u64,
+    ) -> Option<LspNotificationSnapshot> {
+        let Ok(log) = self.notifications.lock() else {
+            return None;
+        };
+        (log.revision() != applied_revision).then(|| log.snapshot())
     }
 
     pub fn set_server_settings_override(
@@ -1629,15 +1697,14 @@ impl LspClientManager {
             session,
             runtime_override,
             initialization_options_override,
-            Arc::clone(&self.transport_log),
-            Arc::clone(&self.notifications),
-            Arc::clone(&self.diagnostics_generation),
+            self.session_shared_state(),
         )?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
         state.sessions.insert(key, Arc::clone(&handle));
+        self.sessions_generation.fetch_add(1, Ordering::Release);
         Ok(handle)
     }
 
@@ -1645,19 +1712,31 @@ impl LspClientManager {
         if session_keys.is_empty() {
             return Ok(());
         }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
-        for key in session_keys {
-            state.sessions.remove(key);
-            state.start_failures.remove(key);
-        }
-        for tracked in state.tracked_buffers.values_mut() {
+        let mut dirty_paths = Vec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
             for key in session_keys {
-                tracked.sessions.remove(key);
+                if let Some(session) = state.sessions.remove(key)
+                    && let Ok(diagnostics) = session.diagnostics.lock()
+                {
+                    dirty_paths.extend(diagnostics.keys().cloned());
+                }
+                state.start_failures.remove(key);
+            }
+            for tracked in state.tracked_buffers.values_mut() {
+                for key in session_keys {
+                    tracked.sessions.remove(key);
+                }
             }
         }
+        if let Ok(mut dirty) = self.dirty_diagnostic_paths.lock() {
+            dirty.extend(dirty_paths);
+        }
+        self.diagnostics_generation.fetch_add(1, Ordering::Release);
+        self.sessions_generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -1712,6 +1791,7 @@ impl LspClientManager {
     }
 
     pub fn diagnostics_for_path(&self, path: &Path) -> Vec<Diagnostic> {
+        self.diagnostics_lookups.fetch_add(1, Ordering::Relaxed);
         let sessions = self.tracked_sessions_for_path(path).unwrap_or_default();
         let mut diagnostics = Vec::new();
         for session in sessions {
@@ -1730,6 +1810,171 @@ impl LspClientManager {
     /// Monotonic generation bumped whenever published diagnostics change.
     pub fn diagnostics_generation(&self) -> u64 {
         self.diagnostics_generation.load(Ordering::Acquire)
+    }
+
+    /// Monotonic generation bumped when live Language Server Sessions are added or removed.
+    pub fn sessions_generation(&self) -> u64 {
+        self.sessions_generation.load(Ordering::Acquire)
+    }
+
+    /// Number of `diagnostics_for_path` lookups. Host tests use this to assert apply skip.
+    pub fn diagnostics_for_path_lookups(&self) -> u64 {
+        self.diagnostics_lookups.load(Ordering::Relaxed)
+    }
+
+    /// Paths whose published diagnostics changed since the previous take.
+    pub fn take_dirty_diagnostic_paths(&self) -> BTreeSet<PathBuf> {
+        self.dirty_diagnostic_paths
+            .lock()
+            .map(|mut dirty| std::mem::take(&mut *dirty))
+            .unwrap_or_default()
+    }
+
+    /// Attaches an in-memory Language Server Session with diagnostics for `path`.
+    ///
+    /// Does not spawn the real language-server program. Used by host tests to
+    /// drive the shell diagnostic apply seam.
+    pub fn attach_memory_session(
+        &self,
+        server_id: &str,
+        path: &Path,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Result<(), LspClientError> {
+        let handle = if let Some(existing) = self.live_session_for_server(server_id, None)? {
+            if let Ok(mut guard) = existing.diagnostics.lock() {
+                guard.insert(path.to_path_buf(), diagnostics);
+            }
+            existing
+        } else {
+            self.memory_session_handle(server_id, path, diagnostics)?
+        };
+        let key = handle.key.clone();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state.sessions.insert(key.clone(), Arc::clone(&handle));
+            let tracked = state.tracked_buffers.entry(path.to_path_buf()).or_default();
+            tracked.sessions.insert(key);
+            if tracked.revision == 0 {
+                tracked.revision = 1;
+                tracked.version = 1;
+            }
+        }
+        self.mark_dirty_diagnostic_path(path);
+        self.diagnostics_generation.fetch_add(1, Ordering::Release);
+        self.sessions_generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// Records diagnostics as if a Language Server Session published them for `path`.
+    pub fn apply_published_diagnostics(
+        &self,
+        path: &Path,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Result<(), LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        let Some(session) = sessions.first() else {
+            return Err(LspClientError::Protocol(format!(
+                "no live Language Server Session tracks `{}`",
+                path.display()
+            )));
+        };
+        record_published_diagnostics(
+            &session.diagnostics,
+            &self.dirty_diagnostic_paths,
+            &self.diagnostics_generation,
+            path.to_path_buf(),
+            diagnostics,
+        );
+        Ok(())
+    }
+
+    /// Marks live Sessions for `path` disconnected and bumps diagnostics generation.
+    pub fn disconnect_memory_sessions_for_path(&self, path: &Path) -> Result<(), LspClientError> {
+        let sessions = self.tracked_sessions_for_path(path)?;
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        for session in &sessions {
+            note_session_disconnect_diagnostics(&session.diagnostics, &self.dirty_diagnostic_paths);
+            session.disconnected.store(true, Ordering::Release);
+        }
+        self.diagnostics_generation.fetch_add(1, Ordering::Release);
+        self.sessions_generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// Records a transport-log event without cloning a snapshot.
+    pub fn record_transport_log_event(&self, server_id: &str, message: impl Into<String>) {
+        record_transport_event(&self.transport_log, server_id, message);
+    }
+
+    /// Records a `window/showMessage`-style UI notification.
+    pub fn record_show_message(&self, server_id: &str, message: impl Into<String>) {
+        let server_id = server_id.to_owned();
+        let message = message.into();
+        record_notification(
+            &self.notifications,
+            LspNotification {
+                key: format!("window:{server_id}:{message}"),
+                server_id: server_id.clone(),
+                root: None,
+                level: LspNotificationLevel::Info,
+                title: format!("LSP · {server_id}"),
+                body_lines: vec![message],
+                progress: None,
+                active: false,
+                action: None,
+            },
+        );
+    }
+
+    fn mark_dirty_diagnostic_path(&self, path: &Path) {
+        if let Ok(mut dirty) = self.dirty_diagnostic_paths.lock() {
+            dirty.insert(path.to_path_buf());
+        }
+    }
+
+    fn memory_session_handle(
+        &self,
+        server_id: &str,
+        path: &Path,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Result<Arc<LspSessionHandle>, LspClientError> {
+        let session = self
+            .registry
+            .prepare_session_for_path(server_id, path, None)?;
+        let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
+            &session, None,
+        )));
+        let (child, writer) = spawn_inert_child().map_err(|error| {
+            LspClientError::Protocol(format!(
+                "failed to spawn inert Language Server Session for `{server_id}`: {error}"
+            ))
+        })?;
+        let mut diagnostics_by_path = BTreeMap::new();
+        diagnostics_by_path.insert(path.to_path_buf(), diagnostics);
+        Ok(Arc::new(LspSessionHandle {
+            key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
+            session,
+            child: Mutex::new(child),
+            writer: Arc::new(Mutex::new(writer)),
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
+            open_documents: Mutex::new(BTreeMap::new()),
+            text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
+            workspace_configuration,
+            initialization_options: None,
+            transport_log: Arc::clone(&self.transport_log),
+            next_request_id: AtomicU64::new(1),
+            next_progress_token: AtomicU64::new(1),
+            disconnected: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_send: AtomicBool::new(false),
+            needs_full_document: Mutex::new(BTreeSet::new()),
+        }))
     }
 
     pub fn workspace_diagnostics(&self) -> Vec<LspWorkspaceDiagnostic> {
@@ -2215,9 +2460,7 @@ impl LspClientManager {
                 session,
                 runtime_override,
                 initialization_options_override,
-                Arc::clone(&self.transport_log),
-                Arc::clone(&self.notifications),
-                Arc::clone(&self.diagnostics_generation),
+                self.session_shared_state(),
             ) {
                 Ok(handle) => {
                     self.state
@@ -2227,6 +2470,7 @@ impl LspClientManager {
                         })?
                         .sessions
                         .insert(key, Arc::clone(&handle));
+                    self.sessions_generation.fetch_add(1, Ordering::Release);
                     handled_keys.insert(handle.key.clone());
                     handles.push(handle);
                 }
@@ -2271,10 +2515,15 @@ impl LspSessionHandle {
         session: LanguageServerSession,
         runtime_override: Option<Value>,
         initialization_options_override: Option<Value>,
-        transport_log: TransportLog,
-        notifications: NotificationLog,
-        diagnostics_generation: Arc<AtomicU64>,
+        shared: LspSessionSharedState,
     ) -> Result<Arc<Self>, LspClientError> {
+        let LspSessionSharedState {
+            transport_log,
+            notifications,
+            diagnostics_generation,
+            dirty_diagnostic_paths,
+            sessions_generation,
+        } = shared;
         let launch = session.launch();
         let launch_program = launch.program().to_owned();
         let launch_args = launch.args().to_vec();
@@ -2372,6 +2621,8 @@ impl LspSessionHandle {
                 transport_log,
                 notifications: Arc::clone(&notifications),
                 diagnostics_generation,
+                dirty_diagnostic_paths,
+                sessions_generation,
             },
         );
         handle.initialize()?;
@@ -3029,6 +3280,8 @@ struct LspReaderSession {
     transport_log: TransportLog,
     notifications: NotificationLog,
     diagnostics_generation: Arc<AtomicU64>,
+    dirty_diagnostic_paths: Arc<Mutex<BTreeSet<PathBuf>>>,
+    sessions_generation: Arc<AtomicU64>,
 }
 
 fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: LspReaderSession) {
@@ -3044,6 +3297,8 @@ fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: LspReaderSes
             transport_log,
             notifications,
             diagnostics_generation,
+            dirty_diagnostic_paths,
+            sessions_generation,
         } = session;
         let mut reader = BufReader::new(stdout);
         let mut progress_tracks = BTreeMap::<String, ProgressTrack>::new();
@@ -3128,10 +3383,14 @@ fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: LspReaderSes
                 if method == "textDocument/publishDiagnostics"
                     && let Some(params) = object.get("params")
                     && let Some((path, parsed)) = parse_publish_diagnostics(params)
-                    && let Ok(mut guard) = diagnostics.lock()
                 {
-                    guard.insert(path, parsed);
-                    diagnostics_generation.fetch_add(1, Ordering::Release);
+                    record_published_diagnostics(
+                        &diagnostics,
+                        &dirty_diagnostic_paths,
+                        &diagnostics_generation,
+                        path,
+                        parsed,
+                    );
                     continue;
                 }
                 if method == "$/progress"
@@ -3169,6 +3428,9 @@ fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: LspReaderSes
             }
         }
         disconnected.store(true, Ordering::Release);
+        note_session_disconnect_diagnostics(&diagnostics, &dirty_diagnostic_paths);
+        diagnostics_generation.fetch_add(1, Ordering::Release);
+        sessions_generation.fetch_add(1, Ordering::Release);
         record_transport_event(&transport_log, &server_id, "marked session disconnected");
         if let Ok(mut pending) = pending.lock() {
             for sender in pending.values() {
@@ -3698,6 +3960,59 @@ fn record_notification(notifications: &NotificationLog, notification: LspNotific
     if let Ok(mut log) = notifications.lock() {
         log.record(notification);
     }
+}
+
+fn record_published_diagnostics(
+    diagnostics: &DiagnosticsByPath,
+    dirty_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
+    diagnostics_generation: &AtomicU64,
+    path: PathBuf,
+    parsed: Vec<Diagnostic>,
+) {
+    if let Ok(mut guard) = diagnostics.lock() {
+        guard.insert(path.clone(), parsed);
+    }
+    if let Ok(mut dirty) = dirty_paths.lock() {
+        dirty.insert(path);
+    }
+    diagnostics_generation.fetch_add(1, Ordering::Release);
+}
+
+fn note_session_disconnect_diagnostics(
+    diagnostics: &DiagnosticsByPath,
+    dirty_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
+) {
+    if let Ok(guard) = diagnostics.lock()
+        && let Ok(mut dirty) = dirty_paths.lock()
+    {
+        dirty.extend(guard.keys().cloned());
+    }
+}
+
+fn spawn_inert_child() -> std::io::Result<(Child, ChildStdin)> {
+    #[cfg(windows)]
+    let mut child = {
+        use std::os::windows::process::CommandExt as _;
+
+        Command::new("cmd")
+            .args(["/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?
+    };
+    #[cfg(not(windows))]
+    let mut child = Command::new("sh")
+        .args(["-c", "cat >/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::other("inert language server child is missing stdin pipe")
+    })?;
+    Ok((child, stdin))
 }
 
 fn session_notification_key(server_id: &str, root: Option<&Path>) -> String {
@@ -6354,6 +6669,156 @@ mod tests {
         );
     }
 
+    fn register_dummy_server(id: &str) -> LanguageServerRegistry {
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                id,
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register dummy server");
+        registry
+    }
+
+    fn sample_diagnostic(message: &str) -> Diagnostic {
+        Diagnostic::new(
+            "rustc",
+            message,
+            DiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 4)),
+        )
+    }
+
+    #[test]
+    fn memory_session_publish_bumps_generation_and_dirty_path() {
+        let path = PathBuf::from("src").join("main.rs");
+        let manager = LspClientManager::new(register_dummy_server("rust-analyzer"));
+        manager
+            .attach_memory_session(
+                "rust-analyzer",
+                &path,
+                vec![sample_diagnostic("cannot find value `missing`")],
+            )
+            .expect("attach memory session");
+
+        assert_eq!(manager.diagnostics_generation(), 1);
+        assert_eq!(
+            manager.take_dirty_diagnostic_paths(),
+            BTreeSet::from([path.clone()])
+        );
+        assert!(manager.take_dirty_diagnostic_paths().is_empty());
+
+        manager
+            .apply_published_diagnostics(&path, vec![sample_diagnostic("unused variable")])
+            .expect("publish diagnostics");
+        assert_eq!(manager.diagnostics_generation(), 2);
+        assert_eq!(
+            manager.take_dirty_diagnostic_paths(),
+            BTreeSet::from([path.clone()])
+        );
+        assert_eq!(
+            manager.diagnostics_for_path(&path)[0].message(),
+            "unused variable"
+        );
+    }
+
+    #[test]
+    fn memory_session_disconnect_bumps_generation_and_clears_path() {
+        let path = PathBuf::from("src").join("lib.rs");
+        let manager = LspClientManager::new(register_dummy_server("rust-analyzer"));
+        manager
+            .attach_memory_session(
+                "rust-analyzer",
+                &path,
+                vec![sample_diagnostic("cannot find value `missing`")],
+            )
+            .expect("attach memory session");
+        let _ = manager.take_dirty_diagnostic_paths();
+        manager
+            .disconnect_memory_sessions_for_path(&path)
+            .expect("disconnect");
+
+        assert_eq!(manager.diagnostics_generation(), 2);
+        assert_eq!(
+            manager.take_dirty_diagnostic_paths(),
+            BTreeSet::from([path.clone()])
+        );
+        assert!(manager.diagnostics_for_path(&path).is_empty());
+    }
+
+    #[test]
+    fn log_and_notification_revision_skip_cloning_unchanged_snapshots() {
+        let manager = LspClientManager::new(LanguageServerRegistry::new());
+        assert_eq!(manager.log_revision(), 0);
+        assert!(manager.log_snapshot_if_changed(0).is_none());
+        manager.record_transport_log_event("rust-analyzer", "started");
+        assert_eq!(manager.log_revision(), 1);
+        let log = manager
+            .log_snapshot_if_changed(0)
+            .expect("log snapshot after revision move");
+        assert_eq!(log.revision(), 1);
+        assert!(manager.log_snapshot_if_changed(1).is_none());
+
+        assert_eq!(manager.notification_revision(), 0);
+        assert!(manager.notification_snapshot_if_changed(0).is_none());
+        manager.record_show_message("rust-analyzer", "Indexing");
+        assert_eq!(manager.notification_revision(), 1);
+        let notifications = manager
+            .notification_snapshot_if_changed(0)
+            .expect("notification snapshot after revision move");
+        assert_eq!(notifications.revision(), 1);
+        assert!(manager.notification_snapshot_if_changed(1).is_none());
+    }
+
+    #[test]
+    fn two_memory_sessions_merge_and_sort_diagnostics_for_path() {
+        let path = PathBuf::from("src").join("main.rs");
+        let mut registry = LanguageServerRegistry::new();
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "rust-analyzer",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register rust-analyzer");
+        registry
+            .register(crate::LanguageServerSpec::new(
+                "biome",
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .expect("register biome");
+        let manager = LspClientManager::new(registry);
+        let later = Diagnostic::new(
+            "rustc",
+            "cannot find value `missing`",
+            DiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(4, 2), TextPoint::new(4, 9)),
+        );
+        let earlier = Diagnostic::new(
+            "biome",
+            "formatting suggestion",
+            DiagnosticSeverity::Information,
+            TextRange::new(TextPoint::new(1, 0), TextPoint::new(1, 6)),
+        );
+        manager
+            .attach_memory_session("rust-analyzer", &path, vec![later.clone()])
+            .expect("attach rust-analyzer");
+        manager
+            .attach_memory_session("biome", &path, vec![earlier.clone()])
+            .expect("attach biome");
+
+        let merged = manager.diagnostics_for_path(&path);
+        assert_eq!(merged, vec![earlier, later]);
+    }
+
     #[test]
     fn progress_notifications_update_existing_track() {
         let begin = json!({
@@ -6556,30 +7021,8 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     fn spawn_inert_child() -> (Child, ChildStdin) {
-        let mut child = Command::new("cmd")
-            .args(["/C", "more"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn inert child");
-        let stdin = child.stdin.take().expect("child stdin");
-        (child, stdin)
-    }
-
-    #[cfg(not(windows))]
-    fn spawn_inert_child() -> (Child, ChildStdin) {
-        let mut child = Command::new("sh")
-            .args(["-c", "cat >/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn inert child");
-        let stdin = child.stdin.take().expect("child stdin");
-        (child, stdin)
+        super::spawn_inert_child().expect("spawn inert child")
     }
 
     fn test_session_handle(

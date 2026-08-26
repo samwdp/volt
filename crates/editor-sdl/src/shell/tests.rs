@@ -3,7 +3,10 @@ use agent_client_protocol::{
     Diff, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, TextContent, ToolCall,
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
-use editor_lsp::{LanguageServerRegistry, LspClientManager, LspLiveSession, LspLogDirection};
+use editor_lsp::{
+    Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LspClientManager, LspLiveSession,
+    LspLogDirection,
+};
 use editor_plugin_api::{
     AcpClient, AutocompleteProvider, DebugAdapterSpec, GhostTextContext, HoverProvider,
     LanguageConfiguration, LanguageServerSpec, LigatureConfig, MarkdownPrettyConfig, OilDefaults,
@@ -3287,6 +3290,348 @@ fn lsp_log_buffers_stay_in_the_background_until_explicitly_focused() -> Result<(
         .ok_or_else(|| "active runtime buffer is missing after focusing log buffer".to_owned())?;
     assert_eq!(active_after_focus.1, buffer_id);
     assert_eq!(active_shell_buffer_id(&state.runtime)?, buffer_id);
+    Ok(())
+}
+
+fn install_test_lsp_manager(
+    runtime: &mut EditorRuntime,
+    server_ids: &[&str],
+) -> Result<Arc<LspClientManager>, String> {
+    let mut registry = LanguageServerRegistry::new();
+    for server_id in server_ids {
+        registry
+            .register(editor_lsp::LanguageServerSpec::new(
+                *server_id,
+                "rust",
+                ["rs"],
+                "dummy-lsp",
+                std::iter::empty::<&str>(),
+            ))
+            .map_err(|error| error.to_string())?;
+    }
+    let manager = Arc::new(LspClientManager::new(registry));
+    runtime.services_mut().insert(Arc::clone(&manager));
+    Ok(manager)
+}
+
+fn install_lsp_enabled_file_buffer(
+    state: &mut ShellState,
+    name: &str,
+    path: &Path,
+    lines: Vec<String>,
+) -> Result<BufferId, String> {
+    let buffer_id = install_text_test_buffer(state, name, lines)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_path(path.to_path_buf());
+        buffer.set_lsp_enabled(true);
+        buffer.set_lsp_path(Some(path.to_path_buf()));
+    }
+    Ok(buffer_id)
+}
+
+fn sample_lsp_diagnostic(message: &str) -> Diagnostic {
+    Diagnostic::new(
+        "rustc",
+        message,
+        DiagnosticSeverity::Error,
+        TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 4)),
+    )
+}
+
+#[test]
+fn apply_pending_lsp_state_skips_diagnostic_lookups_when_generation_unchanged() -> Result<(), String>
+{
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let path = PathBuf::from("src").join("main.rs");
+    let buffer_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-diag-skip*",
+        &path,
+        vec!["fn main() {}".to_owned()],
+    )?;
+    manager
+        .attach_memory_session(
+            "rust-analyzer",
+            &path,
+            vec![sample_lsp_diagnostic("cannot find value `missing`")],
+        )
+        .map_err(|error| error.to_string())?;
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    let after_publish = shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics_revision();
+    assert_eq!(after_publish, 1);
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics()[0].message(),
+        "cannot find value `missing`"
+    );
+    let lookups_after_publish = manager.diagnostics_for_path_lookups();
+    assert!(
+        lookups_after_publish >= 1,
+        "first apply should look up diagnostics"
+    );
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics_revision(),
+        after_publish
+    );
+    assert_eq!(
+        manager.diagnostics_for_path_lookups(),
+        lookups_after_publish,
+        "unchanged diagnostics generation must not clone diagnostics again"
+    );
+
+    manager
+        .apply_published_diagnostics(&path, vec![sample_lsp_diagnostic("unused variable")])
+        .map_err(|error| error.to_string())?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics_revision(),
+        after_publish + 1
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics()[0].message(),
+        "unused variable"
+    );
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_refreshes_only_paths_whose_diagnostics_changed() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let main_path = PathBuf::from("src").join("main.rs");
+    let lib_path = PathBuf::from("src").join("lib.rs");
+    let main_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-diag-main*",
+        &main_path,
+        vec!["fn main() {}".to_owned()],
+    )?;
+    let lib_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-diag-lib*",
+        &lib_path,
+        vec!["pub fn lib() {}".to_owned()],
+    )?;
+    manager
+        .attach_memory_session(
+            "rust-analyzer",
+            &main_path,
+            vec![sample_lsp_diagnostic("cannot find value `missing`")],
+        )
+        .map_err(|error| error.to_string())?;
+    manager
+        .attach_memory_session("rust-analyzer", &lib_path, Vec::new())
+        .map_err(|error| error.to_string())?;
+    let _ = manager.take_dirty_diagnostic_paths();
+    manager
+        .apply_published_diagnostics(
+            &main_path,
+            vec![sample_lsp_diagnostic("cannot find value `missing`")],
+        )
+        .map_err(|error| error.to_string())?;
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(manager.diagnostics_for_path_lookups(), 1);
+    assert_eq!(
+        shell_buffer(&state.runtime, main_id)?.lsp_diagnostics_revision(),
+        1
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, lib_id)?.lsp_diagnostics_revision(),
+        0
+    );
+
+    manager
+        .apply_published_diagnostics(&lib_path, vec![sample_lsp_diagnostic("unused variable")])
+        .map_err(|error| error.to_string())?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(manager.diagnostics_for_path_lookups(), 2);
+    assert_eq!(
+        shell_buffer(&state.runtime, main_id)?.lsp_diagnostics_revision(),
+        1
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, lib_id)?.lsp_diagnostics_revision(),
+        1
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, lib_id)?.lsp_diagnostics()[0].message(),
+        "unused variable"
+    );
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_clears_diagnostics_after_session_disconnect() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let path = PathBuf::from("src").join("main.rs");
+    let buffer_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-diag-disconnect*",
+        &path,
+        vec!["fn main() {}".to_owned()],
+    )?;
+    manager
+        .attach_memory_session(
+            "rust-analyzer",
+            &path,
+            vec![sample_lsp_diagnostic("cannot find value `missing`")],
+        )
+        .map_err(|error| error.to_string())?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics_revision(),
+        1
+    );
+
+    manager
+        .disconnect_memory_sessions_for_path(&path)
+        .map_err(|error| error.to_string())?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .lsp_diagnostics()
+            .is_empty()
+    );
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.lsp_diagnostics_revision(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_skips_log_snapshot_until_revision_moves() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = ensure_lsp_log_buffer(&mut state.runtime, workspace_id, "rust-analyzer")?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    let before = shell_buffer(&state.runtime, buffer_id)?.text.text();
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(shell_buffer(&state.runtime, buffer_id)?.text.text(), before);
+
+    manager.record_transport_log_event("rust-analyzer", "started language server");
+    apply_pending_lsp_state(&mut state.runtime)?;
+    let after = shell_buffer(&state.runtime, buffer_id)?.text.text();
+    assert_ne!(after, before);
+    assert!(after.contains("started language server"));
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(shell_buffer(&state.runtime, buffer_id)?.text.text(), after);
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_toasts_only_when_notification_revision_moves() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    apply_pending_lsp_state(&mut state.runtime)?;
+    let before = shell_ui(&state.runtime)?.notification_revision();
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(shell_ui(&state.runtime)?.notification_revision(), before);
+
+    manager.record_show_message("rust-analyzer", "Indexing");
+    apply_pending_lsp_state(&mut state.runtime)?;
+    let after = shell_ui(&state.runtime)?.notification_revision();
+    assert!(after > before);
+    let now = Instant::now();
+    assert!(
+        shell_ui(&state.runtime)?
+            .visible_notifications(now)
+            .iter()
+            .any(|notification| notification.title.contains("rust-analyzer")
+                && notification
+                    .body_lines
+                    .iter()
+                    .any(|line| line.contains("Indexing")))
+    );
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(shell_ui(&state.runtime)?.notification_revision(), after);
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_refreshes_attached_server_label_when_session_set_changes()
+-> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer", "biome"])?;
+    let rust_path = PathBuf::from("src").join("main.rs");
+    let biome_path = PathBuf::from("src").join("lib.rs");
+    let rust_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-label-rust*",
+        &rust_path,
+        vec!["fn main() {}".to_owned()],
+    )?;
+    let biome_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "*lsp-label-biome*",
+        &biome_path,
+        vec!["pub fn lib() {}".to_owned()],
+    )?;
+    manager
+        .attach_memory_session("rust-analyzer", &rust_path, Vec::new())
+        .map_err(|error| error.to_string())?;
+    manager
+        .attach_memory_session("biome", &biome_path, Vec::new())
+        .map_err(|error| error.to_string())?;
+
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(rust_id);
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.attached_lsp_server(),
+        Some("rust-analyzer")
+    );
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.attached_lsp_server(),
+        Some("rust-analyzer")
+    );
+
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(biome_id);
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.attached_lsp_server(),
+        Some("biome")
+    );
+    Ok(())
+}
+
+#[test]
+fn apply_pending_lsp_state_does_nothing_without_lsp_enabled_buffers() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let path = PathBuf::from("src").join("main.rs");
+    manager
+        .attach_memory_session(
+            "rust-analyzer",
+            &path,
+            vec![sample_lsp_diagnostic("cannot find value `missing`")],
+        )
+        .map_err(|error| error.to_string())?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        for buffer in &mut ui.buffers {
+            buffer.set_lsp_enabled(false);
+        }
+    }
+
+    apply_pending_lsp_state(&mut state.runtime)?;
+    assert_eq!(manager.diagnostics_for_path_lookups(), 0);
     Ok(())
 }
 
