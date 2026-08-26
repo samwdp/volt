@@ -1,3 +1,4 @@
+use super::autocomplete_tokens::AutocompleteTokenScanKind;
 use super::*;
 use agent_client_protocol::{
     Diff, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, TextContent, ToolCall,
@@ -11941,9 +11942,11 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
         ],
         lsp_client: None,
         edits: None,
+        token_edits_from: None,
+        token_edits: None,
     };
 
-    let entries = autocomplete_entries(&request);
+    let entries = autocomplete_entries(&request, &mut AutocompleteTokenCache::default());
     assert!(!entries.is_empty());
     assert!(entries.iter().all(|entry| entry.provider_id == "primary"));
     Ok(())
@@ -12003,10 +12006,190 @@ fn autocomplete_entries_are_not_limited_by_visible_result_limit() -> Result<(), 
         }],
         lsp_client: None,
         edits: None,
+        token_edits_from: None,
+        token_edits: None,
     };
 
-    let entries = autocomplete_entries(&request);
+    let entries = autocomplete_entries(&request, &mut AutocompleteTokenCache::default());
     assert_eq!(entries.len(), 6);
+    Ok(())
+}
+
+fn buffer_autocomplete_request(
+    buffer_id: BufferId,
+    buffer: &TextBuffer,
+    query: AutocompleteQuery,
+    token_edits_from: Option<u64>,
+    token_edits: Option<Vec<TextEdit>>,
+) -> AutocompleteWorkerRequest {
+    AutocompleteWorkerRequest {
+        request_id: 1,
+        buffer_id,
+        buffer_revision: buffer.revision(),
+        text: buffer.snapshot(),
+        plugin_kind: None,
+        db_candidates: Vec::new(),
+        path: None,
+        root: None,
+        cursor: buffer.cursor(),
+        query,
+        providers: vec![AutocompleteProviderSpec {
+            id: "buffer".to_owned(),
+            label: "Buffer".to_owned(),
+            icon: "B".to_owned(),
+            item_icon: "T".to_owned(),
+            or_group: None,
+            buffer_kind: None,
+            items: Vec::new(),
+            kind: AutocompleteProviderKind::Buffer,
+        }],
+        lsp_client: None,
+        edits: None,
+        token_edits_from,
+        token_edits,
+    }
+}
+
+#[test]
+fn autocomplete_worker_reuses_token_map_for_same_revision() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("alpha alpine alphabet\nal");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(1, 2));
+
+    let (buffer_id, request) = {
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        let buffer_id = ui
+            .active_buffer_id()
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        let buffer = ui
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let query = autocomplete_query(&buffer.text.snapshot(), true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        (
+            buffer_id,
+            buffer_autocomplete_request(buffer_id, &buffer.text, query, None, None),
+        )
+    };
+    let _ = buffer_id;
+    let mut cache = AutocompleteTokenCache::default();
+    let first = autocomplete_entries(&request, &mut cache);
+    assert_eq!(
+        cache.last_scan().map(|scan| scan.kind),
+        Some(AutocompleteTokenScanKind::Rebuilt)
+    );
+    let second = autocomplete_entries(&request, &mut cache);
+    assert_eq!(
+        cache.last_scan().map(|scan| scan.kind),
+        Some(AutocompleteTokenScanKind::Reused)
+    );
+    assert_eq!(first, second);
+    Ok(())
+}
+
+#[test]
+fn autocomplete_insert_identifier_appears_and_delete_drops_last_occurrence() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .text = TextBuffer::from_text("alpha alpine\nal");
+    state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .set_cursor(TextPoint::new(1, 2));
+
+    let (buffer_id, mut cache) = {
+        let ui = state.ui().map_err(|error| error.to_string())?;
+        let buffer_id = ui
+            .active_buffer_id()
+            .ok_or_else(|| "active buffer missing".to_owned())?;
+        (buffer_id, AutocompleteTokenCache::default())
+    };
+
+    {
+        let buffer = state
+            .ui()
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let query = autocomplete_query(&buffer.text.snapshot(), true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        let request = buffer_autocomplete_request(buffer_id, &buffer.text, query, None, None);
+        let entries = autocomplete_entries(&request, &mut cache);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.replacement == "alpha" || entry.replacement == "alpine")
+        );
+        assert!(!entries.iter().any(|entry| entry.replacement == "almond"));
+    }
+
+    let from_revision = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let from_revision = buffer.text.revision();
+        buffer.text.set_cursor(TextPoint::new(0, 12));
+        buffer.text.insert_text(" almond");
+        buffer.text.set_cursor(TextPoint::new(1, 2));
+        from_revision
+    };
+    {
+        let buffer = state
+            .ui()
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let query = autocomplete_query(&buffer.text.snapshot(), true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        let edits = buffer.text.edits_since(from_revision);
+        let request =
+            buffer_autocomplete_request(buffer_id, &buffer.text, query, Some(from_revision), edits);
+        let entries = autocomplete_entries(&request, &mut cache);
+        assert_eq!(
+            cache.last_scan().map(|scan| scan.kind),
+            Some(AutocompleteTokenScanKind::Incremental)
+        );
+        assert!(entries.iter().any(|entry| entry.replacement == "almond"));
+    }
+
+    let from_revision = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let from_revision = buffer.text.revision();
+        buffer.text.replace(
+            TextRange::new(TextPoint::new(0, 13), TextPoint::new(0, 19)),
+            "",
+        );
+        buffer.text.set_cursor(TextPoint::new(1, 2));
+        from_revision
+    };
+    {
+        let buffer = state
+            .ui()
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| "shell buffer missing".to_owned())?;
+        let query = autocomplete_query(&buffer.text.snapshot(), true)
+            .ok_or_else(|| "autocomplete query missing".to_owned())?;
+        let edits = buffer.text.edits_since(from_revision);
+        let request =
+            buffer_autocomplete_request(buffer_id, &buffer.text, query, Some(from_revision), edits);
+        let entries = autocomplete_entries(&request, &mut cache);
+        assert_eq!(
+            cache.last_scan().map(|scan| scan.kind),
+            Some(AutocompleteTokenScanKind::Incremental)
+        );
+        assert!(!entries.iter().any(|entry| entry.replacement == "almond"));
+    }
     Ok(())
 }
 

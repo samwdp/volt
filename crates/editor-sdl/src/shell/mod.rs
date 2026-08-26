@@ -1,4 +1,5 @@
 mod acp;
+mod autocomplete_tokens;
 mod browser;
 mod clipboard;
 mod command_line;
@@ -23,6 +24,7 @@ mod ui_overlays;
 mod workspace_dock;
 mod workspace_search;
 
+use autocomplete_tokens::{AutocompleteTokenCache, is_completion_word_char};
 use browser::*;
 use command_line::*;
 use command_stream::*;
@@ -14262,6 +14264,7 @@ impl ShellState {
             {
                 return Err(ShellError::Runtime(error));
             }
+            let token_map_key = ui.autocomplete_worker.token_map_key();
             autocomplete_request_for_buffer(
                 &self.runtime,
                 buffer_id,
@@ -14271,6 +14274,10 @@ impl ShellState {
                 lsp_client.clone(),
                 false,
             )
+            .map(|mut request| {
+                attach_token_count_edits(&mut request, &buffer.text, token_map_key);
+                request
+            })
         };
         let ui = self.ui_mut()?;
         match request {
@@ -23469,9 +23476,14 @@ fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         {
             return Err(error);
         }
+        let token_map_key = ui.autocomplete_worker.token_map_key();
         autocomplete_request_for_buffer(
             runtime, buffer_id, buffer, root, &registry, lsp_client, true,
         )
+        .map(|mut request| {
+            attach_token_count_edits(&mut request, &buffer.text, token_map_key);
+            request
+        })
     };
     let Some(request) = request else {
         shell_ui_mut(runtime)?.close_autocomplete();
@@ -24504,6 +24516,8 @@ struct AutocompleteBufferRequest {
     providers: Vec<AutocompleteProviderSpec>,
     lsp_client: Option<Arc<LspClientManager>>,
     edits: Option<Vec<TextEdit>>,
+    token_edits_from: Option<u64>,
+    token_edits: Option<Vec<TextEdit>>,
 }
 
 struct PendingAutocompleteRequest {
@@ -24822,6 +24836,8 @@ struct AutocompleteWorkerRequest {
     providers: Vec<AutocompleteProviderSpec>,
     lsp_client: Option<Arc<LspClientManager>>,
     edits: Option<Vec<TextEdit>>,
+    token_edits_from: Option<u64>,
+    token_edits: Option<Vec<TextEdit>>,
 }
 
 struct AutocompleteWorkerResult {
@@ -24837,6 +24853,7 @@ struct AutocompleteWorkerState {
     next_request_id: u64,
     request_tx: Sender<AutocompleteWorkerRequest>,
     results: Arc<Mutex<Vec<AutocompleteWorkerResult>>>,
+    token_map_key: Arc<Mutex<Option<(u64, u64)>>>,
 }
 
 impl AutocompleteWorkerState {
@@ -24844,12 +24861,20 @@ impl AutocompleteWorkerState {
         let (request_tx, request_rx) = mpsc::channel::<AutocompleteWorkerRequest>();
         let results = Arc::new(Mutex::new(Vec::new()));
         let worker_results = Arc::clone(&results);
+        let token_map_key = Arc::new(Mutex::new(None));
+        let worker_token_map_key = Arc::clone(&token_map_key);
         std::thread::spawn(move || {
+            let mut token_cache = AutocompleteTokenCache::default();
             while let Ok(mut request) = request_rx.recv() {
                 while let Ok(newer_request) = request_rx.try_recv() {
                     request = newer_request;
                 }
-                let entries = autocomplete_entries(&request);
+                let entries = autocomplete_entries(&request, &mut token_cache);
+                if let Some(key) = token_cache.key()
+                    && let Ok(mut slot) = worker_token_map_key.lock()
+                {
+                    *slot = Some(key);
+                }
                 if let Ok(mut results) = worker_results.lock() {
                     results.push(AutocompleteWorkerResult {
                         request_id: request.request_id,
@@ -24870,7 +24895,12 @@ impl AutocompleteWorkerState {
             next_request_id: 0,
             request_tx,
             results,
+            token_map_key,
         }
+    }
+
+    fn token_map_key(&self) -> Option<(u64, u64)> {
+        self.token_map_key.lock().ok().and_then(|guard| *guard)
     }
 
     fn clear_pending(&mut self) {
@@ -24900,6 +24930,8 @@ impl AutocompleteWorkerState {
                 providers: request.providers,
                 lsp_client: request.lsp_client,
                 edits: request.edits,
+                token_edits_from: request.token_edits_from,
+                token_edits: request.token_edits,
             },
         });
     }
@@ -24934,7 +24966,10 @@ struct RankedAutocompleteEntry {
     provider_index: usize,
 }
 
-fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<AutocompleteEntry> {
+fn autocomplete_entries(
+    request: &AutocompleteWorkerRequest,
+    token_cache: &mut AutocompleteTokenCache,
+) -> Vec<AutocompleteEntry> {
     let mut ranked = Vec::new();
     let mut satisfied_or_groups = BTreeSet::new();
     for (provider_index, provider) in request.providers.iter().enumerate() {
@@ -24947,7 +24982,14 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
         }
         let entries = match provider.kind {
             AutocompleteProviderKind::Buffer => {
-                buffer_autocomplete_entries(&request.text, &request.query, provider)
+                token_cache.refresh(
+                    request.buffer_id.get(),
+                    request.buffer_revision,
+                    &request.text,
+                    request.token_edits_from,
+                    request.token_edits.as_deref(),
+                );
+                buffer_autocomplete_entries(token_cache.counts(), &request.query, provider)
             }
             AutocompleteProviderKind::Database => db_autocomplete_entries(
                 &request.plugin_kind,
@@ -24994,24 +25036,22 @@ fn autocomplete_entries(request: &AutocompleteWorkerRequest) -> Vec<Autocomplete
 }
 
 fn buffer_autocomplete_entries(
-    snapshot: &TextSnapshot,
+    counts: &BTreeMap<String, usize>,
     query: &AutocompleteQuery,
     provider: &AutocompleteProviderSpec,
 ) -> Vec<(AutocompleteEntry, i64)> {
-    let text = snapshot.text();
-    let counts = collect_autocomplete_token_counts(&text);
     let prefix_lower = query.prefix.to_ascii_lowercase();
     counts
-        .into_iter()
+        .iter()
         .filter_map(|(token, frequency)| {
             let token_lower = token.to_ascii_lowercase();
             if !prefix_lower.is_empty() && !token_lower.starts_with(&prefix_lower) {
                 return None;
             }
-            if !query.token.is_empty() && token == query.token {
+            if !query.token.is_empty() && token == &query.token {
                 return None;
             }
-            let score = autocomplete_score(&token, frequency, query);
+            let score = autocomplete_score(token, *frequency, query);
             Some((
                 AutocompleteEntry {
                     provider_id: provider.id.clone(),
@@ -25019,7 +25059,7 @@ fn buffer_autocomplete_entries(
                     provider_icon: provider.icon.clone(),
                     item_icon: provider.item_icon.clone(),
                     label: token.clone(),
-                    replacement: token,
+                    replacement: token.clone(),
                     replace_range: None,
                     detail: None,
                     documentation: None,
@@ -25206,24 +25246,6 @@ fn db_autocomplete_entries(
         .collect()
 }
 
-fn collect_autocomplete_token_counts(text: &str) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    let mut token = String::new();
-    for character in text.chars() {
-        if is_completion_word_char(character) {
-            token.push(character);
-            continue;
-        }
-        if !token.is_empty() {
-            *counts.entry(std::mem::take(&mut token)).or_insert(0) += 1;
-        }
-    }
-    if !token.is_empty() {
-        *counts.entry(token).or_insert(0) += 1;
-    }
-    counts
-}
-
 fn autocomplete_score(token: &str, frequency: usize, query: &AutocompleteQuery) -> i64 {
     let starts_with_exact_case =
         usize::from(!query.prefix.is_empty() && token.starts_with(&query.prefix));
@@ -25321,10 +25343,6 @@ fn is_member_access_completion_point(characters: &[char], cursor_col: usize) -> 
         || (cursor_col >= 2
             && matches!(characters.get(cursor_col - 2), Some('-'))
             && matches!(characters.get(cursor_col - 1), Some('>')))
-}
-
-fn is_completion_word_char(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
 }
 
 fn completion_token_at_cursor(buffer: &ShellBuffer) -> Option<(TextRange, String)> {
@@ -25465,7 +25483,26 @@ fn autocomplete_request_for_buffer(
                 .lsp_path()
                 .and_then(|path| lsp_edits_since_last_sync(client, path, &buffer.text))
         }),
+        token_edits_from: None,
+        token_edits: None,
     })
+}
+
+fn attach_token_count_edits(
+    request: &mut AutocompleteBufferRequest,
+    buffer: &TextBuffer,
+    token_map_key: Option<(u64, u64)>,
+) {
+    match token_map_key {
+        Some((cached_id, revision)) if cached_id == request.buffer_id.get() => {
+            request.token_edits_from = Some(revision);
+            request.token_edits = buffer.edits_since(revision);
+        }
+        _ => {
+            request.token_edits_from = None;
+            request.token_edits = None;
+        }
+    }
 }
 
 fn runtime_db_candidates_for_buffer(
