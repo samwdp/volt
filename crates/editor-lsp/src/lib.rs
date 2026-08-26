@@ -474,7 +474,8 @@ impl LanguageServerSpec {
     /// Adds root markers used for workspace discovery.
     ///
     /// Marker order is preference priority: earlier markers win over later ones across the full
-    /// ancestor walk (for example `*.sln` before `*.csproj`).
+    /// ancestor walk (for example `*.sln` before `*.csproj`). Solution globs (`*.sln`, `*.slnx`)
+    /// also walk above a nested Project Workspace and search that workspace for a unique match.
     pub fn with_root_markers(
         mut self,
         markers: impl IntoIterator<Item = impl Into<String>>,
@@ -1265,18 +1266,115 @@ fn find_root_for_path_matching_marker(
     workspace_root: Option<&Path>,
     marker: &str,
 ) -> Option<PathBuf> {
-    let workspace_root = workspace_root.filter(|root| path.starts_with(root));
+    let bounded_workspace_root = workspace_root.filter(|root| path.starts_with(root));
+    let stop_at_workspace = !is_solution_glob_marker(marker);
     let mut current = path.parent();
     while let Some(directory) = current {
+        if directory.parent().is_none() {
+            break;
+        }
         if directory_matches_root_marker(directory, marker) {
             return Some(directory.to_path_buf());
         }
-        if workspace_root.is_some_and(|root| root == directory) {
+        if should_stop_root_marker_walk(directory, bounded_workspace_root, stop_at_workspace) {
             break;
         }
         current = directory.parent();
     }
-    None
+    solution_glob_extension(marker)
+        .and_then(|extension| unique_workspace_match_for_extension(workspace_root, extension))
+}
+
+fn should_stop_root_marker_walk(
+    directory: &Path,
+    workspace_root: Option<&Path>,
+    stop_at_workspace: bool,
+) -> bool {
+    if stop_at_workspace {
+        return workspace_root.is_some_and(|root| root == directory);
+    }
+    if workspace_root.is_some_and(|root| root == directory) {
+        return !directory_matches_root_marker(directory, "*.csproj");
+    }
+    directory_is_git_root(directory)
+}
+
+fn is_solution_glob_marker(marker: &str) -> bool {
+    solution_glob_extension(marker).is_some()
+}
+
+fn solution_glob_extension(marker: &str) -> Option<&str> {
+    let extension = marker.strip_prefix("*.")?;
+    (extension.eq_ignore_ascii_case("sln") || extension.eq_ignore_ascii_case("slnx"))
+        .then_some(extension)
+}
+
+fn directory_is_git_root(directory: &Path) -> bool {
+    fs::metadata(directory.join(".git")).is_ok()
+}
+
+const SOLUTION_SEARCH_MAX_DEPTH: usize = 8;
+
+fn unique_workspace_match_for_extension(
+    workspace_root: Option<&Path>,
+    extension: &str,
+) -> Option<PathBuf> {
+    let workspace_root = workspace_root?;
+    let mut matches = Vec::new();
+    collect_files_with_extension(workspace_root, extension, 0, &mut matches);
+    if matches.len() != 1 {
+        return None;
+    }
+    matches.pop()?.parent().map(Path::to_path_buf)
+}
+
+fn collect_files_with_extension(
+    directory: &Path,
+    extension: &str,
+    depth: usize,
+    found: &mut Vec<PathBuf>,
+) {
+    if found.len() > 1 || depth > SOLUTION_SEARCH_MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if found.len() > 1 {
+            return;
+        }
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if should_skip_solution_search_dir(&path) {
+                continue;
+            }
+            collect_files_with_extension(&path, extension, depth + 1, found);
+            continue;
+        }
+        if file_type.is_file()
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            found.push(path);
+        }
+    }
+}
+
+fn should_skip_solution_search_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "bin" | "obj" | ".git" | ".vs" | "node_modules" | "target" | "packages" | "dist"
+            )
+        })
 }
 
 fn directory_matches_root_marker(directory: &Path, marker: &str) -> bool {
@@ -1740,10 +1838,10 @@ mod tests {
     #[test]
     fn prepared_session_for_path_prefers_solution_root_over_nested_csharp_project() {
         let root = temp_dir();
-        let project_dir = root.join("src").join("AssetFusion.Api");
+        let project_dir = root.join("src").join("Api");
         fs::create_dir_all(&project_dir).expect("project dir");
-        fs::write(root.join("af-platform-api.sln"), "").expect("solution");
-        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        fs::write(root.join("App.sln"), "").expect("solution");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
         let file_path = project_dir.join("Program.cs");
         fs::write(&file_path, "class Program {}").expect("file");
 
@@ -1759,7 +1857,102 @@ mod tests {
                 "--features",
                 "razor-support,metadata-uris",
                 "--solution",
-                "af-platform-api.sln"
+                "App.sln"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_finds_solution_above_nested_workspace() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("Api");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(root.join("App.sln"), "").expect("solution");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session = must(registry.prepare_session_for_path(
+            "csharp-ls",
+            &file_path,
+            Some(project_dir.as_path()),
+        ));
+        assert_eq!(session.root(), Some(&root));
+        assert_eq!(session.launch().cwd(), Some(&root));
+        assert_eq!(
+            session.launch().args(),
+            [
+                "--features",
+                "razor-support,metadata-uris",
+                "--solution",
+                "App.sln"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_finds_solution_above_git_project_workspace() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("Api");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(root.join("App.sln"), "").expect("solution");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
+        fs::write(project_dir.join(".git"), "gitdir: /tmp/fake").expect("git");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session = must(registry.prepare_session_for_path(
+            "csharp-ls",
+            &file_path,
+            Some(project_dir.as_path()),
+        ));
+        assert_eq!(session.root(), Some(&root));
+        assert_eq!(
+            session.launch().args(),
+            [
+                "--features",
+                "razor-support,metadata-uris",
+                "--solution",
+                "App.sln"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_session_for_path_finds_unique_solution_outside_file_ancestors() {
+        let root = temp_dir();
+        let project_dir = root.join("src").join("Api");
+        let solution_dir = root.join("solutions");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::create_dir_all(&solution_dir).expect("solution dir");
+        fs::write(solution_dir.join("App.sln"), "").expect("solution");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
+        let file_path = project_dir.join("Program.cs");
+        fs::write(&file_path, "class Program {}").expect("file");
+
+        let mut registry = LanguageServerRegistry::new();
+        must(registry.register(csharp_language_server()));
+        let session =
+            must(registry.prepare_session_for_path("csharp-ls", &file_path, Some(root.as_path())));
+        assert_eq!(session.root(), Some(&solution_dir));
+        assert_eq!(session.launch().cwd(), Some(&solution_dir));
+        assert_eq!(
+            session.launch().args(),
+            [
+                "--features",
+                "razor-support,metadata-uris",
+                "--solution",
+                "App.sln"
             ]
         );
 
@@ -1769,9 +1962,9 @@ mod tests {
     #[test]
     fn prepared_session_for_path_falls_back_to_csproj_without_solution_arg() {
         let root = temp_dir();
-        let project_dir = root.join("src").join("AssetFusion.Api");
+        let project_dir = root.join("src").join("Api");
         fs::create_dir_all(&project_dir).expect("project dir");
-        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
         let file_path = project_dir.join("Program.cs");
         fs::write(&file_path, "class Program {}").expect("file");
 
@@ -1792,11 +1985,11 @@ mod tests {
     #[test]
     fn prepared_session_for_path_skips_solution_arg_when_multiple_solutions_exist() {
         let root = temp_dir();
-        let project_dir = root.join("src").join("AssetFusion.Api");
+        let project_dir = root.join("src").join("Api");
         fs::create_dir_all(&project_dir).expect("project dir");
         fs::write(root.join("App.sln"), "").expect("solution");
         fs::write(root.join("App.Tests.sln"), "").expect("solution");
-        fs::write(project_dir.join("AssetFusion.Api.csproj"), "").expect("project");
+        fs::write(project_dir.join("Api.csproj"), "").expect("project");
         let file_path = project_dir.join("Program.cs");
         fs::write(&file_path, "class Program {}").expect("file");
 
