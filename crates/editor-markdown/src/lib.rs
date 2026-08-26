@@ -9,9 +9,17 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use editor_buffer::TextBuffer;
 use editor_syntax::{SyntaxPoint, SyntaxRegistry, SyntaxStructureNode};
+
+mod cache;
+pub use cache::{
+    CachedMarkdownPretty, MarkdownPrettyCacheIdentity, MarkdownPrettyCacheKey,
+    MarkdownPrettyPlanCache, MarkdownPrettySourceStats, hash_markdown_source,
+    pretty_kill_switch_trips,
+};
 
 /// User-tunable Markdown Pretty settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +171,26 @@ pub struct MarkdownPrettyRequest<'a> {
     pub visible_lines: Option<Range<usize>>,
 }
 
+/// Paint-time Anti-conceal: cursor line and Visual selection show Markdown Raw.
+pub fn line_is_anti_concealed(
+    cursor_line: Option<usize>,
+    visual_lines: Option<&Range<usize>>,
+    line_index: usize,
+) -> bool {
+    if let Some(cursor) = cursor_line
+        && cursor == line_index
+    {
+        return true;
+    }
+    if let Some(range) = visual_lines
+        && line_index >= range.start
+        && line_index <= range.end
+    {
+        return true;
+    }
+    false
+}
+
 impl MarkdownPrettyPlan {
     /// Returns whether Pretty chrome should paint on `line_index`.
     pub fn line_is_anti_concealed(
@@ -170,18 +198,11 @@ impl MarkdownPrettyPlan {
         request: &MarkdownPrettyRequest<'_>,
         line_index: usize,
     ) -> bool {
-        if let Some(cursor) = request.cursor_line
-            && cursor == line_index
-        {
-            return true;
-        }
-        if let Some(range) = &request.visual_lines
-            && line_index >= range.start
-            && line_index <= range.end
-        {
-            return true;
-        }
-        false
+        line_is_anti_concealed(
+            request.cursor_line,
+            request.visual_lines.as_ref(),
+            line_index,
+        )
     }
 
     pub fn line(&self, line_index: usize) -> Option<&PrettyLinePlan> {
@@ -198,17 +219,17 @@ pub fn plan_markdown_pretty(
         return MarkdownPrettyPlan::default();
     }
 
-    let line_count = request.text.lines().count();
-    let byte_count = request.text.len();
-    if request.config.kill_switch_enabled
-        && (line_count > request.config.kill_switch_max_lines
-            || byte_count > request.config.kill_switch_max_bytes)
-    {
+    let stats = MarkdownPrettySourceStats {
+        line_count: request.text.lines().count(),
+        byte_count: request.text.len(),
+    };
+    if pretty_kill_switch_trips(request.config, stats) {
         return MarkdownPrettyPlan {
             lines: BTreeMap::new(),
             skipped_by_kill_switch: true,
         };
     }
+    let line_count = stats.line_count;
 
     let window = request
         .visible_lines
@@ -223,6 +244,59 @@ pub fn plan_markdown_pretty(
     }
 
     plan_from_line_scanner(request, window)
+}
+
+fn ephemeral_pretty_plan_cache() -> &'static Mutex<MarkdownPrettyPlanCache> {
+    static CACHE: OnceLock<Mutex<MarkdownPrettyPlanCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(MarkdownPrettyPlanCache::with_capacity(32)))
+}
+
+/// Plan hover/ACP markdown. No buffer revision — cache by source hash.
+pub fn plan_markdown_pretty_ephemeral(
+    text: &str,
+    config: &MarkdownPrettyConfig,
+    buffer_enabled: Option<bool>,
+    registry: Option<&mut SyntaxRegistry>,
+) -> Arc<MarkdownPrettyPlan> {
+    let enabled = buffer_enabled.unwrap_or(config.enabled);
+    let key = MarkdownPrettyCacheKey::for_ephemeral(
+        hash_markdown_source(text),
+        enabled,
+        config,
+        Some("markdown".to_owned()),
+    );
+    let stats = MarkdownPrettySourceStats {
+        line_count: text.lines().count(),
+        byte_count: text.len(),
+    };
+    if let Ok(mut cache) = ephemeral_pretty_plan_cache().lock() {
+        return cache
+            .get_or_insert_with(key, stats, || {
+                let request = MarkdownPrettyRequest {
+                    text,
+                    config,
+                    buffer_enabled,
+                    buffer_path: None,
+                    workspace_root: None,
+                    cursor_line: None,
+                    visual_lines: None,
+                    visible_lines: None,
+                };
+                (plan_markdown_pretty(&request, registry), None)
+            })
+            .plan;
+    }
+    let request = MarkdownPrettyRequest {
+        text,
+        config,
+        buffer_enabled,
+        buffer_path: None,
+        workspace_root: None,
+        cursor_line: None,
+        visual_lines: None,
+        visible_lines: None,
+    };
+    Arc::new(plan_markdown_pretty(&request, registry))
 }
 
 fn plan_from_structure_nodes(
@@ -761,6 +835,36 @@ pub fn conceal_line_text(line: &str, conceal: &[ConcealRange]) -> String {
     out
 }
 
+/// Display text for a Pretty line. Anti-conceal is a paint-time overlay: skip conceal/icons.
+pub fn pretty_display_line(
+    plan: &MarkdownPrettyPlan,
+    anti_conceal: bool,
+    line_index: usize,
+    source_line: &str,
+) -> String {
+    if anti_conceal {
+        return source_line.to_owned();
+    }
+    let Some(line_plan) = plan.line(line_index) else {
+        return source_line.to_owned();
+    };
+    if line_plan.horizontal_rule {
+        let glyph = line_plan
+            .icons
+            .first()
+            .map(|icon| icon.glyph.as_str())
+            .unwrap_or("─");
+        return glyph.repeat(24);
+    }
+    let concealed = conceal_line_text(source_line, &line_plan.conceal);
+    let prefix = line_icon_prefix(line_plan);
+    if prefix.is_empty() {
+        concealed
+    } else {
+        format!("{prefix}{concealed}")
+    }
+}
+
 /// Prefix icons for a line in column order.
 pub fn line_icon_prefix(plan: &PrettyLinePlan) -> String {
     let mut icons = plan.icons.clone();
@@ -825,6 +929,20 @@ See [docs](https://example.com).
         assert!(plan.line(5).is_some_and(|l| {
             l.icons.iter().any(|i| i.kind == "inline_link") && !l.conceal.is_empty()
         }));
+    }
+
+    #[test]
+    fn ephemeral_plan_reuses_hash_key() {
+        let config = cfg();
+        let text = "# Title\n- item\n";
+        let first = plan_markdown_pretty_ephemeral(text, &config, Some(true), None);
+        let second = plan_markdown_pretty_ephemeral(text, &config, Some(true), None);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        let display = pretty_display_line(&first, false, 0, "# Title");
+        assert!(
+            display.contains("Title") && !display.starts_with("# "),
+            "ephemeral Pretty should conceal heading markers: {display:?}"
+        );
     }
 
     #[test]

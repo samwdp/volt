@@ -212,6 +212,7 @@ struct HeaderlineTestUserLibrary {
     headerline_requires_scrolled_viewport: bool,
     headerline_call_count: Arc<AtomicUsize>,
     pdf_open_mode: PdfOpenMode,
+    markdown_pretty: MarkdownPrettyConfig,
 }
 
 impl Default for HeaderlineTestUserLibrary {
@@ -222,6 +223,7 @@ impl Default for HeaderlineTestUserLibrary {
             headerline_requires_scrolled_viewport: false,
             headerline_call_count: Arc::new(AtomicUsize::new(0)),
             pdf_open_mode: PdfOpenMode::Rendered,
+            markdown_pretty: MarkdownPrettyConfig::default(),
         }
     }
 }
@@ -319,7 +321,7 @@ impl UserLibrary for HeaderlineTestUserLibrary {
     }
 
     fn markdown_pretty_config(&self) -> MarkdownPrettyConfig {
-        MarkdownPrettyConfig::default()
+        self.markdown_pretty.clone()
     }
 
     fn pane_config(&self) -> PaneConfig {
@@ -5290,6 +5292,263 @@ fn install_markdown_test_buffer(
     }
     sync_active_buffer(&mut state.runtime)?;
     Ok(buffer_id)
+}
+
+const PRETTY_CACHE_FIXTURE: &str = "# Title\n- item\nplain\n";
+
+fn markdown_pretty_paint_args(buffer: &ShellBuffer) -> MarkdownPrettyPaintArgs {
+    MarkdownPrettyPaintArgs {
+        visible_start: 0,
+        visible_end: buffer.line_count().max(1),
+        visual_selection: None,
+        input_mode: InputMode::Normal,
+        pane_width_px: 640,
+        line_height: 16,
+    }
+}
+
+fn park_cursor_on_plain_pretty_line(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(2, 0));
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_reuses_plan_for_same_revision() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_markdown_test_buffer(&mut state, "*pretty-cache-revision*", PRETTY_CACHE_FIXTURE)?;
+    park_cursor_on_plain_pretty_line(&mut state, buffer_id)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let args = markdown_pretty_paint_args(buffer);
+    let first = markdown_pretty_paint_plan(buffer, &*user_library, args);
+    let first_plan = markdown_pretty::last_cached_pretty_plan(buffer)
+        .ok_or("missing cached plan after first paint")?;
+    let second = markdown_pretty_paint_plan(buffer, &*user_library, args);
+    let second_plan = markdown_pretty::last_cached_pretty_plan(buffer)
+        .ok_or("missing cached plan after second paint")?;
+    assert!(
+        std::sync::Arc::ptr_eq(&first_plan, &second_plan),
+        "same revision should reuse MarkdownPrettyPlan"
+    );
+    assert_eq!(first.text_overrides, second.text_overrides);
+    let heading = first
+        .text_overrides
+        .get(&0)
+        .ok_or("heading Pretty override missing")?;
+    assert!(
+        heading.contains("Title") && !heading.starts_with("# "),
+        "heading should conceal markers: {heading:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_rebuilds_after_edit() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_markdown_test_buffer(&mut state, "*pretty-cache-edit*", PRETTY_CACHE_FIXTURE)?;
+    park_cursor_on_plain_pretty_line(&mut state, buffer_id)?;
+    let before_plan = {
+        let buffer = shell_buffer(&state.runtime, buffer_id)?;
+        let args = markdown_pretty_paint_args(buffer);
+        let paint = markdown_pretty_paint_plan(buffer, &*user_library, args);
+        let plan = markdown_pretty::last_cached_pretty_plan(buffer)
+            .ok_or("missing cached plan before edit")?;
+        (paint.text_overrides, plan)
+    };
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(0, 7));
+        buffer.insert_text("!");
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let args = markdown_pretty_paint_args(buffer);
+    let after = markdown_pretty_paint_plan(buffer, &*user_library, args);
+    let after_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing cached plan after edit")?;
+    assert!(!std::sync::Arc::ptr_eq(&before_plan.1, &after_plan));
+    assert_ne!(before_plan.0, after.text_overrides);
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_cursor_anti_conceal_uses_source() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*pretty-anti-conceal-cursor*",
+        "# Title\n- item\n",
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(0, 0));
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let paint =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    assert!(
+        !paint.text_overrides.contains_key(&0),
+        "cursor line should paint Markdown Raw: {:?}",
+        paint.text_overrides
+    );
+    assert!(
+        paint.text_overrides.contains_key(&1),
+        "non-cursor Pretty lines should still override: {:?}",
+        paint.text_overrides
+    );
+    let plan = markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing cached plan")?;
+    let reused =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let reused_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing reused plan")?;
+    assert!(std::sync::Arc::ptr_eq(&plan, &reused_plan));
+    assert_eq!(paint.text_overrides, reused.text_overrides);
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_visual_anti_conceal_then_restores() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_markdown_test_buffer(
+        &mut state,
+        "*pretty-anti-conceal-visual*",
+        PRETTY_CACHE_FIXTURE,
+    )?;
+    park_cursor_on_plain_pretty_line(&mut state, buffer_id)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let visual = VisualSelection::Range(TextRange::new(TextPoint::new(0, 0), TextPoint::new(1, 6)));
+    let visual_args = MarkdownPrettyPaintArgs {
+        visual_selection: Some(visual),
+        input_mode: InputMode::Visual,
+        ..markdown_pretty_paint_args(buffer)
+    };
+    let visual_paint = markdown_pretty_paint_plan(buffer, &*user_library, visual_args);
+    assert!(
+        !visual_paint.text_overrides.contains_key(&0),
+        "Visual selection should paint Markdown Raw: {:?}",
+        visual_paint.text_overrides
+    );
+    assert!(
+        !visual_paint.text_overrides.contains_key(&1),
+        "Visual selection should paint Markdown Raw on selected lines: {:?}",
+        visual_paint.text_overrides
+    );
+    let visual_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing plan during visual")?;
+    let normal_paint =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let normal_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing plan after visual")?;
+    assert!(std::sync::Arc::ptr_eq(&visual_plan, &normal_plan));
+    assert!(normal_paint.text_overrides.contains_key(&0));
+    assert!(normal_paint.text_overrides.contains_key(&1));
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_toggle_off_is_raw() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_markdown_test_buffer(&mut state, "*pretty-toggle-off*", "# Title\n- item\n")?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.toggle_markdown_pretty(true);
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let paint =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    assert!(paint.text_overrides.is_empty());
+    assert!(paint.images.is_empty());
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_kill_switch_skips() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary {
+        markdown_pretty: MarkdownPrettyConfig {
+            kill_switch_enabled: true,
+            kill_switch_max_lines: 0,
+            ..MarkdownPrettyConfig::default()
+        },
+        ..HeaderlineTestUserLibrary::default()
+    });
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_markdown_test_buffer(&mut state, "*pretty-kill-switch*", "# Title\n- item\n")?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let first =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let first_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing kill-switch sentinel")?;
+    assert!(first.text_overrides.is_empty());
+    assert!(first_plan.skipped_by_kill_switch);
+    let second =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let second_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing reused sentinel")?;
+    assert!(std::sync::Arc::ptr_eq(&first_plan, &second_plan));
+    assert_eq!(first.text_overrides, second.text_overrides);
+    Ok(())
+}
+
+#[test]
+fn markdown_pretty_paint_plan_forced_language_caches() -> Result<(), String> {
+    let user_library: Arc<dyn UserLibrary> = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_scratch_test_buffer(&mut state, "*pretty-forced-language*")?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.replace_with_lines(vec![
+            "# Title".to_owned(),
+            "- item".to_owned(),
+            "plain".to_owned(),
+        ]);
+        buffer.set_forced_language_id("markdown");
+        buffer.set_cursor(TextPoint::new(2, 0));
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let first =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let first_plan =
+        markdown_pretty::last_cached_pretty_plan(buffer).ok_or("missing Forced Language plan")?;
+    let second =
+        markdown_pretty_paint_plan(buffer, &*user_library, markdown_pretty_paint_args(buffer));
+    let second_plan = markdown_pretty::last_cached_pretty_plan(buffer)
+        .ok_or("missing reused Forced Language plan")?;
+    assert!(std::sync::Arc::ptr_eq(&first_plan, &second_plan));
+    assert_eq!(first.text_overrides, second.text_overrides);
+    assert!(
+        first
+            .text_overrides
+            .get(&0)
+            .is_some_and(|line| line.contains("Title") && !line.starts_with("# ")),
+        "Forced Language markdown should Pretty: {:?}",
+        first.text_overrides
+    );
+    Ok(())
 }
 
 fn markdown_table_event_dimensions() -> (u32, u32, i32, i32) {

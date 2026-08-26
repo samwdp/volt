@@ -17,7 +17,7 @@ impl MarkdownInlineImageDraw {
 
 #[derive(Debug, Default)]
 pub(super) struct MarkdownPrettyPaintPlan {
-    text_overrides: BTreeMap<usize, String>,
+    pub(super) text_overrides: BTreeMap<usize, String>,
     pub(super) images: BTreeMap<usize, MarkdownInlineImageDraw>,
 }
 
@@ -59,10 +59,10 @@ pub(super) fn markdown_pretty_paint_plan(
     }
     let config = markdown_pretty::user_library_pretty_config(user_library);
     let enabled = buffer.markdown_pretty_enabled().unwrap_or(config.enabled);
-    if !enabled {
+    let plan = markdown_pretty::cached_plan_for_buffer(buffer, &config, enabled, None);
+    if !enabled || plan.skipped_by_kill_switch || plan.lines.is_empty() {
         return paint;
     }
-    let text = buffer.text.text();
     let cursor_line = buffer.cursor_row();
     let visual_range = if matches!(input_mode, InputMode::Visual) {
         visual_selection.map(|selection| match selection {
@@ -80,24 +80,14 @@ pub(super) fn markdown_pretty_paint_plan(
     } else {
         None
     };
-    let request = editor_markdown::MarkdownPrettyRequest {
-        text: &text,
-        config: &config,
-        buffer_enabled: Some(enabled),
-        buffer_path: buffer.text.path(),
-        workspace_root: None,
-        cursor_line: Some(cursor_line),
-        visual_lines: visual_range,
-        visible_lines: Some(visible_start..visible_end.max(visible_start.saturating_add(1))),
-    };
-    let plan = markdown_pretty::build_markdown_pretty_plan(&request, None);
-    if plan.skipped_by_kill_switch || plan.lines.is_empty() {
-        return paint;
-    }
     let line_count = buffer.line_count();
     for line_index in visible_start..visible_end.min(line_count) {
         let source = buffer.text.line(line_index).unwrap_or_default();
-        let anti = plan.line_is_anti_concealed(&request, line_index);
+        let anti = editor_markdown::line_is_anti_concealed(
+            Some(cursor_line),
+            visual_range.as_ref(),
+            line_index,
+        );
         if !anti
             && let Some(image) =
                 markdown_pretty::line_plan(&plan, line_index).and_then(|line| line.image.as_ref())

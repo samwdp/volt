@@ -4,20 +4,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use editor_markdown::{
-    ImageDestination, MarkdownPrettyConfig as PlanConfig, MarkdownPrettyPlan,
-    MarkdownPrettyRequest, PrettyLinePlan, conceal_line_text, line_icon_prefix,
-    plan_markdown_pretty,
+    ImageDestination, MarkdownPrettyCacheKey, MarkdownPrettyConfig as PlanConfig,
+    MarkdownPrettyPlan, MarkdownPrettyRequest, MarkdownPrettySourceStats, PrettyLinePlan,
 };
 use editor_plugin_api::UserLibrary;
 use editor_syntax::SyntaxRegistry;
 
-use super::{DecodedImage, decode_raster_image_bytes};
+use super::{DecodedImage, ShellBuffer, decode_raster_image_bytes};
 
 fn image_cache() -> &'static Mutex<HashMap<String, MarkdownImageCacheEntry>> {
     static CACHE: OnceLock<Mutex<HashMap<String, MarkdownImageCacheEntry>>> = OnceLock::new();
@@ -54,7 +53,65 @@ pub(super) fn build_markdown_pretty_plan(
     request: &MarkdownPrettyRequest<'_>,
     registry: Option<&mut SyntaxRegistry>,
 ) -> MarkdownPrettyPlan {
-    plan_markdown_pretty(request, registry)
+    editor_markdown::plan_markdown_pretty(request, registry)
+}
+
+pub(super) fn cached_plan_for_buffer(
+    buffer: &ShellBuffer,
+    config: &PlanConfig,
+    enabled: bool,
+    registry: Option<&mut SyntaxRegistry>,
+) -> Arc<MarkdownPrettyPlan> {
+    let key = MarkdownPrettyCacheKey::for_buffer(
+        buffer.id().get(),
+        buffer.text.revision(),
+        enabled,
+        config,
+        buffer.language_id().map(str::to_owned),
+    );
+    let stats = MarkdownPrettySourceStats {
+        line_count: buffer.text.line_count(),
+        byte_count: buffer.text.byte_count(),
+    };
+    if let Ok(mut cache) = buffer.markdown_pretty_plan_cache.lock() {
+        return cache
+            .get_or_insert_with(key, stats, || {
+                let text = buffer.text.text();
+                let request = MarkdownPrettyRequest {
+                    text: &text,
+                    config,
+                    buffer_enabled: Some(enabled),
+                    buffer_path: buffer.text.path(),
+                    workspace_root: None,
+                    cursor_line: None,
+                    visual_lines: None,
+                    visible_lines: None,
+                };
+                (build_markdown_pretty_plan(&request, registry), Some(text))
+            })
+            .plan;
+    }
+    let text = buffer.text.text();
+    let request = MarkdownPrettyRequest {
+        text: &text,
+        config,
+        buffer_enabled: Some(enabled),
+        buffer_path: buffer.text.path(),
+        workspace_root: None,
+        cursor_line: None,
+        visual_lines: None,
+        visible_lines: None,
+    };
+    Arc::new(build_markdown_pretty_plan(&request, registry))
+}
+
+#[cfg(test)]
+pub(super) fn last_cached_pretty_plan(buffer: &ShellBuffer) -> Option<Arc<MarkdownPrettyPlan>> {
+    buffer
+        .markdown_pretty_plan_cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.last_plan())
 }
 
 pub(super) fn pretty_display_line(
@@ -63,27 +120,7 @@ pub(super) fn pretty_display_line(
     line_index: usize,
     source_line: &str,
 ) -> String {
-    if anti_conceal {
-        return source_line.to_owned();
-    }
-    let Some(line_plan) = plan.line(line_index) else {
-        return source_line.to_owned();
-    };
-    if line_plan.horizontal_rule {
-        let glyph = line_plan
-            .icons
-            .first()
-            .map(|icon| icon.glyph.as_str())
-            .unwrap_or("─");
-        return glyph.repeat(24);
-    }
-    let concealed = conceal_line_text(source_line, &line_plan.conceal);
-    let prefix = line_icon_prefix(line_plan);
-    if prefix.is_empty() {
-        concealed
-    } else {
-        format!("{prefix}{concealed}")
-    }
+    editor_markdown::pretty_display_line(plan, anti_conceal, line_index, source_line)
 }
 
 pub(super) fn line_plan(plan: &MarkdownPrettyPlan, line_index: usize) -> Option<&PrettyLinePlan> {

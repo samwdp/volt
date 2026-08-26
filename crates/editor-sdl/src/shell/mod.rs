@@ -3861,6 +3861,7 @@ pub(crate) struct ShellBuffer {
     scroll_indent_size: usize,
     wrap_cache: Option<WrapRowCache>,
     pretty_display_rows: BTreeMap<usize, usize>,
+    markdown_pretty_plan_cache: Arc<Mutex<editor_markdown::MarkdownPrettyPlanCache>>,
     context_overlay_cache: Arc<Mutex<Option<BufferContextOverlaySnapshot>>>,
     syntax_error: Option<String>,
     syntax_lines: BTreeMap<usize, Vec<LineSyntaxSpan>>,
@@ -4816,6 +4817,9 @@ impl ShellBuffer {
             scroll_indent_size: 1,
             wrap_cache: None,
             pretty_display_rows: BTreeMap::new(),
+            markdown_pretty_plan_cache: Arc::new(Mutex::new(
+                editor_markdown::MarkdownPrettyPlanCache::default(),
+            )),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -4897,6 +4901,9 @@ impl ShellBuffer {
             scroll_indent_size: 1,
             wrap_cache: None,
             pretty_display_rows: BTreeMap::new(),
+            markdown_pretty_plan_cache: Arc::new(Mutex::new(
+                editor_markdown::MarkdownPrettyPlanCache::default(),
+            )),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -4981,6 +4988,9 @@ impl ShellBuffer {
             scroll_indent_size: 1,
             wrap_cache: None,
             pretty_display_rows: BTreeMap::new(),
+            markdown_pretty_plan_cache: Arc::new(Mutex::new(
+                editor_markdown::MarkdownPrettyPlanCache::default(),
+            )),
             context_overlay_cache: Arc::new(Mutex::new(None)),
             syntax_error: None,
             syntax_lines: BTreeMap::new(),
@@ -25590,17 +25600,10 @@ fn render_markdown_ephemeral_content(
     if rendered.lines.is_empty() {
         return rendered;
     }
-    let plan = markdown_pretty::build_markdown_pretty_plan(
-        &editor_markdown::MarkdownPrettyRequest {
-            text: &normalized,
-            config,
-            buffer_enabled,
-            buffer_path: None,
-            workspace_root: None,
-            cursor_line: None,
-            visual_lines: None,
-            visible_lines: None,
-        },
+    let plan = editor_markdown::plan_markdown_pretty_ephemeral(
+        &normalized,
+        config,
+        buffer_enabled,
         registry.as_deref_mut(),
     );
     if !plan.skipped_by_kill_switch {
