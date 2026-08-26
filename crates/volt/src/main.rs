@@ -940,8 +940,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Open a picker-style popup buffer.",
         CommandSource::Core,
         move |runtime| {
-            let picker = PickerSession::new("Command Palette", command_palette_items(runtime))
-                .with_result_limit(32);
+            let picker = PickerSession::new_with_limit(
+                "Command Palette",
+                command_palette_items(runtime),
+                32,
+            );
             let palette_state = CommandPaletteState {
                 visible_items: picker.match_count(),
                 selected_command: picker
@@ -983,8 +986,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let loaded_packages = load_auto_loaded_packages(&mut runtime, &user_library.packages())?;
     let mut command_palette_preview =
-        PickerSession::new("Command Palette", command_palette_items(&runtime))
-            .with_result_limit(16);
+        PickerSession::new_with_limit("Command Palette", command_palette_items(&runtime), 16);
     command_palette_preview.set_query("term");
     let mut lsp_registry = LanguageServerRegistry::new();
     lsp_registry.register_all(user_library.language_servers())?;

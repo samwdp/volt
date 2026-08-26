@@ -1,5 +1,18 @@
 use super::*;
 
+/// Retained Workspace Files rows. One-letter queries must not clone the whole tree.
+const WORKSPACE_FILES_PICKER_RESULT_LIMIT: usize = 256;
+/// Retained command-palette rows. Finite but higher than Workspace Files.
+const COMMAND_PICKER_RESULT_LIMIT: usize = 512;
+
+fn overlay_result_limit(source: PickerSource) -> usize {
+    match source {
+        PickerSource::WorkspaceFiles => WORKSPACE_FILES_PICKER_RESULT_LIMIT,
+        PickerSource::Commands => COMMAND_PICKER_RESULT_LIMIT,
+        _ => usize::MAX,
+    }
+}
+
 fn provider_extra_keybinds(spec: &PickerProviderSpec) -> Vec<PickerExtraKeybind> {
     spec.extra_keybinds()
         .iter()
@@ -84,10 +97,14 @@ fn user_picker_overlay(
         .iter()
         .map(|item| static_picker_entry(runtime, item))
         .collect::<Result<Vec<_>, String>>()?;
-    let mut overlay = PickerOverlay::from_entries(spec.title(), entries)
-        .with_title(spec.title())
-        .with_source(spec.source())
-        .with_provider_id(spec.id());
+    let mut overlay = PickerOverlay::from_entries_with_limit(
+        spec.title(),
+        entries,
+        overlay_result_limit(spec.source()),
+    )
+    .with_title(spec.title())
+    .with_source(spec.source())
+    .with_provider_id(spec.id());
     if matches!(
         spec.source(),
         PickerSource::Buffers
@@ -1020,6 +1037,90 @@ mod tests {
 
         assert_eq!(picker.session().item_count(), 80);
         assert_eq!(picker.session().match_count(), 80);
+        Ok(())
+    }
+
+    struct BoundedSourceLibrary {
+        source: PickerSource,
+        items: Vec<PickerItemSpec>,
+    }
+
+    impl UserLibrary for BoundedSourceLibrary {
+        fn picker_provider_items(
+            &self,
+            context: &PickerProviderContext,
+        ) -> Option<Vec<PickerItemSpec>> {
+            (context.source == self.source).then(|| self.items.clone())
+        }
+    }
+
+    fn preview_items(count: usize, prefix: &str) -> Vec<PickerItemSpec> {
+        (0..count)
+            .map(|index| {
+                PickerItemSpec::new(
+                    format!("{prefix}-{index:03}"),
+                    format!("{prefix}-{index:03}.rs"),
+                    "src",
+                    PickerActionSpec::no_op(),
+                )
+                .with_preview(format!("preview-{prefix}-{index:03}"))
+            })
+            .collect()
+    }
+
+    fn overlay_for_source(
+        source: PickerSource,
+        id: &str,
+        title: &str,
+        items: Vec<PickerItemSpec>,
+    ) -> Result<PickerOverlay, String> {
+        let provider = PickerProviderSpec::new(id, title, source);
+        let mut runtime = EditorRuntime::new();
+        runtime
+            .services_mut()
+            .insert(UserLibraryService(Arc::new(BoundedSourceLibrary {
+                source,
+                items,
+            })));
+        let context = PickerProviderContext::new(id, title, source);
+        user_picker_overlay(&runtime, &provider, context)
+    }
+
+    #[test]
+    fn workspace_files_overlay_caps_matches_without_dropping_source_items() -> Result<(), String> {
+        let picker = overlay_for_source(
+            PickerSource::WorkspaceFiles,
+            "workspace.files",
+            "Workspace Files",
+            preview_items(300, "file"),
+        )?;
+
+        assert_eq!(picker.session().item_count(), 300);
+        assert_eq!(
+            picker.session().match_count(),
+            WORKSPACE_FILES_PICKER_RESULT_LIMIT
+        );
+        assert!(
+            picker
+                .session()
+                .matches()
+                .iter()
+                .any(|matched| matched.item().preview() == Some("preview-file-000"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_picker_overlay_uses_finite_result_limit() -> Result<(), String> {
+        let picker = overlay_for_source(
+            PickerSource::Commands,
+            "commands",
+            "Command Palette",
+            preview_items(600, "cmd"),
+        )?;
+
+        assert_eq!(picker.session().item_count(), 600);
+        assert_eq!(picker.session().match_count(), COMMAND_PICKER_RESULT_LIMIT);
         Ok(())
     }
 

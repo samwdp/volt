@@ -9007,6 +9007,14 @@ pub(crate) struct PickerOverlay {
 
 impl PickerOverlay {
     fn from_entries(title: impl Into<String>, entries: Vec<PickerEntry>) -> Self {
+        Self::from_entries_with_limit(title, entries, usize::MAX)
+    }
+
+    fn from_entries_with_limit(
+        title: impl Into<String>,
+        entries: Vec<PickerEntry>,
+        result_limit: usize,
+    ) -> Self {
         let title = title.into();
         let mut actions = BTreeMap::new();
         let mut quickfix_entries = BTreeMap::new();
@@ -9022,7 +9030,7 @@ impl PickerOverlay {
             .collect();
 
         Self {
-            session: PickerSession::new(title, items),
+            session: PickerSession::new_with_limit(title, items, result_limit),
             actions,
             quickfix_entries,
             extra_keybinds: Vec::new(),
@@ -9077,9 +9085,7 @@ impl PickerOverlay {
             .collect();
 
         Self {
-            session: PickerSession::new(title, items)
-                .with_result_limit(48)
-                .with_preserve_order(),
+            session: PickerSession::new_with_limit(title, items, 48).with_preserve_order(),
             actions,
             quickfix_entries,
             extra_keybinds: Vec::new(),
@@ -9097,8 +9103,7 @@ impl PickerOverlay {
 
     fn workspace_search(title: impl Into<String>, root: PathBuf) -> Self {
         Self {
-            session: PickerSession::new(title.into(), Vec::new())
-                .with_result_limit(48)
+            session: PickerSession::new_with_limit(title.into(), Vec::new(), 48)
                 .with_preserve_order(),
             actions: BTreeMap::new(),
             quickfix_entries: BTreeMap::new(),

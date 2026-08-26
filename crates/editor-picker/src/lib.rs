@@ -163,13 +163,22 @@ pub struct PickerSession {
 impl PickerSession {
     /// Creates a new picker session and computes the initial match set.
     pub fn new(title: impl Into<String>, items: Vec<PickerItem>) -> Self {
+        Self::new_with_limit(title, items, usize::MAX)
+    }
+
+    /// Creates a session that caps retained matches before the first item clone.
+    pub fn new_with_limit(
+        title: impl Into<String>,
+        items: Vec<PickerItem>,
+        result_limit: usize,
+    ) -> Self {
         let mut session = Self {
             title: title.into(),
             items,
             query: String::new(),
             matches: Vec::new(),
             selected_index: 0,
-            result_limit: usize::MAX,
+            result_limit: result_limit.max(1),
             result_order: PickerResultOrder::ScoreThenLabel,
         };
         session.recompute_matches();
@@ -323,6 +332,11 @@ impl PickerSession {
         }
     }
 
+    #[cfg(test)]
+    fn source_item(&self, id: &str) -> Option<&PickerItem> {
+        self.items.iter().find(|item| item.id == id)
+    }
+
     fn select_first_match(&mut self) {
         if self.matches.is_empty() {
             self.selected_index = 0;
@@ -340,22 +354,79 @@ impl PickerSession {
                 Some(matched.item().id().to_owned())
             }
         });
-        self.matches = self
-            .items
-            .iter()
-            .filter_map(|item| match_item(&self.query, item))
-            .collect();
+        let query_lower = self.query.to_ascii_lowercase();
+        let query_terms = query_terms(&query_lower);
+        let hide_dividers = !query_terms.is_empty();
+        let mut search_lower = String::new();
+        let mut candidates = match self.result_order {
+            PickerResultOrder::ScoreThenLabel => Vec::with_capacity(self.items.len()),
+            PickerResultOrder::Source => {
+                Vec::with_capacity(self.items.len().min(self.result_limit))
+            }
+        };
+
+        for (index, item) in self.items.iter().enumerate() {
+            if item.is_divider() {
+                if hide_dividers {
+                    continue;
+                }
+                candidates.push(ScoredCandidate {
+                    index,
+                    score: 0,
+                    matched_positions: Vec::new(),
+                });
+            } else if query_terms.is_empty() {
+                candidates.push(ScoredCandidate {
+                    index,
+                    score: 0,
+                    matched_positions: Vec::new(),
+                });
+            } else {
+                push_ascii_lowercase(item.search_text(), &mut search_lower);
+                if let Some((score, matched_positions)) =
+                    score_item(item.search_text(), &query_terms, &search_lower)
+                {
+                    candidates.push(ScoredCandidate {
+                        index,
+                        score,
+                        matched_positions,
+                    });
+                }
+            }
+
+            if self.result_order == PickerResultOrder::Source
+                && candidates.len() == self.result_limit
+            {
+                break;
+            }
+        }
+
         match self.result_order {
             PickerResultOrder::ScoreThenLabel => {
-                self.matches.sort_by_key(|matched| {
-                    (Reverse(matched.score), matched.item.label().to_owned())
+                candidates.sort_by(|left, right| {
+                    Reverse(left.score)
+                        .cmp(&Reverse(right.score))
+                        .then_with(|| {
+                            self.items[left.index]
+                                .label()
+                                .cmp(self.items[right.index].label())
+                        })
                 });
             }
             PickerResultOrder::Source => {}
         }
-        if self.matches.len() > self.result_limit {
-            self.matches.truncate(self.result_limit);
+        if candidates.len() > self.result_limit {
+            candidates.truncate(self.result_limit);
         }
+
+        self.matches = candidates
+            .into_iter()
+            .map(|candidate| PickerMatch {
+                item: self.items[candidate.index].clone(),
+                score: candidate.score,
+                matched_positions: candidate.matched_positions,
+            })
+            .collect();
 
         if self.matches.is_empty() {
             self.selected_index = 0;
@@ -373,40 +444,33 @@ impl PickerSession {
     }
 }
 
-fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
-    if item.is_divider() {
-        if query.split_whitespace().any(|term| !term.is_empty()) {
-            return None;
-        }
-        return Some(PickerMatch {
-            item: item.clone(),
-            score: 0,
-            matched_positions: Vec::new(),
-        });
-    }
+struct ScoredCandidate {
+    index: usize,
+    score: i64,
+    matched_positions: Vec<usize>,
+}
 
-    let query_terms = query
+fn query_terms(query_lower: &str) -> Vec<&str> {
+    query_lower
         .split_whitespace()
         .filter(|term| !term.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if query_terms.is_empty() {
-        return Some(PickerMatch {
-            item: item.clone(),
-            score: 0,
-            matched_positions: Vec::new(),
-        });
-    }
+        .collect()
+}
 
-    let search_chars: Vec<char> = item.search_text().chars().collect();
-    let search_lower = item.search_text().to_ascii_lowercase();
+fn push_ascii_lowercase(src: &str, buf: &mut String) {
+    buf.clear();
+    buf.extend(src.chars().map(|character| character.to_ascii_lowercase()));
+}
+
+fn score_item(search_text: &str, terms: &[&str], search_lower: &str) -> Option<(i64, Vec<usize>)> {
     let mut score = 0i64;
     let mut matched_positions = Vec::new();
+    let search_len = search_text.chars().count();
 
-    for (term_index, term) in query_terms.iter().enumerate() {
-        let matched = match_term(term, &search_chars, &search_lower)?;
+    for (term_index, term) in terms.iter().enumerate() {
+        let matched = match_term(term, search_text, search_lower)?;
         score += matched.score;
-        score += best_contiguous_substring_bonus(term, &search_chars, &search_lower);
+        score += best_contiguous_substring_bonus(term, search_text, search_lower);
         if term_index == 0 && search_lower.starts_with(term) {
             score += 24;
         }
@@ -415,13 +479,9 @@ fn match_item(query: &str, item: &PickerItem) -> Option<PickerMatch> {
 
     matched_positions.sort_unstable();
     matched_positions.dedup();
-    score -= search_chars.len() as i64;
+    score -= search_len as i64;
 
-    Some(PickerMatch {
-        item: item.clone(),
-        score,
-        matched_positions,
-    })
+    Some((score, matched_positions))
 }
 
 struct TermMatch {
@@ -429,11 +489,11 @@ struct TermMatch {
     matched_positions: Vec<usize>,
 }
 
-fn best_contiguous_substring_bonus(term: &str, label_chars: &[char], label_lower: &str) -> i64 {
-    label_lower
+fn best_contiguous_substring_bonus(term: &str, search_text: &str, search_lower: &str) -> i64 {
+    search_lower
         .match_indices(term)
         .map(|(start_byte, _)| {
-            contiguous_substring_bonus(start_byte, term, label_chars, label_lower)
+            contiguous_substring_bonus(start_byte, term, search_text, search_lower)
         })
         .max()
         .unwrap_or(0)
@@ -442,44 +502,43 @@ fn best_contiguous_substring_bonus(term: &str, label_chars: &[char], label_lower
 fn contiguous_substring_bonus(
     start_byte: usize,
     term: &str,
-    label_chars: &[char],
-    label_lower: &str,
+    search_text: &str,
+    search_lower: &str,
 ) -> i64 {
-    let start_index = label_lower[..start_byte].chars().count();
+    let start_index = search_lower[..start_byte].chars().count();
     let end_index = start_index + term.chars().count();
     let mut bonus = 48;
 
-    if is_match_boundary(label_chars, start_index) {
+    if is_match_boundary(search_text, start_index) {
         bonus += 24;
     }
-    if is_match_end_boundary(label_chars, end_index) {
+    if is_match_end_boundary(search_text, end_index) {
         bonus += 18;
     }
 
     bonus
 }
 
-fn is_match_boundary(label_chars: &[char], index: usize) -> bool {
+fn is_match_boundary(search_text: &str, index: usize) -> bool {
     index == 0
-        || label_chars
-            .get(index.saturating_sub(1))
-            .copied()
+        || search_text
+            .chars()
+            .nth(index.saturating_sub(1))
             .is_some_and(is_boundary_separator)
 }
 
-fn is_match_end_boundary(label_chars: &[char], index: usize) -> bool {
-    index >= label_chars.len()
-        || label_chars
-            .get(index)
-            .copied()
-            .is_some_and(is_boundary_separator)
+fn is_match_end_boundary(search_text: &str, index: usize) -> bool {
+    search_text
+        .chars()
+        .nth(index)
+        .is_none_or(is_boundary_separator)
 }
 
 fn is_boundary_separator(character: char) -> bool {
     matches!(character, '.' | ':' | '-' | '_' | '/' | '\\' | ' ')
 }
 
-fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<TermMatch> {
+fn match_term(term: &str, search_text: &str, search_lower: &str) -> Option<TermMatch> {
     let query_chars = term.chars().collect::<Vec<_>>();
     if query_chars.is_empty() {
         return None;
@@ -489,13 +548,15 @@ fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<Ter
     let mut query_index = 0usize;
     let mut score = 0i64;
     let mut previous_match = None;
+    let mut previous_char = None;
 
-    for (label_index, character) in label_chars.iter().copied().enumerate() {
+    for (label_index, character) in search_text.chars().enumerate() {
         if query_index >= query_chars.len() {
             break;
         }
 
         if character.to_ascii_lowercase() != query_chars[query_index] {
+            previous_char = Some(character);
             continue;
         }
 
@@ -512,12 +573,12 @@ fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<Ter
             score += 14;
         }
 
-        let boundary = is_match_boundary(label_chars, label_index);
-        if boundary {
+        if label_index == 0 || previous_char.is_some_and(is_boundary_separator) {
             score += 10;
         }
 
         previous_match = Some(label_index);
+        previous_char = Some(character);
         query_index += 1;
     }
 
@@ -525,7 +586,7 @@ fn match_term(term: &str, label_chars: &[char], label_lower: &str) -> Option<Ter
         return None;
     }
 
-    if label_lower.starts_with(term) {
+    if search_lower.starts_with(term) {
         score += 12;
     }
 
@@ -832,6 +893,145 @@ mod tests {
                 .find(|matched| matched.item().id() == "b")
                 .and_then(|matched| matched.item().preview())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_query_with_result_limit_truncates() {
+        let items = vec![
+            item("c", "charlie"),
+            item("a", "alpha"),
+            item("b", "bravo"),
+            item("d", "delta"),
+        ];
+        let session = PickerSession::new("Commands", items).with_result_limit(2);
+
+        assert_eq!(session.match_count(), 2);
+        assert_eq!(
+            session
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo"]
+        );
+    }
+
+    #[test]
+    fn source_order_result_limit_truncates_without_reordering() {
+        let session = PickerSession::new(
+            "Projects",
+            vec![
+                item("z", "zeta"),
+                item("a", "alpha"),
+                item("m", "mu"),
+                item("b", "beta"),
+            ],
+        )
+        .with_result_order(PickerResultOrder::Source)
+        .with_result_limit(2);
+
+        assert_eq!(session.match_count(), 2);
+        assert_eq!(
+            session
+                .matches()
+                .iter()
+                .map(|matched| matched.item().label())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha"]
+        );
+    }
+
+    #[test]
+    fn capped_match_set_does_not_require_cloning_losing_row_previews() {
+        let items = (0..48)
+            .map(|index| {
+                PickerItem::new(
+                    format!("f{index:03}"),
+                    format!("file-{index:03}.rs"),
+                    "src",
+                    Some(format!("preview-{index:03}")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut session = PickerSession::new("Files", items).with_result_limit(8);
+        session.set_query("file");
+
+        assert_eq!(session.match_count(), 8);
+        assert_eq!(session.item_count(), 48);
+        assert!(
+            session
+                .matches()
+                .iter()
+                .all(|matched| matched.item().id() != "f047")
+        );
+        assert_eq!(
+            session.source_item("f047").and_then(PickerItem::preview),
+            Some("preview-047")
+        );
+        assert!(
+            session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().preview() == Some("preview-000"))
+        );
+    }
+
+    #[test]
+    fn set_items_preserves_selected_id_when_still_matched() {
+        let mut session = PickerSession::new(
+            "Commands",
+            vec![item("a", "alpha"), item("b", "beta"), item("c", "gamma")],
+        );
+        session.select_next();
+        assert_eq!(
+            session.selected().map(|matched| matched.item().id()),
+            Some("b")
+        );
+
+        session.set_items(vec![
+            item("a", "alpha"),
+            item("b", "beta"),
+            item("c", "gamma"),
+            item("d", "delta"),
+        ]);
+
+        assert_eq!(
+            session.selected().map(|matched| matched.item().id()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn matched_positions_follow_search_text_characters() {
+        let mut session = PickerSession::new(
+            "Files",
+            vec![item("main", "main.rs").with_search_text("src/main.rs")],
+        );
+        session.set_query("main");
+
+        assert_eq!(
+            session
+                .selected()
+                .map(|matched| matched.matched_positions().to_vec()),
+            Some(vec![4, 5, 6, 7])
+        );
+    }
+
+    #[test]
+    fn select_next_walks_retained_matches() {
+        let items = (0..16)
+            .map(|index| item(&format!("i{index:02}"), &format!("item-{index:02}")))
+            .collect::<Vec<_>>();
+        let mut session = PickerSession::new("Commands", items).with_result_limit(3);
+
+        assert_eq!(session.match_count(), 3);
+        session.select_next();
+        session.select_next();
+        session.select_next();
+        assert_eq!(
+            session.selected().map(|matched| matched.item().label()),
+            Some("item-00")
         );
     }
 }
