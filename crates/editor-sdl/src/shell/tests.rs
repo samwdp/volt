@@ -1835,6 +1835,78 @@ fn oil_toggle_hidden_filters_cached_entries_without_reread() -> Result<(), Strin
 }
 
 #[test]
+fn oil_cycle_sort_does_not_reread_listing() -> Result<(), String> {
+    let root = unique_temp_dir("oil-sort-cache");
+    std::fs::write(root.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    std::fs::write(root.join("zeta.txt"), "zeta\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    std::fs::write(root.join("sneaky.txt"), "external\n").map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .execute_command("oil.cycle-sort")
+        .map_err(|error| error.to_string())?;
+
+    assert!(oil_line_index_containing(&state.runtime, buffer_id, "alpha.txt").is_ok());
+    assert!(oil_line_index_containing(&state.runtime, buffer_id, "zeta.txt").is_ok());
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "sneaky.txt").is_err(),
+        "sort must reorder the cached listing without a disk walk"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn oil_rename_moves_cursor_to_new_entry_not_substring_sibling() -> Result<(), String> {
+    let root = unique_temp_dir("oil-rename-cursor");
+    std::fs::write(root.join("old.txt"), "old\n").map_err(|error| error.to_string())?;
+    std::fs::write(root.join("a_foo.txt"), "sibling\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    let old_line = oil_line_index_containing(&state.runtime, buffer_id, "old.txt")?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(old_line, 0));
+
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("c")
+        .map_err(|error| error.to_string())?;
+    state
+        .handle_text_input("foo.txt")
+        .map_err(|error| error.to_string())?;
+    state
+        .try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+
+    assert!(root.join("foo.txt").is_file());
+    assert!(!root.join("old.txt").exists());
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "a_foo.txt").is_ok(),
+        "substring sibling must stay in the patched listing"
+    );
+
+    let cursor_line = shell_buffer(&state.runtime, buffer_id)?.cursor_point().line;
+    let renamed_line =
+        oil_line_index_for_entry_path(&state.runtime, buffer_id, &root.join("foo.txt"))?;
+    assert_eq!(
+        cursor_line, renamed_line,
+        "rename cursor follow must match the new entry path, not a substring sibling"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn oil_root_change_rereads_the_new_directory() -> Result<(), String> {
     let root = unique_temp_dir("oil-root-reread");
     let child = root.join("child");
@@ -6516,6 +6588,24 @@ fn oil_line_index_containing(
     (0..buffer.line_count())
         .find(|&index| buffer.text.line(index).unwrap_or_default().contains(needle))
         .ok_or_else(|| format!("oil buffer is missing line containing `{needle}`"))
+}
+
+fn oil_line_index_for_entry_path(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    path: &Path,
+) -> Result<usize, String> {
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    (0..buffer.line_count())
+        .find(|&index| {
+            buffer
+                .section_line_meta(index)
+                .and_then(|meta| meta.action.as_ref())
+                .filter(|action| action.id() == editor_plugin_api::oil_protocol::ACTION_OIL_ENTRY)
+                .and_then(|action| action.detail())
+                .is_some_and(|detail| Path::new(detail) == path)
+        })
+        .ok_or_else(|| format!("oil buffer is missing entry `{}`", path.display()))
 }
 
 fn oil_type_new_entry_and_leave_insert(state: &mut ShellState, entry: &str) -> Result<(), String> {

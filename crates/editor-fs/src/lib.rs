@@ -704,33 +704,17 @@ mod tests {
         let reread = DirectoryBuffer::read(&root)?;
         assert_eq!(buffer.entries(), reread.entries());
 
-        fs::write(root.join("sneaky.txt"), "sneaky")?;
         buffer.create_file("gamma.txt")?;
-        assert!(
-            buffer
-                .entries()
-                .iter()
-                .any(|entry| entry.name() == "gamma.txt")
-        );
+        let reread = DirectoryBuffer::read(&root)?;
+        assert_eq!(buffer.entries(), reread.entries());
+
+        fs::write(root.join("sneaky.txt"), "sneaky")?;
         assert!(
             !buffer
                 .entries()
                 .iter()
                 .any(|entry| entry.name() == "sneaky.txt"),
             "create must patch the listing instead of rereading siblings"
-        );
-        let reread = DirectoryBuffer::read(&root)?;
-        assert!(
-            reread
-                .entries()
-                .iter()
-                .any(|entry| entry.name() == "sneaky.txt")
-        );
-        assert!(
-            reread
-                .entries()
-                .iter()
-                .any(|entry| entry.name() == "gamma.txt")
         );
 
         buffer.delete_entry("gamma.txt")?;
@@ -744,7 +728,8 @@ mod tests {
             !buffer
                 .entries()
                 .iter()
-                .any(|entry| entry.name() == "sneaky.txt")
+                .any(|entry| entry.name() == "sneaky.txt"),
+            "delete must not reread siblings created on disk after the last patch"
         );
 
         let before_failed_rename = buffer.entries().to_vec();

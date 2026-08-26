@@ -897,23 +897,20 @@ fn move_cursor_after_directory_actions(
     buffer_id: BufferId,
     actions: &[DirectoryEditAction],
 ) -> Result<(), String> {
-    let Some(name) = actions.iter().rev().find_map(|action| match action {
-        DirectoryEditAction::Rename { to, .. }
-        | DirectoryEditAction::CreateFile(to)
-        | DirectoryEditAction::CreateDir(to)
-        | DirectoryEditAction::CreateGitWorktree { path: to, .. } => to
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
-        DirectoryEditAction::Delete { .. } => None,
+    let Some(to) = actions.iter().rev().find_map(|action| match action {
+        DirectoryEditAction::Rename { to, .. } => Some(to.as_path()),
+        _ => None,
     }) else {
         return Ok(());
     };
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     if let Some(line) = (0..buffer.line_count()).find(|&index| {
         buffer
-            .text
-            .line(index)
-            .is_some_and(|line| line.contains(&name))
+            .section_line_meta(index)
+            .and_then(|meta| meta.action.as_ref())
+            .filter(|action| action.id() == oil_protocol::ACTION_OIL_ENTRY)
+            .and_then(|action| action.detail())
+            .is_some_and(|detail| Path::new(detail) == to)
     }) {
         buffer.set_cursor(TextPoint::new(line, 0));
     }
