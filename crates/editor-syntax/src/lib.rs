@@ -1069,13 +1069,31 @@ struct DeferredQuery {
 
 struct ParsedHighlight {
     snapshot: SyntaxSnapshot,
-    tree: Tree,
+    /// Owned tree when no parse session holds it. Session trees stay in the session.
+    tree: Option<Tree>,
+}
+
+impl ParsedHighlight {
+    fn tree<'a>(&'a self, session: Option<&'a SyntaxParseSession>) -> Option<&'a Tree> {
+        self.tree
+            .as_ref()
+            .or_else(|| session.map(|session| &session.tree))
+    }
 }
 
 struct ParseTreeResult {
-    tree: Tree,
+    /// Owned tree when highlighting without a parse session.
+    owned_tree: Option<Tree>,
     changed_ranges: Option<Vec<Range>>,
     applied_edits: Option<Vec<TextEdit>>,
+}
+
+impl ParseTreeResult {
+    fn tree<'a>(&'a self, session: Option<&'a SyntaxParseSession>) -> Option<&'a Tree> {
+        self.owned_tree
+            .as_ref()
+            .or_else(|| session.map(|session| &session.tree))
+    }
 }
 
 #[derive(Default)]
@@ -1495,7 +1513,8 @@ impl SyntaxRegistry {
             .get(&language_id)
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
         let parse_result = parse_tree(&language_id, loaded, buffer, None)?;
-        Ok(collect_structure_nodes(parse_result.tree.root_node()))
+        let tree = require_tree(&language_id, &parse_result, None)?;
+        Ok(collect_structure_nodes(tree.root_node()))
     }
 
     /// Returns named ancestor nodes for a cursor location, ordered innermost to outermost.
@@ -1525,7 +1544,7 @@ impl SyntaxRegistry {
         language_id: &str,
         buffer: &impl SyntaxText,
         point: TextPoint,
-        parse_session: Option<&mut Option<SyntaxParseSession>>,
+        mut parse_session: Option<&mut Option<SyntaxParseSession>>,
     ) -> Result<Vec<SyntaxNodeContext>, SyntaxError> {
         let language_id = language_id.to_owned();
         if !self.languages.contains_key(&language_id) {
@@ -1536,10 +1555,14 @@ impl SyntaxRegistry {
             .loaded
             .get(&language_id)
             .ok_or_else(|| SyntaxError::UnknownLanguage(language_id.clone()))?;
-        let parse_result = parse_tree(&language_id, loaded, buffer, parse_session)?;
+        let parse_result = parse_tree(&language_id, loaded, buffer, parse_session.as_deref_mut())?;
+        let tree = require_tree(
+            &language_id,
+            &parse_result,
+            parse_session_ref(parse_session.as_deref()),
+        )?;
         let point = text_point_to_tree_sitter_point(buffer, point);
-        let Some(mut node) = parse_result
-            .tree
+        let Some(mut node) = tree
             .root_node()
             .named_descendant_for_point_range(point, point)
         else {
@@ -1726,15 +1749,19 @@ impl SyntaxRegistry {
                 loaded,
                 buffer,
                 highlight_window,
-                parse_session,
+                parse_session.as_deref_mut(),
             )?
         };
 
         if let Some(parse) = base_parse.as_ref().filter(|_| has_injections) {
+            let session = parse_session_ref(parse_session.as_deref());
+            let Some(tree) = parse.tree(session) else {
+                return Err(SyntaxError::ParseCancelled(language_id));
+            };
             let injections = self.highlight_injections_for_tree(
                 &config,
                 &language_id,
-                &parse.tree,
+                tree,
                 buffer,
                 highlight_window,
                 injection_depth,
@@ -1753,7 +1780,11 @@ impl SyntaxRegistry {
                 let Some(parse) = base_parse.as_ref() else {
                     continue;
                 };
-                let mut inline_lines = markdown_inline_line_indices(&parse.tree);
+                let session = parse_session_ref(parse_session.as_deref());
+                let Some(tree) = parse.tree(session) else {
+                    continue;
+                };
+                let mut inline_lines = markdown_inline_line_indices(tree);
                 if let Some(highlight_window) = highlight_window {
                     let end_line = highlight_window.end_line_exclusive();
                     inline_lines
@@ -2416,7 +2447,7 @@ fn desired_indent_for_loaded_language(
     buffer: &impl SyntaxText,
     line_index: usize,
     indent_width: usize,
-    parse_session: Option<&mut Option<SyntaxParseSession>>,
+    mut parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<Option<usize>, SyntaxError> {
     let Some(indent_query) = loaded.indent_query.query(&loaded.language, language_id)? else {
         return Ok(None);
@@ -2425,7 +2456,17 @@ fn desired_indent_for_loaded_language(
         return Ok(Some(0));
     }
 
-    let parse_result = parse_tree(language_id, loaded, buffer, parse_session)?;
+    let parse_result = parse_tree(
+        language_id,
+        loaded,
+        buffer,
+        parse_session.as_deref_mut(),
+    )?;
+    let tree = require_tree(
+        language_id,
+        &parse_result,
+        parse_session_ref(parse_session.as_deref()),
+    )?;
     let mut query_cursor = QueryCursor::new();
     query_cursor.set_match_limit(INDENT_QUERY_MATCH_LIMIT);
     query_cursor.set_point_range(
@@ -2458,7 +2499,7 @@ fn desired_indent_for_loaded_language(
     let query_options = QueryCursorOptions::new().progress_callback(&mut progress_callback);
     let mut matches = query_cursor.matches_with_options(
         indent_query,
-        parse_result.tree.root_node(),
+        tree.root_node(),
         SyntaxTextProvider { buffer },
         query_options,
     );
@@ -3146,6 +3187,22 @@ fn parse_with_parser(
         .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))
 }
 
+fn parse_session_ref(
+    parse_session: Option<&Option<SyntaxParseSession>>,
+) -> Option<&SyntaxParseSession> {
+    parse_session.and_then(Option::as_ref)
+}
+
+fn require_tree<'a>(
+    language_id: &str,
+    parse_result: &'a ParseTreeResult,
+    session: Option<&'a SyntaxParseSession>,
+) -> Result<&'a Tree, SyntaxError> {
+    parse_result
+        .tree(session)
+        .ok_or_else(|| SyntaxError::ParseCancelled(language_id.to_owned()))
+}
+
 fn parse_tree(
     language_id: &str,
     loaded: &LoadedLanguage,
@@ -3155,7 +3212,7 @@ fn parse_tree(
     let Some(parse_session) = parse_session else {
         let mut parser = create_parser(language_id, loaded)?;
         return Ok(ParseTreeResult {
-            tree: parse_with_parser(language_id, &mut parser, buffer, None)?,
+            owned_tree: Some(parse_with_parser(language_id, &mut parser, buffer, None)?),
             changed_ranges: None,
             applied_edits: None,
         });
@@ -3166,7 +3223,7 @@ fn parse_tree(
     {
         if session.revision == buffer.revision() {
             return Ok(ParseTreeResult {
-                tree: session.tree.clone(),
+                owned_tree: None,
                 changed_ranges: Some(Vec::new()),
                 applied_edits: Some(Vec::new()),
             });
@@ -3177,28 +3234,35 @@ fn parse_tree(
         } else {
             None
         };
-        let edited_tree = applied_edits.as_ref().map(|edits| {
-            let mut tree = session.tree.clone();
+        if let Some(edits) = applied_edits.as_ref() {
             for edit in edits {
-                tree.edit(&text_edit_to_input_edit(*edit));
+                session.tree.edit(&text_edit_to_input_edit(*edit));
             }
-            tree
-        });
-        let new_tree = parse_with_parser(
-            language_id,
-            &mut session.parser,
-            buffer,
-            edited_tree.as_ref(),
-        )?;
-        let changed_ranges = edited_tree
-            .as_ref()
-            .map(|previous_tree| previous_tree.changed_ranges(&new_tree).collect::<Vec<_>>());
+            let new_tree = parse_with_parser(
+                language_id,
+                &mut session.parser,
+                buffer,
+                Some(&session.tree),
+            )?;
+            let changed_ranges = session.tree.changed_ranges(&new_tree).collect::<Vec<_>>();
+            session.revision = buffer.revision();
+            session.tree = new_tree;
+            return Ok(ParseTreeResult {
+                owned_tree: None,
+                changed_ranges: Some(changed_ranges),
+                applied_edits,
+            });
+        }
+
+        let new_tree = parse_with_parser(language_id, &mut session.parser, buffer, None)?;
         session.revision = buffer.revision();
-        session.tree = new_tree.clone();
+        session.tree = new_tree;
+        session.last_highlight_window = None;
+        session.last_snapshot = None;
         return Ok(ParseTreeResult {
-            tree: new_tree,
-            changed_ranges,
-            applied_edits,
+            owned_tree: None,
+            changed_ranges: None,
+            applied_edits: None,
         });
     }
 
@@ -3208,12 +3272,12 @@ fn parse_tree(
         language_id: language_id.to_owned(),
         revision: buffer.revision(),
         parser,
-        tree: tree.clone(),
+        tree,
         last_highlight_window: None,
         last_snapshot: None,
     });
     Ok(ParseTreeResult {
-        tree,
+        owned_tree: None,
         changed_ranges: None,
         applied_edits: None,
     })
@@ -3471,23 +3535,15 @@ fn changed_range_windows(
     merged
 }
 
-fn highlight_loaded_language_with_tree(
-    language_id: &str,
+fn highlight_spans_for_tree(
+    session: Option<&SyntaxParseSession>,
     loaded: &LoadedLanguage,
+    tree: &Tree,
     buffer: &impl SyntaxText,
     highlight_window: Option<HighlightWindow>,
-    parse_session: Option<&mut Option<SyntaxParseSession>>,
-) -> Result<ParsedHighlight, SyntaxError> {
-    let (parse_result, mut session) = match parse_session {
-        Some(parse_session) => (
-            parse_tree(language_id, loaded, buffer, Some(parse_session))?,
-            parse_session.as_mut(),
-        ),
-        None => (parse_tree(language_id, loaded, buffer, None)?, None),
-    };
-
-    let mut highlight_spans = session
-        .as_ref()
+    parse_result: &ParseTreeResult,
+) -> Vec<HighlightSpan> {
+    session
         .and_then(|session| {
             let previous_snapshot = session.last_snapshot.as_ref()?;
             if session.last_highlight_window != highlight_window {
@@ -3522,28 +3578,62 @@ fn highlight_loaded_language_with_tree(
             for changed_window in changed_windows {
                 highlight_spans.extend(highlight_tree(
                     loaded,
-                    &parse_result.tree,
+                    tree,
                     buffer,
                     Some(changed_window),
                 ));
             }
             Some(highlight_spans)
         })
-        .unwrap_or_else(|| highlight_tree(loaded, &parse_result.tree, buffer, highlight_window));
-    sort_highlight_spans(&mut highlight_spans);
-    let snapshot = SyntaxSnapshot {
-        language_id: language_id.to_owned(),
-        root_kind: parse_result.tree.root_node().kind().to_owned(),
-        has_errors: parse_result.tree.root_node().has_error(),
-        highlight_spans,
+        .unwrap_or_else(|| highlight_tree(loaded, tree, buffer, highlight_window))
+}
+
+fn highlight_loaded_language_with_tree(
+    language_id: &str,
+    loaded: &LoadedLanguage,
+    buffer: &impl SyntaxText,
+    highlight_window: Option<HighlightWindow>,
+    mut parse_session: Option<&mut Option<SyntaxParseSession>>,
+) -> Result<ParsedHighlight, SyntaxError> {
+    let parse_result = parse_tree(
+        language_id,
+        loaded,
+        buffer,
+        parse_session.as_deref_mut(),
+    )?;
+    let mut highlight_spans = {
+        let session = parse_session_ref(parse_session.as_deref());
+        let tree = require_tree(language_id, &parse_result, session)?;
+        highlight_spans_for_tree(
+            session,
+            loaded,
+            tree,
+            buffer,
+            highlight_window,
+            &parse_result,
+        )
     };
-    if let Some(session) = session.as_mut() {
+    sort_highlight_spans(&mut highlight_spans);
+    let snapshot = {
+        let session = parse_session_ref(parse_session.as_deref());
+        let tree = require_tree(language_id, &parse_result, session)?;
+        SyntaxSnapshot {
+            language_id: language_id.to_owned(),
+            root_kind: tree.root_node().kind().to_owned(),
+            has_errors: tree.root_node().has_error(),
+            highlight_spans,
+        }
+    };
+    if let Some(session) = parse_session
+        .as_deref_mut()
+        .and_then(Option::as_mut)
+    {
         session.last_highlight_window = highlight_window;
         session.last_snapshot = Some(snapshot.clone());
     }
     Ok(ParsedHighlight {
         snapshot,
-        tree: parse_result.tree,
+        tree: parse_result.owned_tree,
     })
 }
 

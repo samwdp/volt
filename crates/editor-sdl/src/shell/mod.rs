@@ -26637,7 +26637,7 @@ enum SyntaxWorkerMessage {
     Refresh(Box<SyntaxRefreshWorkerRequest>),
     PreloadBatch {
         language_ids: Vec<String>,
-        done: Sender<()>,
+        done: Option<Sender<()>>,
     },
 }
 
@@ -26723,7 +26723,7 @@ impl SyntaxRefreshWorkerState {
                 let mut parse_sessions = BTreeMap::<BufferId, SyntaxParseSession>::new();
                 while let Ok(first) = request_rx.recv() {
                     let mut refreshes = BTreeMap::<BufferId, SyntaxRefreshWorkerRequest>::new();
-                    let mut preload_batches = Vec::<(Vec<String>, Sender<()>)>::new();
+                    let mut preload_batches = Vec::<(Vec<String>, Option<Sender<()>>)>::new();
                     match first {
                         SyntaxWorkerMessage::Refresh(request) => {
                             refreshes.insert(request.buffer_id, *request);
@@ -26742,8 +26742,8 @@ impl SyntaxRefreshWorkerState {
                             }
                         }
                     }
-                    // Finish all preloads before any refresh so the first open of a
-                    // workspace language never pays the cold DLL load on the highlight path.
+                    // Finish queued preloads before refresh so a cold language still
+                    // loads on the worker, not the UI thread. Callers do not wait.
                     for (language_ids, done) in preload_batches {
                         for language_id in language_ids {
                             if let Err(error) = registry.preload_language(&language_id) {
@@ -26752,7 +26752,9 @@ impl SyntaxRefreshWorkerState {
                                 );
                             }
                         }
-                        let _ = done.send(());
+                        if let Some(done) = done {
+                            let _ = done.send(());
+                        }
                     }
                     for request in refreshes.into_values() {
                         let result = process_syntax_refresh_request(
@@ -26799,14 +26801,14 @@ impl SyntaxRefreshWorkerState {
         if language_ids.is_empty() {
             return true;
         }
+        self.send_preload_batch(language_ids, None)
+    }
+
+    fn send_preload_batch(&mut self, language_ids: Vec<String>, done: Option<Sender<()>>) -> bool {
         if !self.ensure_worker() {
             return false;
         }
-        let (done_tx, done_rx) = mpsc::channel();
-        let message = SyntaxWorkerMessage::PreloadBatch {
-            language_ids,
-            done: done_tx,
-        };
+        let message = SyntaxWorkerMessage::PreloadBatch { language_ids, done };
         let sent = self
             .request_tx
             .as_ref()
@@ -26816,9 +26818,16 @@ impl SyntaxRefreshWorkerState {
             self.request_tx = None;
             return false;
         }
-        // Block until the shared worker finishes loading so the first file open of a
-        // prewarmed language never races a cold grammar load.
-        done_rx.recv().is_ok()
+        true
+    }
+
+    #[cfg(test)]
+    fn wait_for_pending_preloads(&mut self, timeout: Duration) -> bool {
+        let (done_tx, done_rx) = mpsc::channel();
+        if !self.send_preload_batch(Vec::new(), Some(done_tx)) {
+            return false;
+        }
+        done_rx.recv_timeout(timeout).is_ok()
     }
 
     fn send(&mut self, request: SyntaxRefreshWorkerRequest) -> bool {
@@ -35536,8 +35545,8 @@ pub(crate) fn open_workspace_from_project(
 
     invalidate_repository_file_list_cache_for(root);
     queue_workspace_syntax_prewarm(runtime, root);
-    // Flush immediately so the shared highlight worker has grammars loaded before any
-    // file open (readme / picker) can race a cold DLL load.
+    // Queue prewarm immediately so the shared worker starts loading grammars. Do not
+    // wait: first paint of a cold language may be uncolored until the worker finishes.
     while refresh_pending_syntax_prewarm(runtime).unwrap_or(false) {}
 
     if let Some(readme_path) = initial_readme_path {
@@ -35683,8 +35692,7 @@ fn prewarm_workspace_syntax_languages(runtime: &mut EditorRuntime, root: &Path) 
     if language_ids.is_empty() {
         return;
     }
-    // Only the shared highlight worker paints buffers. Block until it finishes loading so
-    // the first open of a workspace language never races a cold DLL load.
+    // Shared highlight worker loads grammars in the background. UI stays interactive.
     if let Ok(ui) = shell_ui_mut(runtime) {
         ui.syntax_refresh_worker.preload_languages(language_ids);
     }

@@ -196,6 +196,50 @@ fn syntax_refresh_reuses_shared_worker_across_buffers() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn preload_languages_returns_without_waiting_for_worker_done() {
+    let (request_tx, request_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut worker = SyntaxRefreshWorkerState::disabled();
+        worker.configure(Vec::new(), PathBuf::from("."), None);
+        worker.request_tx = Some(request_tx);
+        let ok = worker.preload_languages(["rust"]);
+        let _ = result_tx.send(ok);
+    });
+
+    let _queued = request_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("preload should queue a worker message");
+
+    let returned = result_rx.recv_timeout(Duration::from_millis(500));
+    assert!(
+        returned.is_ok(),
+        "preload_languages must return without waiting for the worker to finish loading"
+    );
+    assert!(
+        returned.expect("preload result"),
+        "queueing preload must succeed even when the worker has not finished"
+    );
+}
+
+#[test]
+fn preload_languages_still_completes_on_worker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    assert!(
+        shell_ui_mut(&mut state.runtime)?
+            .syntax_refresh_worker
+            .preload_languages(["rust"])
+    );
+    assert!(
+        shell_ui_mut(&mut state.runtime)?
+            .syntax_refresh_worker
+            .wait_for_pending_preloads(Duration::from_secs(5)),
+        "test-only wait hook must observe worker preload completion"
+    );
+    Ok(())
+}
+
 fn sync_active_buffer_layout_for_test(state: &mut ShellState) -> Result<(), String> {
     const RENDER_WIDTH: u32 = 960;
     const RENDER_HEIGHT: u32 = 640;
