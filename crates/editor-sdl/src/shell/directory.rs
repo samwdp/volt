@@ -325,9 +325,18 @@ pub(super) fn directory_edit_lines(
         if line_index == 0 && trimmed.starts_with("Directory ") {
             continue;
         }
-        lines.push(user_library.oil_strip_entry_icon_prefix(trimmed).to_owned());
+        let stripped = user_library.oil_strip_entry_icon_prefix(trimmed);
+        if is_oil_navigation_label(stripped) {
+            continue;
+        }
+        lines.push(stripped.to_owned());
     }
     lines
+}
+
+fn is_oil_navigation_label(label: &str) -> bool {
+    let raw = label.trim().trim_end_matches(['/', '\\']);
+    raw == ".." || raw == "."
 }
 
 pub(super) fn parse_directory_line(
@@ -431,6 +440,41 @@ mod directory_line_tests {
     }
 
     #[test]
+    fn parent_navigation_line_is_ignored_when_creating_entries() {
+        let root = PathBuf::from("workspace");
+        let before = vec!["Cargo.toml".to_owned()];
+        let after = vec![
+            "../".to_owned(),
+            "Cargo.toml".to_owned(),
+            "Test/".to_owned(),
+            "abc.txt".to_owned(),
+            "nested/dir/file.txt".to_owned(),
+        ];
+        let user_library = NullUserLibrary;
+        let actions = directory_edit_actions(&root, &before, &after, &user_library)
+            .expect("parent navigation entry should be ignored");
+        assert_eq!(
+            actions,
+            vec![
+                DirectoryEditAction::CreateDir(root.join("Test")),
+                DirectoryEditAction::CreateFile(root.join("abc.txt")),
+                DirectoryEditAction::CreateFile(root.join("nested").join("dir").join("file.txt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_parent_navigation_line_does_not_delete_parent_directory() {
+        let root = PathBuf::from("workspace");
+        let before = vec!["../".to_owned(), "Cargo.toml".to_owned()];
+        let after = vec!["Cargo.toml".to_owned()];
+        let user_library = NullUserLibrary;
+        let actions = directory_edit_actions(&root, &before, &after, &user_library)
+            .expect("removing ../ should not emit filesystem actions");
+        assert_eq!(actions, Vec::new());
+    }
+
+    #[test]
     fn create_dir_action_creates_empty_directory() {
         let temp =
             std::env::temp_dir().join(format!("volt-oil-dir-create-test-{}", std::process::id()));
@@ -513,6 +557,10 @@ pub(super) fn parse_directory_lines(
     let mut seen = BTreeSet::new();
     let mut parsed = Vec::with_capacity(lines.len());
     for line in lines {
+        let stripped = user_library.oil_strip_entry_icon_prefix(line.trim());
+        if is_oil_navigation_label(stripped) {
+            continue;
+        }
         let entry = parse_directory_line(line, user_library)?;
         if !seen.insert(entry.rel_path.clone()) {
             return Err(format!("duplicate entry `{}`", entry.label));

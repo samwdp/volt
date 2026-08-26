@@ -1699,6 +1699,36 @@ fn directory_view_state_uses_user_oil_defaults() {
 }
 
 #[test]
+fn oil_insert_creates_directory_file_and_nested_paths_on_normal() -> Result<(), String> {
+    let root = unique_temp_dir("oil-insert-create");
+    std::fs::write(root.join("existing.txt"), "keep\n").map_err(|error| error.to_string())?;
+
+    let mut state = state_with_user_library()?;
+    let buffer_id = open_oil_test_buffer(&mut state, &root)?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    oil_type_new_entry_and_leave_insert(&mut state, "Test/")?;
+    oil_type_new_entry_and_leave_insert(&mut state, "abc.txt")?;
+    oil_type_new_entry_and_leave_insert(&mut state, "nested/dir/file.txt")?;
+
+    assert!(
+        root.join("Test").is_dir(),
+        "typing Test/ then leaving insert should create directory"
+    );
+    assert!(
+        root.join("abc.txt").is_file(),
+        "typing abc.txt then leaving insert should create file"
+    );
+    assert!(
+        root.join("nested").join("dir").join("file.txt").is_file(),
+        "typing nested/dir/file.txt then leaving insert should create nested directories and file"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
     let root = unique_temp_dir("oil-normal-delete");
     let file_path = root.join("alpha.txt");
@@ -1706,7 +1736,8 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
 
     let mut state = state_with_user_library()?;
     let buffer_id = open_oil_test_buffer(&mut state, &root)?;
-    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(1, 0));
+    let file_line = oil_line_index_containing(&state.runtime, buffer_id, "alpha.txt")?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(file_line, 0));
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
 
     state
@@ -1717,7 +1748,10 @@ fn oil_normal_mode_dd_applies_delete_immediately() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     assert!(!file_path.exists());
-    assert_eq!(shell_buffer(&state.runtime, buffer_id)?.line_count(), 1);
+    assert!(
+        oil_line_index_containing(&state.runtime, buffer_id, "alpha.txt").is_err(),
+        "deleted file should leave the oil listing"
+    );
 
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     Ok(())
@@ -6158,6 +6192,43 @@ fn open_oil_test_buffer(
     open_workspace_from_project(&mut state.runtime, "oil-test", root)?;
     open_oil_directory(&mut state.runtime, root.to_path_buf())?;
     active_shell_buffer_id(&state.runtime)
+}
+
+fn oil_line_index_containing(
+    runtime: &EditorRuntime,
+    buffer_id: BufferId,
+    needle: &str,
+) -> Result<usize, String> {
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    (0..buffer.line_count())
+        .find(|&index| buffer.text.line(index).unwrap_or_default().contains(needle))
+        .ok_or_else(|| format!("oil buffer is missing line containing `{needle}`"))
+}
+
+fn oil_type_new_entry_and_leave_insert(state: &mut ShellState, entry: &str) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let last_line = shell_buffer(&state.runtime, buffer_id)?
+        .line_count()
+        .saturating_sub(1);
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(last_line, 0));
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
+
+    state
+        .handle_text_input("o")
+        .map_err(|error| error.to_string())?;
+    if shell_ui(&state.runtime)?.input_mode() != InputMode::Insert {
+        return Err(format!(
+            "expected insert mode after o, got {:?}",
+            shell_ui(&state.runtime)?.input_mode()
+        ));
+    }
+    state
+        .handle_text_input(entry)
+        .map_err(|error| error.to_string())?;
+    state
+        .try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn install_text_test_buffer(
