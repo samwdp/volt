@@ -4820,6 +4820,187 @@ fn single_line_insert_updates_wrap_cache_prefix_rows() -> Result<(), String> {
     Ok(())
 }
 
+fn assert_wrap_cache_matches_cold_build(
+    buffer: &ShellBuffer,
+    wrap_cols: usize,
+    indent_size: usize,
+) -> Result<(), String> {
+    let cache = buffer
+        .wrap_cache
+        .as_ref()
+        .ok_or_else(|| "wrap cache was missing".to_owned())?;
+    let cold = WrapRowCache::build(buffer, wrap_cols, indent_size);
+    assert_eq!(cache.line_count, cold.line_count);
+    assert_eq!(cache.prefix_rows, cold.prefix_rows);
+    assert_eq!(cache.wrap_cols, wrap_cols);
+    assert_eq!(cache.indent_size, indent_size);
+    Ok(())
+}
+
+#[test]
+fn insert_newline_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*newline-wrap-edit*",
+        vec![
+            "abcde".to_owned(),
+            "    wrappedtail".to_owned(),
+            "end".to_owned(),
+        ],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(0, 3));
+
+    buffer.insert_text("\n");
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)?;
+    let cache = buffer
+        .wrap_cache
+        .as_ref()
+        .ok_or_else(|| "wrap cache was cleared after newline insert".to_owned())?;
+    assert_eq!(cache.prefix_rows.len(), 5);
+    Ok(())
+}
+
+#[test]
+fn join_lines_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*join-wrap-edit*",
+        vec!["abcde".to_owned(), "fghij".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(1, 0));
+
+    buffer.backspace();
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)?;
+    let cache = buffer
+        .wrap_cache
+        .as_ref()
+        .ok_or_else(|| "wrap cache was cleared after join".to_owned())?;
+    assert_eq!(cache.prefix_rows.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn delete_forward_newline_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*delete-newline-wrap-edit*",
+        vec!["abcde".to_owned(), "fghij".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(0, 5));
+
+    buffer.delete_forward();
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)
+}
+
+#[test]
+fn newline_insert_does_not_create_wrap_cache() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*newline-no-wrap-cache*",
+        vec!["abcde".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = None;
+    buffer.set_cursor(TextPoint::new(0, 2));
+
+    buffer.insert_text("\n");
+
+    assert!(
+        buffer.wrap_cache.is_none(),
+        "newline must not create a wrap cache by itself"
+    );
+    Ok(())
+}
+
+#[test]
+fn replace_mode_newline_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*replace-newline-wrap-edit*",
+        vec!["hello".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(0, 2));
+
+    buffer.replace_mode_text("\n");
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)
+}
+
+#[test]
+fn open_line_below_updates_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*open-line-wrap-edit*",
+        vec!["abcde".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(0, 1));
+
+    buffer.open_line_below();
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)
+}
+
+#[test]
+fn same_line_replace_keeps_wrap_cache_prefix_rows() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*replace-range-wrap-edit*",
+        vec!["hello".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+
+    buffer.replace_range(
+        TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 0)),
+        "    ",
+    );
+
+    assert_wrap_cache_matches_cold_build(buffer, 8, 4)
+}
+
+#[test]
+fn undo_newline_wrap_cache_matches_cold_rebuild() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*undo-newline-wrap-edit*",
+        vec!["abcde".to_owned(), "tail".to_owned()],
+    )?;
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    buffer.wrap_cache = Some(WrapRowCache::build(buffer, 8, 4));
+    buffer.set_cursor(TextPoint::new(0, 3));
+    buffer.insert_text("\n");
+    buffer.record_undo_snapshot();
+    buffer.undo();
+
+    assert_eq!(buffer.line_count(), 2);
+    match buffer.wrap_cache.as_ref() {
+        None => {}
+        Some(_) => assert_wrap_cache_matches_cold_build(buffer, 8, 4)?,
+    }
+    Ok(())
+}
+
 #[test]
 fn sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff() -> Result<(), String> {
     let render_width = 640;

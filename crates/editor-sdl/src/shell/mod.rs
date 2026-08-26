@@ -4688,8 +4688,24 @@ struct WrapCacheInlineEdit {
     old_row_count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WrapCacheLineSplice {
+    start_line: usize,
+    old_span: usize,
+    old_line_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WrapCacheInsertPlan {
+    inline: Option<WrapCacheInlineEdit>,
+    splice: Option<WrapCacheLineSplice>,
+    had_cache: bool,
+    has_newline: bool,
+}
+
 const LARGE_BUFFER_WRAP_CACHE_LINE_THRESHOLD: usize = 2_048;
 const LARGE_BUFFER_SYNC_INDENT_LINE_THRESHOLD: usize = 2_048;
+const MAX_WRAP_CACHE_SPLICE_LINES: usize = 256;
 
 impl WrapRowCache {
     fn build(buffer: &ShellBuffer, wrap_cols: usize, indent_size: usize) -> Self {
@@ -4735,13 +4751,19 @@ impl WrapRowCache {
         old_row_count: usize,
         new_row_count: usize,
     ) {
+        self.apply_row_count_delta_from(line_index.saturating_add(1), old_row_count, new_row_count);
+    }
+
+    fn apply_row_count_delta_from(
+        &mut self,
+        from_index: usize,
+        old_row_count: usize,
+        new_row_count: usize,
+    ) {
         if old_row_count == new_row_count {
             return;
         }
-        let affected = self
-            .prefix_rows
-            .iter_mut()
-            .skip(line_index.saturating_add(1));
+        let affected = self.prefix_rows.iter_mut().skip(from_index);
         if new_row_count > old_row_count {
             let delta = new_row_count.saturating_sub(old_row_count);
             for prefix in affected {
@@ -4759,6 +4781,43 @@ impl WrapRowCache {
         self.wrap_cols == wrap_cols
             && self.indent_size == indent_size
             && self.line_count == line_count
+    }
+
+    fn splice_lines(
+        &mut self,
+        start_line: usize,
+        old_span: usize,
+        new_row_counts: &[usize],
+    ) -> bool {
+        let old_end = start_line.saturating_add(old_span);
+        if old_span == 0
+            || old_end >= self.prefix_rows.len()
+            || self.prefix_rows.len() != self.line_count.saturating_add(1)
+        {
+            return false;
+        }
+        let base = self.prefix_rows[start_line];
+        let old_region_rows = self.prefix_rows[old_end].saturating_sub(base);
+        let new_region_rows: usize = new_row_counts.iter().copied().sum();
+        let mut new_prefixes = Vec::with_capacity(new_row_counts.len());
+        let mut acc = base;
+        for &rows in new_row_counts {
+            acc = acc.saturating_add(rows);
+            new_prefixes.push(acc);
+        }
+        let rest_start = start_line
+            .saturating_add(1)
+            .saturating_add(new_row_counts.len());
+        self.prefix_rows.splice(
+            start_line.saturating_add(1)..old_end.saturating_add(1),
+            new_prefixes,
+        );
+        self.apply_row_count_delta_from(rest_start, old_region_rows, new_region_rows);
+        self.line_count = self
+            .line_count
+            .saturating_sub(old_span)
+            .saturating_add(new_row_counts.len());
+        self.prefix_rows.len() == self.line_count.saturating_add(1)
     }
 }
 
@@ -6496,6 +6555,102 @@ impl ShellBuffer {
         }
     }
 
+    fn prepare_wrap_cache_line_splice(
+        &self,
+        start_line: usize,
+        old_span: usize,
+    ) -> Option<WrapCacheLineSplice> {
+        let cache = self.wrap_cache.as_ref()?;
+        if cache.line_count != self.line_count()
+            || cache.prefix_rows.len() != cache.line_count.saturating_add(1)
+        {
+            return None;
+        }
+        if old_span == 0 || start_line.saturating_add(old_span) > cache.line_count {
+            return None;
+        }
+        Some(WrapCacheLineSplice {
+            start_line,
+            old_span,
+            old_line_count: cache.line_count,
+        })
+    }
+
+    fn apply_wrap_cache_line_splice(&mut self, splice: Option<WrapCacheLineSplice>) {
+        let Some(splice) = splice else {
+            return;
+        };
+        let (wrap_cols, indent_size) = match self.wrap_cache.as_ref() {
+            Some(cache) => (cache.wrap_cols, cache.indent_size),
+            None => return,
+        };
+        let new_span = match self
+            .line_count()
+            .checked_add(splice.old_span)
+            .and_then(|sum| sum.checked_sub(splice.old_line_count))
+        {
+            Some(span) => span,
+            None => {
+                self.wrap_cache = None;
+                return;
+            }
+        };
+        if new_span > MAX_WRAP_CACHE_SPLICE_LINES
+            || splice.start_line.saturating_add(new_span) > self.line_count()
+        {
+            self.wrap_cache = None;
+            return;
+        }
+        let new_row_counts: Vec<usize> = (0..new_span)
+            .map(|offset| {
+                self.line_visual_row_count(
+                    splice.start_line.saturating_add(offset),
+                    wrap_cols,
+                    indent_size,
+                )
+            })
+            .collect();
+        let spliced = self.wrap_cache.as_mut().is_some_and(|cache| {
+            cache.splice_lines(splice.start_line, splice.old_span, &new_row_counts)
+        });
+        if !spliced {
+            self.wrap_cache = None;
+        }
+    }
+
+    fn finish_wrap_cache_line_splice(
+        &mut self,
+        had_cache: bool,
+        splice: Option<WrapCacheLineSplice>,
+    ) {
+        if splice.is_some() {
+            self.apply_wrap_cache_line_splice(splice);
+        } else if had_cache {
+            self.invalidate_wrap_cache();
+        }
+    }
+
+    fn plan_wrap_cache_insert(&self, start_line: usize, has_newline: bool) -> WrapCacheInsertPlan {
+        WrapCacheInsertPlan {
+            inline: (!has_newline)
+                .then(|| self.prepare_wrap_cache_inline_edit(start_line))
+                .flatten(),
+            splice: has_newline
+                .then(|| self.prepare_wrap_cache_line_splice(start_line, 1))
+                .flatten(),
+            had_cache: has_newline && self.wrap_cache.is_some(),
+            has_newline,
+        }
+    }
+
+    fn commit_wrap_cache_insert_plan(&mut self, plan: WrapCacheInsertPlan) {
+        if plan.has_newline {
+            self.finish_wrap_cache_line_splice(plan.had_cache, plan.splice);
+        } else {
+            self.apply_wrap_cache_inline_edit(plan.inline);
+        }
+    }
+
     fn refresh_wrap_cache(
         &mut self,
         wrap_cols: usize,
@@ -6817,23 +6972,17 @@ impl ShellBuffer {
 
     fn insert_text(&mut self, text: &str) {
         self.clear_inline_completion();
-        let wrap_edit = (!text.contains('\n'))
-            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
-            .flatten();
+        let start_line = self.cursor_row();
+        let plan = self.plan_wrap_cache_insert(start_line, text.contains('\n'));
         self.preserve_root_cursor_before_text_change();
         self.text.insert_text(text);
-        if text.contains('\n') {
-            self.invalidate_wrap_cache();
-        } else {
-            self.apply_wrap_cache_inline_edit(wrap_edit);
-        }
+        self.commit_wrap_cache_insert_plan(plan);
     }
 
     fn replace_mode_text(&mut self, text: &str) {
         self.clear_inline_completion();
-        let wrap_edit = (!text.contains('\n'))
-            .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
-            .flatten();
+        let start_line = self.cursor_row();
+        let plan = self.plan_wrap_cache_insert(start_line, text.contains('\n'));
         let mut changed = false;
         for character in text.chars() {
             if character == '\n' {
@@ -6864,26 +7013,27 @@ impl ShellBuffer {
             }
         }
         if changed {
-            if text.contains('\n') {
-                self.invalidate_wrap_cache();
-            } else {
-                self.apply_wrap_cache_inline_edit(wrap_edit);
-            }
+            self.commit_wrap_cache_insert_plan(plan);
         }
     }
 
     fn backspace(&mut self) {
         self.clear_inline_completion();
         let single_line_edit = self.cursor_col() > 0;
+        let join_start = (!single_line_edit && self.cursor_row() > 0)
+            .then_some(self.cursor_row().saturating_sub(1));
         let wrap_edit = single_line_edit
             .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
             .flatten();
+        let had_wrap_cache = join_start.is_some() && self.wrap_cache.is_some();
+        let wrap_splice =
+            join_start.and_then(|start_line| self.prepare_wrap_cache_line_splice(start_line, 2));
         self.preserve_root_cursor_before_text_change();
         if self.text.backspace() {
             if single_line_edit {
                 self.apply_wrap_cache_inline_edit(wrap_edit);
             } else {
-                self.invalidate_wrap_cache();
+                self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
             }
         }
     }
@@ -6891,19 +7041,24 @@ impl ShellBuffer {
     fn delete_forward(&mut self) {
         self.clear_inline_completion();
         let current = self.cursor_point();
-        let single_line_edit = self
-            .point_after(current)
-            .map(|next| self.slice(TextRange::new(current, next)) != "\n")
+        let next = self.point_after(current);
+        let joining_newline = next
+            .map(|next| self.slice(TextRange::new(current, next)) == "\n")
             .unwrap_or(false);
+        let single_line_edit = next.is_some() && !joining_newline;
         let wrap_edit = single_line_edit
             .then(|| self.prepare_wrap_cache_inline_edit(self.cursor_row()))
+            .flatten();
+        let had_wrap_cache = joining_newline && self.wrap_cache.is_some();
+        let wrap_splice = joining_newline
+            .then(|| self.prepare_wrap_cache_line_splice(current.line, 2))
             .flatten();
         self.preserve_root_cursor_before_text_change();
         if self.text.delete_forward() {
             if single_line_edit {
                 self.apply_wrap_cache_inline_edit(wrap_edit);
             } else {
-                self.invalidate_wrap_cache();
+                self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
             }
         }
     }
@@ -7223,18 +7378,22 @@ impl ShellBuffer {
         let column = self.text.line_len_chars(line).unwrap_or(0);
         self.text
             .set_cursor(editor_buffer::TextPoint::new(line, column));
+        let had_wrap_cache = self.wrap_cache.is_some();
+        let wrap_splice = self.prepare_wrap_cache_line_splice(line, 1);
         self.preserve_root_cursor_before_text_change();
         self.text.insert_newline();
-        self.invalidate_wrap_cache();
+        self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
     }
 
     fn open_line_above(&mut self) {
         let line = self.cursor_row();
         self.text.set_cursor(editor_buffer::TextPoint::new(line, 0));
+        let had_wrap_cache = self.wrap_cache.is_some();
+        let wrap_splice = self.prepare_wrap_cache_line_splice(line, 1);
         self.preserve_root_cursor_before_text_change();
         self.text.insert_newline();
         let _ = self.text.move_up();
-        self.invalidate_wrap_cache();
+        self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
     }
 
     fn undo(&mut self) {
@@ -7285,16 +7444,46 @@ impl ShellBuffer {
 
     fn delete_range(&mut self, range: TextRange) {
         self.clear_inline_completion();
+        let start_line = range.start().line.min(range.end().line);
+        let end_line = range.start().line.max(range.end().line);
+        let old_span = end_line.saturating_sub(start_line).saturating_add(1);
+        let single_line = start_line == end_line;
+        let wrap_edit = single_line
+            .then(|| self.prepare_wrap_cache_inline_edit(start_line))
+            .flatten();
+        let had_wrap_cache = !single_line && self.wrap_cache.is_some();
+        let wrap_splice = (!single_line)
+            .then(|| self.prepare_wrap_cache_line_splice(start_line, old_span))
+            .flatten();
         self.preserve_root_cursor_before_text_change();
         self.text.delete(range);
-        self.invalidate_wrap_cache();
+        if single_line {
+            self.apply_wrap_cache_inline_edit(wrap_edit);
+        } else {
+            self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
+        }
     }
 
     fn replace_range(&mut self, range: TextRange, text: &str) {
         self.clear_inline_completion();
+        let start_line = range.start().line.min(range.end().line);
+        let end_line = range.start().line.max(range.end().line);
+        let old_span = end_line.saturating_sub(start_line).saturating_add(1);
+        let single_line = start_line == end_line && !text.contains('\n');
+        let wrap_edit = single_line
+            .then(|| self.prepare_wrap_cache_inline_edit(start_line))
+            .flatten();
+        let had_wrap_cache = !single_line && self.wrap_cache.is_some();
+        let wrap_splice = (!single_line)
+            .then(|| self.prepare_wrap_cache_line_splice(start_line, old_span))
+            .flatten();
         self.preserve_root_cursor_before_text_change();
         self.text.replace(range, text);
-        self.invalidate_wrap_cache();
+        if single_line {
+            self.apply_wrap_cache_inline_edit(wrap_edit);
+        } else {
+            self.finish_wrap_cache_line_splice(had_wrap_cache, wrap_splice);
+        }
     }
 
     fn replace_chars_at_cursor(&mut self, character: char, count: usize) -> bool {
@@ -7427,9 +7616,10 @@ impl ShellBuffer {
 
     fn insert_at(&mut self, point: TextPoint, text: &str) {
         self.text.set_cursor(point);
+        let plan = self.plan_wrap_cache_insert(point.line, text.contains('\n'));
         self.preserve_root_cursor_before_text_change();
         self.text.insert_text(text);
-        self.invalidate_wrap_cache();
+        self.commit_wrap_cache_insert_plan(plan);
     }
 
     fn preserve_root_cursor_before_text_change(&mut self) {
@@ -32146,6 +32336,9 @@ fn apply_vim_substitute_command(
     }
     let buffer = active_shell_buffer_mut(runtime)?;
     buffer.replace_range(range, &replaced);
+    if matches!(scope, VimSubstituteScope::FullBuffer) {
+        buffer.invalidate_wrap_cache();
+    }
     buffer.set_cursor(original_cursor);
     buffer.mark_syntax_dirty();
     Ok(())

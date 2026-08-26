@@ -2456,12 +2456,7 @@ fn desired_indent_for_loaded_language(
         return Ok(Some(0));
     }
 
-    let parse_result = parse_tree(
-        language_id,
-        loaded,
-        buffer,
-        parse_session.as_deref_mut(),
-    )?;
+    let parse_result = parse_tree(language_id, loaded, buffer, parse_session.as_deref_mut())?;
     let tree = require_tree(
         language_id,
         &parse_result,
@@ -3576,12 +3571,7 @@ fn highlight_spans_for_tree(
                 .cloned()
                 .collect::<Vec<_>>();
             for changed_window in changed_windows {
-                highlight_spans.extend(highlight_tree(
-                    loaded,
-                    tree,
-                    buffer,
-                    Some(changed_window),
-                ));
+                highlight_spans.extend(highlight_tree(loaded, tree, buffer, Some(changed_window)));
             }
             Some(highlight_spans)
         })
@@ -3595,12 +3585,7 @@ fn highlight_loaded_language_with_tree(
     highlight_window: Option<HighlightWindow>,
     mut parse_session: Option<&mut Option<SyntaxParseSession>>,
 ) -> Result<ParsedHighlight, SyntaxError> {
-    let parse_result = parse_tree(
-        language_id,
-        loaded,
-        buffer,
-        parse_session.as_deref_mut(),
-    )?;
+    let parse_result = parse_tree(language_id, loaded, buffer, parse_session.as_deref_mut())?;
     let mut highlight_spans = {
         let session = parse_session_ref(parse_session.as_deref());
         let tree = require_tree(language_id, &parse_result, session)?;
@@ -3624,10 +3609,7 @@ fn highlight_loaded_language_with_tree(
             highlight_spans,
         }
     };
-    if let Some(session) = parse_session
-        .as_deref_mut()
-        .and_then(Option::as_mut)
-    {
+    if let Some(session) = parse_session.and_then(|inner| inner.as_mut()) {
         session.last_highlight_window = highlight_window;
         session.last_snapshot = Some(snapshot.clone());
     }
