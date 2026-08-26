@@ -96,6 +96,7 @@ impl IssuesWorkerState {
                 };
                 if let Ok(mut guard) = worker_results.lock() {
                     guard.push(result);
+                    ping_shell_wakeup();
                 } else {
                     return;
                 }

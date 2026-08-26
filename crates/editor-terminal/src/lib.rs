@@ -158,6 +158,26 @@ impl TerminalSession {
     }
 }
 
+#[derive(Clone)]
+struct TerminalEventWake(Option<Arc<dyn Fn() + Send + Sync>>);
+
+impl std::fmt::Debug for TerminalEventWake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("TerminalEventWake")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for TerminalEventWake {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.is_some() == other.0.is_some()
+    }
+}
+
+impl Eq for TerminalEventWake {}
+
 /// Launch configuration for an interactive PTY-backed terminal session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTerminalConfig {
@@ -168,6 +188,7 @@ pub struct LiveTerminalConfig {
     rows: u16,
     cols: u16,
     scrollback: usize,
+    on_event: TerminalEventWake,
 }
 
 impl LiveTerminalConfig {
@@ -185,6 +206,7 @@ impl LiveTerminalConfig {
             rows: 24,
             cols: 80,
             scrollback: DEFAULT_TERMINAL_SCROLLBACK,
+            on_event: TerminalEventWake(None),
         }
     }
 
@@ -204,6 +226,12 @@ impl LiveTerminalConfig {
     /// Sets the scrollback length retained by the in-memory parser.
     pub fn with_scrollback(mut self, scrollback: usize) -> Self {
         self.scrollback = scrollback.max(1);
+        self
+    }
+
+    /// Invokes `on_event` on the PTY reader thread when output or other terminal events arrive.
+    pub fn with_on_event(mut self, on_event: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_event = TerminalEventWake(Some(Arc::new(on_event)));
         self
     }
 
@@ -541,11 +569,15 @@ impl From<TerminalDimensions> for WindowSize {
 #[derive(Clone)]
 struct QueuedEventListener {
     tx: Sender<AlacrittyEvent>,
+    on_event: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EventListener for QueuedEventListener {
     fn send_event(&self, event: AlacrittyEvent) {
         let _ = self.tx.send(event);
+        if let Some(on_event) = &self.on_event {
+            on_event();
+        }
     }
 }
 
@@ -570,7 +602,10 @@ impl LiveTerminalSession {
         let pty = tty::new(&tty_options, dimensions.into(), 0)?;
         let process_id = tty_process_id(&pty);
         let (event_tx, event_rx) = mpsc::channel();
-        let listener = QueuedEventListener { tx: event_tx };
+        let listener = QueuedEventListener {
+            tx: event_tx,
+            on_event: config.on_event.0.clone(),
+        };
         let term = Arc::new(FairMutex::new(Term::new(
             AlacrittyConfig {
                 scrolling_history: config.scrollback,

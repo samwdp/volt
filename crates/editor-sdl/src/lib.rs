@@ -10,4 +10,4 @@ mod window_effects;
 mod tests;
 
 pub use config::{ShellConfig, ShellError, ShellSummary};
-pub use shell::run_demo_shell;
+pub use shell::{IDLE_WAIT_CAP, idle_wait_timeout, run_demo_shell};

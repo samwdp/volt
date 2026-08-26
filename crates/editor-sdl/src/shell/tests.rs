@@ -6213,6 +6213,37 @@ fn frame_pacing_is_deferred_while_typing() {
 }
 
 #[test]
+fn idle_wait_timeout_equals_next_deadline_when_idle() {
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(40);
+    assert_eq!(
+        idle_wait_timeout(now, &[deadline], false, false),
+        Some(Duration::from_millis(40))
+    );
+}
+
+#[test]
+fn idle_wait_timeout_caps_and_skips_when_interacting() {
+    let now = Instant::now();
+    assert_eq!(
+        idle_wait_timeout(now, &[], false, false),
+        Some(IDLE_WAIT_CAP)
+    );
+    assert_eq!(
+        idle_wait_timeout(now, &[now + Duration::from_secs(5)], false, false),
+        Some(IDLE_WAIT_CAP)
+    );
+    assert_eq!(
+        idle_wait_timeout(now, &[now + Duration::from_millis(40)], true, false),
+        None
+    );
+    assert_eq!(
+        idle_wait_timeout(now, &[now + Duration::from_millis(40)], false, true),
+        None
+    );
+}
+
+#[test]
 fn normal_mode_text_input_does_not_activate_typing_budget() -> Result<(), String> {
     let mut state = state_with_user_library()?;
 

@@ -377,7 +377,8 @@ pub(super) fn terminal_spawn_config(
     let title = shell_buffer(runtime, buffer_id)?.display_name().to_owned();
     let terminal_config = shell_user_library(runtime).terminal_config();
     let mut config = LiveTerminalConfig::new(title, terminal_config.program, terminal_config.args)
-        .with_size(rows, cols);
+        .with_size(rows, cols)
+        .with_on_event(ping_shell_wakeup);
     if let Some(cwd) = terminal_working_dir(runtime)? {
         config = config.with_cwd(cwd);
     }

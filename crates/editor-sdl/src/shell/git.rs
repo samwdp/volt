@@ -44,6 +44,7 @@ impl GitFringeState {
 
     pub(super) fn finish_refresh(&self) {
         self.inflight.store(false, Ordering::Release);
+        ping_shell_wakeup();
     }
 
     pub(super) fn try_line_kind(&self, line_index: usize) -> Option<GitFringeKind> {
@@ -121,6 +122,12 @@ impl GitSummaryState {
         self.last_refresh_at = Some(now);
     }
 
+    pub(super) fn next_refresh_at(&self) -> Instant {
+        self.last_refresh_at
+            .map(|last| last + GIT_SUMMARY_REFRESH_INTERVAL)
+            .unwrap_or_else(Instant::now)
+    }
+
     pub(super) fn try_begin_refresh(&self) -> bool {
         self.inflight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -129,6 +136,7 @@ impl GitSummaryState {
 
     pub(super) fn finish_refresh(&self) {
         self.inflight.store(false, Ordering::Release);
+        ping_shell_wakeup();
     }
 
     pub(super) fn snapshot_revision(&self) -> u64 {
@@ -769,6 +777,10 @@ pub(super) struct GitPrefixState {
 impl GitPrefixState {
     pub(super) fn prefix(&self) -> GitPrefix {
         self.prefix
+    }
+
+    pub(super) fn expires_at(&self) -> Instant {
+        self.started_at + Duration::from_millis(1200)
     }
 }
 

@@ -189,6 +189,7 @@ fn spawn_https_fetch(key: String, url: String, max_bytes: usize) {
                 }
             }
         }
+        super::ping_shell_wakeup();
     });
 }
 

@@ -10,6 +10,7 @@ mod directory;
 mod draw;
 mod git;
 mod git_editor;
+mod idle;
 mod issues;
 mod markdown_pretty;
 mod pdf;
@@ -32,12 +33,15 @@ use directory::*;
 use draw::*;
 use git::*;
 use git_editor::*;
+use idle::*;
 use issues::*;
 use pdf::*;
 use render::*;
 use terminal::*;
 use workspace_dock::*;
 use workspace_search::*;
+
+pub use idle::{IDLE_WAIT_CAP, idle_wait_timeout};
 
 #[cfg(test)]
 mod tests;
@@ -11701,6 +11705,80 @@ impl ShellState {
         frame_pacing_deferred_for_typing(self.last_text_input_at, now)
     }
 
+    fn idle_wait_deadlines(
+        &self,
+        now: Instant,
+        extras: impl IntoIterator<Item = Instant>,
+    ) -> Vec<Instant> {
+        const GIT_DIRECTORY_PREFIX_TIMEOUT: Duration = Duration::from_millis(1200);
+        let mut deadlines: Vec<Instant> = extras.into_iter().collect();
+        if self.deferred_startup_pending() {
+            deadlines.push(now);
+        }
+        if let Some(last) = self.last_text_input_at {
+            deadlines.push(last + FRAME_PACING_TYPING_IDLE_THRESHOLD);
+            deadlines.push(last + GIT_REFRESH_TYPING_IDLE_THRESHOLD);
+            deadlines.push(last + LSP_SYNC_TYPING_IDLE_THRESHOLD);
+        }
+        if let Some(pending) = self.pending_suppressed_text_input.as_ref() {
+            deadlines.push(pending.expires_at);
+        }
+        let Ok(ui) = self.ui() else {
+            return deadlines;
+        };
+        if let Some(until) = ui.yank_flash_deadline(now) {
+            deadlines.push(until);
+        }
+        if let Some(until) = ui.notification_deadline(now) {
+            deadlines.push(until);
+        }
+        deadlines.push(ui.git_summary.next_refresh_at());
+        if let Some(prefix) = ui.pending_git_prefix.as_ref() {
+            deadlines.push(prefix.expires_at());
+        }
+        if let Some(prefix) = ui.pending_directory_prefix.as_ref() {
+            deadlines.push(prefix.started_at + GIT_DIRECTORY_PREFIX_TIMEOUT);
+        }
+        if let Some(sequence) = ui.pending_key_sequence.as_ref() {
+            let options = key_sequence_options(&*shell_user_library(&self.runtime));
+            let timeout_ms = if sequence.ambiguous_short.is_some() {
+                options.ambiguous_prefix_timeout_ms
+            } else {
+                options.sequence_idle_timeout_ms
+            };
+            deadlines.push(sequence.started_at + Duration::from_millis(timeout_ms));
+        }
+        for buffer in &ui.buffers {
+            if buffer.git_fringe_dirty {
+                deadlines.push(
+                    buffer
+                        .git_fringe_last_edit_at
+                        .map(|last| last + GIT_FRINGE_REFRESH_DEBOUNCE)
+                        .unwrap_or(now),
+                );
+            }
+            if let Some(last) = buffer.git_status_last_refresh_at {
+                deadlines.push(last + GIT_STATUS_BUFFER_REFRESH_INTERVAL);
+            }
+        }
+        if let Some(due_at) = ui.autocomplete_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
+        if let Some(due_at) = ui.inline_completion_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
+        if let Some(due_at) = ui.lsp_sync_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
+        if let Some(due_at) = ui.vim_search_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
+        if let Some(due_at) = ui.workspace_search_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
+        deadlines
+    }
+
     fn active_buffer_is_terminal(&self) -> bool {
         active_shell_buffer_id(&self.runtime)
             .ok()
@@ -15695,6 +15773,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut event_pump = sdl_context
         .event_pump()
         .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    let event_subsystem = sdl_context
+        .event()
+        .map_err(|error| ShellError::Sdl(error.to_string()))?;
+    attach_shell_wakeup(&event_subsystem)?;
+    let _event_subsystem = event_subsystem;
     if let Some(trace) = startup_trace.as_mut() {
         trace.mark("shell.renderer-ready");
     }
@@ -15713,6 +15796,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
     let mut deferred_icon_fonts_complete = true;
     let mut deferred_emoji_font_loaded = false;
     let mut last_user_activity = Instant::now();
+    let mut queued_sdl_event: Option<sdl3::event::Event> = None;
     loop {
         let frame_started = Instant::now();
         let frame_result =
@@ -15795,8 +15879,19 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let event_batch_started = Instant::now();
                 let mut frame_polled_events = 0usize;
                 let mut frame_text_input_events = 0usize;
+                let mut pending_event = queued_sdl_event.take();
 
-                for event in event_pump.poll_iter() {
+                loop {
+                    let event = match pending_event.take() {
+                        Some(event) => event,
+                        None => match event_pump.poll_event() {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    if take_shell_wakeup_event(&event) {
+                        continue;
+                    }
                     had_events = true;
                     frame_polled_events = frame_polled_events.saturating_add(1);
                     let profiled_event = typing_frame
@@ -16222,7 +16317,30 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
             }
         }
 
-        frame_pacing_sleep = if state.frame_pacing_deferred_for_typing(Instant::now()) {
+        let now = Instant::now();
+        let mut extras = vec![
+            theme_reload_state.last_checked_at + THEME_SOURCE_POLL_INTERVAL,
+            user_config_reload_state.last_checked_at + THEME_SOURCE_POLL_INTERVAL,
+        ];
+        if !deferred_icon_fonts_complete {
+            extras.push(last_user_activity + DEFERRED_ICON_FONT_IDLE_DELAY);
+        }
+        if !deferred_emoji_font_loaded {
+            extras.push(last_user_activity + DEFERRED_EMOJI_FONT_IDLE_DELAY);
+        }
+        let deadlines = state.idle_wait_deadlines(now, extras);
+        let keys_held = event_pump
+            .keyboard_state()
+            .pressed_scancodes()
+            .next()
+            .is_some();
+        let interaction_active = keys_held || state.frame_pacing_deferred_for_typing(now);
+        frame_pacing_sleep = if let Some(timeout) =
+            idle_wait_timeout(now, &deadlines, interaction_active, config.show_fps_overlay)
+        {
+            queued_sdl_event = event_pump.wait_event_timeout(idle_wait_timeout_ms(timeout));
+            Duration::from_secs(0)
+        } else if state.frame_pacing_deferred_for_typing(now) {
             Duration::from_secs(0)
         } else {
             pace_frame_to_120fps(frame_started)
@@ -24465,6 +24583,7 @@ impl InlineCompletionWorkerState {
                         item,
                         error,
                     });
+                    ping_shell_wakeup();
                 } else {
                     return;
                 }
@@ -24504,6 +24623,10 @@ impl InlineCompletionWorkerState {
         if let Some(request) = request {
             let _ = self.request_tx.send(request);
         }
+    }
+
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.due_at)
     }
 
     fn take_latest_result(&self) -> Option<InlineCompletionWorkerResult> {
@@ -24563,6 +24686,7 @@ impl LspSyncWorkerState {
                             revision: request.revision,
                             error,
                         });
+                        ping_shell_wakeup();
                     } else {
                         return;
                     }
@@ -24647,6 +24771,10 @@ impl LspSyncWorkerState {
         Ok(())
     }
 
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.values().map(|pending| pending.due_at).min()
+    }
+
     fn take_results(&mut self) -> Vec<LspSyncWorkerResult> {
         let Ok(mut results) = self.results.lock() else {
             return Vec::new();
@@ -24712,6 +24840,7 @@ impl AutocompleteWorkerState {
                         query: request.query,
                         entries,
                     });
+                    ping_shell_wakeup();
                 } else {
                     return;
                 }
@@ -24768,6 +24897,10 @@ impl AutocompleteWorkerState {
         if let Some(request) = request {
             let _ = self.request_tx.send(request);
         }
+    }
+
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.due_at)
     }
 
     fn take_latest_result(&self) -> Option<AutocompleteWorkerResult> {
@@ -26039,6 +26172,7 @@ impl VimSearchWorkerState {
                         query: request.query,
                         data,
                     });
+                    ping_shell_wakeup();
                 } else {
                     return;
                 }
@@ -26093,6 +26227,10 @@ impl VimSearchWorkerState {
         }
     }
 
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.due_at)
+    }
+
     fn take_latest_result(&self) -> Option<VimSearchWorkerResult> {
         let mut results = self.results.lock().ok()?;
         results.drain(..).next_back()
@@ -26142,6 +26280,7 @@ impl WorkspaceSearchWorkerState {
                         query: request.query,
                         data,
                     });
+                    ping_shell_wakeup();
                 } else {
                     return;
                 }
@@ -26184,6 +26323,10 @@ impl WorkspaceSearchWorkerState {
         if let Some(request) = request {
             let _ = self.request_tx.send(request);
         }
+    }
+
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.due_at)
     }
 
     fn take_latest_result(&self) -> Option<WorkspaceSearchWorkerResult> {
@@ -26277,6 +26420,7 @@ impl FileReloadWorkerState {
                         let result = process_file_reload_request(request);
                         if let Ok(mut results) = worker_results.lock() {
                             results.push(result);
+                            ping_shell_wakeup();
                         } else {
                             return;
                         }
@@ -26412,12 +26556,14 @@ fn enqueue_file_reload_event(event: NotifyEvent, changed_paths: &Arc<Mutex<Vec<P
     }
     if let Ok(mut queued_paths) = changed_paths.lock() {
         queued_paths.extend(event.paths);
+        ping_shell_wakeup();
     }
 }
 
 fn push_file_reload_worker_error(errors: &Arc<Mutex<Vec<String>>>, message: String) {
     if let Ok(mut errors) = errors.lock() {
         errors.push(message);
+        ping_shell_wakeup();
     }
 }
 
@@ -26561,6 +26707,7 @@ impl SyntaxRefreshWorkerState {
                         );
                         if let Ok(mut results) = worker_results.lock() {
                             results.push(result);
+                            ping_shell_wakeup();
                         } else {
                             return;
                         }

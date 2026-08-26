@@ -967,6 +967,7 @@ fn push_streamed_command_update(
 ) {
     if let Ok(mut updates) = updates.lock() {
         updates.push(update);
+        ping_shell_wakeup();
     }
 }
 

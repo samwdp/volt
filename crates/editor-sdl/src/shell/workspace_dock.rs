@@ -115,6 +115,7 @@ impl WorkspaceDockBranchCache {
                 if let Ok(mut guard) = inflight_map.lock() {
                     guard.remove(&root);
                 }
+                super::ping_shell_wakeup();
             });
         }
     }

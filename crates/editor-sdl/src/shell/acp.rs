@@ -3985,7 +3985,7 @@ async fn connect_acp_client(
             child,
         },
     );
-    let _ = state.borrow().event_tx.send(AcpEvent::Connected {
+    state.borrow().emit(AcpEvent::Connected {
         buffer_id,
         client_id: config.id,
         session_id,
@@ -4014,10 +4014,9 @@ async fn send_acp_prompt(
         .await
         .map_err(|error| format!("ACP prompt failed: {error}"))?;
     if matches!(response.stop_reason, StopReason::EndTurn) {
-        let _ = state
+        state
             .borrow()
-            .event_tx
-            .send(AcpEvent::SessionFinished { session_id });
+            .emit(AcpEvent::SessionFinished { session_id });
     }
     Ok(())
 }
@@ -4041,7 +4040,7 @@ async fn list_acp_sessions(
         .list_sessions(request)
         .await
         .map_err(|error| format!("ACP list sessions failed: {error}"))?;
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionList {
+    state.borrow().emit(AcpEvent::SessionList {
         buffer_id,
         sessions: response.sessions,
     });
@@ -4080,7 +4079,7 @@ async fn load_acp_session(
         .map_err(|error| format!("ACP load session failed: {error}"))?;
     resolve_all_pending_permissions(&state, &session_id);
     resolve_all_pending_permissions(&state, &target_session_id);
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionLoaded {
+    state.borrow().emit(AcpEvent::SessionLoaded {
         buffer_id,
         old_session_id: session_id,
         new_session_id: target_session_id,
@@ -4110,7 +4109,7 @@ async fn set_acp_config_option(
         .set_session_config_option(request)
         .await
         .map_err(|error| format!("ACP set config option failed: {error}"))?;
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionConfigSet {
+    state.borrow().emit(AcpEvent::SessionConfigSet {
         session_id,
         config_id,
         value_id,
@@ -4136,7 +4135,7 @@ async fn set_acp_mode(
         .set_session_mode(request)
         .await
         .map_err(|error| format!("ACP set mode failed: {error}"))?;
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionModeSet {
+    state.borrow().emit(AcpEvent::SessionModeSet {
         session_id,
         mode_id,
     });
@@ -4161,7 +4160,7 @@ async fn set_acp_model(
         .set_session_model(request)
         .await
         .map_err(|error| format!("ACP set model failed: {error}"))?;
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionModelSet {
+    state.borrow().emit(AcpEvent::SessionModelSet {
         session_id,
         model_id,
     });
@@ -4180,7 +4179,7 @@ async fn disconnect_acp_session(
         let _ = session.child.kill().await;
     }
     resolve_all_pending_permissions(&state, &session_id);
-    let _ = state.borrow().event_tx.send(AcpEvent::Disconnected {
+    state.borrow().emit(AcpEvent::Disconnected {
         session_id,
         message: "Disconnected.".to_owned(),
     });
@@ -4242,7 +4241,7 @@ fn resolve_permission_response(
         PermissionDecision::Approve => "Permission approved.",
         PermissionDecision::Deny => "Permission denied.",
     };
-    let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
+    state.borrow().emit(AcpEvent::PermissionResolved {
         request_id,
         session_id: pending.session_id.clone(),
         message: label.to_owned(),
@@ -4274,7 +4273,7 @@ fn resolve_permission_option(
     let _ = pending.responder.send(RequestPermissionOutcome::Selected(
         SelectedPermissionOutcome::new(option_id.clone()),
     ));
-    let _ = state.borrow().event_tx.send(AcpEvent::PermissionResolved {
+    state.borrow().emit(AcpEvent::PermissionResolved {
         request_id,
         session_id: pending.session_id.clone(),
         message,
@@ -4326,17 +4325,15 @@ async fn drain_stderr(
 }
 
 fn send_client_log(state: &Rc<RefCell<AcpRuntimeState>>, buffer_id: BufferId, message: String) {
-    let _ = state
+    state
         .borrow()
-        .event_tx
-        .send(AcpEvent::ClientLog { buffer_id, message });
+        .emit(AcpEvent::ClientLog { buffer_id, message });
 }
 
 fn send_client_failure(state: &Rc<RefCell<AcpRuntimeState>>, buffer_id: BufferId, message: String) {
-    let _ = state
+    state
         .borrow()
-        .event_tx
-        .send(AcpEvent::ClientFailed { buffer_id, message });
+        .emit(AcpEvent::ClientFailed { buffer_id, message });
 }
 
 fn send_session_lines(
@@ -4344,7 +4341,7 @@ fn send_session_lines(
     session_id: &agent_client_protocol::SessionId,
     lines: Vec<String>,
 ) {
-    let _ = state.borrow().event_tx.send(AcpEvent::SessionLines {
+    state.borrow().emit(AcpEvent::SessionLines {
         session_id: session_id.clone(),
         lines,
     });
@@ -4366,6 +4363,12 @@ impl AcpRuntimeState {
             pending_permissions: VecDeque::new(),
             next_permission_request_id: 1,
             event_tx,
+        }
+    }
+
+    fn emit(&self, event: AcpEvent) {
+        if self.event_tx.send(event).is_ok() {
+            super::ping_shell_wakeup();
         }
     }
 }
@@ -4406,7 +4409,7 @@ impl Client for AcpClient {
                 options: args.options.clone(),
                 responder: tx,
             });
-            let _ = state.event_tx.send(AcpEvent::PermissionRequested {
+            state.emit(AcpEvent::PermissionRequested {
                 request_id,
                 session_id: args.session_id.clone(),
                 tool_call: args.tool_call.clone(),
@@ -4626,65 +4629,59 @@ fn handle_session_update(
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
             if let ContentBlock::Text(text) = chunk.content {
-                let _ = state.borrow().event_tx.send(AcpEvent::SessionUserPrompt {
+                state.borrow().emit(AcpEvent::SessionUserPrompt {
                     session_id,
                     prompt: text.text,
                 });
             }
         }
         SessionUpdate::AgentMessageChunk(chunk) => {
-            let _ = state.borrow().event_tx.send(AcpEvent::SessionAgentChunk {
+            state.borrow().emit(AcpEvent::SessionAgentChunk {
                 session_id,
                 content: chunk.content,
             });
         }
         SessionUpdate::AgentThoughtChunk(_) => {}
         SessionUpdate::ToolCall(call) => {
-            let _ = state.borrow().event_tx.send(AcpEvent::SessionToolCall {
+            state.borrow().emit(AcpEvent::SessionToolCall {
                 session_id,
                 tool_call: call,
             });
         }
         SessionUpdate::ToolCallUpdate(update) => {
-            let _ = state
+            state
                 .borrow()
-                .event_tx
-                .send(AcpEvent::SessionToolCallUpdate { session_id, update });
+                .emit(AcpEvent::SessionToolCallUpdate { session_id, update });
         }
         SessionUpdate::Plan(plan) => {
-            let _ = state
+            state
                 .borrow()
-                .event_tx
-                .send(AcpEvent::SessionPlan { session_id, plan });
+                .emit(AcpEvent::SessionPlan { session_id, plan });
         }
         SessionUpdate::AvailableCommandsUpdate(update) => {
             let commands = update.available_commands.clone();
-            let _ = state.borrow().event_tx.send(AcpEvent::SessionCommands {
+            state.borrow().emit(AcpEvent::SessionCommands {
                 session_id: session_id.clone(),
                 commands,
             });
         }
         SessionUpdate::CurrentModeUpdate(update) => {
             let mode_id = update.current_mode_id.clone();
-            let _ = state.borrow().event_tx.send(AcpEvent::SessionModeUpdate {
+            state.borrow().emit(AcpEvent::SessionModeUpdate {
                 session_id: session_id.clone(),
                 mode_id,
             });
         }
         SessionUpdate::ConfigOptionUpdate(update) => {
-            let _ = state
-                .borrow()
-                .event_tx
-                .send(AcpEvent::SessionConfigOptions {
-                    session_id: session_id.clone(),
-                    options: update.config_options,
-                });
+            state.borrow().emit(AcpEvent::SessionConfigOptions {
+                session_id: session_id.clone(),
+                options: update.config_options,
+            });
         }
         SessionUpdate::SessionInfoUpdate(update) => {
-            let _ = state
+            state
                 .borrow()
-                .event_tx
-                .send(AcpEvent::SessionInfoUpdated { session_id, update });
+                .emit(AcpEvent::SessionInfoUpdated { session_id, update });
         }
         _ => {}
     }
