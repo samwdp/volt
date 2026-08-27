@@ -8865,6 +8865,7 @@ fn render_buffer_draws_show_paren_html_tag_highlight() -> Result<(), String> {
     )?;
     {
         let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("html".to_owned()));
         buffer.set_cursor(TextPoint::new(0, 1));
     }
 
@@ -8916,6 +8917,82 @@ fn render_buffer_draws_show_paren_html_tag_highlight() -> Result<(), String> {
                 if *color == to_render_color(match_color)
         )),
         "expected show-paren HTML tag highlight, scene={scene:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn render_buffer_skips_show_paren_html_tag_highlight_for_csharp() -> Result<(), String> {
+    let match_color = Color::RGBA(9, 8, 7, 120);
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme").with_token(
+                TOKEN_SHOW_PAREN_MATCH,
+                editor_theme::Color::rgba(9, 8, 7, 120),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*show-paren-csharp*",
+        vec!["<div>hi</div>".to_owned()],
+    )?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_language_id(Some("csharp".to_owned()));
+        buffer.set_cursor(TextPoint::new(0, 1));
+    }
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "test-theme",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().all(|command| !matches!(
+            command,
+            DrawCommand::FillRoundedRect { color, .. }
+                if *color == to_render_color(match_color)
+        )),
+        "C# buffers should not highlight HTML tags, scene={scene:?}"
     );
     Ok(())
 }

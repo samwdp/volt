@@ -1,4 +1,6 @@
 //! Emacs-style show-paren highlighting for delimiters and HTML/XML tags.
+//!
+//! Tag matching for show-paren and `%` is limited to `html`, `xml`, `jsx`, and `tsx`.
 
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
@@ -25,7 +27,7 @@ pub fn package() -> PluginPackage {
     PluginPackage::new(
         "show-paren",
         true,
-        "Highlights the matching delimiter or HTML/XML tag at the cursor.",
+        "Highlights the matching delimiter, and HTML/XML tags in html/xml/jsx/tsx buffers.",
     )
     .with_commands(vec![PluginCommand::new(
         "show-paren.toggle",

@@ -3046,7 +3046,11 @@ pub(super) fn render_buffer(
         let mut visual_row = 0usize;
         let show_paren = buffer
             .show_paren_enabled(user_library.show_paren_config().enabled)
-            .then(|| buffer.text.show_paren_at(view_state.cursor))
+            .then(|| {
+                buffer
+                    .text
+                    .show_paren_at(view_state.cursor, buffer.language_id())
+            })
             .flatten();
         for wrapped in wrapped_lines {
             let line_index = wrapped.line_index;

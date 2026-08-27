@@ -3617,7 +3617,7 @@ impl InputField {
             VimTextObjectKind::Delimited { open, close } => {
                 buffer.delimited_range_at(buffer.cursor(), open, close, around)
             }
-            VimTextObjectKind::Tag => buffer.tag_range_at(buffer.cursor(), around),
+            VimTextObjectKind::Tag => buffer.tag_range_at(buffer.cursor(), around, None),
         }?;
         Some((
             buffer.point_to_char_index(range.start()),
@@ -7184,13 +7184,14 @@ impl ShellBuffer {
     }
 
     fn move_matching_delimiter(&mut self) -> bool {
+        let language_id = self.language_id.clone();
         if let Some(pane) = self.active_aux_text_pane_state_mut() {
-            return pane.text.move_matching_delimiter();
+            return pane.text.move_matching_delimiter(language_id.as_deref());
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
-            return pane.text.move_matching_delimiter();
+            return pane.text.move_matching_delimiter(language_id.as_deref());
         }
-        self.text.move_matching_delimiter()
+        self.text.move_matching_delimiter(language_id.as_deref())
     }
 
     fn move_sentence_forward(&mut self) -> bool {
@@ -7581,7 +7582,10 @@ impl ShellBuffer {
                 self.text
                     .delimited_range_at(self.cursor_point(), open, close, around)
             }
-            VimTextObjectKind::Tag => self.text.tag_range_at(self.cursor_point(), around),
+            VimTextObjectKind::Tag => {
+                self.text
+                    .tag_range_at(self.cursor_point(), around, self.language_id())
+            }
         }
     }
 
@@ -27530,6 +27534,7 @@ fn move_text_buffer_with_motion(
     buffer: &mut TextBuffer,
     motion: ShellMotion,
     count: Option<usize>,
+    language_id: Option<&str>,
 ) -> bool {
     let repeat = count.unwrap_or(1).max(1);
     match motion {
@@ -27573,7 +27578,7 @@ fn move_text_buffer_with_motion(
         ShellMotion::BigWordEndBackward => (0..repeat).fold(false, |moved, _| {
             buffer.move_big_word_end_backward() || moved
         }),
-        ShellMotion::MatchPair => buffer.move_matching_delimiter(),
+        ShellMotion::MatchPair => buffer.move_matching_delimiter(language_id),
         ShellMotion::LineStart => {
             buffer.set_cursor(TextPoint::new(buffer.cursor().line, 0));
             true
@@ -27792,12 +27797,19 @@ fn apply_multicursor_motion(
         .multicursor
         .clone()
         .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let language_id = {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        shell_buffer(runtime, buffer_id)?
+            .language_id()
+            .map(str::to_owned)
+    };
     let mut buffer = TextBuffer::from_text(&state.match_text);
     buffer.set_cursor(buffer.point_from_char_index(state.cursor_offset));
     let moved = move_text_buffer_with_motion(
         &mut buffer,
         motion,
         shell_ui_mut(runtime)?.vim_mut().take_count(),
+        language_id.as_deref(),
     );
     state.cursor_offset = buffer.point_to_char_index(buffer.cursor());
     shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
