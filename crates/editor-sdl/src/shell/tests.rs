@@ -7811,6 +7811,58 @@ fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String>
 }
 
 #[test]
+fn buffer_save_does_not_synchronously_refresh_git_status_buffers() -> Result<(), String> {
+    // Regression: buffer.save used to block the UI on a full sync `git status` snapshot
+    // whenever a git-status buffer was open (:w / <leader>w). workspace.save did not.
+    let repo = init_git_repo_with_commit("buffer-save-no-sync-git-status")?;
+    let mut state = state_with_user_library()?;
+    let status_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let (_, _, untracked_before) = git_status_snapshot_paths(&state, status_id)?;
+    assert!(untracked_before.is_empty());
+
+    let path = repo.join("note.txt");
+    std::fs::write(&path, "seed\n").map_err(|error| error.to_string())?;
+    let file_id = open_workspace_file(&mut state.runtime, &path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, file_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("edit\n");
+        assert!(buffer.is_dirty());
+    }
+
+    std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
+
+    let started = Instant::now();
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+    let buffer_save_elapsed = started.elapsed();
+
+    let (_, _, untracked_after_save) = git_status_snapshot_paths(&state, status_id)?;
+    assert!(
+        !untracked_after_save.contains("beta.txt"),
+        "buffer.save must not synchronously refresh open git-status buffers (elapsed {buffer_save_elapsed:?}); got {untracked_after_save:?}"
+    );
+    assert!(!shell_buffer(&state.runtime, file_id)?.is_dirty());
+    assert!(
+        buffer_save_elapsed < Duration::from_millis(500),
+        "buffer.save blocked too long with git-status open: {buffer_save_elapsed:?}"
+    );
+
+    refresh_git_status_buffer(&mut state.runtime, status_id)?;
+    let (_, _, untracked_after_refresh) = git_status_snapshot_paths(&state, status_id)?;
+    assert_eq!(
+        untracked_after_refresh,
+        BTreeSet::from(["beta.txt".to_owned(), "note.txt".to_owned()])
+    );
+
+    drop(state);
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_status_focus_refresh_reuses_recent_snapshot() -> Result<(), String> {
     let repo = init_git_repo_with_commit("git-status-focus-refresh-cache")?;
 

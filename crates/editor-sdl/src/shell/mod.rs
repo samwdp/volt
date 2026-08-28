@@ -13716,6 +13716,9 @@ impl ShellState {
         if !ui.picker_visible()
             && !matches!(ui.input_mode(), InputMode::Insert | InputMode::Replace)
         {
+            if ui.vim().multicursor.is_some() {
+                modes.push(KeymapScope::Multicursor);
+            }
             modes.push(KeymapScope::Workspace);
         }
         Ok(modes)
@@ -14216,6 +14219,12 @@ impl ShellState {
                 self.clear_stale_vim_count()?;
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
                 self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+
+            if self.ui()?.vim().multicursor.is_some()
+                && self.handle_key_sequence(&token, KeymapScope::Multicursor, vim_mode)?
+            {
                 return Ok(());
             }
 
@@ -18810,6 +18819,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 VimEditAction::MulticursorAddNextMatch => {
                     add_next_multicursor_match(runtime)?;
                 }
+                VimEditAction::MulticursorAddPreviousMatch => {
+                    add_previous_multicursor_match(runtime)?;
+                }
                 VimEditAction::MulticursorSelectAllMatches => {
                     add_next_multicursor_match(runtime)?;
                     while shell_ui(runtime)?.vim().multicursor.is_some() {
@@ -19043,7 +19055,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .or_else(|| active_shell_buffer_id(runtime).ok())
                 .ok_or_else(|| "buffer.save hook missing buffer".to_owned())?;
             save_buffer(runtime, workspace_id, buffer_id)?;
-            let _ = refresh_git_status_buffers(runtime);
+            // Invalidate only — do not sync-refresh open git-status buffers here.
+            // A full `git status` snapshot blocks the UI for hundreds of ms to seconds
+            // (:w / <leader>w). Status refreshes on focus / explicit git commands instead.
+            let _ = invalidate_git_state_after_save(runtime);
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -19077,6 +19092,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     .or_else(|| runtime.model().active_workspace_id().ok())
                     .ok_or_else(|| "workspace.save hook missing workspace".to_owned())?;
                 save_workspace(runtime, workspace_id)?;
+                let _ = invalidate_git_state_after_save(runtime);
                 Ok(())
             },
         )
@@ -27687,29 +27703,68 @@ fn find_next_multicursor_match(
             (exact == Some(range)).then_some(range)
         })
     };
-    search_range(
-        after_char_index.min(
-            haystack
-                .len()
-                .saturating_sub(needle_chars.len())
-                .saturating_add(1),
-        ),
-        haystack
-            .len()
-            .saturating_sub(needle_chars.len())
-            .saturating_add(1),
-    )
-    .or_else(|| {
-        search_range(
-            0,
-            after_char_index.min(
-                haystack
-                    .len()
-                    .saturating_sub(needle_chars.len())
-                    .saturating_add(1),
-            ),
-        )
-    })
+    let search_end = haystack
+        .len()
+        .saturating_sub(needle_chars.len())
+        .saturating_add(1);
+    search_range(after_char_index.min(search_end), search_end)
+        .or_else(|| search_range(0, after_char_index.min(search_end)))
+}
+
+fn find_previous_multicursor_match(
+    buffer: &ShellBuffer,
+    needle: &str,
+    before_char_index: usize,
+    existing: &[TextRange],
+) -> Option<TextRange> {
+    if needle.is_empty() {
+        return None;
+    }
+    let haystack = buffer.text.text().chars().collect::<Vec<_>>();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    if needle_chars.is_empty() || haystack.len() < needle_chars.len() {
+        return None;
+    }
+    let existing = existing
+        .iter()
+        .map(|range| {
+            (
+                buffer.text.point_to_char_index(range.start()),
+                buffer.text.point_to_char_index(range.end()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let search_end = haystack
+        .len()
+        .saturating_sub(needle_chars.len())
+        .saturating_add(1);
+    let search_range_rev = |start: usize, end: usize| {
+        (start..end).rev().find_map(|candidate| {
+            let candidate_end = candidate.saturating_add(needle_chars.len());
+            if candidate_end > haystack.len()
+                || haystack[candidate..candidate_end] != needle_chars[..]
+                || existing.iter().any(|&(existing_start, existing_end)| {
+                    existing_start == candidate && existing_end == candidate_end
+                })
+            {
+                return None;
+            }
+            let start_point = buffer.text.point_from_char_index(candidate);
+            let end_point = buffer.text.point_from_char_index(candidate_end);
+            let range = TextRange::new(start_point, end_point);
+            let exact = buffer
+                .text
+                .word_range_at(start_point, false, 1)
+                .or_else(|| {
+                    buffer
+                        .text
+                        .word_range_at_kind(start_point, WordKind::BigWord, false, 1)
+                });
+            (exact == Some(range)).then_some(range)
+        })
+    };
+    let before = before_char_index.min(search_end);
+    search_range_rev(0, before).or_else(|| search_range_rev(before, search_end))
 }
 
 fn sync_multicursor_primary_cursor(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -27867,17 +27922,46 @@ fn add_next_multicursor_match(runtime: &mut EditorRuntime) -> Result<(), String>
     let Some(next) = next else {
         return Ok(());
     };
-    state.ranges.push(next);
+    push_multicursor_range(runtime, &mut state, next)
+}
+
+fn add_previous_multicursor_match(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if active_shell_buffer_vim_targets_input(runtime)? || active_shell_buffer_is_terminal(runtime)?
+    {
+        return Ok(());
+    }
+    let Some(mut state) = shell_ui(runtime)?.vim().multicursor.clone() else {
+        return Ok(());
+    };
+    let before_char = active_shell_buffer_mut(runtime)?
+        .text
+        .point_to_char_index(state.ranges[state.primary].start());
+    let previous = {
+        let buffer = active_shell_buffer_mut(runtime)?;
+        find_previous_multicursor_match(buffer, &state.match_text, before_char, &state.ranges)
+    };
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    push_multicursor_range(runtime, &mut state, previous)
+}
+
+fn push_multicursor_range(
+    runtime: &mut EditorRuntime,
+    state: &mut MulticursorState,
+    range: TextRange,
+) -> Result<(), String> {
+    state.ranges.push(range);
     let buffer = active_shell_buffer_mut(runtime)?;
     state
         .ranges
-        .sort_by_key(|range| buffer.text.point_to_char_index(range.start()));
+        .sort_by_key(|candidate| buffer.text.point_to_char_index(candidate.start()));
     state.primary = state
         .ranges
         .iter()
-        .position(|range| *range == next)
+        .position(|candidate| *candidate == range)
         .unwrap_or(state.primary);
-    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state);
+    shell_ui_mut(runtime)?.vim_mut().multicursor = Some(state.clone());
     sync_multicursor_primary_cursor(runtime)?;
     Ok(())
 }
@@ -28073,6 +28157,110 @@ fn apply_multicursor_text_object_operator(
             ui.vim_mut().clear_transient();
         }
         VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {}
+    }
+    Ok(true)
+}
+
+fn apply_multicursor_operator_motion(
+    runtime: &mut EditorRuntime,
+    operator: VimOperator,
+    operator_count: usize,
+    motion: ShellMotion,
+    motion_count: Option<usize>,
+) -> Result<bool, String> {
+    let motion = change_operator_word_motion(operator, motion);
+    if matches!(
+        motion,
+        ShellMotion::Down | ShellMotion::Up | ShellMotion::FirstLine | ShellMotion::LastLine
+    ) {
+        return Ok(false);
+    }
+
+    let state = shell_ui(runtime)?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or_else(|| "multicursor state is missing".to_owned())?;
+    let language_id = {
+        let buffer_id = active_shell_buffer_id(runtime)?;
+        shell_buffer(runtime, buffer_id)?
+            .language_id()
+            .map(str::to_owned)
+    };
+    let total = state.match_text.chars().count();
+    let original_offset = state.cursor_offset.min(total);
+    let mut buffer = TextBuffer::from_text(&state.match_text);
+    buffer.set_cursor(buffer.point_from_char_index(original_offset));
+    let repeat = operator_count
+        .saturating_mul(motion_count.unwrap_or(1))
+        .max(1);
+    if !move_text_buffer_with_motion(&mut buffer, motion, Some(repeat), language_id.as_deref()) {
+        return Ok(false);
+    }
+    let target_offset = buffer.point_to_char_index(buffer.cursor()).min(total);
+    let inclusive = motion_is_inclusive(motion);
+    let (start, end) = if target_offset >= original_offset {
+        let end = if inclusive {
+            target_offset.saturating_add(1).min(total)
+        } else {
+            target_offset
+        };
+        (original_offset, end)
+    } else {
+        let end = if inclusive {
+            original_offset.saturating_add(1).min(total)
+        } else {
+            original_offset
+        };
+        (target_offset, end)
+    };
+    if start >= end {
+        return Ok(false);
+    }
+
+    let selected = state
+        .match_text
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<String>();
+    if matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    ) {
+        store_yank_register(runtime, YankRegister::Character(selected.clone()), true)?;
+    }
+    match operator {
+        VimOperator::Delete | VimOperator::Change => {
+            let prefix = state.match_text.chars().take(start).collect::<String>();
+            let suffix = state.match_text.chars().skip(end).collect::<String>();
+            let replacement = format!("{prefix}{suffix}");
+            replace_multicursor_ranges(runtime, &replacement, start, None)?;
+            if operator == VimOperator::Change {
+                let ui = shell_ui_mut(runtime)?;
+                ui.input_mode = InputMode::Insert;
+                ui.vim_mut().clear_transient();
+                mark_change_finish_on_normal(runtime)?;
+            } else {
+                let ui = shell_ui_mut(runtime)?;
+                ui.input_mode = InputMode::Normal;
+                ui.vim_mut().clear_transient();
+            }
+        }
+        VimOperator::Yank => {
+            let ui = shell_ui_mut(runtime)?;
+            ui.vim_mut().clear_transient();
+        }
+        VimOperator::ToggleCase | VimOperator::Lowercase | VimOperator::Uppercase => {
+            let prefix = state.match_text.chars().take(start).collect::<String>();
+            let middle = transform_case_text(&selected, operator);
+            let suffix = state.match_text.chars().skip(end).collect::<String>();
+            let replacement = format!("{prefix}{middle}{suffix}");
+            replace_multicursor_ranges(runtime, &replacement, end, None)?;
+            let ui = shell_ui_mut(runtime)?;
+            ui.input_mode = InputMode::Normal;
+            ui.vim_mut().clear_transient();
+        }
     }
     Ok(true)
 }
@@ -31916,6 +32104,12 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
 
     if let Some((operator, count)) = pending_operator {
         let motion_count = shell_ui_mut(runtime)?.vim_mut().take_count();
+        if shell_ui(runtime)?.vim().multicursor.is_some()
+            && !active_shell_buffer_vim_targets_input(runtime)?
+            && apply_multicursor_operator_motion(runtime, operator, count, motion, motion_count)?
+        {
+            return Ok(());
+        }
         return apply_operator_motion(runtime, operator, count, motion, motion_count);
     }
 
@@ -37260,7 +37454,8 @@ fn plugin_buffer_binding_scope_active(
         editor_plugin_api::PluginKeymapScope::Autocomplete
         | editor_plugin_api::PluginKeymapScope::Hover
         | editor_plugin_api::PluginKeymapScope::Dap
-        | editor_plugin_api::PluginKeymapScope::WorkspaceDock => false,
+        | editor_plugin_api::PluginKeymapScope::WorkspaceDock
+        | editor_plugin_api::PluginKeymapScope::Multicursor => false,
     }
 }
 

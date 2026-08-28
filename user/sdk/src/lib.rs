@@ -2388,6 +2388,7 @@ pub enum VimEditAction {
     Undo,
     Redo,
     MulticursorAddNextMatch,
+    MulticursorAddPreviousMatch,
     MulticursorSelectAllMatches,
     StartGPrefix,
     StartFindForward,
@@ -2481,6 +2482,7 @@ impl VimEditAction {
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::MulticursorAddNextMatch => "multicursor-add-next-match",
+            Self::MulticursorAddPreviousMatch => "multicursor-add-previous-match",
             Self::MulticursorSelectAllMatches => "multicursor-select-all-matches",
             Self::StartGPrefix => "start-g-prefix",
             Self::StartFindForward => "start-find-forward",
@@ -2555,6 +2557,7 @@ impl VimEditAction {
             "undo" => Some(Self::Undo),
             "redo" => Some(Self::Redo),
             "multicursor-add-next-match" => Some(Self::MulticursorAddNextMatch),
+            "multicursor-add-previous-match" => Some(Self::MulticursorAddPreviousMatch),
             "multicursor-select-all-matches" => Some(Self::MulticursorSelectAllMatches),
             "start-g-prefix" => Some(Self::StartGPrefix),
             "start-find-forward" => Some(Self::StartFindForward),
@@ -3120,6 +3123,8 @@ pub enum PluginKeymapScope {
     Dap,
     /// Workspace Dock Minor Mode (vertical workspace list focus).
     WorkspaceDock,
+    /// Multicursor Mode: linked cursors active on the focused buffer.
+    Multicursor,
 }
 
 /// Modal Vim state that can activate a keybinding.
@@ -3913,6 +3918,7 @@ mod tests {
             VimEditAction::Undo,
             VimEditAction::Redo,
             VimEditAction::MulticursorAddNextMatch,
+            VimEditAction::MulticursorAddPreviousMatch,
             VimEditAction::MulticursorSelectAllMatches,
             VimEditAction::StartGPrefix,
             VimEditAction::StartFindForward,

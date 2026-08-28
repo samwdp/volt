@@ -361,6 +361,7 @@ fn map_scope(scope: PluginKeymapScope) -> KeymapScope {
         PluginKeymapScope::Hover => KeymapScope::Hover,
         PluginKeymapScope::Dap => KeymapScope::Dap,
         PluginKeymapScope::WorkspaceDock => KeymapScope::WorkspaceDock,
+        PluginKeymapScope::Multicursor => KeymapScope::Multicursor,
     }
 }
 

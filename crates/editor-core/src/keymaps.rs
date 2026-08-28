@@ -176,6 +176,8 @@ pub enum KeymapScope {
     Dap,
     /// Workspace Dock Minor Mode (vertical workspace list focus).
     WorkspaceDock,
+    /// Multicursor Mode: linked cursors active on the focused buffer.
+    Multicursor,
 }
 
 impl fmt::Display for KeymapScope {
@@ -188,6 +190,7 @@ impl fmt::Display for KeymapScope {
             Self::Hover => formatter.write_str("hover"),
             Self::Dap => formatter.write_str("dap"),
             Self::WorkspaceDock => formatter.write_str("workspace-dock"),
+            Self::Multicursor => formatter.write_str("multicursor"),
         }
     }
 }

@@ -817,9 +817,15 @@ pub(super) fn refresh_git_status_if_active_if_due(
     refresh_git_status_buffer_for_root(runtime, buffer_id, &root, now)
 }
 
-pub(super) fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+/// Marks fringe/summary stale after a disk mutation without blocking on `git status`.
+pub(super) fn invalidate_git_state_after_save(runtime: &mut EditorRuntime) -> Result<(), String> {
     mark_git_fringe_snapshots_stale(runtime)?;
     invalidate_git_identity_for_active_workspace(runtime);
+    Ok(())
+}
+
+pub(super) fn refresh_git_status_buffers(runtime: &mut EditorRuntime) -> Result<(), String> {
+    invalidate_git_state_after_save(runtime)?;
     let buffer_ids = {
         let ui = shell_ui(runtime)?;
         ui.buffers

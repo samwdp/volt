@@ -369,6 +369,49 @@ fn vim_multicursor_gn_adds_next_exact_match() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn vim_multicursor_n_and_p_add_matches_while_active() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(&mut state, "test\nalpha\ntest\nbeta\ntest")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(2, 0));
+
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.match_text, "test");
+    assert_eq!(mc.ranges.len(), 1);
+
+    state.handle_text_input("n")?;
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.ranges.len(), 2);
+    assert_eq!(state.active_buffer_mut()?.cursor_row(), 4);
+
+    state.handle_text_input("p")?;
+    let mc = state
+        .ui()?
+        .vim()
+        .multicursor
+        .clone()
+        .ok_or("missing multicursor state")?;
+    assert_eq!(mc.ranges.len(), 3);
+    assert_eq!(state.active_buffer_mut()?.cursor_row(), 0);
+
+    // Without multicursor, bare `n` must keep search-repeat behavior.
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+    assert!(state.ui()?.vim().multicursor.is_none());
+    Ok(())
+}
+
+#[test]
 fn vim_multicursor_caw_changes_all_matches() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = user_shell_state()?;
     set_active_buffer_text(
@@ -395,6 +438,37 @@ fn vim_multicursor_caw_changes_all_matches() -> Result<(), Box<dyn std::error::E
     assert_eq!(
         state.active_buffer_mut()?.text.text(),
         "Volt2 is a new editor. Volt2 does things like Emacs + vim"
+    );
+    Ok(())
+}
+
+#[test]
+fn vim_multicursor_cw_changes_all_matches() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = user_shell_state()?;
+    set_active_buffer_text(&mut state, "test\ntest\ntest\ntest")?;
+    state.active_buffer_mut()?.set_cursor(TextPoint::new(0, 0));
+
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+    state.handle_text_input("g")?;
+    state.handle_text_input("n")?;
+
+    state.handle_text_input("c")?;
+    state.handle_text_input("w")?;
+    assert_eq!(state.input_mode()?, InputMode::Insert);
+
+    state.handle_text_input("testing")?;
+    assert!(state.try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)?);
+
+    assert_eq!(state.input_mode()?, InputMode::Normal);
+    assert!(state.ui()?.vim().multicursor.is_none());
+    assert_eq!(
+        state.active_buffer_mut()?.text.text(),
+        "testing\ntesting\ntesting\ntesting"
     );
     Ok(())
 }

@@ -27,8 +27,12 @@ A project root path recorded in the Mark List for quick jump. List order matters
 _Avoid_: favorite, bookmark, pin, starred workspace
 
 **Minor Mode**:
-A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, Workspace Dock, autocomplete, hover, and DAP Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
+A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, Workspace Dock, autocomplete, hover, DAP Mode, and Multicursor Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
 _Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
+
+**Multicursor Mode**:
+The Minor Mode active while linked multicursors exist on the focused buffer. While it is active, chords such as `n`/`p` add next/previous matches instead of search-repeat/paste. Started by `g n` / `g N`; cleared on Normal-mode exit.
+_Avoid_: multi-cursor minor mode (as the spoken product name)
 
 **Popup**:
 The horizontal overlay that holds pickers, Command Stream, terminal, and similar buffers. Distinct from Workspace Dock.

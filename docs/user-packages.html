@@ -1003,10 +1003,13 @@ keybindings:
                     <h3 class="reveal">Multiple Cursors</h3>
                     <p class="reveal">
                         The <code>multicursor</code> package (<code>user/multicursor.rs</code>) adds
-                        multi-cursor editing support.  Two commands are provided:
-                        <code>multicursor.add-next-match</code> adds a cursor at the next occurrence of
-                        the current word, and <code>multicursor.select-all-matches</code> selects all
-                        occurrences in the buffer.  Default keybindings can be changed in the
+                        multi-cursor editing support.  Start with <code>g n</code>
+                        (<code>multicursor.add-next-match</code>) or select all with
+                        <code>g N</code> (<code>multicursor.select-all-matches</code>).
+                        While Multicursor Mode is active, bare <code>n</code> / <code>p</code> add
+                        the next / previous match without the <code>g</code> prefix
+                        (search-repeat and paste stay available once multicursor exits).
+                        Default keybindings can be changed in the
                         <code>.with_key_bindings(vec![...])</code> block in that file.
                     </p>
 
