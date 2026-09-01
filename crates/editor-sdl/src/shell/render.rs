@@ -1047,7 +1047,7 @@ pub(super) fn render_hover_overlay(
         blend_color(base_foreground, background, 0.46),
     );
     let row_height = line_height.max(1);
-    let width = overlay_width(pane_rect.width(), cell_width, 44, 74);
+    let width = hover_overlay_width(hover, provider, pane_rect.width(), cell_width);
     let body_columns = overlay_text_columns(width, 28, cell_width);
     let body_lines = wrap_hover_overlay_lines(
         provider,
@@ -1490,6 +1490,41 @@ pub(super) fn overlay_width(
         .min(available)
         .max(min_width);
     ((pane_width.saturating_mul(3)) / 4).clamp(min_width, max_width)
+}
+
+pub(super) fn hover_overlay_width(
+    hover: &HoverOverlay,
+    provider: &HoverProviderContent,
+    pane_width: u32,
+    cell_width: i32,
+) -> u32 {
+    // Body rows are drawn at x + 12 and wrapped via overlay_text_columns(width, 28, ...).
+    let mut content_width = 0u32;
+    for line in &provider.lines {
+        content_width =
+            content_width.max(monospace_text_width(line, cell_width).saturating_add(28));
+    }
+    // Title row: "{icon} {token}" on the left, "Focused"/"Preview" right-aligned.
+    let title = format!("{} {}", provider.provider_icon, hover.token);
+    let status_width = monospace_text_width("Preview", cell_width)
+        .max(monospace_text_width("Focused", cell_width));
+    content_width = content_width.max(
+        monospace_text_width(&title, cell_width)
+            .saturating_add(status_width)
+            .saturating_add(40),
+    );
+    // Tab strip: each tab is label + 16px padding + 4px gap, starting at x + 10.
+    let mut tabs_width = 14u32;
+    for tab in &hover.providers {
+        let label = format!("{} {}", tab.provider_icon, tab.provider_label);
+        tabs_width = tabs_width
+            .saturating_add(monospace_text_width(&label, cell_width))
+            .saturating_add(20);
+    }
+    content_width = content_width.max(tabs_width);
+    let available = pane_width.saturating_sub(16);
+    let min_width = ((cell_width.max(1) as u32) * 44).min(available);
+    content_width.clamp(min_width, available.max(min_width))
 }
 
 pub(super) fn overlay_text_columns(width: u32, horizontal_padding: u32, cell_width: i32) -> usize {

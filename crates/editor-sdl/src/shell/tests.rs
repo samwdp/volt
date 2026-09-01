@@ -10418,6 +10418,40 @@ fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
 }
 
 #[test]
+fn hover_overlay_width_tracks_content_and_clamps_to_pane() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_text_test_buffer(&mut state, "*hover-width*", vec!["hover".to_owned()])?;
+    install_hover_test_overlay(&mut state, false)?;
+    let mut hover = shell_ui(&state.runtime)?
+        .hover()
+        .cloned()
+        .ok_or_else(|| "hover overlay missing".to_owned())?;
+    let cell_width = 8;
+
+    let short_provider = hover
+        .current_provider()
+        .cloned()
+        .ok_or_else(|| "hover provider missing".to_owned())?;
+    assert_eq!(
+        hover_overlay_width(&hover, &short_provider, 4000, cell_width),
+        44 * cell_width as u32
+    );
+
+    hover.providers[0].lines = vec!["x".repeat(100)];
+    let long_provider = hover.providers[0].clone();
+    assert_eq!(
+        hover_overlay_width(&hover, &long_provider, 4000, cell_width),
+        100 * cell_width as u32 + 28
+    );
+
+    assert_eq!(
+        hover_overlay_width(&hover, &long_provider, 400, cell_width),
+        384
+    );
+    Ok(())
+}
+
+#[test]
 fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
     let mut registry = ThemeRegistry::new();
     let picker_foreground = Color::RGB(220, 224, 230);
