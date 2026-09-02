@@ -4319,6 +4319,36 @@ fn acp_pane_line_index_for_visual_row(pane: &AcpPaneState, target_visual_row: us
     pane.render_lines.len().saturating_sub(1)
 }
 
+fn acp_pane_point_for_visual_row(pane: &AcpPaneState, target_visual_row: usize) -> TextPoint {
+    if pane.render_lines.is_empty() {
+        return TextPoint::default();
+    }
+    let target_visual_row =
+        target_visual_row.min(acp_pane_total_visual_rows(pane).saturating_sub(1));
+    let mut visual_row = 0usize;
+    for (line_index, rendered_line) in pane.render_lines.iter().enumerate() {
+        match rendered_line {
+            AcpRenderedLine::Text(line) => {
+                let segments = acp_rendered_text_segments(line, pane.wrap_cols());
+                for segment in segments.iter() {
+                    if visual_row == target_visual_row {
+                        return TextPoint::new(line_index, segment.start_col);
+                    }
+                    visual_row = visual_row.saturating_add(1);
+                }
+            }
+            AcpRenderedLine::Image(_) | AcpRenderedLine::Spacer => {
+                if visual_row == target_visual_row {
+                    return TextPoint::new(line_index, 0);
+                }
+                visual_row = visual_row.saturating_add(1);
+            }
+        }
+    }
+    let line_index = pane.render_lines.len().saturating_sub(1);
+    TextPoint::new(line_index, pane.line_len_chars(line_index))
+}
+
 impl AcpPaneState {
     fn line_count(&self) -> usize {
         self.text.line_count()
@@ -4374,7 +4404,7 @@ impl AcpPaneState {
         follow_output: bool,
         visible_rows: usize,
     ) {
-        let cursor = self.cursor();
+        let cursor_offset = self.text.point_to_char_index(self.cursor());
         let scroll_visual_row = self.scroll_visual_row;
         let lines = render_lines
             .iter()
@@ -4395,14 +4425,30 @@ impl AcpPaneState {
             self.scroll_visual_row = 0;
             return;
         }
-        let line = cursor.line.min(line_count.saturating_sub(1));
-        let column = cursor.column.min(self.line_len_chars(line));
-        self.text.set_cursor(TextPoint::new(line, column));
+        let char_count = self.text.char_count();
+        self.text.set_cursor(
+            self.text
+                .point_from_char_index(cursor_offset.min(char_count)),
+        );
         if follow_output {
             self.scroll_visual_row = acp_pane_max_scroll_visual_row(self);
         } else {
             self.scroll_visual_row = scroll_visual_row.min(acp_pane_max_scroll_visual_row(self));
         }
+    }
+
+    fn move_visual_row(&mut self, delta: i32) -> bool {
+        if self.render_lines.is_empty() {
+            return false;
+        }
+        let before = self.cursor();
+        let current = acp_pane_cursor_visual_row(self);
+        let max_row = acp_pane_total_visual_rows(self).saturating_sub(1) as i32;
+        let target = (current as i32 + delta).clamp(0, max_row) as usize;
+        let point = acp_pane_point_for_visual_row(self, target);
+        self.set_cursor(point);
+        self.ensure_cursor_visible();
+        self.cursor() != before
     }
 
     fn line_at_viewport_offset(&self, offset: usize) -> usize {
@@ -6262,6 +6308,15 @@ impl ShellBuffer {
             .unwrap_or_else(|| self.text.cursor())
     }
 
+    pub(crate) fn char_offset_for_point(&self, point: TextPoint) -> Option<usize> {
+        if let Some(pane) = self.active_aux_text_pane_state() {
+            return Some(pane.text.point_to_char_index(point));
+        }
+        self.acp_active_pane_state()
+            .map(|pane| pane.text.point_to_char_index(point))
+            .or_else(|| Some(self.text.point_to_char_index(point)))
+    }
+
     fn view_state(&self) -> BufferViewState {
         BufferViewState {
             cursor: self.cursor_point(),
@@ -7088,7 +7143,7 @@ impl ShellBuffer {
             return pane.text.move_up();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
-            return pane.text.move_up();
+            return pane.move_visual_row(-1);
         }
         self.text.move_up()
     }
@@ -7098,7 +7153,7 @@ impl ShellBuffer {
             return pane.text.move_down();
         }
         if let Some(pane) = self.acp_active_pane_state_mut() {
-            return pane.text.move_down();
+            return pane.move_visual_row(1);
         }
         self.text.move_down()
     }
@@ -10039,6 +10094,7 @@ impl ShellUiState {
     fn enter_normal_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.vim.visual_anchor = None;
+        self.vim.visual_anchor_char_offset = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.multicursor = None;
         self.vim.clear_transient();
@@ -10051,6 +10107,7 @@ impl ShellUiState {
     fn enter_insert_mode(&mut self) {
         self.input_mode = InputMode::Insert;
         self.vim.visual_anchor = None;
+        self.vim.visual_anchor_char_offset = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
@@ -10062,6 +10119,7 @@ impl ShellUiState {
     fn enter_replace_mode(&mut self) {
         self.input_mode = InputMode::Replace;
         self.vim.visual_anchor = None;
+        self.vim.visual_anchor_char_offset = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
@@ -10073,6 +10131,10 @@ impl ShellUiState {
     fn enter_visual_mode(&mut self, anchor: TextPoint, kind: VisualSelectionKind) {
         self.input_mode = InputMode::Visual;
         self.vim.visual_anchor = Some(anchor);
+        self.vim.visual_anchor_char_offset = self
+            .focused_buffer_id()
+            .and_then(|buffer_id| self.buffer(buffer_id))
+            .and_then(|buffer| buffer.char_offset_for_point(anchor));
         self.vim.visual_kind = kind;
         self.vim.clear_transient();
         self.persist_active_buffer_vim_state();
@@ -12625,6 +12687,10 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_up();
                             }
+                        } else if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Visual)
+                        {
+                            let _ = self.active_buffer_mut()?.move_up();
                         } else if active_buffer.is_terminal {
                             scroll_active_terminal_view(
                                 &mut self.runtime,
@@ -12644,6 +12710,10 @@ impl ShellState {
                             if let Some(input) = self.active_buffer_mut()?.input_field_mut() {
                                 input.move_down();
                             }
+                        } else if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Visual)
+                        {
+                            let _ = self.active_buffer_mut()?.move_down();
                         } else if active_buffer.is_terminal {
                             scroll_active_terminal_view(
                                 &mut self.runtime,
@@ -12656,7 +12726,10 @@ impl ShellState {
                                 matches!(input_mode, InputMode::Insert | InputMode::Replace);
                         }
                     }
-                    Keycode::PageDown if active_buffer.is_terminal => {
+                    Keycode::PageDown
+                        if active_buffer.is_terminal
+                            && !matches!(input_mode, InputMode::Visual) =>
+                    {
                         scroll_active_terminal_view(
                             &mut self.runtime,
                             TerminalViewportScroll::PageDown,
@@ -12664,7 +12737,10 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     }
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(page_rows),
-                    Keycode::PageUp if active_buffer.is_terminal => {
+                    Keycode::PageUp
+                        if active_buffer.is_terminal
+                            && !matches!(input_mode, InputMode::Visual) =>
+                    {
                         scroll_active_terminal_view(
                             &mut self.runtime,
                             TerminalViewportScroll::PageUp,
@@ -13822,8 +13898,37 @@ impl ShellState {
                 clear_key_sequence(&mut self.runtime).map_err(ShellError::Runtime)?;
                 Ok(true)
             }
+            KeySequencePush::FireShortThenRetry { chord } => {
+                // The new token broke the sequence while an exact short chord
+                // (e.g. `g`) was pending: fire the short binding first, then
+                // re-process the token so Vim pendings it created (like the
+                // g-prefix) can consume it (e.g. `g c c` line comments).
+                self.execute_sequence_chord(&scope, vim_mode, &chord)?;
+                self.retry_sequence_token(token, scope)
+            }
             KeySequencePush::Miss => Ok(false),
         }
+    }
+
+    fn retry_sequence_token(
+        &mut self,
+        token: &str,
+        scope: KeymapScope,
+    ) -> Result<bool, ShellError> {
+        let chord = if token == "Space" {
+            " ".to_owned()
+        } else {
+            token.to_owned()
+        };
+        if self.handle_vim_pending_text(&chord)? || self.handle_vim_count_input(&chord)? {
+            self.record_vim_input(VimRecordedInput::Text(chord))?;
+            self.maybe_finish_change_after_input()?;
+            return Ok(true);
+        }
+        // Re-resolve against the keymap as a fresh sequence; the fired short
+        // chord may have switched Vim modes, so recompute the mode.
+        let vim_mode = keymap_vim_mode(self.input_mode()?);
+        self.handle_key_sequence(token, scope, vim_mode)
     }
 
     fn execute_sequence_chord(
@@ -19200,6 +19305,22 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_PICKER_CANCEL, "shell.picker-cancel", |_, runtime| {
+            if !shell_ui(runtime)?.picker_visible() {
+                // Escape reaches this binding through the Popup Minor Mode
+                // whenever a popup is focused, picker or not. Without a picker
+                // to close, fall through to Normal mode so popup buffers
+                // (terminals included) are not stuck in Insert mode.
+                let cursor_point = {
+                    let buffer_id = active_shell_buffer_id(runtime)?;
+                    let buffer = shell_buffer(runtime, buffer_id)?;
+                    terminal_buffer_cursor_point_for_normal_mode(buffer)
+                };
+                shell_ui_mut(runtime)?.enter_normal_mode();
+                if let Some(point) = cursor_point {
+                    active_shell_buffer_mut(runtime)?.set_cursor(point);
+                }
+                return Ok(());
+            }
             let picker_kind = shell_ui(runtime)?.picker_kind();
             shell_ui_mut(runtime)?.close_picker();
             if let Some(PickerKind::AcpPermission { request_id }) = picker_kind {
@@ -32122,7 +32243,9 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
     }
 
     let count = shell_ui_mut(runtime)?.vim_mut().take_count();
-    if let Some(scroll) = terminal_scroll_for_motion(motion, count)
+    let visual_mode = shell_ui(runtime)?.input_mode() == InputMode::Visual;
+    if !visual_mode
+        && let Some(scroll) = terminal_scroll_for_motion(motion, count)
         && scroll_active_terminal_view(runtime, scroll)?
     {
         return Ok(());
@@ -32152,6 +32275,7 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
 
 fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> Result<(), String> {
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
+    let visual_mode = shell_ui(runtime)?.input_mode() == InputMode::Visual;
     let terminal_scroll = match command {
         ScrollCommand::HalfPageDown => Some(TerminalViewportScroll::HalfPageDown),
         ScrollCommand::HalfPageUp => Some(TerminalViewportScroll::HalfPageUp),
@@ -32160,7 +32284,8 @@ fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> 
         ScrollCommand::LineDown => Some(TerminalViewportScroll::LineDelta(-(count as i32))),
         ScrollCommand::LineUp => Some(TerminalViewportScroll::LineDelta(count as i32)),
     };
-    if let Some(scroll) = terminal_scroll
+    if !visual_mode
+        && let Some(scroll) = terminal_scroll
         && scroll_active_terminal_view(runtime, scroll)?
     {
         return Ok(());
@@ -32203,6 +32328,19 @@ fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
 }
 
 fn scroll_buffer_viewport_only(buffer: &mut ShellBuffer, delta: i32) {
+    if let Some(pane) = buffer.acp_active_pane_state_mut() {
+        let screen_offset = pane.cursor_viewport_offset();
+        let max_scroll = pane.max_scroll_row() as i32;
+        pane.scroll_visual_row =
+            ((pane.scroll_visual_row as i32) + delta).clamp(0, max_scroll) as usize;
+        let target_visual = pane
+            .scroll_visual_row
+            .saturating_add(screen_offset)
+            .min(acp_pane_total_visual_rows(pane).saturating_sub(1));
+        let point = acp_pane_point_for_visual_row(pane, target_visual);
+        pane.set_cursor(point);
+        return;
+    }
     buffer.scroll_by(delta);
     // Always resolve viewport edges through line_at_viewport_offset. ACP panes scroll
     // by visual row, so comparing cursor_row() to current_scroll_row() wrongly treats a
@@ -33051,7 +33189,37 @@ fn swap_visual_anchor(runtime: &mut EditorRuntime) -> Result<(), String> {
     active_shell_buffer_mut(runtime)?.set_cursor(anchor);
     let ui = shell_ui_mut(runtime)?;
     ui.vim_mut().visual_anchor = Some(current);
+    ui.vim_mut().visual_anchor_char_offset = ui
+        .focused_buffer_id()
+        .and_then(|buffer_id| ui.buffer(buffer_id))
+        .and_then(|buffer| buffer.char_offset_for_point(current));
     ui.vim_mut().clear_transient();
+    Ok(())
+}
+
+fn remap_acp_output_visual_anchors(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if shell_ui(runtime)?.input_mode() != InputMode::Visual {
+        return Ok(());
+    }
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer(runtime, buffer_id)?;
+    if !buffer_is_acp(&buffer.kind) || buffer.acp_active_pane() != Some(AcpPane::Output) {
+        return Ok(());
+    }
+    let Some(offset) = shell_ui(runtime)?.vim().visual_anchor_char_offset else {
+        return Ok(());
+    };
+    let anchor = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let pane = buffer
+            .acp_state
+            .as_ref()
+            .map(|state| &state.output_pane)
+            .ok_or_else(|| "ACP output pane is missing".to_owned())?;
+        pane.text
+            .point_from_char_index(offset.min(pane.text.char_count()))
+    };
+    shell_ui_mut(runtime)?.vim_mut().visual_anchor = Some(anchor);
     Ok(())
 }
 

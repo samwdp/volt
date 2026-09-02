@@ -57,6 +57,12 @@ pub enum KeySequencePush {
     Cancel,
     /// Token does not continue a sequence; pending cleared if any.
     Miss,
+    /// Token broke a sequence that had an exact short chord pending: fire the
+    /// short chord first, then re-process the breaking token from scratch.
+    FireShortThenRetry {
+        /// Normalized short chord to execute before retrying the token.
+        chord: String,
+    },
 }
 
 /// Result of polling a pending sequence against the clock.
@@ -84,9 +90,21 @@ pub fn push_key_sequence(
     options: &KeySequenceOptions,
 ) -> KeySequencePush {
     let live_pending = pending.and_then(|state| retain_live_pending(state, now_ms, options));
+    let ambiguous_short = live_pending
+        .as_ref()
+        .and_then(|state| state.ambiguous_short.clone());
     let mut tokens = live_pending.map(|state| state.tokens).unwrap_or_default();
     tokens.push(normalize_token(token));
-    resolve_tokens(registry, scope, vim_mode, tokens, now_ms)
+    match resolve_tokens(registry, scope, vim_mode, tokens, now_ms) {
+        // Incompatible continuation while an exact short chord was pending: the
+        // short binding must still fire (Vim semantics, e.g. `g` then `c` where
+        // only `g` is bound), and the breaking token is re-processed after it.
+        KeySequencePush::Cancel => match ambiguous_short {
+            Some(chord) => KeySequencePush::FireShortThenRetry { chord },
+            None => KeySequencePush::Cancel,
+        },
+        result => result,
+    }
 }
 
 /// Polls `pending` for ambiguous-prefix fire or idle expiry.
@@ -292,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_input_clears_pending_short_without_firing() {
+    fn incompatible_input_fires_pending_short_then_retries_token() {
         let registry = registry_with_space_w();
         let opts = options(250);
 
@@ -319,6 +337,43 @@ mod tests {
         ) {
             KeySequencePush::Wait(pending) => pending,
             other => panic!("expected ambiguous wait, got {other:?}"),
+        };
+
+        let result = push_key_sequence(
+            &registry,
+            &KeymapScope::Workspace,
+            KeymapVimMode::Any,
+            Some(pending),
+            "x",
+            50,
+            &opts,
+        );
+        assert_eq!(
+            result,
+            KeySequencePush::FireShortThenRetry {
+                chord: "Space w".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn incompatible_input_without_pending_short_cancels() {
+        let registry = registry_with_space_w();
+        let opts = options(250);
+
+        // "Space" alone is prefix-only (no exact binding), so breaking it has
+        // no short chord to fire.
+        let pending = match push_key_sequence(
+            &registry,
+            &KeymapScope::Workspace,
+            KeymapVimMode::Any,
+            None,
+            "Space",
+            0,
+            &opts,
+        ) {
+            KeySequencePush::Wait(pending) => pending,
+            other => panic!("expected wait, got {other:?}"),
         };
 
         let result = push_key_sequence(

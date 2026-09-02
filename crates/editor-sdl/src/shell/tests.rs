@@ -11715,6 +11715,190 @@ fn acp_visual_selection_uses_output_text_without_prefix() -> Result<(), String> 
 }
 
 #[test]
+fn acp_output_visual_row_motion_aligns_with_yank() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_push_system_message("word ".repeat(40));
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        acp.output_pane.set_cursor(TextPoint::new(0, 0));
+    }
+
+    apply_motion_command(&mut state.runtime, ShellMotion::Down)?;
+
+    {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            buffer.cursor_point().line,
+            0,
+            "wrapped visual-row motion must stay on the same logical line"
+        );
+        assert!(
+            buffer.cursor_point().column > 0,
+            "wrapped visual-row motion should advance within the line"
+        );
+    }
+
+    let anchor = TextPoint::new(0, 0);
+    let expected = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        buffer
+            .slice(
+                match visual_selection(buffer, anchor, VisualSelectionKind::Character)
+                    .ok_or_else(|| "visual selection missing".to_owned())?
+                {
+                    VisualSelection::Range(range) => range,
+                    VisualSelection::Block(_) => {
+                        return Err("expected range visual selection".to_owned());
+                    }
+                },
+            )
+            .trim_end_matches('\n')
+            .to_owned()
+    };
+    shell_ui_mut(&mut state.runtime)?.enter_visual_mode(anchor, VisualSelectionKind::Character);
+    apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
+
+    let ui = shell_ui(&state.runtime)?;
+    let yanked = ui
+        .vim()
+        .yank
+        .as_ref()
+        .and_then(|register| match register {
+            YankRegister::Character(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| "expected character yank".to_owned())?;
+    assert_eq!(yanked, expected.as_str());
+    Ok(())
+}
+
+#[test]
+fn acp_output_visual_anchor_survives_streaming_rebuild() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_push_system_message("stable prefix");
+    buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
+    let line_index = buffer.line_count().saturating_sub(1);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        acp.output_pane.set_cursor(TextPoint::new(line_index, 0));
+        acp.output_pane.scroll_visual_row = 0;
+    }
+    let anchor = TextPoint::new(line_index, 0);
+    shell_ui_mut(&mut state.runtime)?.enter_visual_mode(anchor, VisualSelectionKind::Character);
+    apply_motion_command(&mut state.runtime, ShellMotion::Right)?;
+    apply_motion_command(&mut state.runtime, ShellMotion::Right)?;
+
+    let anchor_offset = shell_ui(&state.runtime)?
+        .vim()
+        .visual_anchor_char_offset
+        .ok_or_else(|| "visual anchor offset missing".to_owned())?;
+
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.acp_append_agent_chunk(ContentBlock::Text(TextContent::new(" streaming tail")));
+
+    remap_acp_output_visual_anchors(&mut state.runtime)?;
+
+    let remapped_anchor = shell_ui(&state.runtime)?
+        .vim()
+        .visual_anchor
+        .ok_or_else(|| "visual anchor missing after rebuild".to_owned())?;
+    let (anchor_char, selected) = {
+        let buffer = state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?;
+        let pane = buffer
+            .acp_state
+            .as_ref()
+            .ok_or_else(|| "ACP output pane is missing".to_owned())?
+            .output_pane
+            .clone();
+        let anchor = pane
+            .text
+            .point_from_char_index(anchor_offset.min(pane.text.char_count()));
+        assert_eq!(anchor, remapped_anchor);
+        let anchor_char = pane.text.char_at_point(anchor);
+        let selected = buffer
+            .slice(
+                match visual_selection(buffer, anchor, VisualSelectionKind::Character)
+                    .ok_or_else(|| "visual selection missing".to_owned())?
+                {
+                    VisualSelection::Range(range) => range,
+                    VisualSelection::Block(_) => {
+                        return Err("expected range visual selection".to_owned());
+                    }
+                },
+            )
+            .trim_end_matches('\n')
+            .to_owned();
+        (anchor_char, selected)
+    };
+    assert_eq!(anchor_char, Some('s'));
+    assert_eq!(selected, "sta");
+    apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().yank,
+        Some(YankRegister::Character("sta".to_owned()))
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_visual_line_yank_includes_multiple_lines() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_terminal_test_buffer(&mut state)?;
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "terminal test buffer missing".to_owned())?;
+        buffer.replace_with_lines_follow_output(vec![
+            "line alpha".to_owned(),
+            "line beta".to_owned(),
+            "line gamma".to_owned(),
+        ]);
+        buffer.set_viewport_lines(10);
+        buffer.set_cursor(TextPoint::new(0, 0));
+    }
+    shell_ui_mut(&mut state.runtime)?
+        .enter_visual_mode(TextPoint::new(0, 0), VisualSelectionKind::Line);
+    apply_motion_command(&mut state.runtime, ShellMotion::Down)?;
+    apply_motion_command(&mut state.runtime, ShellMotion::Down)?;
+    apply_visual_operator(&mut state.runtime, VimOperator::Yank)?;
+
+    assert_eq!(
+        shell_ui(&state.runtime)?.vim().yank,
+        Some(YankRegister::Line(
+            "line alpha\nline beta\nline gamma".to_owned()
+        ))
+    );
+    Ok(())
+}
+
+#[test]
 fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
@@ -15535,12 +15719,11 @@ fn vim_g_prefix_executes_workspace_keybinding() -> Result<(), String> {
     state
         .handle_text_input("g")
         .map_err(|error| error.to_string())?;
+    // `g` is an exact binding and a prefix of longer sequences, so it waits in
+    // the key-sequence resolver without starting the Vim g-prefix yet.
     assert_eq!(
         state.ui().map_err(|error| error.to_string())?.vim().pending,
-        Some(VimPending::GPrefix {
-            operator: None,
-            line_target: None,
-        })
+        None
     );
 
     state
@@ -15609,18 +15792,11 @@ fn vim_g_prefix_preserves_longer_workspace_sequence() -> Result<(), String> {
             .0,
         Vec::<String>::new()
     );
+    // `g z` is a proper prefix of `g z z`, so the resolver keeps waiting
+    // without firing anything or starting the Vim g-prefix.
     let ui = state.ui().map_err(|error| error.to_string())?;
-    assert_eq!(
-        ui.vim().pending,
-        Some(VimPending::GPrefix {
-            operator: None,
-            line_target: None,
-        })
-    );
-    assert_eq!(
-        ui.vim().pending_change_prefix,
-        Some(VimRecordedInput::Chord("g z".to_owned()))
-    );
+    assert_eq!(ui.vim().pending, None);
+    assert_eq!(ui.vim().pending_change_prefix, None);
 
     state
         .handle_text_input("z")
@@ -20057,6 +20233,63 @@ fn popup_focus_ctrl_n_cycles_popup_buffers_instead_of_marked_workspace() -> Resu
         .ok_or_else(|| "popup missing after Ctrl+n".to_owned())?;
     assert_eq!(popup.active_buffer, second);
     assert_eq!(shell_ui(&state.runtime)?.popup_buffer_id, Some(second));
+    Ok(())
+}
+
+#[test]
+fn popup_terminal_escape_enters_normal_mode() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    install_terminal_popup_test_buffer(&mut state)?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    // Escape resolves to `picker.cancel` through the Popup Minor Mode; without
+    // an open picker it must fall through to Normal mode instead of being
+    // swallowed.
+    let handled = state
+        .try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Escape must be handled in a focused popup");
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
+    Ok(())
+}
+
+#[test]
+fn popup_buffer_escape_enters_normal_mode() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let workspace_id = state
+        .runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let popup_buffer = state
+        .runtime
+        .model_mut()
+        .create_popup_buffer(workspace_id, "*popup-escape*", BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .open_popup(workspace_id, "Popup", vec![popup_buffer], popup_buffer)
+        .map_err(|error| error.to_string())?;
+    {
+        let user_library = shell_user_library(&state.runtime);
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.ensure_popup_buffer(
+            popup_buffer,
+            "*popup-escape*",
+            BufferKind::Scratch,
+            &*user_library,
+        );
+        ui.set_popup_buffer(popup_buffer);
+        ui.set_popup_focus(true);
+        ui.enter_insert_mode();
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::Escape, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Escape must be handled in a focused popup");
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
     Ok(())
 }
 

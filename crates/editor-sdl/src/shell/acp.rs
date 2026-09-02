@@ -814,6 +814,9 @@ pub(super) fn refresh_pending_acp(runtime: &mut EditorRuntime) -> Result<bool, S
         handle_acp_ui_action(runtime, action)?;
         changed = true;
     }
+    if changed {
+        remap_acp_output_visual_anchors(runtime)?;
+    }
     Ok(changed)
 }
 

@@ -291,6 +291,7 @@ pub(crate) struct VimBufferState {
     pub(crate) count: Option<usize>,
     pub(crate) pending: Option<VimPending>,
     pub(crate) visual_anchor: Option<TextPoint>,
+    pub(crate) visual_anchor_char_offset: Option<usize>,
     pub(crate) visual_kind: VisualSelectionKind,
     pub(crate) active_register: Option<char>,
     pub(crate) pending_change_prefix: Option<VimRecordedInput>,
@@ -310,6 +311,7 @@ impl Default for VimBufferState {
             count: None,
             pending: None,
             visual_anchor: None,
+            visual_anchor_char_offset: None,
             visual_kind: VisualSelectionKind::Character,
             active_register: None,
             pending_change_prefix: None,
@@ -336,6 +338,7 @@ pub(crate) struct VimState {
     pub(crate) count: Option<usize>,
     pub(crate) pending: Option<VimPending>,
     pub(crate) visual_anchor: Option<TextPoint>,
+    pub(crate) visual_anchor_char_offset: Option<usize>,
     pub(crate) visual_kind: VisualSelectionKind,
     pub(crate) last_find: Option<LastFind>,
     pub(crate) last_search: Option<LastSearch>,
@@ -391,6 +394,7 @@ impl VimState {
             count: self.count,
             pending: self.pending,
             visual_anchor: self.visual_anchor,
+            visual_anchor_char_offset: self.visual_anchor_char_offset,
             visual_kind: self.visual_kind,
             active_register: self.active_register,
             pending_change_prefix: self.pending_change_prefix.clone(),
@@ -413,6 +417,7 @@ impl VimState {
         self.count = state.count;
         self.pending = state.pending;
         self.visual_anchor = state.visual_anchor;
+        self.visual_anchor_char_offset = state.visual_anchor_char_offset;
         self.visual_kind = state.visual_kind;
         self.active_register = state.active_register;
         self.pending_change_prefix
